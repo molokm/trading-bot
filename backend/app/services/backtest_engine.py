@@ -800,7 +800,7 @@ class BacktestEngine:
 
         return {
             "strategy_name": params.get("name", self.strategy_name),
-            "symbol": df.get("symbol", "Unknown"),
+            "symbol": str(df["symbol"].iloc[0]) if "symbol" in df.columns else params.get("symbol", "Unknown"),
             "timeframe": params.get("timeframe", "1H"),
             "period": f"{str(df.loc[0, 'ts'])} - {str(df.loc[len(df)-1, 'ts'])}",
             "initial_capital": initial_capital,

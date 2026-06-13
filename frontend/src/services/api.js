@@ -95,6 +95,8 @@ export const api = {
 
   getAllTrades: (limit = 50) => request(`/trades?limit=${limit}`),
 
+  getBotChart: (botId, params = '') => request(`/bots/${botId}/chart${params}`),
+
   getPnl: () => request('/pnl'),
 
   getPairedTrades: (limit = 15, begin = '', end = '') => {

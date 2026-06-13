@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 
 from app.models.schemas import (
     OKXCredentials, BacktestRequest, LiveDeployRequest,
@@ -24,7 +25,7 @@ from app.services.data_cache import ensure_candles
 from app.services.strategy_loader import (
     list_strategies, get_strategy_code, save_strategy,
     delete_strategy, list_backtest_results,
-    parse_strategy_file, STRATEGIES_DIR,
+    save_backtest_result, parse_strategy_file, STRATEGIES_DIR,
 )
 from app.database import db
 from app.services.ws_manager import WSManager
@@ -41,6 +42,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+STATIC_DIR = Path(__file__).parent.parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
 client_manager = OKXClientManager.get_instance()
 
@@ -399,7 +404,7 @@ async def run_backtest(req: BacktestRequest):
             except (json.JSONDecodeError, TypeError):
                 pass
     req_merged = {**default_params, **dict(req.params or {})}
-    params = {"name": strategy_name, "timeframe": req.timeframe, **req_merged}
+    params = {"name": strategy_name, "timeframe": req.timeframe, "symbol": req.symbol, **req_merged}
     bt_result = engine.run(all_candles, req.initial_capital, params)
 
     if "error" in bt_result:
@@ -601,6 +606,162 @@ async def get_bot_trades(bot_id: str, limit: int = 100):
     return {"trades": trades, "summary": summary}
 
 
+@app.get("/api/bots/{bot_id}/chart")
+async def get_bot_chart(bot_id: str, limit: int = 200, bar: str = None):
+    bot = live_bots.get(bot_id)
+    if not bot:
+        rows = await db.get_bots(bot_id=bot_id)
+        if not rows:
+            raise HTTPException(status_code=404, detail="Bot not found")
+        from app.services.strategy_loader import parse_strategy_file, STRATEGIES_DIR
+        strategy_path = STRATEGIES_DIR / f"{rows[0]['strategy_id']}.py"
+        meta = parse_strategy_file(strategy_path) if strategy_path.exists() else {}
+        params = json.loads(rows[0].get("params", "{}"))
+        symbol = rows[0]["symbol"]
+        timeframe = rows[0]["timeframe"]
+        strategy_code = rows[0].get("strategy_code", "")
+    else:
+        meta = {}
+        params = bot.params
+        symbol = bot.symbol
+        timeframe = bot.timeframe
+        strategy_code = bot.strategy_code
+
+    tf = bar or timeframe
+    raw = await ensure_candles(symbol, tf, live_limit=limit)
+    if not raw:
+        return {"candles": [], "trades": [], "signals": [], "indicators": {}}
+
+    df = pd.DataFrame(raw)
+    df.columns = ["ts", "open", "high", "low", "close", "vol", "volCcy", "volCcyQuote", "confirm"]
+    for col in ["open", "high", "low", "close", "vol"]:
+        df[col] = df[col].astype(float)
+    df["ts"] = pd.to_datetime(df["ts"].astype(int), unit="ms")
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    candles_out = []
+    for _, r in df.iterrows():
+        candles_out.append({
+            "time": int(r["ts"].timestamp()),
+            "open": round(r["open"], 2),
+            "high": round(r["high"], 2),
+            "low": round(r["low"], 2),
+            "close": round(r["close"], 2),
+            "volume": round(r["vol"], 4),
+        })
+
+    signals_out = []
+    indicator_series = {}
+    if strategy_code:
+        ns = {"pd": pd, "np": np, "math": math}
+        try:
+            exec(strategy_code, ns)
+            fn = ns.get("generate_signals")
+            if fn:
+                sig = fn(df, params)
+                sig_arr = sig.values if hasattr(sig, "values") else list(sig)
+                for i, v in enumerate(sig_arr):
+                    if v != 0:
+                        signals_out.append({
+                            "time": int(df.iloc[i]["ts"].timestamp()),
+                            "value": int(v),
+                        })
+        except Exception:
+            pass
+
+    close_vals = df["close"].values.astype(float)
+    indicators = {"lines": [], "signals": signals_out}
+
+    ema_periods = set()
+    for k, v in params.items():
+        if "ema" in k.lower() or "ma" in k.lower():
+            try:
+                ema_periods.add(int(v))
+            except (ValueError, TypeError):
+                pass
+    if not ema_periods:
+        meta_params = meta.get("params", {})
+        for k, v in meta_params.items():
+            if "ema" in k.lower() or "ma" in k.lower():
+                try:
+                    ema_periods.add(int(v))
+                except (ValueError, TypeError):
+                    pass
+    if not ema_periods:
+        ema_periods = {50, 200}
+
+    for period in sorted(ema_periods):
+        vals = pd.Series(close_vals).ewm(span=period).mean().values
+        line_data = []
+        for i in range(len(df)):
+            if not np.isnan(vals[i]):
+                line_data.append({
+                    "time": int(df.iloc[i]["ts"].timestamp()),
+                    "value": round(float(vals[i]), 2),
+                })
+        indicators["lines"].append({
+            "name": f"EMA {period}",
+            "data": line_data,
+            "color": "#f0b429" if period == min(ema_periods) else "#a78bfa",
+        })
+
+    has_rsi = any("rsi" in k.lower() for k in params) or any("rsi" in k.lower() for k in meta_params)
+    if has_rsi or True:
+        delta_vals = pd.Series(close_vals).diff().values
+        gain = np.where(delta_vals > 0, delta_vals, 0)
+        loss = np.where(delta_vals < 0, -delta_vals, 0)
+        avg_gain = pd.Series(gain).rolling(14).mean().values
+        avg_loss = pd.Series(loss).rolling(14).mean().values
+        rsi_vals = np.full(len(close_vals), 50.0)
+        for i in range(14, len(close_vals)):
+            if avg_loss[i] == 0:
+                rsi_vals[i] = 100.0
+            else:
+                rsi_vals[i] = 100.0 - 100.0 / (1.0 + avg_gain[i] / avg_loss[i])
+        rsi_data = []
+        for i in range(len(df)):
+            if not np.isnan(rsi_vals[i]):
+                rsi_data.append({
+                    "time": int(df.iloc[i]["ts"].timestamp()),
+                    "value": round(float(rsi_vals[i]), 1),
+                })
+        indicators["rsi"] = rsi_data
+
+    if hasattr(bot, "position") and bot.position != 0:
+        indicators["current_position"] = {
+            "side": "long" if bot.position > 0 else "short",
+            "size": round(abs(bot.position), 6),
+            "entry": round(bot.entry_price, 2),
+        }
+
+    trades = await db.get_trades(bot_id=bot_id, limit=50)
+    markers = []
+    for t in trades:
+        px = float(t.get("px", 0))
+        ts = t.get("timestamp", "")
+        try:
+            t_int = int(pd.Timestamp(ts).timestamp()) if ts else 0
+        except Exception:
+            t_int = 0
+        is_buy = t.get("side") == "buy" or t.get("side") == "buy"
+        markers.append({
+            "time": t_int,
+            "position": "belowBar" if is_buy else "aboveBar",
+            "color": "#00ff88" if is_buy else "#ff4444",
+            "shape": "arrowUp" if is_buy else "arrowDown",
+            "text": f"{'BUY' if is_buy else 'SELL'} ${px}",
+        })
+
+    return {
+        "candles": candles_out,
+        "trades": trades,
+        "markers": markers,
+        "indicators": indicators,
+        "symbol": symbol,
+        "timeframe": tf,
+    }
+
+
 @app.get("/api/pnl")
 async def get_pnl():
     pnl_1d = await db.get_pnl_by_period(1)
@@ -654,6 +815,14 @@ async def ws_status():
     if ws_manager:
         return {"running": ws_manager._running, "subscribed": list(ws_manager._subscribed)}
     return {"running": False, "subscribed": []}
+
+
+if STATIC_DIR.exists():
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return FileResponse(str(STATIC_DIR / "index.html"))
 
 
 if __name__ == "__main__":
