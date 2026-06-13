@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.models.schemas import (
     OKXCredentials, BacktestRequest, LiveDeployRequest,
@@ -818,11 +818,19 @@ async def ws_status():
 
 
 if STATIC_DIR.exists():
+    @app.head("/api/health")
+    async def health_head():
+        return JSONResponse({"status": "ok"})
+
+    @app.head("/")
+    async def root_head():
+        return Response(status_code=200)
+
     @app.get("/")
     async def serve_root():
         return FileResponse(str(STATIC_DIR / "index.html"))
 
-    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
+    @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
