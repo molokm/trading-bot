@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -12,13 +11,16 @@ LOG = lambda *a: print(f"[data_cache] {' '.join(str(x) for x in a)}", flush=True
 CACHE_DIR = Path(__file__).parent.parent.parent / "backtests_data" / "candles"
 
 OKX_BASE = "https://www.okx.com"
-BINANCE_BASE = "https://api.binance.com"
 
-_TIMEFRAMES = {
-    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m",
-    "30m": "30m", "1H": "1h", "2H": "2h", "4H": "4h",
-    "6H": "6h", "12H": "12h", "1D": "1d", "1W": "1w", "1M": "1M",
+_BYBIT_INTERVALS = {
+    "1m": "1", "3m": "3", "5m": "5", "15m": "15",
+    "30m": "30", "1H": "60", "2H": "120", "4H": "240",
+    "6H": "360", "12H": "720", "1D": "D",
 }
+
+BAR_MS = {"1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000,
+          "30m": 1800000, "1H": 3600000, "2H": 7200000, "4H": 14400000,
+          "6H": 21600000, "12H": 43200000, "1D": 86400000}
 
 
 def _cache_path(symbol: str, timeframe: str) -> Path:
@@ -62,29 +64,36 @@ async def _fetch_okx(client: httpx.AsyncClient, inst_id: str, bar: str, after: s
         return []
 
 
-async def _fetch_binance(client: httpx.AsyncClient, symbol: str, interval: str,
-                         start_time: int, limit: int = 1000) -> list:
+async def _fetch_bybit(client: httpx.AsyncClient, symbol: str, interval: str,
+                       start_time: int, limit: int = 1000) -> list:
     parts = symbol.split("-")
-    bn_symbol = (parts[0] + parts[1]).upper()
+    bb_symbol = (parts[0] + parts[1]).upper()
     params = {
-        "symbol": bn_symbol,
+        "symbol": bb_symbol,
         "interval": interval,
-        "startTime": str(start_time),
+        "from": str(start_time // 1000),
         "limit": str(limit),
     }
     try:
-        r = await client.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=5)
+        r = await client.get("https://api.bybit.com/v5/market/kline",
+                              params=params, timeout=5)
         if r.status_code != 200:
-            LOG(f"Binance {bn_symbol} status={r.status_code} body={r.text[:200]}")
+            LOG(f"Bybit {bb_symbol} status={r.status_code} body={r.text[:200]}")
             return []
-        raw = r.json()
+        data = r.json()
+        if data.get("retCode") != 0:
+            LOG(f"Bybit {bb_symbol} retCode={data.get('retCode')} msg={data.get('retMsg','')}")
+            return []
+        raw = data.get("result", {}).get("list", [])
         if not isinstance(raw, list):
-            LOG(f"Binance {bn_symbol} not a list: {raw}")
             return []
-        return [[str(int(k[0])), str(k[1]), str(k[2]), str(k[3]), str(k[4]),
-                 str(k[5]), str(k[7]), "0", "0"] for k in raw]
+        result = []
+        for k in raw:
+            result.append([str(int(k[0])), k[1], k[2], k[3], k[4], k[5], k[6] if len(k) > 6 else "0",
+                           "0", "0"])
+        return result
     except Exception as e:
-        LOG(f"Binance {bn_symbol} exception: {type(e).__name__}: {e}")
+        LOG(f"Bybit exception: {type(e).__name__}: {e}")
         return []
 
 
@@ -153,45 +162,42 @@ async def ensure_candles(symbol: str, timeframe: str,
                 _save_cache(symbol, timeframe, okx_candles, start_ms, end_ms)
                 return [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
 
-        binance_interval = _TIMEFRAMES.get(timeframe, "1h")
-        LOG(f"Falling through to Binance interval={binance_interval}")
+        bybit_interval = _BYBIT_INTERVALS.get(timeframe, "60")
+        LOG(f"Falling through to Bybit interval={bybit_interval}")
 
-        bar_ms = {"1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000,
-                  "30m": 1800000, "1H": 3600000, "2H": 7200000, "4H": 14400000,
-                  "6H": 21600000, "12H": 43200000, "1D": 86400000}.get(timeframe, 3600000)
-        page_ms = 1000 * bar_ms
+        page_ms = 1000 * BAR_MS.get(timeframe, 3600000)
         total_pages = (end_ms - start_ms + page_ms - 1) // page_ms
-        LOG(f"Binance pages: {total_pages} (page_ms={page_ms})")
+        LOG(f"Bybit pages: {total_pages} (page_ms={page_ms})")
 
         sem = asyncio.Semaphore(5)
 
-        async def _fetch_bn_page(page: int) -> list:
+        async def _fetch_bb_page(page: int) -> list:
             cursor = start_ms + page * page_ms
             if cursor >= end_ms:
                 return []
             async with sem:
-                return await _fetch_binance(client, symbol, binance_interval, cursor) or []
+                return await _fetch_bybit(client, symbol, bybit_interval, cursor) or []
 
         tasks = []
         for p in range(total_pages):
-            tasks.append(_fetch_bn_page(p))
+            tasks.append(_fetch_bb_page(p))
             await asyncio.sleep(0.03)
-        bn_results = await asyncio.gather(*tasks)
-        bn_candles = [c for batch in bn_results for c in batch if batch]
+        bb_results = await asyncio.gather(*tasks)
+        bb_candles = [c for batch in bb_results for c in batch if batch]
 
-        LOG(f"Binance total candles: {len(bn_candles)}")
+        LOG(f"Bybit total candles: {len(bb_candles)}")
 
         if okx_candles:
-            by_ts = {int(c[0]): c for c in bn_candles}
+            by_ts = {int(c[0]): c for c in bb_candles}
             for c in okx_candles:
                 by_ts[int(c[0])] = c
             merged = sorted(by_ts.values(), key=lambda c: int(c[0]))
-            LOG(f"Merged: {len(merged)} candles (OKX overlapped)")
-        elif bn_candles:
-            merged = sorted(bn_candles, key=lambda c: int(c[0]))
-            LOG(f"Merged: {len(merged)} candles (Binance only)")
+            LOG(f"Merged: {len(merged)} candles")
+        elif bb_candles:
+            merged = sorted(bb_candles, key=lambda c: int(c[0]))
+            LOG(f"Merged: {len(merged)} candles (Bybit only)")
         else:
-            LOG("No candles from OKX or Binance!")
+            LOG("No candles from OKX or Bybit!")
             return []
 
         _save_cache(symbol, timeframe, merged, start_ms, end_ms)
