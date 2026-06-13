@@ -1,0 +1,22 @@
+# Backend
+backend/venv/
+backend/.env
+backend/__pycache__/
+backend/**/*.pyc
+backend/**/*.pyo
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Strategies & Data
+strategies/*.pyc
+backtests_data/*.json
+
+# Database
+backend/data/
+
+# OS
+.DS_Store
+*.log
+.env

@@ -1,0 +1,146 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: #0a0a1a;
+  color: #e0e0e0;
+  overflow-x: hidden;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.glass {
+  background: rgba(15, 15, 35, 0.75);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+
+.glass-hover:hover {
+  background: rgba(20, 20, 50, 0.85);
+  border-color: rgba(0, 255, 136, 0.2);
+  transition: all 0.2s ease;
+}
+
+.neon-glow-green {
+  box-shadow: 0 0 15px rgba(0, 255, 136, 0.15), 0 0 30px rgba(0, 255, 136, 0.05);
+}
+
+.neon-glow-red {
+  box-shadow: 0 0 15px rgba(255, 51, 102, 0.15), 0 0 30px rgba(255, 51, 102, 0.05);
+}
+
+.neon-glow-blue {
+  box-shadow: 0 0 15px rgba(0, 212, 255, 0.15), 0 0 30px rgba(0, 212, 255, 0.05);
+}
+
+.btn-neon {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 212, 255, 0.1));
+  border: 1px solid rgba(0, 255, 136, 0.3);
+  color: #00ff88;
+  transition: all 0.2s ease;
+}
+
+.btn-neon:hover {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.25), rgba(0, 212, 255, 0.2));
+  box-shadow: 0 0 20px rgba(0, 255, 136, 0.2);
+}
+
+.btn-danger {
+  background: linear-gradient(135deg, rgba(255, 51, 102, 0.15), rgba(255, 0, 0, 0.1));
+  border: 1px solid rgba(255, 51, 102, 0.3);
+  color: #ff3366;
+  transition: all 0.2s ease;
+}
+
+.btn-danger:hover {
+  background: linear-gradient(135deg, rgba(255, 51, 102, 0.25), rgba(255, 0, 0, 0.2));
+  box-shadow: 0 0 20px rgba(255, 51, 102, 0.2);
+}
+
+input, select, textarea {
+  background: rgba(10, 10, 30, 0.8) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  color: #e0e0e0 !important;
+  border-radius: 8px !important;
+  padding: 10px 14px !important;
+  outline: none !important;
+  transition: border-color 0.2s ease !important;
+}
+
+input:focus, select:focus, textarea:focus {
+  border-color: rgba(0, 255, 136, 0.4) !important;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(10, 10, 30, 0.5);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+@keyframes pulse-green {
+  0%, 100% { box-shadow: 0 0 5px rgba(0, 255, 136, 0.3); }
+  50% { box-shadow: 0 0 15px rgba(0, 255, 136, 0.6); }
+}
+
+@keyframes pulse-red {
+  0%, 100% { box-shadow: 0 0 5px rgba(255, 51, 102, 0.3); }
+  50% { box-shadow: 0 0 15px rgba(255, 51, 102, 0.6); }
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+
+.status-dot.online {
+  background: #00ff88;
+  animation: pulse-green 2s infinite;
+}
+
+.status-dot.offline {
+  background: #ff3366;
+  animation: pulse-red 2s infinite;
+}
+
+.dropzone {
+  border: 2px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.dropzone:hover, .dropzone.active {
+  border-color: rgba(0, 255, 136, 0.4);
+  background: rgba(0, 255, 136, 0.03);
+}

@@ -1,0 +1,663 @@
+import asyncio
+import json
+import math
+import os
+import uuid
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pandas as pd
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.models.schemas import (
+    OKXCredentials, BacktestRequest, LiveDeployRequest,
+    StrategyMeta
+)
+from app.services.okx_client import OKXClientManager
+from app.services.backtest_engine import BacktestEngine, load_strategy_file
+from app.services.data_cache import ensure_candles
+from app.services.strategy_loader import (
+    list_strategies, get_strategy_code, save_strategy,
+    delete_strategy, list_backtest_results,
+    parse_strategy_file, STRATEGIES_DIR,
+)
+from app.database import db
+from app.services.ws_manager import WSManager
+from app.engine.bot_engine import BotEngine
+
+load_dotenv()
+
+app = FastAPI(title="OKX Trading Terminal", version="2.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+client_manager = OKXClientManager.get_instance()
+
+_env_key = os.getenv("OKX_API_KEY", "")
+_env_secret = os.getenv("OKX_SECRET_KEY", "")
+_env_pass = os.getenv("OKX_PASSPHRASE", "")
+_env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
+
+ws_manager: Optional[WSManager] = None
+trade_log: list = []
+live_bots: dict = {}
+
+@app.on_event("startup")
+async def startup():
+    await db.init()
+    if _env_key and _env_secret and _env_pass:
+        await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        global ws_manager
+        ws_manager = WSManager(_env_key, _env_secret, _env_pass, _env_demo)
+        ws_manager.on("account", _ws_on_account)
+        ws_manager.on("positions", _ws_on_positions)
+        ws_manager.on("orders", _ws_on_orders)
+        await ws_manager.start()
+        await ws_manager.subscribe("account")
+        await ws_manager.subscribe("positions")
+        await ws_manager.subscribe("orders")
+    await _restore_bots()
+
+@app.on_event("shutdown")
+async def shutdown():
+    if ws_manager:
+        await ws_manager.stop()
+    await db.close()
+
+async def _ws_on_account(data: list):
+    for entry in data:
+        for detail in entry.get("details", []):
+            trade_log.append({
+                "id": str(uuid.uuid4()),
+                "timestamp": datetime.now().isoformat(),
+                "type": "balance_update",
+                "ccy": detail.get("ccy"),
+                "eq": detail.get("eq"),
+                "eqUsd": detail.get("eqUsd"),
+            })
+
+async def _ws_on_positions(data: list):
+    for pos in data:
+        bot_id = pos.get("instId", "")
+        pnl = float(pos.get("upl", 0))
+        await db.update_position_price(bot_id, float(pos.get("markPx", 0)), pnl)
+
+async def _ws_on_orders(data: list):
+    for ord_data in data:
+        trade_log.append({
+            "id": str(uuid.uuid4()),
+            "timestamp": datetime.now().isoformat(),
+            "type": "order_update",
+            "instId": ord_data.get("instId"),
+            "ordId": ord_data.get("ordId"),
+            "state": ord_data.get("state"),
+            "fillSz": ord_data.get("fillSz"),
+            "fillPx": ord_data.get("fillPx"),
+        })
+
+
+def _active_bot_count() -> int:
+    return sum(1 for b in live_bots.values() if b.status == "running")
+
+
+async def _okx_call(coro_factory):
+    client = client_manager.get_client()
+    if not client:
+        if _env_key and _env_secret and _env_pass:
+            await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+            client = client_manager.get_client()
+        if not client:
+            return {"error": True, "message": "API not configured"}
+    result = await coro_factory(client)
+    if result.get("error"):
+        if _env_key and _env_secret and _env_pass:
+            await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+            client = client_manager.get_client()
+            if client:
+                result = await coro_factory(client)
+    return result
+
+
+async def _restore_bots():
+    bots = await db.get_bots()
+    restored = 0
+    for b in bots:
+        bid = b["id"]
+        if bid in live_bots:
+            continue
+        params = json.loads(b["params"]) if isinstance(b["params"], str) else b.get("params") or {}
+        bot = BotEngine(
+            bot_id=bid,
+            strategy_id=b["strategy_id"],
+            strategy_code=b["strategy_code"],
+            symbol=b["symbol"],
+            timeframe=b["timeframe"],
+            capital=float(b["capital"]),
+            params=params,
+            client_manager=client_manager,
+            trade_log=trade_log,
+            get_active_bot_count=_active_bot_count,
+            name=b.get("name"),
+        )
+        bot.status = "stopped"
+        live_bots[bid] = bot
+        restored += 1
+        # Auto-start bots that were running before restart
+        if b.get("status") == "running":
+            await bot.start()
+    if bots:
+        print(f"[startup] Restored {len(bots)} bots from DB ({restored} total, {sum(1 for b in bots if b.get('status')=='running')} auto-started)", flush=True)
+
+
+@app.get("/api/health")
+async def health():
+    client = client_manager.get_client()
+    return {
+        "status": "ok",
+        "connected": client.is_connected if client else False,
+        "has_credentials": client_manager.is_ready(),
+        "demo": client.demo if client else False,
+        "env_configured": bool(_env_key and _env_secret and _env_pass),
+        "env_demo": _env_demo,
+        "db_path": str(db.db_path),
+        "ws_running": ws_manager._running if ws_manager else False,
+    }
+
+@app.get("/api/credentials/status")
+async def credentials_status():
+    client = client_manager.get_client()
+    return {
+        "has_credentials": client_manager.is_ready(),
+        "demo": client.demo if client else _env_demo,
+        "env_configured": bool(_env_key and _env_secret and _env_pass),
+        "connected": client.is_connected if client else False,
+    }
+
+
+@app.post("/api/credentials/test")
+async def test_connection(creds: OKXCredentials):
+    result = await client_manager.test_connection(
+        creds.api_key, creds.secret_key, creds.passphrase, creds.demo
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["message"])
+    return {"connected": True, "demo": creds.demo, "data": result}
+
+
+@app.post("/api/credentials/init")
+async def init_credentials(creds: OKXCredentials):
+    client = await client_manager.init_client(
+        creds.api_key, creds.secret_key, creds.passphrase, creds.demo
+    )
+    test = await client.get_balance()
+    if test.get("error"):
+        raise HTTPException(status_code=400, detail=test["message"])
+    return {"connected": True, "demo": creds.demo, "message": "Credentials saved"}
+
+
+@app.get("/api/portfolio")
+async def get_portfolio():
+    result = await _okx_call(lambda c: c.get_balance())
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    data = result.get("data", [{}])[0]
+    details = data.get("details", [])
+    total = float(data.get("totalEq", 0))
+    return {
+        "totalEqUsd": round(total, 2),
+        "details": [
+            {
+                "ccy": d["ccy"],
+                "eq": d.get("eq", "0"),
+                "eqUsd": round(float(d.get("eqUsd", 0)), 2),
+                "availBal": d.get("availBal", "0"),
+                "frozenBal": d.get("frozenBal", "0"),
+            }
+            for d in details
+        ]
+    }
+
+
+@app.get("/api/positions")
+async def get_positions(inst_type: str = "SWAP"):
+    result = await _okx_call(lambda c: c.get_positions(inst_type))
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    return {"positions": result.get("data", [])}
+
+
+@app.post("/api/positions/close")
+async def close_position(data: dict):
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+
+    inst_id = data.get("instId")
+    pos_side = data.get("posSide")
+    sz = data.get("sz", "0")
+    mgn_mode = data.get("mgnMode", "cross")
+
+    if not inst_id or not pos_side or not sz:
+        raise HTTPException(status_code=400, detail="instId, posSide, sz required")
+
+    side = "buy" if pos_side == "short" else "sell"
+
+    result = await client.place_order(
+        inst_id=inst_id, side=side, ord_type="market",
+        sz=str(sz), td_mode=mgn_mode, pos_side=pos_side,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    return {"ok": True, "data": result.get("data", [])}
+
+
+@app.get("/api/market/ticker")
+async def get_ticker(inst_id: str = "BTC-USDT"):
+    result = await _okx_call(lambda c: c.get_ticker(inst_id))
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    data = result.get("data", [{}])[0]
+    return {
+        "instId": data.get("instId"),
+        "last": data.get("last"),
+        "bid": data.get("bidPx"),
+        "ask": data.get("askPx"),
+        "vol24h": data.get("volCcy24h"),
+        "high24h": data.get("high24h"),
+        "low24h": data.get("low24h"),
+        "change24h": data.get("change24h"),
+    }
+
+
+@app.get("/api/market/candles")
+async def get_candles(inst_id: str = "BTC-USDT", bar: str = "1H",
+                       after: str = None, before: str = None, limit: int = 200):
+    result = await _okx_call(lambda c: c.get_candles(inst_id, bar, after, before, limit))
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    return {
+        "candles": [
+            {
+                "ts": c[0], "open": c[1], "high": c[2], "low": c[3],
+                "close": c[4], "vol": c[5], "volCcy": c[6], "volCcyQuote": c[7]
+            }
+            for c in result.get("data", [])
+        ]
+    }
+
+
+@app.post("/api/trade/order")
+async def place_order(req: dict):
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+    result = await client.place_order(
+        inst_id=req["instId"],
+        side=req["side"],
+        ord_type=req.get("ordType", "market"),
+        sz=req["sz"],
+        px=req.get("px"),
+        td_mode=req.get("tdMode", "cash"),
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["message"])
+    trade_log.append({
+        "id": str(uuid.uuid4()),
+        "timestamp": datetime.now().isoformat(),
+        "instId": req["instId"],
+        "side": req["side"],
+        "sz": req["sz"],
+        "state": "filled",
+        **result.get("data", [{}])[0]
+    })
+    return result
+
+
+@app.get("/api/trade/orders")
+async def get_orders(inst_type: str = "SWAP"):
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+    result = await client.get_orders(inst_type)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["message"])
+    return {"orders": result.get("data", [])}
+
+
+@app.get("/api/trade/log")
+async def get_trade_log():
+    return {"orders": trade_log[-100:]}
+
+
+@app.get("/api/strategies")
+async def get_strategies():
+    return {"strategies": list_strategies()}
+
+
+@app.post("/api/strategies/upload")
+async def upload_strategy(data: dict):
+    filename = data.get("filename", "strategy.py")
+    content = data.get("content", "")
+    if not content:
+        raise HTTPException(status_code=400, detail="No content")
+    if save_strategy(filename, content):
+        return {"message": "Uploaded", "filename": filename}
+    raise HTTPException(status_code=500, detail="Save failed")
+
+
+@app.delete("/api/strategies/{strategy_id}")
+async def remove_strategy(strategy_id: str):
+    if delete_strategy(strategy_id):
+        return {"message": "Deleted"}
+    raise HTTPException(status_code=404, detail="Not found")
+
+
+@app.post("/api/backtest/run")
+async def run_backtest(req: BacktestRequest):
+    strategy_code = get_strategy_code(req.strategy_id)
+    if not strategy_code:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+
+    all_candles = await ensure_candles(
+        req.symbol, req.timeframe,
+        start_date=req.start_date,
+        end_date=req.end_date
+    )
+
+    if not all_candles:
+        raise HTTPException(status_code=400, detail="No candle data in the requested period")
+
+    strategy_meta = load_strategy_file(
+        str(STRATEGIES_DIR / f"{req.strategy_id}.py")
+    ) or load_strategy_file(
+        str(STRATEGIES_DIR / f"{req.strategy_id}.json")
+    )
+    strategy_name = strategy_meta.get("@name", strategy_meta.get("name", req.strategy_id)) if strategy_meta else req.strategy_id
+
+    engine = BacktestEngine(strategy_code, strategy_name)
+    default_params = {}
+    if strategy_meta:
+        params_str = strategy_meta.get("@params", "")
+        if params_str:
+            try:
+                default_params = json.loads(params_str)
+            except (json.JSONDecodeError, TypeError):
+                pass
+    req_merged = {**default_params, **dict(req.params or {})}
+    params = {"name": strategy_name, "timeframe": req.timeframe, **req_merged}
+    bt_result = engine.run(all_candles, req.initial_capital, params)
+
+    if "error" in bt_result:
+        raise HTTPException(status_code=400, detail=bt_result["error"])
+
+    bt_result["symbol"] = req.symbol
+    bt_result["candles_loaded"] = len(all_candles)
+    save_backtest_result(req.strategy_id, bt_result)
+    return bt_result
+
+
+@app.post("/api/live/deploy")
+async def deploy_live(req: LiveDeployRequest):
+    strategy_code = get_strategy_code(req.strategy_id)
+    if not strategy_code:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+
+    ns = {"pd": pd, "np": np, "math": math}
+    try:
+        exec(strategy_code, ns)
+        fn = ns.get("generate_signals")
+        if not fn:
+            raise HTTPException(status_code=400, detail="Strategy missing generate_signals function")
+    except SyntaxError as e:
+        raise HTTPException(status_code=400, detail=f"Strategy syntax error: {e}")
+
+    # Merge strategy @params with request params (request takes priority)
+    strategy_path = STRATEGIES_DIR / f"{req.strategy_id}.py"
+    strategy_meta = parse_strategy_file(strategy_path) if strategy_path.exists() else None
+    strategy_params = strategy_meta.get("params", {}) if strategy_meta else {}
+    merged_params = {**strategy_params, **req.params}
+
+    bot_id = str(uuid.uuid4())[:8]
+    is_diff = ".diff()" in strategy_code
+    signal_type = "diff" if is_diff else "position"
+    bot = BotEngine(
+        bot_id=bot_id,
+        strategy_id=req.strategy_id,
+        strategy_code=strategy_code,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        capital=req.capital,
+        params=merged_params,
+        client_manager=client_manager,
+        trade_log=trade_log,
+        get_active_bot_count=_active_bot_count,
+        name=req.name,
+    )
+    await db.save_bot(
+        bot_id=bot_id, strategy_id=req.strategy_id,
+        strategy_code=strategy_code, symbol=req.symbol,
+        timeframe=req.timeframe, capital=req.capital,
+        params=merged_params, mode="demo",
+        signal_type=signal_type, name=req.name,
+    )
+    live_bots[bot_id] = bot
+    await bot.start()
+    return {
+        "bot_id": bot_id,
+        "status": "running",
+        "name": req.name,
+        "message": f"Strategy {req.strategy_id} deployed on {req.symbol}",
+        "cycle_interval_sec": {"1m": 60, "3m": 120, "5m": 240, "15m": 600,
+                               "30m": 900, "1H": 1200, "4H": 3600, "1D": 14400}.get(req.timeframe, 600),
+    }
+
+
+@app.get("/api/live/bots")
+async def list_live_bots(status: str = None):
+    if status:
+        return {"bots": [b.to_dict() for b in live_bots.values() if b.status == status]}
+    return {"bots": [b.to_dict() for b in live_bots.values()]}
+
+
+@app.get("/api/live/bots/{bot_id}")
+async def get_bot_detail(bot_id: str):
+    if bot_id not in live_bots:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    return live_bots[bot_id].to_dict()
+
+
+@app.post("/api/live/stop/{bot_id}")
+async def stop_bot(bot_id: str):
+    if bot_id not in live_bots:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    await live_bots[bot_id].stop()
+    await db.update_bot_stopped(bot_id)
+    return {"message": f"Bot {bot_id} stopped"}
+
+
+@app.post("/api/live/restart/{bot_id}")
+async def restart_bot(bot_id: str):
+    if bot_id not in live_bots:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    bot = live_bots[bot_id]
+    await bot.stop()
+    await asyncio.sleep(1)
+    bot.position = 0.0
+    bot.entry_price = 0.0
+    bot.last_position = 0
+    bot.error = None
+    bot.status = "starting"
+    await bot.start()
+    return {"message": f"Bot {bot_id} restarted", "bot_id": bot_id}
+
+
+@app.post("/api/auto-trade/start")
+async def auto_trade_start(req: LiveDeployRequest):
+    if not req.strategy_id:
+        raise HTTPException(status_code=400, detail="strategy_id required")
+    strategy_code = get_strategy_code(req.strategy_id)
+    if not strategy_code:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+    bot_id = str(uuid.uuid4())[:8]
+    is_diff = ".diff()" in strategy_code
+    signal_type = "diff" if is_diff else "position"
+    bot = BotEngine(
+        bot_id=bot_id,
+        strategy_id=req.strategy_id,
+        strategy_code=strategy_code,
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        capital=req.capital,
+        params=req.params,
+        client_manager=client_manager,
+        trade_log=trade_log,
+        get_active_bot_count=_active_bot_count,
+        name=req.name,
+    )
+    await db.save_bot(
+        bot_id=bot_id, strategy_id=req.strategy_id,
+        strategy_code=strategy_code, symbol=req.symbol,
+        timeframe=req.timeframe, capital=req.capital,
+        params=req.params, mode="demo",
+        signal_type=signal_type, name=req.name,
+    )
+    live_bots[bot_id] = bot
+    await bot.start()
+    return {
+        "bot_id": bot_id,
+        "status": "running",
+        "name": req.name,
+        "message": f"Auto-trade started: {req.strategy_id} on {req.symbol}",
+    }
+
+
+@app.get("/api/auto-trade/status")
+async def auto_trade_status():
+    active = [(bid, b.to_dict()) for bid, b in live_bots.items() if b.status == "running"]
+    return {
+        "active_count": len(active),
+        "bots": [a[1] for a in active],
+    }
+
+
+@app.get("/api/backtest/history")
+async def get_backtest_history():
+    return {"results": list_backtest_results()}
+
+
+# ── Database-backed endpoints ──
+
+@app.get("/api/bots")
+async def list_bots():
+    rows = await db.get_bots()
+    active = {b.id: b.to_dict() for b in live_bots.values()}
+    result = []
+    for row in rows:
+        bid = row["id"]
+        if bid in active:
+            result.append(active[bid])
+        else:
+            row["capital"] = row.get("capital") or 100.0
+            try:
+                row["params"] = json.loads(row.get("params", "{}"))
+            except (json.JSONDecodeError, TypeError):
+                row["params"] = {}
+            result.append(row)
+    return {"bots": result}
+
+
+@app.get("/api/bots/{bot_id}/signals")
+async def get_bot_signals(bot_id: str, limit: int = 100):
+    signals = await db.get_signals(bot_id=bot_id, limit=limit)
+    return {"signals": signals}
+
+
+@app.get("/api/bots/{bot_id}/trades")
+async def get_bot_trades(bot_id: str, limit: int = 100):
+    trades = await db.get_trades(bot_id=bot_id, limit=limit)
+    summary = await db.get_trades_summary(bot_id)
+    return {"trades": trades, "summary": summary}
+
+
+@app.get("/api/pnl")
+async def get_pnl():
+    pnl_1d = await db.get_pnl_by_period(1)
+    pnl_7d = await db.get_pnl_by_period(7)
+    pnl_30d = await db.get_pnl_by_period(30)
+    return {"1d": round(pnl_1d, 2), "7d": round(pnl_7d, 2), "30d": round(pnl_30d, 2)}
+
+@app.get("/api/trades")
+async def get_all_trades(limit: int = 100):
+    trades = await db.get_trades(limit=limit)
+    return {"trades": trades}
+
+
+@app.get("/api/trades/paired")
+async def get_paired_trades(limit: int = 15, begin: str = None, end: str = None):
+    paired = await db.get_paired_trades(limit=limit, begin=begin, end=end)
+    return {"trades": paired}
+
+
+@app.get("/api/bots/{bot_id}/metrics")
+async def get_bot_metrics(bot_id: str, limit: int = 100):
+    metrics = await db.get_metrics(bot_id=bot_id, limit=limit)
+    return {"metrics": metrics}
+
+
+@app.delete("/api/bots/{bot_id}")
+async def delete_bot(bot_id: str):
+    if bot_id in live_bots:
+        bot = live_bots[bot_id]
+        if bot.status == "running":
+            await bot.stop()
+        del live_bots[bot_id]
+    await db.delete_bot_all(bot_id)
+    return {"message": f"Bot {bot_id} and all data deleted"}
+
+
+@app.get("/api/signals")
+async def get_all_signals(limit: int = 100):
+    signals = await db.get_signals(limit=limit)
+    return {"signals": signals}
+
+
+@app.get("/api/db/positions")
+async def get_db_positions():
+    positions = await db.get_all_positions()
+    return {"positions": positions}
+
+
+@app.get("/api/ws/status")
+async def ws_status():
+    if ws_manager:
+        return {"running": ws_manager._running, "subscribed": list(ws_manager._subscribed)}
+    return {"running": False, "subscribed": []}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("BACKEND_PORT", "8000"))
+    host = os.getenv("BACKEND_HOST", "0.0.0.0")
+    uvicorn.run("app.main:app", host=host, port=port, reload=True)

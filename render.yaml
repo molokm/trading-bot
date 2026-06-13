@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: trading-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: BACKEND_PORT
+        value: "8000"
+      - key: BACKEND_HOST
+        value: "0.0.0.0"
+      - key: OKX_DEMO
+        value: "true"
+      - key: OKX_API_KEY
+        sync: false
+      - key: OKX_SECRET_KEY
+        sync: false
+      - key: OKX_PASSPHRASE
+        sync: false
+      - key: DATABASE_URL
+        sync: false
