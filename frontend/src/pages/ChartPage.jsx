@@ -65,7 +65,7 @@ export default function ChartPage() {
       },
       rightPriceScale: {
         borderColor: '#1a2332',
-        scaleMargins: { top: 0.1, bottom: 0.3 },
+        scaleMargins: { top: 0.1, bottom: 0.1 },
         entireTextOnly: true,
       },
       localization: {
