@@ -70,7 +70,7 @@ async def _fetch_binance(client: httpx.AsyncClient, symbol: str, interval: str,
         "limit": str(limit),
     }
     try:
-        r = await client.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=30)
+        r = await client.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=5)
         if r.status_code != 200:
             return []
         raw = r.json()
@@ -142,7 +142,7 @@ async def ensure_candles(symbol: str, timeframe: str,
         page_ms = 1000 * bar_ms
         total_pages = (end_ms - start_ms + page_ms - 1) // page_ms
 
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(5)
 
         async def _fetch_bn_page(page: int) -> list:
             cursor = start_ms + page * page_ms
@@ -150,6 +150,12 @@ async def ensure_candles(symbol: str, timeframe: str,
                 return []
             async with sem:
                 return await _fetch_binance(client, symbol, binance_interval, cursor) or []
+
+        tasks = []
+        for p in range(total_pages):
+            tasks.append(_fetch_bn_page(p))
+            await asyncio.sleep(0.03)
+        bn_results = await asyncio.gather(*tasks)
 
         bn_results = await asyncio.gather(*[_fetch_bn_page(p) for p in range(total_pages)])
         bn_candles = [c for batch in bn_results for c in batch]
