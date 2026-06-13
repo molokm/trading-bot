@@ -21,7 +21,6 @@ def login(password: str) -> Optional[str]:
         return _new_token("admin")
     if password == PASSWORD:
         return _new_token("admin")
-    print(f"[auth] login mismatch: input len={len(password)}, stored len={len(PASSWORD)}")
     return None
 
 def guest() -> str:
