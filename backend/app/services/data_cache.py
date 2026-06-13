@@ -1,10 +1,13 @@
 import json
 import os
+import sys
 import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 import httpx
+
+LOG = lambda *a: print(f"[data_cache] {' '.join(str(x) for x in a)}", flush=True)
 
 CACHE_DIR = Path(__file__).parent.parent.parent / "backtests_data" / "candles"
 
@@ -72,13 +75,16 @@ async def _fetch_binance(client: httpx.AsyncClient, symbol: str, interval: str,
     try:
         r = await client.get(f"{BINANCE_BASE}/api/v3/klines", params=params, timeout=5)
         if r.status_code != 200:
+            LOG(f"Binance {bn_symbol} status={r.status_code} body={r.text[:200]}")
             return []
         raw = r.json()
         if not isinstance(raw, list):
+            LOG(f"Binance {bn_symbol} not a list: {raw}")
             return []
         return [[str(int(k[0])), str(k[1]), str(k[2]), str(k[3]), str(k[4]),
                  str(k[5]), str(k[7]), "0", "0"] for k in raw]
-    except Exception:
+    except Exception as e:
+        LOG(f"Binance {bn_symbol} exception: {type(e).__name__}: {e}")
         return []
 
 
@@ -98,6 +104,10 @@ async def ensure_candles(symbol: str, timeframe: str,
     else:
         end_ms = now_ms
 
+    LOG(f"Request start={start_date or 'auto'} end={end_date or 'auto'} "
+        f"start_ms={start_ms} end_ms={end_ms} range_days={(end_ms-start_ms)/86400000:.1f} "
+        f"force_refresh={force_refresh} live_limit={live_limit} symbol={symbol} tf={timeframe}")
+
     if live_limit > 0:
         async with httpx.AsyncClient(timeout=15.0) as client:
             batch = await _fetch_okx(client, symbol, timeframe)
@@ -111,36 +121,47 @@ async def ensure_candles(symbol: str, timeframe: str,
         if cached:
             c_old = int(cached[0][0])
             c_new = int(cached[-1][0])
+            LOG(f"Cache hit: {len(cached)} candles, range={c_old}..{c_new}")
             if c_old <= start_ms and c_new >= end_ms:
+                LOG("Cache covers full range, returning cached")
                 return [c for c in cached if start_ms <= int(c[0]) <= end_ms]
+            else:
+                LOG("Cache does NOT cover full range, fetching fresh")
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         okx_candles = []
         after = None
+        okx_batches = 0
         while True:
             batch = await _fetch_okx(client, symbol, timeframe, after)
             if not batch:
                 break
             okx_candles.extend(batch)
+            okx_batches += 1
             oldest = int(batch[-1][0])
             if oldest <= start_ms:
                 break
             after = str(oldest)
 
+        LOG(f"OKX: {okx_batches} batches, {len(okx_candles)} candles total")
+
         if okx_candles:
             oldest_okx = int(okx_candles[-1][0])
+            LOG(f"OKX oldest={oldest_okx} start_ms={start_ms} covers_all={oldest_okx <= start_ms}")
             if oldest_okx <= start_ms:
                 okx_candles.sort(key=lambda c: int(c[0]))
                 _save_cache(symbol, timeframe, okx_candles, start_ms, end_ms)
                 return [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
 
         binance_interval = _TIMEFRAMES.get(timeframe, "1h")
+        LOG(f"Falling through to Binance interval={binance_interval}")
 
         bar_ms = {"1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000,
                   "30m": 1800000, "1H": 3600000, "2H": 7200000, "4H": 14400000,
                   "6H": 21600000, "12H": 43200000, "1D": 86400000}.get(timeframe, 3600000)
         page_ms = 1000 * bar_ms
         total_pages = (end_ms - start_ms + page_ms - 1) // page_ms
+        LOG(f"Binance pages: {total_pages} (page_ms={page_ms})")
 
         sem = asyncio.Semaphore(5)
 
@@ -156,19 +177,24 @@ async def ensure_candles(symbol: str, timeframe: str,
             tasks.append(_fetch_bn_page(p))
             await asyncio.sleep(0.03)
         bn_results = await asyncio.gather(*tasks)
+        bn_candles = [c for batch in bn_results for c in batch if batch]
 
-        bn_results = await asyncio.gather(*[_fetch_bn_page(p) for p in range(total_pages)])
-        bn_candles = [c for batch in bn_results for c in batch]
+        LOG(f"Binance total candles: {len(bn_candles)}")
 
         if okx_candles:
             by_ts = {int(c[0]): c for c in bn_candles}
             for c in okx_candles:
                 by_ts[int(c[0])] = c
             merged = sorted(by_ts.values(), key=lambda c: int(c[0]))
+            LOG(f"Merged: {len(merged)} candles (OKX overlapped)")
         elif bn_candles:
             merged = sorted(bn_candles, key=lambda c: int(c[0]))
+            LOG(f"Merged: {len(merged)} candles (Binance only)")
         else:
+            LOG("No candles from OKX or Binance!")
             return []
 
         _save_cache(symbol, timeframe, merged, start_ms, end_ms)
-        return [c for c in merged if start_ms <= int(c[0]) <= end_ms]
+        result = [c for c in merged if start_ms <= int(c[0]) <= end_ms]
+        LOG(f"Final candles: {len(result)}")
+        return result

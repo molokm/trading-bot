@@ -431,7 +431,8 @@ async def run_backtest(req: BacktestRequest):
     all_candles = await ensure_candles(
         req.symbol, req.timeframe,
         start_date=req.start_date,
-        end_date=req.end_date
+        end_date=req.end_date,
+        force_refresh=True
     )
 
     if not all_candles:
