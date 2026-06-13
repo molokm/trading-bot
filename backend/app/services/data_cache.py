@@ -122,31 +122,30 @@ async def ensure_candles(symbol: str, timeframe: str,
             return [c for c in cached if start_ms <= int(c[0]) <= end_ms]
 
     kucoin_tf = _KUCOIN_INTERVAL.get(timeframe, "5min")
-    headers = {}
-    if os.getenv("OKX_DEMO", "").lower() in ("1", "true"):
-        headers["x-simulated-trading"] = "1"
 
-    async def _fetch_page(client, page: int, bar_ms: int, sem) -> list:
-        async with sem:
-            cursor = start_ms + page * KUCOIN_PAGE * bar_ms
-            if cursor >= end_ms:
-                return []
-            end = min(cursor + KUCOIN_PAGE * bar_ms, end_ms)
-            return await _fetch_kucoin(client, symbol, kucoin_tf, cursor // 1000, end // 1000) or []
+    async with httpx.AsyncClient(timeout=30.0) as kc_client:
 
-    bar_ms = BAR_MS.get(timeframe, 300000)
-    total_pages = (end_ms - start_ms + KUCOIN_PAGE * bar_ms - 1) // (KUCOIN_PAGE * bar_ms)
-    max_pages = (max_candles // KUCOIN_PAGE) + 1
-    if total_pages > max_pages:
-        LOG(f"Clipping {total_pages} pages to {max_pages} (max_candles)")
-        total_pages = max_pages
+        async def _fetch_page(page: int, bar_ms: int, sem) -> list:
+            async with sem:
+                cursor = start_ms + page * KUCOIN_PAGE * bar_ms
+                if cursor >= end_ms:
+                    return []
+                end = min(cursor + KUCOIN_PAGE * bar_ms, end_ms)
+                return await _fetch_kucoin(kc_client, symbol, kucoin_tf, cursor // 1000, end // 1000) or []
 
-    LOG(f"KuCoin: {total_pages} pages of {KUCOIN_PAGE} candles")
+        bar_ms = BAR_MS.get(timeframe, 300000)
+        total_pages = (end_ms - start_ms + KUCOIN_PAGE * bar_ms - 1) // (KUCOIN_PAGE * bar_ms)
+        max_pages = (max_candles // KUCOIN_PAGE) + 1
+        if total_pages > max_pages:
+            LOG(f"Clipping {total_pages} pages to {max_pages} (max_candles)")
+            total_pages = max_pages
 
-    sem = asyncio.Semaphore(5)
-    tasks = [_fetch_page(client, p, bar_ms, sem) for p in range(total_pages)]
-    kc_results = await asyncio.gather(*tasks)
-    candles = [c for batch in kc_results for c in batch if batch]
+        LOG(f"KuCoin: {total_pages} pages of {KUCOIN_PAGE} candles")
+
+        sem = asyncio.Semaphore(5)
+        tasks = [_fetch_page(p, bar_ms, sem) for p in range(total_pages)]
+        kc_results = await asyncio.gather(*tasks)
+        candles = [c for batch in kc_results for c in batch if batch]
 
     if not candles:
         LOG("No candles from KuCoin")
@@ -162,7 +161,7 @@ async def ensure_candles(symbol: str, timeframe: str,
     candles.sort(key=lambda c: int(c[0]))
 
     try:
-        async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             okx_batch = await _fetch_okx(client, symbol, timeframe)
             if okx_batch:
                 LOG(f"OKX overlap: {len(okx_batch)} candles")
