@@ -818,7 +818,11 @@ async def ws_status():
 
 
 if STATIC_DIR.exists():
-    @app.get("/{full_path:path}")
+    @app.get("/")
+    async def serve_root():
+        return FileResponse(str(STATIC_DIR / "index.html"))
+
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"])
     async def serve_frontend(full_path: str):
         if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
