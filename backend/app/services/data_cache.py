@@ -1,4 +1,5 @@
 import json
+import os
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -42,8 +43,12 @@ async def _fetch_okx(client: httpx.AsyncClient, inst_id: str, bar: str, after: s
     params = {"instId": inst_id, "bar": bar, "limit": "300"}
     if after:
         params["after"] = after
+    headers = {}
+    if os.getenv("OKX_DEMO", "").lower() in ("1", "true"):
+        headers["x-simulated-trading"] = "1"
     try:
-        r = await client.get(f"{OKX_BASE}/api/v5/market/candles", params=params, timeout=30)
+        r = await client.get(f"{OKX_BASE}/api/v5/market/candles", params=params,
+                              headers=headers, timeout=30)
         if r.status_code != 200:
             return []
         d = r.json()
