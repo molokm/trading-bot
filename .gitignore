@@ -11,7 +11,8 @@ frontend/dist/
 
 # Strategies & Data
 strategies/*.pyc
-backtests_data/*.json
+backtests_data/
+backend/backtests_data/
 
 # Database
 backend/data/
