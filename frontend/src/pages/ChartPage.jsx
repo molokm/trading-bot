@@ -93,15 +93,16 @@ export default function ChartPage() {
       close: c.close,
     })))
 
-    const prices = chartData.candles.flatMap(c => [c.high, c.low])
-    const minP = Math.floor(Math.min(...prices) / 50) * 50
-    const maxP = Math.ceil(Math.max(...prices) / 50) * 50
-    for (let p = minP; p <= maxP; p += 50) {
+    const lastClose = chartData.candles[chartData.candles.length - 1].close
+    const center = Math.round(lastClose / 50) * 50
+    for (let i = -8; i <= 8; i++) {
+      const price = center + i * 50
+      const isCenter = i === 0
       candlestickSeries.createPriceLine({
-        price: p,
-        color: '#1a233266',
-        lineWidth: 1,
-        lineStyle: 2,
+        price,
+        color: isCenter ? '#4a9eff44' : '#1a233288',
+        lineWidth: isCenter ? 1 : 1,
+        lineStyle: isCenter ? 1 : 2,
         axisLabelVisible: true,
         title: '',
       })
