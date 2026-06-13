@@ -206,6 +206,14 @@ class BotEngine:
                 current_position = self._get_intended_position(sig_arr)
 
                 current_price = float(df["close"].iloc[-1])
+                try:
+                    tk = await client.get_ticker(self.symbol)
+                    if not tk.get("error") and tk.get("data"):
+                        live_last = float(tk["data"][0].get("last", 0))
+                        if live_last > 0:
+                            current_price = live_last
+                except Exception:
+                    pass
                 self.current_price = current_price
                 self.unrealized_pnl = self.position * (current_price - self.entry_price) if self.position != 0 else 0.0
                 ts_now = str(df["ts"].iloc[-1])

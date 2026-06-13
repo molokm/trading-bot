@@ -23,7 +23,7 @@ const ru = {
   'dashboard.websocket': 'WebSocket: Онлайн',
   'dashboard.websocket_offline': 'WebSocket: Офлайн',
   'dashboard.portfolio_value': 'Стоимость портфеля',
-  'dashboard.btc_price': 'BTC/USDT',
+  'dashboard.btc_price': 'BTC-USDT-SWAP',
   'dashboard.open_positions': 'Открытых позиций',
   'dashboard.status': 'Статус',
   'dashboard.online': 'Онлайн',

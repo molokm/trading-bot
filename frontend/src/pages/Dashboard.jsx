@@ -44,7 +44,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       const [pf, pos, tk, bots, trades, pnlData] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
-        api.getTicker('BTC-USDT').catch(() => null),
+        api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.listBots().catch(() => null),
         api.getPairedTrades(15).catch(() => null),
         api.getPnl().catch(() => null),
