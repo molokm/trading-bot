@@ -82,7 +82,7 @@ export default function ChartPage() {
       borderDownColor: '#ff4444',
       wickUpColor: '#00ff88',
       wickDownColor: '#ff4444',
-      priceFormat: { type: 'price', precision: 0, minMove: 50 },
+      priceFormat: { type: 'price', precision: 0, minMove: 1 },
     })
 
     candlestickSeries.setData(chartData.candles.map(c => ({
@@ -92,6 +92,20 @@ export default function ChartPage() {
       low: c.low,
       close: c.close,
     })))
+
+    const prices = chartData.candles.flatMap(c => [c.high, c.low])
+    const minP = Math.floor(Math.min(...prices) / 50) * 50
+    const maxP = Math.ceil(Math.max(...prices) / 50) * 50
+    for (let p = minP; p <= maxP; p += 50) {
+      candlestickSeries.createPriceLine({
+        price: p,
+        color: '#1a233266',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: '',
+      })
+    }
 
     if (chartData.markers && chartData.markers.length > 0) {
       createSeriesMarkers(chart, candlestickSeries, chartData.markers)
