@@ -868,6 +868,47 @@ async def ws_status():
     return {"running": False, "subscribed": []}
 
 
+@app.get("/api/debug/binance-test")
+async def debug_binance():
+    """Test Binance API connectivity from Render"""
+    import httpx as _httpx
+    results = {}
+    async with _httpx.AsyncClient(timeout=10.0) as c:
+        # Test 1: basic connectivity
+        try:
+            r = await c.get("https://api.binance.com/api/v3/ping")
+            results["ping"] = {"ok": r.status_code == 200, "status": r.status_code}
+        except Exception as e:
+            results["ping"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+        # Test 2: fetch BTCUSDT 5m candles
+        try:
+            now_ms = int(datetime.now().timestamp() * 1000)
+            start_ms = now_ms - 86400000  # 1 day ago
+            r = await c.get("https://api.binance.com/api/v3/klines",
+                           params={"symbol": "BTCUSDT", "interval": "5m",
+                                   "limit": "3", "startTime": str(start_ms)},
+                           timeout=5)
+            if r.status_code == 200:
+                data = r.json()
+                results["klines"] = {"ok": True, "count": len(data) if isinstance(data, list) else 0}
+            else:
+                results["klines"] = {"ok": False, "status": r.status_code, "body": r.text[:200]}
+        except Exception as e:
+            results["klines"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+        # Test 3: bad symbol (BTCUSDT-SWAP) — should return error
+        try:
+            r = await c.get("https://api.binance.com/api/v3/klines",
+                           params={"symbol": "BTCUSDT-SWAP", "interval": "5m", "limit": "1"},
+                           timeout=5)
+            results["bad_symbol"] = {"status": r.status_code, "body": r.text[:200]}
+        except Exception as e:
+            results["bad_symbol"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    return results
+
+
 if STATIC_DIR.exists():
     @app.head("/api/health")
     async def health_head():
