@@ -637,6 +637,9 @@ class BacktestEngine:
         max_loss_pct = params.get("max_daily_loss", 0.03)
         max_cons_losses = params.get("max_consecutive_losses", 5)
         use_atr_stops = params.get("use_atr_stops", True)
+        use_trailing = params.get("use_trailing", False)
+        trail_dist = params.get("trail_dist", 1.0)
+        trail_activate_atr = params.get("trail_activate_atr", 0.0)
 
         close = df["close"].values
         high = df["high"].values
@@ -659,6 +662,7 @@ class BacktestEngine:
         entry_price = 0.0
         sl_price = 0.0
         tp_price = 0.0
+        best_price = 0.0
         last_trade_bar = -cooldown
         daily_pnl = 0.0
         cons_losses = 0
@@ -677,6 +681,22 @@ class BacktestEngine:
             if abs(daily_pnl) >= initial_capital * max_loss_pct:
                 continue
 
+            if position != 0 and use_trailing and not np.isnan(atr[i]) and atr[i] > 0:
+                if position > 0:
+                    best_price = max(best_price, high[i])
+                    profit = best_price - entry_price
+                    if profit >= trail_activate_atr * atr[i]:
+                        new_sl = best_price - trail_dist * atr[i]
+                        if new_sl > sl_price:
+                            sl_price = new_sl
+                else:
+                    best_price = min(best_price, low[i])
+                    profit = entry_price - best_price
+                    if profit >= trail_activate_atr * atr[i]:
+                        new_sl = best_price + trail_dist * atr[i]
+                        if new_sl < sl_price:
+                            sl_price = new_sl
+
             if position != 0 and use_atr_stops and not np.isnan(atr[i]) and atr[i] > 0:
                 hit_sl = (position > 0 and low[i] <= sl_price) or (position < 0 and high[i] >= sl_price)
                 hit_tp = (position > 0 and high[i] >= tp_price) or (position < 0 and low[i] <= tp_price)
@@ -691,12 +711,14 @@ class BacktestEngine:
                         "price": round(float(exit_price), 2),
                         "size": round(float(abs(position)), 6),
                         "pnl": round(float(pnl), 2),
-                        "sl_hit": bool(hit_sl), "tp_hit": bool(hit_tp)
+                        "sl_hit": bool(hit_sl), "tp_hit": bool(hit_tp),
+                        "exit_reason": "trailing" if use_trailing and hit_sl else ("tp" if hit_tp else "sl")
                     })
                     position = 0.0
                     entry_price = 0.0
                     sl_price = 0.0
                     tp_price = 0.0
+                    best_price = 0.0
                     last_trade_bar = i
                     continue
 
@@ -718,11 +740,13 @@ class BacktestEngine:
                         position = pos_size
                         sl_price = entry_price - atr[i] * atr_sl_mult
                         tp_price = entry_price + atr[i] * atr_tp_mult
+                        best_price = entry_price
                         side_label = "buy"
                     else:
                         position = -pos_size
                         sl_price = entry_price + atr[i] * atr_sl_mult
                         tp_price = entry_price - atr[i] * atr_tp_mult
+                        best_price = entry_price
                         side_label = "sell"
                     trades.append({
                         "time": str(ts[i]), "side": side_label,
@@ -791,7 +815,7 @@ class BacktestEngine:
         losing = [t for t in trades if t.get("pnl", 0) < 0]
 
         equity_curve = [
-            {"time": str(df.loc[i, "ts"]), "equity": round(float(equity[i]), 2)}
+            {"time": str(df.iloc[i]["ts"]), "equity": round(float(equity[i]), 2)}
             for i in range(len(equity))
         ]
 

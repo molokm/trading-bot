@@ -17,10 +17,12 @@ export default function StrategiesPage() {
   const [strategies, setStrategies] = useState([])
   const [allBots, setAllBots] = useState([])
   const [selected, setSelected] = useState(null)
+  const oneYearAgo = new Date(); oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1)
+
   const [backtestParams, setBacktestParams] = useState({
     symbol: 'BTC-USDT',
     timeframe: '1H',
-    start_date: '',
+    start_date: oneYearAgo.toISOString().slice(0, 10),
     end_date: '',
     initial_capital: 10000,
   })
@@ -56,6 +58,8 @@ export default function StrategiesPage() {
         strategy_id: selected.id,
         symbol: backtestParams.symbol,
         timeframe: backtestParams.timeframe,
+        start_date: backtestParams.start_date || undefined,
+        end_date: backtestParams.end_date || undefined,
         initial_capital: backtestParams.initial_capital,
         params: {},
       })
@@ -274,6 +278,24 @@ export default function StrategiesPage() {
                       onChange={e => setBacktestParams({ ...backtestParams, initial_capital: +e.target.value })}
                     />
                   </div>
+                  <div>
+                    <label className="text-xs text-gray-400">Начало</label>
+                    <input
+                      type="date"
+                      className="w-full mt-1 text-xs"
+                      value={backtestParams.start_date}
+                      onChange={e => setBacktestParams({ ...backtestParams, start_date: e.target.value })}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400">Конец</label>
+                    <input
+                      type="date"
+                      className="w-full mt-1 text-xs"
+                      value={backtestParams.end_date}
+                      onChange={e => setBacktestParams({ ...backtestParams, end_date: e.target.value })}
+                    />
+                  </div>
                 </div>
                 <div className="flex gap-3 mt-4">
                   <button
@@ -305,6 +327,12 @@ export default function StrategiesPage() {
                   ) : (
                     <>
                       <h4 className="text-sm font-semibold text-white mb-4">{t('strategies.results')}</h4>
+
+                      {/* Period + candles */}
+                      <div className="text-xs text-gray-400 mb-4">
+                        Свечей загружено: <span className="text-white">{btResult.candles_loaded ?? '?'}</span>
+                        {btResult.period && <>, период: <span className="text-white">{btResult.period}</span></>}
+                      </div>
 
                       {/* Metrics */}
                       <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
