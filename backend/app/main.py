@@ -870,35 +870,35 @@ async def ws_status():
 
 @app.get("/api/debug/binance-test")
 async def debug_binance():
-    """Test API connectivity from Render (Binance + Bybit)"""
+    """Test API connectivity from Render"""
     import httpx as _httpx
     results = {}
     async with _httpx.AsyncClient(timeout=10.0) as c:
-        now_ms = int(datetime.now().timestamp() * 1000)
-        start_ms = now_ms - 86400000
+        now = int(datetime.now().timestamp())
+        ago = now - 86400
 
-        # Binance test
-        try:
-            r = await c.get("https://api.binance.com/api/v3/klines",
-                           params={"symbol": "BTCUSDT", "interval": "5m",
-                                   "limit": "3", "startTime": str(start_ms)},
-                           timeout=5)
-            results["binance"] = {"status": r.status_code, "ok": r.status_code == 200,
-                                 "body": r.text[:200] if r.status_code != 200 else "OK"}
-        except Exception as e:
-            results["binance"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-        # Bybit test
-        try:
-            r = await c.get("https://api.bybit.com/v5/market/kline",
-                           params={"symbol": "BTCUSDT", "interval": "5",
-                                   "limit": "3", "from": str(start_ms // 1000)},
-                           timeout=5)
-            data = r.json() if r.status_code == 200 else None
-            results["bybit"] = {"status": r.status_code, "ok": r.status_code == 200 and data.get("retCode") == 0,
-                               "body": r.text[:200] if r.status_code != 200 else f"OK retCode={data.get('retCode')}"}
-        except Exception as e:
-            results["bybit"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        for name, url, params in [
+            ("binance", "https://api.binance.com/api/v3/klines",
+             {"symbol": "BTCUSDT", "interval": "5m", "limit": "1"}),
+            ("bybit", "https://api.bybit.com/v5/market/kline",
+             {"symbol": "BTCUSDT", "interval": "5", "limit": "1"}),
+            ("kucoin", "https://api.kucoin.com/api/v1/market/candles",
+             {"symbol": "BTC-USDT", "type": "5min", "startAt": str(ago), "endAt": str(now)}),
+            ("gateio", "https://api.gateio.ws/api/v4/spot/candlesticks",
+             {"currency_pair": "BTC_USDT", "interval": "5m", "limit": "1"}),
+            ("bitfinex", "https://api-pub.bitfinex.com/v2/candles/trade:5m:tBTCUSD/hist",
+             {"limit": "1"}),
+            ("kraken", "https://api.kraken.com/0/public/OHLC",
+             {"pair": "XBTUSDT", "interval": "5"}),
+        ]:
+            try:
+                r = await c.get(url, params=params, timeout=5)
+                data = r.json() if r.status_code == 200 else None
+                results[name] = {"status": r.status_code, "ok": r.status_code == 200}
+                if r.status_code != 200:
+                    results[name]["body"] = r.text[:100]
+            except Exception as e:
+                results[name] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
     return results
 
