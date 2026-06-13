@@ -30,7 +30,7 @@ from app.services.strategy_loader import (
 from app.database import db
 from app.services.ws_manager import WSManager
 from app.engine.bot_engine import BotEngine
-from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD
+from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 
 load_dotenv()
 
@@ -187,10 +187,15 @@ async def auth_middleware(request: Request, call_next):
 
 @app.post("/api/auth/login")
 async def auth_login(request: Request):
+    delay = check_rate_limit(request.client.host)
+    if delay:
+        await asyncio.sleep(delay)
     body = await request.json()
     token = login(body.get("password", ""))
     if not token:
+        record_attempt(request.client.host, False)
         return JSONResponse({"detail": "Неверный пароль"}, status_code=401)
+    record_attempt(request.client.host, True)
     return {"token": token, "role": "admin"}
 
 @app.post("/api/auth/guest")
