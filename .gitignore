@@ -15,6 +15,7 @@ backtests_data/*.json
 
 # Database
 backend/data/
+backend/trading_bot.db
 
 # OS
 .DS_Store

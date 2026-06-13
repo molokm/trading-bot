@@ -702,11 +702,15 @@ class Database:
     # ── Cleanup ──
 
     async def delete_bot_all(self, bot_id: str):
-        for table in ["performance_metrics", "positions", "trades", "signals", "bots"]:
+        for table in ["performance_metrics", "positions", "trades", "signals"]:
             if self._pg_mode:
                 await self._execute(f"DELETE FROM {table} WHERE bot_id = $1", (bot_id,))
             else:
                 await self._execute(f"DELETE FROM {table} WHERE bot_id = ?", (bot_id,))
+        if self._pg_mode:
+            await self._execute("DELETE FROM bots WHERE id = $1", (bot_id,))
+        else:
+            await self._execute("DELETE FROM bots WHERE id = ?", (bot_id,))
 
 
 db = Database()
