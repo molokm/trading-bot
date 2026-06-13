@@ -122,6 +122,7 @@ async def ensure_candles(symbol: str, timeframe: str,
             return [c for c in cached if start_ms <= int(c[0]) <= end_ms]
 
     kucoin_tf = _KUCOIN_INTERVAL.get(timeframe, "5min")
+    kucoin_symbol = symbol.replace("-SWAP", "").replace("-USD-SWAP", "").split("-DELIVERY")[0]
 
     async with httpx.AsyncClient(timeout=30.0) as kc_client:
 
@@ -131,7 +132,7 @@ async def ensure_candles(symbol: str, timeframe: str,
                 if cursor >= end_ms:
                     return []
                 end = min(cursor + KUCOIN_PAGE * bar_ms, end_ms)
-                return await _fetch_kucoin(kc_client, symbol, kucoin_tf, cursor // 1000, end // 1000) or []
+                return await _fetch_kucoin(kc_client, kucoin_symbol, kucoin_tf, cursor // 1000, end // 1000) or []
 
         bar_ms = BAR_MS.get(timeframe, 300000)
         total_pages = (end_ms - start_ms + KUCOIN_PAGE * bar_ms - 1) // (KUCOIN_PAGE * bar_ms)
