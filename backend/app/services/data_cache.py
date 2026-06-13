@@ -1,3 +1,4 @@
+import gc
 import json
 import os
 import asyncio
@@ -100,7 +101,8 @@ async def _fetch_kucoin(client: httpx.AsyncClient, symbol: str, interval: str,
 async def ensure_candles(symbol: str, timeframe: str,
                          start_date: str = None, end_date: str = None,
                          force_refresh: bool = False,
-                         live_limit: int = 0) -> list:
+                         live_limit: int = 0,
+                         max_candles: int = 80000) -> list:
     now_ms = int(datetime.now().timestamp() * 1000)
 
     if start_date:
@@ -115,7 +117,7 @@ async def ensure_candles(symbol: str, timeframe: str,
 
     LOG(f"Request start={start_date or 'auto'} end={end_date or 'auto'} "
         f"start_ms={start_ms} end_ms={end_ms} range_days={(end_ms-start_ms)/86400000:.1f} "
-        f"force_refresh={force_refresh} live_limit={live_limit} symbol={symbol} tf={timeframe}")
+        f"force_refresh={force_refresh} live_limit={live_limit} max_candles={max_candles} symbol={symbol} tf={timeframe}")
 
     if live_limit > 0:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -151,6 +153,9 @@ async def ensure_candles(symbol: str, timeframe: str,
             if oldest <= start_ms:
                 break
             after = str(oldest)
+            if len(okx_candles) >= max_candles * 2:
+                LOG(f"OKX hit memory guard: {len(okx_candles)} candles, stopping")
+                break
 
         LOG(f"OKX: {okx_batches} batches, {len(okx_candles)} candles total")
 
@@ -159,8 +164,12 @@ async def ensure_candles(symbol: str, timeframe: str,
             LOG(f"OKX oldest={oldest_okx} start_ms={start_ms} covers_all={oldest_okx <= start_ms}")
             if oldest_okx <= start_ms:
                 okx_candles.sort(key=lambda c: int(c[0]))
-                _save_cache(symbol, timeframe, okx_candles, start_ms, end_ms)
-                return [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
+                result = [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
+                if len(result) > max_candles:
+                    result = result[-max_candles:]
+                    LOG(f"Clipped to {max_candles} candles")
+                _save_cache(symbol, timeframe, result, start_ms, end_ms)
+                return result
 
         kucoin_interval = _KUCOIN_INTERVALS.get(timeframe, "1hour")
         LOG(f"Falling through to KuCoin interval={kucoin_interval}")
@@ -182,6 +191,9 @@ async def ensure_candles(symbol: str, timeframe: str,
 
         tasks = []
         for p in range(total_pages):
+            if len(tasks) >= (max_candles // KUC_PAGE) + 1:
+                LOG(f"KuCoin memory guard: {len(tasks)} pages, stopping")
+                break
             tasks.append(_fetch_kc_page(p))
             await asyncio.sleep(0.03)
         kc_results = await asyncio.gather(*tasks)
@@ -194,6 +206,7 @@ async def ensure_candles(symbol: str, timeframe: str,
             for c in okx_candles:
                 by_ts[int(c[0])] = c
             merged = sorted(by_ts.values(), key=lambda c: int(c[0]))
+            del by_ts
             LOG(f"Merged: {len(merged)} candles")
         elif kc_candles:
             merged = sorted(kc_candles, key=lambda c: int(c[0]))
@@ -201,6 +214,13 @@ async def ensure_candles(symbol: str, timeframe: str,
         else:
             LOG("No candles from OKX or KuCoin!")
             return []
+
+        if len(merged) > max_candles:
+            merged = merged[-max_candles:]
+            LOG(f"Clipped to {max_candles} candles")
+
+        del okx_candles, kc_candles, kc_results
+        gc.collect()
 
         _save_cache(symbol, timeframe, merged, start_ms, end_ms)
         result = [c for c in merged if start_ms <= int(c[0]) <= end_ms]

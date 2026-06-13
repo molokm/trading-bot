@@ -17,12 +17,11 @@ export default function StrategiesPage() {
   const [strategies, setStrategies] = useState([])
   const [allBots, setAllBots] = useState([])
   const [selected, setSelected] = useState(null)
-  const oneYearAgo = new Date(); oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1)
 
   const [backtestParams, setBacktestParams] = useState({
     symbol: 'BTC-USDT',
     timeframe: '1H',
-    start_date: oneYearAgo.toISOString().slice(0, 10),
+    start_date: '',
     end_date: '',
     initial_capital: 10000,
   })

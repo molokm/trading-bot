@@ -1,7 +1,9 @@
 import asyncio
+import gc
 import json
 import math
 import os
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -67,9 +69,22 @@ class BacktestJob:
     progress: str = ""
     result: Optional[dict] = None
     error: Optional[str] = None
+    ts: float = 0.0
 
 _backtest_jobs: dict[str, BacktestJob] = {}
 _bt_lock = asyncio.Lock()
+
+
+async def _cleanup_old_jobs():
+    while True:
+        await asyncio.sleep(300)
+        now = time.time()
+        old = [jid for jid, job in list(_backtest_jobs.items())
+               if job.status in ("done", "error") and job.ts <= now - 300]
+        for jid in old:
+            _backtest_jobs.pop(jid, None)
+        if old:
+            print(f"[main] Cleaned {len(old)} old backtest jobs", flush=True)
 
 @app.on_event("startup")
 async def startup():
@@ -86,6 +101,7 @@ async def startup():
         await ws_manager.subscribe("positions")
         await ws_manager.subscribe("orders")
     await _restore_bots()
+    asyncio.create_task(_cleanup_old_jobs())
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -440,7 +456,8 @@ async def _run_backtest_job(job: 'BacktestJob', req: BacktestRequest, strategy_c
                 req.symbol, req.timeframe,
                 start_date=req.start_date,
                 end_date=req.end_date,
-                force_refresh=True
+                force_refresh=True,
+                max_candles=50000,
             ),
             timeout=120
         )
@@ -477,18 +494,24 @@ async def _run_backtest_job(job: 'BacktestJob', req: BacktestRequest, strategy_c
         bt_result["candles_loaded"] = len(all_candles)
         save_backtest_result(req.strategy_id, bt_result)
 
+        del all_candles
+        gc.collect()
+
         async with _bt_lock:
             job.status = "done"
             job.result = bt_result
             job.progress = "Готово"
+            job.ts = time.time()
     except asyncio.TimeoutError:
         async with _bt_lock:
             job.status = "error"
             job.error = "Таймаут загрузки свечей (>120 сек)"
+            job.ts = time.time()
     except Exception as e:
         async with _bt_lock:
             job.status = "error"
             job.error = str(e)
+            job.ts = time.time()
 
 
 @app.post("/api/backtest/run")
