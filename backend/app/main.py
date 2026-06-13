@@ -10,7 +10,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -168,7 +168,7 @@ async def _restore_bots():
 
 # ── Auth helpers ──
 
-def get_token(request):
+def get_token(request: Request):
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
         return auth[7:]
@@ -176,7 +176,7 @@ def get_token(request):
 
 # Middleware: protect all POST/PUT/DELETE routes (except auth endpoints)
 @app.middleware("http")
-async def auth_middleware(request, call_next):
+async def auth_middleware(request: Request, call_next):
     if request.method in ("POST", "PUT", "DELETE") and request.url.path.startswith("/api/"):
         skip = ("/api/auth/login", "/api/auth/guest")
         if request.url.path not in skip and PASSWORD:
@@ -186,7 +186,7 @@ async def auth_middleware(request, call_next):
     return await call_next(request)
 
 @app.post("/api/auth/login")
-async def auth_login(request):
+async def auth_login(request: Request):
     body = await request.json()
     token = login(body.get("password", ""))
     if not token:
@@ -199,13 +199,13 @@ async def auth_guest():
     return {"token": token, "role": "guest"}
 
 @app.get("/api/auth/status")
-async def auth_status(request):
+async def auth_status(request: Request):
     token = get_token(request)
     role = validate(token)
     return {"authenticated": bool(role), "role": role, "has_password": bool(PASSWORD)}
 
 @app.post("/api/auth/logout")
-async def auth_logout(request):
+async def auth_logout(request: Request):
     token = get_token(request)
     logout(token)
     return {"status": "ok"}
