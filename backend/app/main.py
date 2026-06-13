@@ -178,7 +178,7 @@ def get_token(request: Request):
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     if request.method in ("POST", "PUT", "DELETE") and request.url.path.startswith("/api/"):
-        skip = ("/api/auth/login", "/api/auth/guest")
+        skip = ("/api/auth/login", "/api/auth/guest", "/api/auth/logout")
         if request.url.path not in skip and PASSWORD:
             token = get_token(request)
             if not is_admin(token):
