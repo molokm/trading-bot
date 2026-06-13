@@ -61,7 +61,7 @@ function AppContent() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.overview') },
     { to: '/chart', icon: CandlestickChart, label: 'График' },
-    { to: '/settings', icon: Settings, label: t('nav.settings') },
+    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
     { to: '/strategies', icon: BarChart3, label: t('nav.strategies') },
     { to: '/trades', icon: ScrollText, label: t('nav.trade_log') },
     { to: '/live', icon: Bot, label: 'Лайв боты' },
