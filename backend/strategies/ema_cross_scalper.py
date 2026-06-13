@@ -1,60 +1,50 @@
-# @name: EMA Cross Scalper
-# @description: 1m скальпер. Цена пересекает EMA(20) = сигнал.
-#   Close > EMA → long, Close < EMA → short.
-#   RSI(7) фильтр: лонг при RSI<70, шорт при RSI>30.
-#   Выход: противоположный сигнал или ATR стоп
-# @timeframe: 1m
+# @name: EMA Crossover Aggressive
+# @description: 5m агрессивный скальпер. EMA(9)/EMA(21) crossover.
+#   Long: EMA9 > EMA21 + close > EMA9
+#   Short: EMA9 < EMA21 + close < EMA9
+# @timeframe: 5m
 # @symbol: BTC-USDT
-# @params: {"ema_period": 20, "rsi_period": 7, "rsi_ob": 75, "rsi_os": 25, "atr_sl_mult": 2.0, "atr_tp_mult": 3.0, "risk_per_trade": 0.005, "cooldown_bars": 5}
+# @params: {"fast_ema": 9, "slow_ema": 21, "risk_per_trade": 0.01, "atr_sl_mult": 2, "atr_tp_mult": 4, "cooldown_bars": 1}
 
 import pandas as pd
 import numpy as np
 
 
 def generate_signals(df, params):
-    ema_period = int(params.get("ema_period", 20))
-    rsi_period = int(params.get("rsi_period", 7))
-    rsi_ob = float(params.get("rsi_ob", 75))
-    rsi_os = float(params.get("rsi_os", 25))
-    cooldown = int(params.get("cooldown_bars", 5))
+    fast = int(params.get("fast_ema", 9))
+    slow = int(params.get("slow_ema", 21))
+    cooldown = int(params.get("cooldown_bars", 1))
 
     close = df["close"].values
-    n = len(df)
+    if len(close) < slow + 5:
+        return [0] * len(close)
 
-    ema = pd.Series(close).ewm(span=ema_period).mean().values
-
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0).rolling(rsi_period).mean().values
-    loss = (-delta.where(delta < 0, 0)).rolling(rsi_period).mean().values
-    rsi = np.full(n, 50.0)
-    for i in range(rsi_period, n):
-        if loss[i] == 0:
-            rsi[i] = 100.0
-        elif gain[i] == 0:
-            rsi[i] = 0.0
-        else:
-            rsi[i] = 100.0 - (100.0 / (1.0 + gain[i] / loss[i]))
+    ema_fast = pd.Series(close).ewm(span=fast).mean().values
+    ema_slow = pd.Series(close).ewm(span=slow).mean().values
+    n = len(close)
 
     signals = np.zeros(n, dtype=np.int64)
     last_bar = -cooldown
-    last_dir = 0
+    last_sig = 0
 
-    for i in range(max(ema_period, rsi_period) + 5, n):
+    for i in range(slow + 5, n):
         if i - last_bar < cooldown:
             continue
-        if np.isnan(rsi[i]):
-            continue
 
-        crossed_above = close[i] > ema[i] and close[i - 1] <= ema[i - 1]
-        crossed_below = close[i] < ema[i] and close[i - 1] >= ema[i - 1]
+        prev_fast = ema_fast[i - 1]
+        prev_slow = ema_slow[i - 1]
 
-        if crossed_above and rsi[i] < rsi_ob and last_dir != 1:
+        fast_above = ema_fast[i] > ema_slow[i]
+        fast_crossed_above = fast_above and prev_fast <= prev_slow
+        fast_crossed_below = not fast_above and prev_fast >= prev_slow
+
+        if fast_crossed_above and close[i] > ema_fast[i] and last_sig != 1:
             signals[i] = 1
-            last_dir = 1
+            last_sig = 1
             last_bar = i
-        elif crossed_below and rsi[i] > rsi_os and last_dir != -1:
+        elif fast_crossed_below and close[i] < ema_fast[i] and last_sig != -1:
             signals[i] = -1
-            last_dir = -1
+            last_sig = -1
             last_bar = i
 
     return signals.tolist()

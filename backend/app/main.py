@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,17 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 ws_manager: Optional[WSManager] = None
 trade_log: list = []
 live_bots: dict = {}
+
+@dataclass
+class BacktestJob:
+    id: str
+    status: str = "pending"  # pending | running | done | error
+    progress: str = ""
+    result: Optional[dict] = None
+    error: Optional[str] = None
+
+_backtest_jobs: dict[str, BacktestJob] = {}
+_bt_lock = asyncio.Lock()
 
 @app.on_event("startup")
 async def startup():
@@ -418,6 +430,67 @@ async def remove_strategy(strategy_id: str):
     raise HTTPException(status_code=404, detail="Not found")
 
 
+async def _run_backtest_job(job: 'BacktestJob', req: BacktestRequest, strategy_code: str, strategy_name: str):
+    async with _bt_lock:
+        job.status = "running"
+    try:
+        job.progress = "Загрузка свечей..."
+        all_candles = await asyncio.wait_for(
+            ensure_candles(
+                req.symbol, req.timeframe,
+                start_date=req.start_date,
+                end_date=req.end_date,
+                force_refresh=True
+            ),
+            timeout=120
+        )
+        if not all_candles:
+            raise ValueError("Нет данных за указанный период")
+
+        strategy_meta = load_strategy_file(
+            str(STRATEGIES_DIR / f"{req.strategy_id}.py")
+        ) or load_strategy_file(
+            str(STRATEGIES_DIR / f"{req.strategy_id}.json")
+        )
+        if not strategy_meta:
+            strategy_name = req.strategy_id
+
+        engine = BacktestEngine(strategy_code, strategy_name)
+        default_params = {}
+        if strategy_meta:
+            params_str = strategy_meta.get("@params", "")
+            if params_str:
+                try:
+                    default_params = json.loads(params_str)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        req_merged = {**default_params, **dict(req.params or {})}
+        params = {"name": strategy_name, "timeframe": req.timeframe, "symbol": req.symbol, **req_merged}
+
+        job.progress = "Расчёт стратегии..."
+        bt_result = engine.run(all_candles, req.initial_capital, params)
+
+        if "error" in bt_result:
+            raise ValueError(bt_result["error"])
+
+        bt_result["symbol"] = req.symbol
+        bt_result["candles_loaded"] = len(all_candles)
+        save_backtest_result(req.strategy_id, bt_result)
+
+        async with _bt_lock:
+            job.status = "done"
+            job.result = bt_result
+            job.progress = "Готово"
+    except asyncio.TimeoutError:
+        async with _bt_lock:
+            job.status = "error"
+            job.error = "Таймаут загрузки свечей (>120 сек)"
+    except Exception as e:
+        async with _bt_lock:
+            job.status = "error"
+            job.error = str(e)
+
+
 @app.post("/api/backtest/run")
 async def run_backtest(req: BacktestRequest):
     strategy_code = get_strategy_code(req.strategy_id)
@@ -428,16 +501,6 @@ async def run_backtest(req: BacktestRequest):
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")
 
-    all_candles = await ensure_candles(
-        req.symbol, req.timeframe,
-        start_date=req.start_date,
-        end_date=req.end_date,
-        force_refresh=True
-    )
-
-    if not all_candles:
-        raise HTTPException(status_code=400, detail="No candle data in the requested period")
-
     strategy_meta = load_strategy_file(
         str(STRATEGIES_DIR / f"{req.strategy_id}.py")
     ) or load_strategy_file(
@@ -445,26 +508,25 @@ async def run_backtest(req: BacktestRequest):
     )
     strategy_name = strategy_meta.get("@name", strategy_meta.get("name", req.strategy_id)) if strategy_meta else req.strategy_id
 
-    engine = BacktestEngine(strategy_code, strategy_name)
-    default_params = {}
-    if strategy_meta:
-        params_str = strategy_meta.get("@params", "")
-        if params_str:
-            try:
-                default_params = json.loads(params_str)
-            except (json.JSONDecodeError, TypeError):
-                pass
-    req_merged = {**default_params, **dict(req.params or {})}
-    params = {"name": strategy_name, "timeframe": req.timeframe, "symbol": req.symbol, **req_merged}
-    bt_result = engine.run(all_candles, req.initial_capital, params)
+    job_id = uuid.uuid4().hex[:12]
+    job = BacktestJob(id=job_id)
+    _backtest_jobs[job_id] = job
 
-    if "error" in bt_result:
-        raise HTTPException(status_code=400, detail=bt_result["error"])
+    asyncio.create_task(_run_backtest_job(job, req, strategy_code, strategy_name))
+    return {"job_id": job_id, "status": "accepted"}
 
-    bt_result["symbol"] = req.symbol
-    bt_result["candles_loaded"] = len(all_candles)
-    save_backtest_result(req.strategy_id, bt_result)
-    return bt_result
+
+@app.get("/api/backtest/status/{job_id}")
+async def backtest_status(job_id: str):
+    job = _backtest_jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {
+        "status": job.status,
+        "progress": job.progress,
+        "result": job.result,
+        "error": job.error,
+    }
 
 
 @app.post("/api/live/deploy")

@@ -83,6 +83,9 @@ export const api = {
   runBacktest: (data) =>
     request('/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
 
+  getBacktestStatus: (jobId) =>
+    request(`/backtest/status/${jobId}`),
+
   getBacktestHistory: () => request('/backtest/history'),
 
   deployLive: (data) =>

@@ -28,6 +28,7 @@ export default function StrategiesPage() {
   })
   const [btResult, setBtResult] = useState(null)
   const [btRunning, setBtRunning] = useState(false)
+  const [btProgress, setBtProgress] = useState('')
   const [showDeploy, setShowDeploy] = useState(false)
   const [deploying, setDeploying] = useState(false)
   const [deployResult, setDeployResult] = useState(null)
@@ -53,8 +54,9 @@ export default function StrategiesPage() {
     if (!selected) return
     setBtRunning(true)
     setBtResult(null)
+    setBtProgress('Старт...')
     try {
-      const result = await api.runBacktest({
+      const { job_id } = await api.runBacktest({
         strategy_id: selected.id,
         symbol: backtestParams.symbol,
         timeframe: backtestParams.timeframe,
@@ -63,7 +65,19 @@ export default function StrategiesPage() {
         initial_capital: backtestParams.initial_capital,
         params: {},
       })
-      setBtResult(result)
+      while (true) {
+        await new Promise(r => setTimeout(r, 1000))
+        const st = await api.getBacktestStatus(job_id)
+        setBtProgress(st.progress || '')
+        if (st.status === 'done') {
+          setBtResult(st.result)
+          break
+        }
+        if (st.status === 'error') {
+          setBtResult({ error: st.error || 'Ошибка' })
+          break
+        }
+      }
     } catch (err) {
       setBtResult({ error: err.message })
     }
@@ -304,7 +318,7 @@ export default function StrategiesPage() {
                     disabled={btRunning}
                   >
                     {btRunning ? <Loader2 size={14} className="animate-spin" /> : <BarChart3 size={14} />}
-                    {btRunning ? t('strategies.running') : t('strategies.run_backtest')}
+                    {btRunning ? btProgress : t('strategies.run_backtest')}
                   </button>
                   <button
                     className="btn-danger px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2"
