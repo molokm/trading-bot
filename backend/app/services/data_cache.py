@@ -61,8 +61,10 @@ async def _fetch_okx(client: httpx.AsyncClient, inst_id: str, bar: str, after: s
 
 async def _fetch_binance(client: httpx.AsyncClient, symbol: str, interval: str,
                          start_time: int, limit: int = 1000) -> list:
+    parts = symbol.split("-")
+    bn_symbol = (parts[0] + parts[1]).upper()
     params = {
-        "symbol": symbol.replace("-", "").upper(),
+        "symbol": bn_symbol,
         "interval": interval,
         "startTime": str(start_time),
         "limit": str(limit),
