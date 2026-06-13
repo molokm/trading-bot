@@ -133,18 +133,24 @@ async def ensure_candles(symbol: str, timeframe: str,
                 return [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
 
         binance_interval = _TIMEFRAMES.get(timeframe, "1h")
-        cursor = start_ms
-        bn_candles = []
 
-        while cursor < end_ms:
-            batch = await _fetch_binance(client, symbol, binance_interval, cursor)
-            if not batch:
-                break
-            bn_candles.extend(batch)
-            newest = int(batch[-1][0])
-            if newest >= end_ms:
-                break
-            cursor = newest + 1
+        bar_ms = {"1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000,
+                  "30m": 1800000, "1H": 3600000, "2H": 7200000, "4H": 14400000,
+                  "6H": 21600000, "12H": 43200000, "1D": 86400000}.get(timeframe, 3600000)
+        page_ms = 1000 * bar_ms
+        total_pages = (end_ms - start_ms + page_ms - 1) // page_ms
+
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch_bn_page(page: int) -> list:
+            cursor = start_ms + page * page_ms
+            if cursor >= end_ms:
+                return []
+            async with sem:
+                return await _fetch_binance(client, symbol, binance_interval, cursor) or []
+
+        bn_results = await asyncio.gather(*[_fetch_bn_page(p) for p in range(total_pages)])
+        bn_candles = [c for batch in bn_results for c in batch]
 
         if okx_candles:
             by_ts = {int(c[0]): c for c in bn_candles}
