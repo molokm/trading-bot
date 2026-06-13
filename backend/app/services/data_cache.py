@@ -10,17 +10,7 @@ import httpx
 LOG = lambda *a: print(f"[data_cache] {' '.join(str(x) for x in a)}", flush=True)
 
 CACHE_DIR = Path(__file__).parent.parent.parent / "backtests_data" / "candles"
-
 OKX_BASE = "https://www.okx.com"
-
-_KUCOIN_INTERVALS = {
-    "1m": "1min", "3m": "3min", "5m": "5min", "15m": "15min",
-    "30m": "30min", "1H": "1hour", "2H": "2hour", "4H": "4hour",
-    "6H": "6hour", "8H": "8hour", "12H": "12hour", "1D": "1day",
-}
-
-KUC_PAGE = 1500  # max candles per request
-
 BAR_MS = {"1m": 60000, "3m": 180000, "5m": 300000, "15m": 900000,
           "30m": 1800000, "1H": 3600000, "2H": 7200000, "4H": 14400000,
           "6H": 21600000, "12H": 43200000, "1D": 86400000}
@@ -64,37 +54,6 @@ async def _fetch_okx(client: httpx.AsyncClient, inst_id: str, bar: str, after: s
             return []
         return d.get("data", [])
     except Exception:
-        return []
-
-
-async def _fetch_kucoin(client: httpx.AsyncClient, symbol: str, interval: str,
-                        start_sec: int, end_sec: int) -> list:
-    params = {
-        "symbol": symbol,
-        "type": interval,
-        "startAt": str(start_sec),
-        "endAt": str(end_sec),
-    }
-    try:
-        r = await client.get("https://api.kucoin.com/api/v1/market/candles",
-                              params=params, timeout=5)
-        if r.status_code != 200:
-            LOG(f"KuCoin {symbol} status={r.status_code}")
-            return []
-        data = r.json()
-        if data.get("code") != "200000":
-            LOG(f"KuCoin {symbol} code={data.get('code')}")
-            return []
-        raw = data.get("data", [])
-        if not isinstance(raw, list):
-            return []
-        result = []
-        for k in raw:
-            result.append([str(int(k[0]) * 1000), k[1], k[2], k[3], k[4],
-                           k[5], k[6] if len(k) > 6 else "0", "0", "0"])
-        return result
-    except Exception as e:
-        LOG(f"KuCoin exception: {type(e).__name__}: {e}")
         return []
 
 
@@ -159,70 +118,26 @@ async def ensure_candles(symbol: str, timeframe: str,
 
         LOG(f"OKX: {okx_batches} batches, {len(okx_candles)} candles total")
 
-        if okx_candles:
-            oldest_okx = int(okx_candles[-1][0])
-            LOG(f"OKX oldest={oldest_okx} start_ms={start_ms} covers_all={oldest_okx <= start_ms}")
-            if oldest_okx <= start_ms:
-                okx_candles.sort(key=lambda c: int(c[0]))
-                result = [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
-                if len(result) > max_candles:
-                    result = result[-max_candles:]
-                    LOG(f"Clipped to {max_candles} candles")
-                _save_cache(symbol, timeframe, result, start_ms, end_ms)
-                return result
-
-        kucoin_interval = _KUCOIN_INTERVALS.get(timeframe, "1hour")
-        LOG(f"Falling through to KuCoin interval={kucoin_interval}")
-
-        page_ms = KUC_PAGE * BAR_MS.get(timeframe, 3600000)
-        total_pages = (end_ms - start_ms + page_ms - 1) // page_ms
-        LOG(f"KuCoin pages: {total_pages} (page_ms={page_ms})")
-
-        sem = asyncio.Semaphore(5)
-
-        async def _fetch_kc_page(page: int) -> list:
-            cursor = start_ms + page * page_ms
-            if cursor >= end_ms:
-                return []
-            end = min(cursor + page_ms, end_ms)
-            async with sem:
-                return await _fetch_kucoin(client, symbol, kucoin_interval,
-                                           cursor // 1000, end // 1000) or []
-
-        tasks = []
-        for p in range(total_pages):
-            if len(tasks) >= (max_candles // KUC_PAGE) + 1:
-                LOG(f"KuCoin memory guard: {len(tasks)} pages, stopping")
-                break
-            tasks.append(_fetch_kc_page(p))
-            await asyncio.sleep(0.03)
-        kc_results = await asyncio.gather(*tasks)
-        kc_candles = [c for batch in kc_results for c in batch if batch]
-
-        LOG(f"KuCoin total candles: {len(kc_candles)}")
-
-        if okx_candles:
-            by_ts = {int(c[0]): c for c in kc_candles}
-            for c in okx_candles:
-                by_ts[int(c[0])] = c
-            merged = sorted(by_ts.values(), key=lambda c: int(c[0]))
-            del by_ts
-            LOG(f"Merged: {len(merged)} candles")
-        elif kc_candles:
-            merged = sorted(kc_candles, key=lambda c: int(c[0]))
-            LOG(f"Merged: {len(merged)} candles (KuCoin only)")
-        else:
-            LOG("No candles from OKX or KuCoin!")
+        if not okx_candles:
+            LOG("No candles from OKX!")
             return []
 
-        if len(merged) > max_candles:
-            merged = merged[-max_candles:]
+        oldest_okx = int(okx_candles[-1][0])
+        LOG(f"OKX oldest={oldest_okx} start_ms={start_ms} covers_all={oldest_okx <= start_ms}")
+
+        okx_candles.sort(key=lambda c: int(c[0]))
+        result = [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
+
+        if oldest_okx > start_ms:
+            LOG(f"OKX covers only from {oldest_okx}, trimming result")
+
+        if len(result) > max_candles:
+            result = result[-max_candles:]
             LOG(f"Clipped to {max_candles} candles")
 
-        del okx_candles, kc_candles, kc_results
+        del okx_candles
         gc.collect()
 
-        _save_cache(symbol, timeframe, merged, start_ms, end_ms)
-        result = [c for c in merged if start_ms <= int(c[0]) <= end_ms]
+        _save_cache(symbol, timeframe, result, start_ms, end_ms)
         LOG(f"Final candles: {len(result)}")
         return result
