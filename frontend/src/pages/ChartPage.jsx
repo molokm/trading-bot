@@ -82,7 +82,7 @@ export default function ChartPage() {
       borderDownColor: '#ff4444',
       wickUpColor: '#00ff88',
       wickDownColor: '#ff4444',
-      priceFormat: { type: 'price', precision: 0, minMove: 1 },
+      priceFormat: { type: 'price', precision: 0, minMove: 50 },
     })
 
     candlestickSeries.setData(chartData.candles.map(c => ({
