@@ -1,12 +1,22 @@
 const BASE = '/api';
 
+function getToken() {
+  return localStorage.getItem('auth_token') || '';
+}
+
 async function request(path, options = {}) {
   const url = `${BASE}${path}`;
-  const config = {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  };
+  const token = getToken();
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const config = { headers, ...options };
   const resp = await fetch(url, config);
+  if (resp.status === 401) {
+    localStorage.removeItem('auth_token');
+    localStorage.removeItem('auth_role');
+    window.location.href = '/login';
+    throw new Error('Unauthorized');
+  }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
     throw new Error(err.detail || 'Request failed');
@@ -15,6 +25,18 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  // ── Auth ──
+  login: (password) =>
+    request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
+
+  guest: () =>
+    request('/auth/guest', { method: 'POST' }),
+
+  logout: () =>
+    request('/auth/logout', { method: 'POST' }),
+
+  authStatus: () => request('/auth/status'),
+
   health: () => request('/health'),
 
   testCredentials: (creds) =>

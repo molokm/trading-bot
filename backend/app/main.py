@@ -30,6 +30,7 @@ from app.services.strategy_loader import (
 from app.database import db
 from app.services.ws_manager import WSManager
 from app.engine.bot_engine import BotEngine
+from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD
 
 load_dotenv()
 
@@ -164,6 +165,50 @@ async def _restore_bots():
     if bots:
         print(f"[startup] Restored {len(bots)} bots from DB ({restored} total, {sum(1 for b in bots if b.get('status')=='running')} auto-started)", flush=True)
 
+
+# ── Auth helpers ──
+
+def get_token(request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return ""
+
+# Middleware: protect all POST/PUT/DELETE routes (except auth endpoints)
+@app.middleware("http")
+async def auth_middleware(request, call_next):
+    if request.method in ("POST", "PUT", "DELETE") and request.url.path.startswith("/api/"):
+        skip = ("/api/auth/login", "/api/auth/guest")
+        if request.url.path not in skip and PASSWORD:
+            token = get_token(request)
+            if not is_admin(token):
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+@app.post("/api/auth/login")
+async def auth_login(request):
+    body = await request.json()
+    token = login(body.get("password", ""))
+    if not token:
+        return JSONResponse({"detail": "Неверный пароль"}, status_code=401)
+    return {"token": token, "role": "admin"}
+
+@app.post("/api/auth/guest")
+async def auth_guest():
+    token = guest()
+    return {"token": token, "role": "guest"}
+
+@app.get("/api/auth/status")
+async def auth_status(request):
+    token = get_token(request)
+    role = validate(token)
+    return {"authenticated": bool(role), "role": role, "has_password": bool(PASSWORD)}
+
+@app.post("/api/auth/logout")
+async def auth_logout(request):
+    token = get_token(request)
+    logout(token)
+    return {"status": "ok"}
 
 @app.get("/api/health")
 async def health():

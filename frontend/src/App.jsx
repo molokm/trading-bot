@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import React, { useState, useEffect, createContext, useContext } from 'react'
+import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Settings, BarChart3, ScrollText,
-  Wallet, Activity, TrendingUp, Play, Circle, Bot, CandlestickChart
+  Wallet, Activity, TrendingUp, Play, Circle, Bot, CandlestickChart, LogOut, User, Shield
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import SettingsPage from './pages/SettingsPage'
@@ -10,11 +10,23 @@ import StrategiesPage from './pages/StrategiesPage'
 import TradeLogPage from './pages/TradeLogPage'
 import LiveTrading from './pages/LiveTrading'
 import ChartPage from './pages/ChartPage'
+import LoginPage from './pages/LoginPage'
 import { api } from './services/api'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
 
+const AuthContext = createContext()
+export const useAuth = () => useContext(AuthContext)
+
+function AppRouter() {
+  const { auth, setAuth } = useAuth()
+  if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
+  return <AppContent />
+}
+
 function AppContent() {
   const { t } = useTranslation()
+  const { auth, setAuth } = useAuth()
+  const navigate = useNavigate()
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
@@ -35,6 +47,16 @@ function AppContent() {
     const interval = setInterval(check, 15000)
     return () => clearInterval(interval)
   }, [])
+
+  const handleLogout = () => {
+    api.logout().catch(() => {})
+    localStorage.removeItem('auth_token')
+    localStorage.removeItem('auth_role')
+    setAuth(null)
+  }
+
+  const isGuest = auth?.role === 'guest'
+  const isAdmin = auth?.role === 'admin'
 
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.overview') },
@@ -86,24 +108,37 @@ function AppContent() {
           ))}
         </nav>
 
-        <div className="p-4 border-t border-white/5">
+        <div className="p-4 border-t border-white/5 space-y-2">
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5">
             <Wallet size={14} className="text-gray-400" />
             <span className={`text-xs font-medium ${demoMode ? 'text-neon-yellow' : 'text-neon-green'}`}>
               {demoMode ? t('sidebar.demo') : t('sidebar.live')}
             </span>
           </div>
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5">
+            {isGuest ? <User size={14} className="text-neon-blue" /> : <Shield size={14} className="text-neon-green" />}
+            <span className={`text-xs font-medium ${isGuest ? 'text-neon-blue' : 'text-neon-green'}`}>
+              {isGuest ? 'Гость' : 'Админ'}
+            </span>
+          </div>
+          <button
+            className="flex items-center gap-2 px-3 py-2 rounded-lg w-full text-xs text-gray-400 hover:text-white hover:bg-white/5 transition-all"
+            onClick={handleLogout}
+          >
+            <LogOut size={14} />
+            Выйти
+          </button>
         </div>
       </aside>
 
       {/* Main */}
       <main className="flex-1 p-6 overflow-auto">
         <Routes>
-          <Route path="/" element={<Dashboard health={health} connected={connected} />} />
+          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
-          <Route path="/strategies" element={<StrategiesPage />} />
+          <Route path="/strategies" element={<StrategiesPage isGuest={isGuest} />} />
           <Route path="/trades" element={<TradeLogPage />} />
-          <Route path="/live" element={<LiveTrading />} />
+          <Route path="/live" element={<LiveTrading isGuest={isGuest} />} />
           <Route path="/chart" element={<ChartPage />} />
         </Routes>
       </main>
@@ -112,9 +147,20 @@ function AppContent() {
 }
 
 export default function App() {
+  const [auth, setAuth] = useState(() => {
+    const token = localStorage.getItem('auth_token')
+    const role = localStorage.getItem('auth_role')
+    return token ? { token, role } : null
+  })
+
   return (
     <TranslationProvider>
-      <AppContent />
+      <AuthContext.Provider value={{ auth, setAuth }}>
+        <Routes>
+          <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
+          <Route path="/*" element={<AppRouter />} />
+        </Routes>
+      </AuthContext.Provider>
     </TranslationProvider>
   )
 }

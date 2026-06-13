@@ -21,7 +21,7 @@ function StatCard({ label, value, change, icon: Icon, positive }) {
   )
 }
 
-export default function Dashboard({ health, connected }) {
+export default function Dashboard({ health, connected, isGuest }) {
   const { t } = useTranslation()
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
@@ -346,6 +346,9 @@ export default function Dashboard({ health, connected }) {
                           ${pnl.toLocaleString()}
                         </td>
                         <td className="py-2 px-1 text-right">
+                          {isGuest ? (
+                            <span className="text-xs text-gray-500">—</span>
+                          ) : (
                           <button
                             onClick={async () => {
                               setClosing(posId)
@@ -365,6 +368,7 @@ export default function Dashboard({ health, connected }) {
                             {closing === posId ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
                             {closing === posId ? '...' : 'Закрыть'}
                           </button>
+                          )}
                         </td>
                       </tr>
                     )
