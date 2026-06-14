@@ -167,29 +167,33 @@ async def _restore_bots():
     bots = await db.get_bots()
     restored = 0
     for b in bots:
-        bid = b["id"]
-        if bid in live_bots:
-            continue
-        params = json.loads(b["params"]) if isinstance(b["params"], str) else b.get("params") or {}
-        bot = BotEngine(
-            bot_id=bid,
-            strategy_id=b["strategy_id"],
-            strategy_code=b["strategy_code"],
-            symbol=b["symbol"],
-            timeframe=b["timeframe"],
-            capital=float(b["capital"]),
-            params=params,
-            client_manager=client_manager,
-            trade_log=trade_log,
-            get_active_bot_count=_active_bot_count,
-            name=b.get("name"),
-        )
-        bot.status = "stopped"
-        live_bots[bid] = bot
-        restored += 1
-        # Auto-start bots that were running before restart
-        if b.get("status") == "running":
-            await bot.start()
+        try:
+            bid = b["id"]
+            if bid in live_bots:
+                continue
+            params = json.loads(b["params"]) if isinstance(b["params"], str) else b.get("params") or {}
+            bot = BotEngine(
+                bot_id=bid,
+                strategy_id=b["strategy_id"],
+                strategy_code=b["strategy_code"],
+                symbol=b["symbol"],
+                timeframe=b["timeframe"],
+                capital=float(b["capital"]),
+                params=params,
+                client_manager=client_manager,
+                trade_log=trade_log,
+                get_active_bot_count=_active_bot_count,
+                name=b.get("name"),
+            )
+            bot.status = "stopped"
+            live_bots[bid] = bot
+            restored += 1
+            # Auto-start bots that were running before restart
+            if b.get("status") == "running":
+                asyncio.create_task(bot.start())
+                print(f"[startup] Auto-started bot {bid}", flush=True)
+        except Exception as e:
+            print(f"[startup] Error restoring bot {b.get('id', '?')}: {e}", flush=True)
     if bots:
         print(f"[startup] Restored {len(bots)} bots from DB ({restored} total, {sum(1 for b in bots if b.get('status')=='running')} auto-started)", flush=True)
 
@@ -457,9 +461,9 @@ async def _run_backtest_job(job: 'BacktestJob', req: BacktestRequest, strategy_c
                 start_date=req.start_date,
                 end_date=req.end_date,
                 force_refresh=True,
-                max_candles=50000,
+                max_candles=200000,
             ),
-            timeout=120
+            timeout=300
         )
         if not all_candles:
             raise ValueError("Нет данных за указанный период")
