@@ -332,9 +332,9 @@ class BotEngine:
                             )
                             print(f"[BOT {self.id}] RISK BLOCKED: {risk.reason}", flush=True)
                         else:
-                            # XGBoost gate: отсеиваем заведомо убыточные сигналы
+                            # XGBoost gate: отсеиваем заведомо убыточные сигналы (только для momentum_pro)
                             xgb_allowed = True
-                            if self._xgb_model is not None:
+                            if self._xgb_model is not None and self.strategy_id == "trend_momentum_pro":
                                 try:
                                     feat = _compute_xgb_features(df)
                                     self._last_xgb_features = feat
