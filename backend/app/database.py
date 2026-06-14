@@ -19,9 +19,15 @@ class Database:
     async def init(self):
         if self._pg_mode:
             import asyncpg
-            self._pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+            print("[db] Connecting to PostgreSQL ...", flush=True)
+            self._pool = await asyncio.wait_for(
+                asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3),
+                timeout=15
+            )
+            print("[db] Connected, running migrations ...", flush=True)
             async with self._pool.acquire() as conn:
                 await self._migrate_pg(conn)
+            print("[db] PG init done", flush=True)
         else:
             import aiosqlite
             os.makedirs(os.path.dirname(self.db_path), exist_ok=True)

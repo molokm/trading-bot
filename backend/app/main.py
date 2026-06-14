@@ -86,12 +86,10 @@ async def _cleanup_old_jobs():
         if old:
             print(f"[main] Cleaned {len(old)} old backtest jobs", flush=True)
 
-@app.on_event("startup")
-async def startup():
-    await db.init()
-    if _env_key and _env_secret and _env_pass:
-        await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        global ws_manager
+async def _startup_ws():
+    """Connect WS in background so startup isn't blocked."""
+    global ws_manager
+    try:
         ws_manager = WSManager(_env_key, _env_secret, _env_pass, _env_demo)
         ws_manager.on("account", _ws_on_account)
         ws_manager.on("positions", _ws_on_positions)
@@ -100,8 +98,31 @@ async def startup():
         await ws_manager.subscribe("account")
         await ws_manager.subscribe("positions")
         await ws_manager.subscribe("orders")
-    await _restore_bots()
-    asyncio.create_task(_cleanup_old_jobs())
+        print("[startup] WS connected", flush=True)
+    except Exception as e:
+        print(f"[startup] WS failed (non-fatal): {e}", flush=True)
+
+
+@app.on_event("startup")
+async def startup():
+    try:
+        print("[startup] 1/5 DB init ...", flush=True)
+        await db.init()
+        print("[startup] 2/5 OKX client init ...", flush=True)
+        if _env_key and _env_secret and _env_pass:
+            await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+
+        print("[startup] 3/5 WebSocket (background) ...", flush=True)
+        asyncio.create_task(_startup_ws())
+
+        print("[startup] 4/5 Restore bots ...", flush=True)
+        await _restore_bots()
+        print("[startup] 5/5 Cleanup jobs ...", flush=True)
+        asyncio.create_task(_cleanup_old_jobs())
+        print("[startup] Done — server ready", flush=True)
+    except Exception as e:
+        print(f"[startup] ERROR: {e}", flush=True)
+        raise
 
 @app.on_event("shutdown")
 async def shutdown():
