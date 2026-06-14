@@ -552,6 +552,24 @@ async def backtest_status(job_id: str):
     }
 
 
+@app.get("/api/backtest/xgb-dataset/{job_id}")
+async def xgb_dataset(job_id: str):
+    """Возвращает XGBoost dataset из результатов бэктеста"""
+    job = _backtest_jobs.get(job_id)
+    if not job or not job.result:
+        raise HTTPException(status_code=404, detail="Job or result not found")
+    ds = job.result.get("xgb_dataset", [])
+    return {
+        "strategy": job.result.get("strategy_name"),
+        "n_samples": len(ds),
+        "feature_names": [
+            "rsi", "atr_pct", "macd_hist", "bb_width", "vol_ratio",
+            "dist_ema200_pct", "dist_ema50_pct", "swing_range", "dist_to_swing",
+        ],
+        "data": ds,
+    }
+
+
 @app.post("/api/live/deploy")
 async def deploy_live(req: LiveDeployRequest):
     strategy_code = get_strategy_code(req.strategy_id)

@@ -13,6 +13,87 @@ from app.engine.signal_executor import execute_open, execute_close
 from app.services.data_cache import ensure_candles
 
 
+XGB_FEATURE_NAMES = [
+    "rsi", "atr_pct", "macd_hist", "bb_width", "vol_ratio",
+    "dist_ema200_pct", "dist_ema50_pct", "swing_range", "dist_to_swing",
+]
+
+
+def _load_xgb_gate(model_dir: str = None):
+    """Загружает XGBoost-фильтр, если есть обученная модель"""
+    import json, os
+    from pathlib import Path
+
+    if model_dir is None:
+        model_dir = str(Path(__file__).parent.parent / "models")
+    meta_path = os.path.join(model_dir, "xgb_meta.json")
+    model_path = os.path.join(model_dir, "xgb_gate.json")
+    if not os.path.exists(model_path):
+        return None, None, 0.5
+    try:
+        import xgboost as xgb
+        model = xgb.XGBClassifier()
+        model.load_model(model_path)
+        meta = json.load(open(meta_path)) if os.path.exists(meta_path) else {}
+        threshold = meta.get("threshold", 0.5)
+        print(f"[XGB] Gate loaded: threshold={threshold}", flush=True)
+        return model, XGB_FEATURE_NAMES, threshold
+    except Exception as e:
+        print(f"[XGB] Load failed: {e}", flush=True)
+        return None, None, 0.5
+
+
+def _compute_xgb_features(df: pd.DataFrame) -> np.ndarray:
+    """Векторизованный расчёт всех 9 фич для XGBoost на всю историю"""
+    close = df["close"].values.astype(np.float64)
+    high = df["high"].values.astype(np.float64)
+    low = df["low"].values.astype(np.float64)
+    vol = df["vol"].values.astype(np.float64)
+    n = len(df)
+
+    tr = np.maximum.reduce([
+        high - low,
+        np.abs(high - np.roll(close, 1)),
+        np.abs(low - np.roll(close, 1)),
+    ])
+    tr[0] = high[0] - low[0]
+    atr14 = pd.Series(tr).rolling(14).mean().values
+
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_g = pd.Series(gain).ewm(span=14).mean().values
+    avg_l = pd.Series(loss).ewm(span=14).mean().values + 1e-9
+    rsi = 100 - 100 / (1 + avg_g / avg_l)
+
+    ema200 = pd.Series(close).ewm(span=200).mean().values
+    ema50 = pd.Series(close).ewm(span=50).mean().values
+    ema12 = pd.Series(close).ewm(span=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26).mean().values
+    macd = ema12 - ema26
+    macd_sig = pd.Series(macd).ewm(span=9).mean().values
+
+    sma20 = pd.Series(close).rolling(20).mean().values
+    std20 = pd.Series(close).rolling(20).std().values
+    bb_width = (std20 * 4) / (sma20 + 1e-9)
+
+    vol_sma20 = pd.Series(vol).rolling(20).mean().values + 1e-9
+    vol_ratio = vol / vol_sma20
+
+    F = np.column_stack([
+        rsi,
+        atr14 / (close + 1e-9),
+        macd - macd_sig,
+        bb_width,
+        vol_ratio,
+        close / ema200 - 1,
+        close / ema50 - 1,
+        np.full(n, 0.0),   # swing_range placeholder
+        np.full(n, 0.0),   # dist_to_swing placeholder
+    ])
+    return F.astype(np.float32)
+
+
 class BotEngine:
     def __init__(self, bot_id: str, strategy_id: str, strategy_code: str,
                  symbol: str, timeframe: str, capital: float, params: dict,
@@ -50,6 +131,8 @@ class BotEngine:
         self.win_count = 0
         self.loss_count = 0
         self.mode = "demo"
+        self._xgb_model, _, self._xgb_threshold = _load_xgb_gate()
+        self._last_xgb_features = None
 
     def to_dict(self) -> dict:
         return {
@@ -249,17 +332,48 @@ class BotEngine:
                             )
                             print(f"[BOT {self.id}] RISK BLOCKED: {risk.reason}", flush=True)
                         else:
-                            result = await self._open_position(side, current_price,
-                                                               signal_id=signal_id)
-                            if result and result.get("ord_id"):
-                                await db.update_signal_status(
-                                    signal_id, "executed",
-                                    ord_id=result["ord_id"],
-                                )
-                            else:
-                                await db.update_signal_status(
-                                    signal_id, "failed",
-                                )
+                            # XGBoost gate: отсеиваем заведомо убыточные сигналы
+                            xgb_allowed = True
+                            if self._xgb_model is not None:
+                                try:
+                                    feat = _compute_xgb_features(df)
+                                    self._last_xgb_features = feat
+                                    row = feat[-1:]
+
+                                    swing_win = int(self.params.get("swing_window", 40))
+                                    high = df["high"].values.astype(np.float64)
+                                    low = df["low"].values.astype(np.float64)
+                                    n = len(df)
+                                    for j in range(n - swing_win, n):
+                                        if high[j] == max(high[j - swing_win: j + swing_win + 1]):
+                                            row[0, -2] = 1.0
+                                        if low[j] == min(low[j - swing_win: j + swing_win + 1]):
+                                            row[0, -1] = 1.0
+
+                                    prob_win = self._xgb_model.predict_proba(row)[0][1]
+                                    if prob_win < self._xgb_threshold:
+                                        xgb_allowed = False
+                                        self.error = f"xgb_rejected: prob_win={prob_win:.3f}"
+                                        await db.update_signal_status(
+                                            signal_id, "rejected",
+                                            reject_reason=self.error,
+                                        )
+                                        print(f"[BOT {self.id}] XGB REJECTED: {self.error}", flush=True)
+                                except Exception as e:
+                                    print(f"[BOT {self.id}] XGB error: {e}", flush=True)
+
+                            if xgb_allowed:
+                                result = await self._open_position(side, current_price,
+                                                                   signal_id=signal_id)
+                                if result and result.get("ord_id"):
+                                    await db.update_signal_status(
+                                        signal_id, "executed",
+                                        ord_id=result["ord_id"],
+                                    )
+                                else:
+                                    await db.update_signal_status(
+                                        signal_id, "failed",
+                                    )
                     else:
                         await db.update_signal_status(signal_id, "executed")
 

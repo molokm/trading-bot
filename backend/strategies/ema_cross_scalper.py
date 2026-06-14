@@ -1,10 +1,8 @@
 # @name: EMA Crossover Aggressive
-# @description: 5m агрессивный скальпер. EMA(9)/EMA(21) crossover.
-#   Long: EMA9 > EMA21 + close > EMA9
-#   Short: EMA9 < EMA21 + close < EMA9
-# @timeframe: 5m
+# @description: 1m агрессивный скальпер. EMA(9)/EMA(21) crossover.
+# @timeframe: 1m
 # @symbol: BTC-USDT
-# @params: {"fast_ema": 9, "slow_ema": 21, "risk_per_trade": 0.01, "atr_sl_mult": 2, "atr_tp_mult": 4, "cooldown_bars": 1}
+# @params: {"fast_ema": 9, "slow_ema": 21, "risk_per_trade": 0.01, "atr_sl_mult": 2, "atr_tp_mult": 3, "cooldown_bars": 1}
 
 import pandas as pd
 import numpy as np

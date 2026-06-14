@@ -18,6 +18,9 @@ backend/backtests_data/
 backend/data/
 backend/trading_bot.db
 
+# Backups
+trading-bot-backups/
+
 # OS
 .DS_Store
 *.log

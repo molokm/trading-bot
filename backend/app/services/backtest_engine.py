@@ -440,6 +440,57 @@ class BacktestEngine:
 
         return self._build_results(df, initial_capital, balance, equity, trades, params)
 
+    def _compute_entry_features(self, df: pd.DataFrame, i: int,
+                                 csh: float, csl: float) -> list:
+        """Вектор признаков для XGBoost на баре i"""
+        close = df["close"].values.astype(float)
+        high = df["high"].values.astype(float)
+        low = df["low"].values.astype(float)
+        vol = df["vol"].values.astype(float)
+
+        atr14 = pd.Series(
+            np.maximum(high - low,
+                       np.abs(high - np.roll(close, 1)),
+                       np.abs(low - np.roll(close, 1)))
+        ).rolling(14).mean().values
+
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_g = pd.Series(gain).ewm(span=14).mean().values
+        avg_l = pd.Series(loss).ewm(span=14).mean().values + 1e-9
+        rsi = 100 - 100 / (1 + avg_g / avg_l)
+
+        ema200 = pd.Series(close).ewm(span=200).mean().values
+        ema50 = pd.Series(close).ewm(span=50).mean().values
+
+        ema12 = pd.Series(close).ewm(span=12).mean().values
+        ema26 = pd.Series(close).ewm(span=26).mean().values
+        macd = ema12 - ema26
+        macd_sig = pd.Series(macd).ewm(span=9).mean().values
+
+        sma20 = pd.Series(close).rolling(20).mean().values
+        std20 = pd.Series(close).rolling(20).std().values
+        bb_width = (std20 * 4) / (sma20 + 1e-9)
+
+        vol_sma20 = pd.Series(vol).rolling(20).mean().values + 1e-9
+
+        c = close[i]
+        swing_range = (csh - csl) / (c + 1e-9)
+        dist_to_swing = min(abs(c - csh), abs(c - csl)) / (atr14[i] + 1e-9)
+
+        return [
+            float(rsi[i]),
+            float(atr14[i] / c),                    # ATR%
+            float(macd[i] - macd_sig[i]),            # MACD histogram
+            float(bb_width[i]),
+            float(vol[i] / vol_sma20[i]),            # vol ratio
+            float(c / ema200[i] - 1),                # distance from EMA200
+            float(c / ema50[i] - 1),                 # distance from EMA50
+            float(swing_range),
+            float(dist_to_swing),
+        ]
+
     def _run_trend_bounce(self, df: pd.DataFrame, initial_capital: float,
                           params: dict) -> dict:
         try:
@@ -467,12 +518,23 @@ class BacktestEngine:
         ts = df["ts"].values
         n = len(df)
 
+        # Pre-compute swing levels for feature extraction
+        sh_arr = np.full(n, np.nan)
+        sl_arr = np.full(n, np.nan)
+        swing_win = params.get("swing_window", 40)
+        for j in range(swing_win, n - swing_win):
+            if high[j] == max(high[j - swing_win: j + swing_win + 1]):
+                sh_arr[j] = high[j]
+            if low[j] == min(low[j - swing_win: j + swing_win + 1]):
+                sl_arr[j] = low[j]
+
         balance = float(initial_capital)
         equity = [float(balance)]
         trades = []
         position = 0.0
         entry_price = 0.0
         entry_bar = 0
+        entry_features = None
         last_trade_bar = -5
         daily_pnl = 0.0
         cons_losses = 0
@@ -480,9 +542,19 @@ class BacktestEngine:
         max_loss_pct = params.get("max_daily_loss", 0.10)
         max_cons_losses = params.get("max_consecutive_losses", 50)
         _fee_rate = params.get("fee", 0.001)
-        _size_pct = params.get("size_pct", 0.95)  # fraction of capital per trade
+        _size_pct = params.get("size_pct", 0.95)
+        _xgb_dataset = []  # for XGBoost training
+
+        # Track latest swing levels
+        csh, csl = 0.0, 0.0
 
         for i in range(1, n):
+            if not np.isnan(sh_arr[i]):
+                csh = sh_arr[i]
+            if not np.isnan(sl_arr[i]):
+                csl = sl_arr[i]
+
+            ts_date = pd.Timestamp(ts[i]).date()
             ts_date = pd.Timestamp(ts[i]).date()
             if current_date is None:
                 current_date = ts_date
@@ -501,6 +573,13 @@ class BacktestEngine:
 
             sig = int(raw[i])
 
+            def _record_outcome(pnl_val):
+                if _xgb_dataset and _xgb_dataset[-1]["outcome"] is None:
+                    _xgb_dataset[-1]["outcome"] = 1 if pnl_val > 0 else 0
+                    _xgb_dataset[-1]["pnl_pct"] = round(
+                        pnl_val / (abs(position) * entry_price + 1e-9), 6
+                    )
+
             # Exit: signal drops to 0 while in position
             if position != 0 and sig == 0:
                 exit_price = close[i]
@@ -508,6 +587,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -522,6 +602,7 @@ class BacktestEngine:
                 })
                 position = 0.0
                 entry_price = 0.0
+                entry_features = None
                 last_trade_bar = i
                 continue
 
@@ -532,6 +613,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -546,6 +628,7 @@ class BacktestEngine:
                 })
                 position = 0.0
                 entry_price = 0.0
+                entry_features = None
                 # Fall through to open short below
 
             if position < 0 and sig == 1:
@@ -554,6 +637,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -568,14 +652,16 @@ class BacktestEngine:
                 })
                 position = 0.0
                 entry_price = 0.0
+                entry_features = None
 
             # Cooldown
             if i - entry_bar < 3:
                 continue
 
             # Entry: use reduced size (size_pct) to leave room for fees
-            if position == 0 and sig != 0:
+            if position == 0 and sig != 0 and csh > 0 and csl > 0:
                 entry_price = close[i]
+                entry_features = self._compute_entry_features(df, i, csh, csl)
                 pos_size = balance * _size_pct / entry_price
                 position = pos_size if sig == 1 else -pos_size
                 entry_bar = i
@@ -586,6 +672,14 @@ class BacktestEngine:
                     "size": round(float(abs(position)), 6),
                     "pnl": 0,
                 })
+                _xgb_dataset.append({
+                    "strategy": params.get("name", "unknown"),
+                    "timestamp": str(ts[i]),
+                    "direction": int(sig),
+                    "entry_price": float(entry_price),
+                    "features": entry_features,
+                    "outcome": None,
+                })
 
         if position != 0:
             final_close = float(close[-1])
@@ -593,6 +687,11 @@ class BacktestEngine:
             exit_notional = abs(position) * final_close
             total_fee = (entry_notional + exit_notional) * _fee_rate
             pnl = float(position) * (final_close - float(entry_price)) - total_fee
+            if _xgb_dataset and _xgb_dataset[-1]["outcome"] is None:
+                _xgb_dataset[-1]["outcome"] = 1 if pnl > 0 else 0
+                _xgb_dataset[-1]["pnl_pct"] = round(
+                    pnl / (abs(position) * entry_price + 1e-9), 6
+                )
             balance += pnl
             trades.append({
                 "time": str(ts[-1]),
@@ -606,7 +705,9 @@ class BacktestEngine:
             equity[-1] = balance
             position = 0
 
-        return self._build_results(df, initial_capital, balance, equity, trades, params)
+        result = self._build_results(df, initial_capital, balance, equity, trades, params)
+        result["xgb_dataset"] = _xgb_dataset
+        return result
 
     def _run_generic(self, df: pd.DataFrame, initial_capital: float,
                      params: dict) -> dict:
