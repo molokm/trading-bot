@@ -170,7 +170,7 @@ export default function StrategiesPage() {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <FileCode size={14} className="text-neon-blue" />
-                      <span className="text-sm font-medium text-white">{s.name}</span>
+                      <span className="text-sm font-medium text-white flex items-center gap-2">{s.name}{s.id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}</span>
                     </div>
                     <button
                       className="text-gray-500 hover:text-neon-red transition-colors"

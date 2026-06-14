@@ -38,6 +38,27 @@ class BacktestEngine:
         self.strategy_code = strategy_code
         self.strategy_name = strategy_name
         self._namespace = {}
+        self._xgb_model = None
+        self._xgb_threshold = 0.5
+
+    def _load_xgb_model(self):
+        if self._xgb_model is not None:
+            return
+        model_path = Path(__file__).parent.parent.parent / "models" / "xgb_gate.json"
+        if not model_path.exists():
+            print("[Backtest] XGB model not found, gate disabled")
+            return
+        try:
+            import xgboost as xgb
+            self._xgb_model = xgb.XGBClassifier()
+            self._xgb_model.load_model(str(model_path))
+            meta_path = model_path.with_name("xgb_meta.json")
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text())
+                self._xgb_threshold = meta.get("threshold", 0.5)
+            print(f"[Backtest] XGB gate loaded (threshold={self._xgb_threshold})")
+        except Exception as e:
+            print(f"[Backtest] XGB load failed: {e}")
 
     def _detect_strategy(self) -> str:
         name_lo = self.strategy_name.lower()
@@ -660,8 +681,21 @@ class BacktestEngine:
 
             # Entry: use reduced size (size_pct) to leave room for fees
             if position == 0 and sig != 0 and csh > 0 and csl > 0:
-                entry_price = close[i]
                 entry_features = self._compute_entry_features(df, i, csh, csl)
+                # XGBoost gate: отсеиваем сигналы с prob_win < threshold
+                if params.get("xgb_gate"):
+                    self._load_xgb_model()
+                    if self._xgb_model is not None:
+                        try:
+                            feat_arr = np.array([entry_features], dtype=np.float32)
+                            prob = self._xgb_model.predict_proba(feat_arr)[0][1]
+                            if prob < self._xgb_threshold:
+                                entry_features = None
+                                continue  # skip this entry
+                        except Exception as e:
+                            print(f"[Backtest] XGB inference error: {e}")
+
+                entry_price = close[i]
                 pos_size = balance * _size_pct / entry_price
                 position = pos_size if sig == 1 else -pos_size
                 entry_bar = i

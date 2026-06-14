@@ -202,7 +202,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             {liveBots.filter(b => b.status === 'running').map(bot => (
               <div key={bot.id} className="flex items-center justify-between bg-white/5 rounded-lg px-4 py-3">
                 <div>
-                  <div className="text-sm font-medium text-white">{bot.strategy_id} — {bot.symbol}</div>
+                  <div className="text-sm font-medium text-white flex items-center gap-2">{bot.strategy_id} — {bot.symbol}{bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}</div>
                   <div className="text-xs text-gray-400">{bot.timeframe} · циклов: {bot.cycle_count}</div>
                 </div>
                 <div className="flex items-center gap-3">

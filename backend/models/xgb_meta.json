@@ -10,9 +10,9 @@
     "swing_range",
     "dist_to_swing"
   ],
-  "n_samples": 552,
-  "win_rate": 0.5489130434782609,
-  "test_accuracy": 0.703,
-  "test_f1": 0.736,
+  "n_samples": 2998,
+  "win_rate": 0.40893929286190794,
+  "test_accuracy": 0.63,
+  "test_f1": 0.565,
   "threshold": 0.5
 }

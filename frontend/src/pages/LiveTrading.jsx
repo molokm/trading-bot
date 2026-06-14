@@ -235,8 +235,9 @@ export default function LiveTrading() {
                   <div className="space-y-1.5">
                     <div className="flex items-center gap-3">
                       <div className={`w-2.5 h-2.5 rounded-full ${STATUS_DOT[bot.status] || 'bg-gray-500'}`} />
-                      <span className="text-sm font-bold text-white">
+                      <span className="text-sm font-bold text-white flex items-center gap-2">
                         {strategies.find(s => s.id === bot.strategy_id)?.name || bot.strategy_id}
+                        {bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}
                       </span>
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${STATUS_COLORS[bot.status] || 'text-gray-400'}`}>
                         {bot.status}
