@@ -1,0 +1,18 @@
+{
+  "feature_names": [
+    "rsi",
+    "atr_pct",
+    "macd_hist",
+    "bb_width",
+    "vol_ratio",
+    "dist_ema200_pct",
+    "dist_ema50_pct",
+    "swing_range",
+    "dist_to_swing"
+  ],
+  "n_samples": 552,
+  "win_rate": 0.5489130434782609,
+  "test_accuracy": 0.703,
+  "test_f1": 0.736,
+  "threshold": 0.5
+}
