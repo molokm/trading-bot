@@ -764,6 +764,10 @@ class BacktestEngine:
         if len(raw) != len(df):
             return {"error": "Signal length mismatch"}
 
+        # Detect if strategy provides its own stops (2/-2 signals)
+        raw_int = np.array(raw, dtype=int)
+        has_own_stops = bool(np.any((raw_int == 2) | (raw_int == -2)))
+
         atr_period = params.get("atr_period", 14)
         atr_sl_mult = params.get("atr_sl_mult", 1.5)
         atr_tp_mult = params.get("atr_tp_mult", 2.0)
@@ -771,11 +775,10 @@ class BacktestEngine:
         cooldown = params.get("cooldown_bars", 3)
         max_loss_pct = params.get("max_daily_loss", 0.03)
         max_cons_losses = params.get("max_consecutive_losses", 5)
-        use_atr_stops = params.get("use_atr_stops", True)
-        use_trailing = params.get("use_trailing", False)
-        trail_dist = params.get("trail_dist", 1.0)
-        trail_activate_atr = params.get("trail_activate_atr", 0.0)
+        use_atr_stops = params.get("use_atr_stops", True) and not has_own_stops
+        use_trailing = params.get("use_trailing", False) and not has_own_stops
         _fee_rate = params.get("fee", 0.001)
+        _size_pct = params.get("size_pct", 0.95)
 
         close = df["close"].values
         high = df["high"].values
@@ -816,23 +819,34 @@ class BacktestEngine:
 
             if abs(daily_pnl) >= initial_capital * max_loss_pct:
                 continue
+            if cons_losses >= max_cons_losses:
+                continue
 
+            sig = int(raw[i])
+            # Normalize: 2/-2 are exit signals (strategy's own stops)
+            if sig == 2:
+                sig = 0
+            elif sig == -2:
+                sig = 0
+
+            # ── Engine-managed trailing stop (only when strategy doesn't have own stops) ──
             if position != 0 and use_trailing and not np.isnan(atr[i]) and atr[i] > 0:
                 if position > 0:
                     best_price = max(best_price, high[i])
                     profit = best_price - entry_price
-                    if profit >= trail_activate_atr * atr[i]:
+                    if profit >= trail_activate_atr * atr[i] and use_atr_stops:
                         new_sl = best_price - trail_dist * atr[i]
                         if new_sl > sl_price:
                             sl_price = new_sl
                 else:
                     best_price = min(best_price, low[i])
                     profit = entry_price - best_price
-                    if profit >= trail_activate_atr * atr[i]:
+                    if profit >= trail_activate_atr * atr[i] and use_atr_stops:
                         new_sl = best_price + trail_dist * atr[i]
                         if new_sl < sl_price:
                             sl_price = new_sl
 
+            # ── Engine-managed SL/TP hits (only when strategy doesn't have own stops) ──
             if position != 0 and use_atr_stops and not np.isnan(atr[i]) and atr[i] > 0:
                 hit_sl = (position > 0 and low[i] <= sl_price) or (position < 0 and high[i] >= sl_price)
                 hit_tp = (position > 0 and high[i] >= tp_price) or (position < 0 and low[i] <= tp_price)
@@ -862,78 +876,114 @@ class BacktestEngine:
                     last_trade_bar = i
                     continue
 
+            # ── Exit on signal ──
+            if position != 0 and sig == 0:
+                exit_price = close[i]
+                entry_notional = abs(position) * entry_price
+                exit_notional = abs(position) * exit_price
+                total_fee = (entry_notional + exit_notional) * _fee_rate
+                pnl = position * (exit_price - entry_price) - total_fee
+                balance += pnl
+                daily_pnl += pnl
+                cons_losses = cons_losses + 1 if pnl < 0 else 0
+                trades.append({
+                    "time": str(ts[i]),
+                    "side": "close_long" if position > 0 else "close_short",
+                    "price": round(float(exit_price), 2),
+                    "size": round(float(abs(position)), 6),
+                    "pnl": round(float(pnl), 2),
+                    "fee": round(float(total_fee), 6),
+                    "exit_reason": "signal"
+                })
+                position = 0.0
+                entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                best_price = 0.0
+                last_trade_bar = i
+                continue
+
+            # ── Flip: exit current, enter opposite (only when position != 0) ──
+            if position > 0 and sig == -1:
+                exit_price = close[i]
+                entry_notional = abs(position) * entry_price
+                exit_notional = abs(position) * exit_price
+                total_fee = (entry_notional + exit_notional) * _fee_rate
+                pnl = position * (exit_price - entry_price) - total_fee
+                balance += pnl
+                daily_pnl += pnl
+                cons_losses = cons_losses + 1 if pnl < 0 else 0
+                trades.append({
+                    "time": str(ts[i]), "side": "close_long",
+                    "price": round(float(exit_price), 2),
+                    "size": round(float(abs(position)), 6),
+                    "pnl": round(float(pnl), 2),
+                    "fee": round(float(total_fee), 6),
+                    "exit_reason": "signal_flip"
+                })
+                position = 0.0
+                entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                best_price = 0.0
+                last_trade_bar = i
+                # Fall through to enter short
+
+            if position < 0 and sig == 1:
+                exit_price = close[i]
+                entry_notional = abs(position) * entry_price
+                exit_notional = abs(position) * exit_price
+                total_fee = (entry_notional + exit_notional) * _fee_rate
+                pnl = position * (exit_price - entry_price) - total_fee
+                balance += pnl
+                daily_pnl += pnl
+                cons_losses = cons_losses + 1 if pnl < 0 else 0
+                trades.append({
+                    "time": str(ts[i]), "side": "close_short",
+                    "price": round(float(exit_price), 2),
+                    "size": round(float(abs(position)), 6),
+                    "pnl": round(float(pnl), 2),
+                    "fee": round(float(total_fee), 6),
+                    "exit_reason": "signal_flip"
+                })
+                position = 0.0
+                entry_price = 0.0
+                sl_price = 0.0
+                tp_price = 0.0
+                best_price = 0.0
+                last_trade_bar = i
+
+            # ── Cooldown ──
             if i - last_trade_bar < cooldown:
                 continue
-            if cons_losses >= max_cons_losses:
-                continue
 
-            sig = int(raw[i])
-            if sig == 0:
-                continue
-
-            if use_atr_stops and not np.isnan(atr[i]) and atr[i] > 0:
-                if position == 0:
-                    entry_price = close[i]
+            # ── Entry on signal (position == 0) ──
+            if position == 0 and sig != 0:
+                entry_price = close[i]
+                if use_atr_stops and not has_own_stops and not np.isnan(atr[i]) and atr[i] > 0:
+                    # Risk-based sizing (engine manages stops)
                     pos_size = (balance * risk_per_trade) / (atr[i] * atr_sl_mult)
                     pos_size = max(pos_size, 0)
                     if sig == 1:
                         position = pos_size
                         sl_price = entry_price - atr[i] * atr_sl_mult
                         tp_price = entry_price + atr[i] * atr_tp_mult
-                        best_price = entry_price
-                        side_label = "buy"
                     else:
                         position = -pos_size
                         sl_price = entry_price + atr[i] * atr_sl_mult
                         tp_price = entry_price - atr[i] * atr_tp_mult
-                        best_price = entry_price
-                        side_label = "sell"
-                    trades.append({
-                        "time": str(ts[i]), "side": side_label,
-                        "price": round(float(entry_price), 2),
-                        "size": round(float(abs(position)), 6), "pnl": 0
-                    })
-            else:
-                if sig == 1 and position <= 0:
-                    if position < 0:
-                        entry_notional = abs(position) * entry_price
-                        exit_notional = abs(position) * close[i]
-                        total_fee = (entry_notional + exit_notional) * _fee_rate
-                        pnl = position * (entry_price - close[i]) - total_fee
-                        balance += pnl
-                        cons_losses = cons_losses + 1 if pnl < 0 else 0
-                        trades.append({
-                            "time": str(ts[i]), "side": "close_short",
-                            "price": close[i], "size": abs(position), "pnl": pnl,
-                            "fee": round(float(total_fee), 6)
-                        })
-                    pos_sz = balance * 0.95 / close[i]
-                    position = pos_sz
-                    entry_price = close[i]
-                    trades.append({
-                        "time": str(ts[i]), "side": "buy",
-                        "price": close[i], "size": pos_sz, "pnl": 0
-                    })
-                elif sig == -1 and position >= 0:
-                    if position > 0:
-                        entry_notional = abs(position) * entry_price
-                        exit_notional = abs(position) * close[i]
-                        total_fee = (entry_notional + exit_notional) * _fee_rate
-                        pnl = position * (close[i] - entry_price) - total_fee
-                        balance += pnl
-                        cons_losses = cons_losses + 1 if pnl < 0 else 0
-                        trades.append({
-                            "time": str(ts[i]), "side": "close_long",
-                            "price": close[i], "size": position, "pnl": pnl,
-                            "fee": round(float(total_fee), 6)
-                        })
-                    pos_sz = balance * 0.95 / close[i]
-                    position = -pos_sz
-                    entry_price = close[i]
-                    trades.append({
-                        "time": str(ts[i]), "side": "sell",
-                        "price": close[i], "size": pos_sz, "pnl": 0
-                    })
+                    best_price = entry_price
+                else:
+                    # Simple sizing (strategy manages its own stops or no ATR params)
+                    pos_size = balance * _size_pct / entry_price
+                    position = pos_size if sig == 1 else -pos_size
+                trades.append({
+                    "time": str(ts[i]),
+                    "side": "buy" if sig == 1 else "sell",
+                    "price": round(float(entry_price), 2),
+                    "size": round(float(abs(position)), 6),
+                    "pnl": 0,
+                })
 
         if position != 0:
             final_close = float(close[-1])
