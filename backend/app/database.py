@@ -418,7 +418,9 @@ class Database:
         params.append(limit)
 
         return await self._fetchall(
-            "SELECT signal_id, bot_id, inst_id, "
+            "SELECT signal_id, "
+            "MAX(bot_id) as bot_id, "
+            "MAX(inst_id) as inst_id, "
             "MAX(CASE WHEN state='filled' AND pnl=0 THEN timestamp END) as entry_time, "
             "MAX(CASE WHEN state='filled' AND pnl=0 THEN side END) as entry_side, "
             "MAX(CASE WHEN state='filled' AND pnl=0 THEN px END) as entry_px, "
