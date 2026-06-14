@@ -775,6 +775,7 @@ class BacktestEngine:
         use_trailing = params.get("use_trailing", False)
         trail_dist = params.get("trail_dist", 1.0)
         trail_activate_atr = params.get("trail_activate_atr", 0.0)
+        _fee_rate = params.get("fee", 0.001)
 
         close = df["close"].values
         high = df["high"].values
@@ -837,7 +838,10 @@ class BacktestEngine:
                 hit_tp = (position > 0 and high[i] >= tp_price) or (position < 0 and low[i] <= tp_price)
                 if hit_sl or hit_tp:
                     exit_price = tp_price if hit_tp else sl_price
-                    pnl = position * (exit_price - entry_price)
+                    entry_notional = abs(position) * entry_price
+                    exit_notional = abs(position) * exit_price
+                    total_fee = (entry_notional + exit_notional) * _fee_rate
+                    pnl = position * (exit_price - entry_price) - total_fee
                     balance += pnl
                     daily_pnl += pnl
                     cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -846,6 +850,7 @@ class BacktestEngine:
                         "price": round(float(exit_price), 2),
                         "size": round(float(abs(position)), 6),
                         "pnl": round(float(pnl), 2),
+                        "fee": round(float(total_fee), 6),
                         "sl_hit": bool(hit_sl), "tp_hit": bool(hit_tp),
                         "exit_reason": "trailing" if use_trailing and hit_sl else ("tp" if hit_tp else "sl")
                     })
@@ -891,12 +896,16 @@ class BacktestEngine:
             else:
                 if sig == 1 and position <= 0:
                     if position < 0:
-                        pnl = position * (entry_price - close[i])
+                        entry_notional = abs(position) * entry_price
+                        exit_notional = abs(position) * close[i]
+                        total_fee = (entry_notional + exit_notional) * _fee_rate
+                        pnl = position * (entry_price - close[i]) - total_fee
                         balance += pnl
                         cons_losses = cons_losses + 1 if pnl < 0 else 0
                         trades.append({
                             "time": str(ts[i]), "side": "close_short",
-                            "price": close[i], "size": abs(position), "pnl": pnl
+                            "price": close[i], "size": abs(position), "pnl": pnl,
+                            "fee": round(float(total_fee), 6)
                         })
                     pos_sz = balance * 0.95 / close[i]
                     position = pos_sz
@@ -907,12 +916,16 @@ class BacktestEngine:
                     })
                 elif sig == -1 and position >= 0:
                     if position > 0:
-                        pnl = position * (close[i] - entry_price)
+                        entry_notional = abs(position) * entry_price
+                        exit_notional = abs(position) * close[i]
+                        total_fee = (entry_notional + exit_notional) * _fee_rate
+                        pnl = position * (close[i] - entry_price) - total_fee
                         balance += pnl
                         cons_losses = cons_losses + 1 if pnl < 0 else 0
                         trades.append({
                             "time": str(ts[i]), "side": "close_long",
-                            "price": close[i], "size": position, "pnl": pnl
+                            "price": close[i], "size": position, "pnl": pnl,
+                            "fee": round(float(total_fee), 6)
                         })
                     pos_sz = balance * 0.95 / close[i]
                     position = -pos_sz
@@ -924,13 +937,17 @@ class BacktestEngine:
 
         if position != 0:
             final_close = float(close[-1])
-            pnl = float(position) * (final_close - float(entry_price))
+            entry_notional = abs(position) * entry_price
+            exit_notional = abs(position) * final_close
+            total_fee = (entry_notional + exit_notional) * _fee_rate
+            pnl = float(position) * (final_close - float(entry_price)) - total_fee
             balance += pnl
             trades.append({
                 "time": str(ts[-1]), "side": "close_final",
                 "price": round(final_close, 2),
                 "size": round(float(abs(position)), 6),
-                "pnl": round(pnl, 2)
+                "pnl": round(pnl, 2),
+                "fee": round(float(total_fee), 6)
             })
             equity[-1] = balance
             position = 0

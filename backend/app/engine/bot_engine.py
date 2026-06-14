@@ -184,6 +184,9 @@ class BotEngine:
         arr = np.array(sig_arr, dtype=float)
         if len(arr) == 0:
             return 0
+        last = int(arr[-1])
+        if last in (2, -2):
+            return 0
         if self._is_diff:
             pos = 0
             for s in arr:
@@ -286,6 +289,11 @@ class BotEngine:
                     continue
 
                 sig_arr = signals.values if hasattr(signals, "values") else signals
+                # Auto-correct _is_diff: позиционные сигналы содержат только {-1,0,1}
+                if self._is_diff and len(sig_arr) > 0:
+                    uv = set(int(v) for v in np.unique(sig_arr))
+                    if uv.issubset({-1, 0, 1}):
+                        self._is_diff = False
                 current_position = self._get_intended_position(sig_arr)
 
                 current_price = float(df["close"].iloc[-1])
