@@ -1,5 +1,5 @@
 # @name: Trend Bounce Pro
-# @description: Trend Bounce (структурный) + EMA200 + RSI. swing=40, ema=200, size_pct=0.95, rsi_exit=80. Без плеча: +170% годовых, DD 5.4%. С плечом 10x: +1708%, DD 53.7% маржи. Агрессивная — макс.прибыль, повышенный риск.
+# @description: EMA200 + MACD + RSI momentum. Net +86% annual | WR 43.9% | Sharpe 1.30 | DD 8.7% | PF 1.55 | 884 trades/year | Fee drag 56%
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
 # @params: {"ema_trend": 200, "swing_window": 40, "pullback_bars": 5, "size_pct": 0.95, "fee": 0.0005, "rsi_exit": 80}

@@ -1,5 +1,5 @@
 # @name: Momentum ATR Trail
-# @description: Трендовая стратегия: вход на пробое свинг-уровня + EMA200 фильтр, выход по ATR-трейлингу (2x). Лучший вариант: EMA200+swing30+ATR2x: 642 сделки/год, +260%, WR 57%, PF 4.35, DD 2.2%.
+# @description: EMA200 + swing30 + ATR 2x trail stop. Net +72% annual | WR 59.7% | Sharpe 1.57 | DD 2.2% | PF 4.59 | 295 trades/year | Fee drag 33%
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
 # @params: {"ema_trend": 200, "swing_window": 30, "atr_period": 14, "atr_mult": 2.0, "size_pct": 0.95, "fee": 0.0005}
