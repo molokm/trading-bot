@@ -262,7 +262,7 @@ class BotEngine:
                 from datetime import timedelta as _td
                 bar_sec = {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,
                            "1H":3600,"4H":14400,"1D":86400}.get(self.timeframe, 300)
-                lookback = max(600, bar_sec * 600)
+                lookback = max(3600, bar_sec * 2000)
                 start_dt = (datetime.now() - _td(seconds=lookback)).strftime("%Y-%m-%dT%H:%M:%S")
                 candles = await ensure_candles(
                     self.symbol, self.timeframe, start_date=start_dt, live_limit=0
