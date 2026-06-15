@@ -38,7 +38,7 @@ function DashboardPlannedTrade({ planned }) {
   const trendLabels = { UP: '▲ Восходящий', DOWN: '▼ Нисходящий', NEUTRAL: '— Боковой' }
 
   return (
-    <div className="border-t border-white/5 px-4 py-3 space-y-2">
+    <div className="border-t border-white/5 px-4 py-3 space-y-2.5">
       <div className="flex items-center gap-2 text-xs">
         <Target size={12} className={action === 'LONG' ? 'text-neon-green' : action === 'SHORT' ? 'text-neon-red' : 'text-gray-400'} />
         <span className="font-semibold text-white">План:</span>
@@ -67,15 +67,21 @@ function DashboardPlannedTrade({ planned }) {
       </div>
 
       {isEntry && planned.entry_zone && (
-        <div className="bg-white/5 rounded-lg px-3 py-2 space-y-1.5">
-          <div className="text-xs">
-            <span className="text-gray-400">Зона входа: </span>
-            <span className="font-mono font-bold text-white">${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}</span>
+        <div className="bg-white/5 rounded-lg px-3 py-2.5 space-y-2">
+          <div className={`rounded-lg px-4 py-3 text-center ${
+            action === 'LONG' ? 'bg-neon-green/10 border border-neon-green/30' : 'bg-neon-red/10 border border-neon-red/30'
+          }`}>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">Цена входа в сделку</div>
+            <div className={`text-xl font-bold font-mono tracking-wide ${
+              action === 'LONG' ? 'text-neon-green' : 'text-neon-red'
+            }`}>
+              ${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}
+            </div>
           </div>
           {planned.stop_loss && (
-            <div className="text-xs">
-              <span className="text-gray-400">Стоп-лосс: </span>
-              <span className="font-mono text-neon-red">${planned.stop_loss?.toLocaleString()}</span>
+            <div className="flex items-center justify-between text-xs px-1">
+              <span className="text-gray-400">Стоп-лосс:</span>
+              <span className="font-mono font-bold text-neon-red">${planned.stop_loss?.toLocaleString()}</span>
             </div>
           )}
           {planned.conditions && (

@@ -67,30 +67,48 @@ function PlannedTradePanel({ planned }) {
       )}
 
       {isEntry && planned.entry_zone && (
-        <div className="space-y-1.5">
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] uppercase tracking-wider opacity-60">Зона входа:</span>
-            <span className="font-mono font-bold">${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}</span>
+        <div className="space-y-2">
+          <div className={`rounded-lg px-4 py-3 text-center ${
+            action === 'LONG' ? 'bg-neon-green/10 border border-neon-green/30' : 'bg-neon-red/10 border border-neon-red/30'
+          }`}>
+            <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">Цена входа в сделку</div>
+            <div className={`text-xl font-bold font-mono tracking-wide ${
+              action === 'LONG' ? 'text-neon-green' : 'text-neon-red'
+            }`}>
+              ${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}
+            </div>
           </div>
           {planned.stop_loss && (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] uppercase tracking-wider opacity-60">Стоп:</span>
-              <span className="font-mono">${planned.stop_loss?.toLocaleString()}</span>
+            <div className="flex items-center justify-between text-xs px-1">
+              <span className="text-gray-400">Стоп-лосс:</span>
+              <span className="font-mono font-bold text-neon-red">${planned.stop_loss?.toLocaleString()}</span>
             </div>
           )}
           {planned.conditions && (
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-              {Object.entries(planned.conditions).map(([key, cond]) => (
-                <div key={key} className="flex items-center gap-1.5">
-                  <span className={cond.met ? 'text-neon-green' : 'text-neon-red'}>{cond.met ? '✓' : '✗'}</span>
-                  <span className="text-[10px]">{key}: {cond.detail}</span>
-                </div>
-              ))}
+              {Object.entries(planned.conditions).map(([key, cond]) => {
+                const labels = {
+                  uptrend: 'Тренд вверх',
+                  downtrend: 'Тренд вниз',
+                  pulled_back: 'Откат от макс.',
+                  near_support: 'У поддержки',
+                  bounce: 'Отскок',
+                  climbed: 'Рост к сопрот.',
+                  near_resistance: 'У сопротивл.',
+                  reject: 'Отклонение',
+                }
+                return (
+                  <div key={key} className="flex items-center gap-1.5 text-[11px]">
+                    <span className={cond.met ? 'text-neon-green' : 'text-neon-red'}>{cond.met ? '✓' : '✗'}</span>
+                    <span className="text-gray-300">{labels[key] || key}</span>
+                  </div>
+                )
+              })}
             </div>
           )}
           {planned.distance_to_long != null && (
-            <div className="text-[10px] opacity-60">
-              До зоны входа: ${planned.distance_to_long?.toLocaleString()} ({((planned.distance_to_long / planned.current_price) * 100).toFixed(2)}%)
+            <div className="text-[11px] text-gray-500">
+              Расстояние до входа: ${planned.distance_to_long?.toLocaleString()} ({((planned.distance_to_long / planned.current_price) * 100).toFixed(2)}%)
             </div>
           )}
         </div>
