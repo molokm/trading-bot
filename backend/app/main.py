@@ -620,6 +620,7 @@ async def deploy_live(req: LiveDeployRequest):
     strategy_params = strategy_meta.get("params", {}) if strategy_meta else {}
     merged_params = {**strategy_params, **req.params}
 
+    bot_id = str(uuid.uuid4())[:8]
     signal_type = "position"
     bot = BotEngine(
         bot_id=bot_id,
