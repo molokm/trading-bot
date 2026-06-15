@@ -3,6 +3,25 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 
+_CT_VAL_CACHE: dict = {}
+
+
+async def _get_ct_val(client, inst_id: str) -> float:
+    if inst_id in _CT_VAL_CACHE:
+        return _CT_VAL_CACHE[inst_id]
+    try:
+        result = await client.get_instruments("SWAP")
+        for inst in result.get("data", []):
+            if inst.get("instId") == inst_id:
+                ct_val = float(inst.get("ctVal", 0.01))
+                _CT_VAL_CACHE[inst_id] = ct_val
+                return ct_val
+    except Exception:
+        pass
+    default = 0.01 if "BTC" in inst_id else 0.1
+    _CT_VAL_CACHE[inst_id] = default
+    return default
+
 
 async def place_order_with_retry(client, inst_id: str, side: str, sz: str,
                                  ord_type: str = "market", td_mode: str = "cash",
@@ -47,7 +66,7 @@ async def execute_open(bot, side: str, price: float, db, signal_id: int = None) 
         sz_pct = bot.params.get("size_pct", 0.80)
         leverage = float(bot.params.get("leverage", 1))
         notional = bot.capital * leverage * sz_pct
-        ct_val = 0.01  # BTC-USDT-SWAP: 1 contract = 0.01 BTC
+        ct_val = await _get_ct_val(client, bot.symbol)
         sz_dec = notional / (ct_val * price)
         sz = f"{sz_dec:.2f}"
         if float(sz) < 0.01:
@@ -56,7 +75,7 @@ async def execute_open(bot, side: str, price: float, db, signal_id: int = None) 
             client, inst_id=bot.symbol, side=side, sz=sz,
             td_mode=td_mode, pos_side=pos_side,
         )
-        pos_sz = float(sz) * ct_val  # convert contracts to BTC for internal tracking
+        pos_sz = float(sz) * ct_val
         open_notional = notional
     else:
         if side != "buy":
@@ -116,7 +135,7 @@ async def execute_close(bot, reason: str, db, signal_id: int = None) -> dict:
     close_side = "sell" if bot.position > 0 else "buy"
 
     if _is_swap(bot.symbol):
-        ct_val = 0.01  # BTC-USDT-SWAP: 1 contract = 0.01 BTC
+        ct_val = await _get_ct_val(client, bot.symbol)
         close_sz = f"{abs(bot.position) / ct_val:.2f}"
         td_mode = "cross"
         pos_side = "long" if bot.position > 0 else "short"

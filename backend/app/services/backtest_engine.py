@@ -278,11 +278,22 @@ class BacktestEngine:
                 entry_bar = i
                 trades.append({
                     "time": str(ts[i]),
-                    "side": "buy" if signals[i] == 1 else "sell",
+                    "side": "buy" if sig == 1 else "sell",
                     "price": round(float(entry_price), 2),
                     "size": round(float(abs(position)), 6),
-                    "pnl": 0
+                    "pnl": 0,
                 })
+                if csh_xgb > 0 and csl_xgb > 0:
+                    _xgb_entry_features = self._compute_entry_features(df, i, csh_xgb, csl_xgb)
+                _xgb_dataset.append({
+                    "strategy": params.get("name", "unknown"),
+                    "timestamp": str(ts[i]),
+                    "direction": int(sig),
+                    "entry_price": float(entry_price),
+                    "features": _xgb_entry_features,
+                    "outcome": None,
+                })
+                _xgb_entry_features = None
 
         if position != 0:
             final_close = float(close[-1])
@@ -794,6 +805,17 @@ class BacktestEngine:
         tr[0] = high[0] - low[0]
         atr = pd.Series(tr).rolling(atr_period).mean().values
 
+        swing_window = 30
+        sh_arr = np.full(n, np.nan)
+        sl_arr = np.full(n, np.nan)
+        half = swing_window // 2
+        for si in range(half, n - half):
+            seg = slice(si - half, si + half + 1)
+            if high[si] == max(high[seg]):
+                sh_arr[si] = high[si]
+            if low[si] == min(low[seg]):
+                sl_arr[si] = low[si]
+
         balance = float(initial_capital)
         equity = [float(balance)]
         trades = []
@@ -806,6 +828,16 @@ class BacktestEngine:
         daily_pnl = 0.0
         cons_losses = 0
         current_date = None
+        _xgb_dataset = []
+        _xgb_entry_features = None
+        csh_xgb, csl_xgb = 0.0, 0.0
+
+        def _record_xgb_outcome(pnl_val):
+            if _xgb_dataset and _xgb_dataset[-1]["outcome"] is None:
+                _xgb_dataset[-1]["outcome"] = 1 if pnl_val > 0 else 0
+                _xgb_dataset[-1]["pnl_pct"] = round(
+                    pnl_val / (abs(position) * entry_price + 1e-9), 6
+                )
 
         for i in range(1, n):
             ts_date = pd.Timestamp(ts[i]).date()
@@ -814,6 +846,11 @@ class BacktestEngine:
             if ts_date != current_date:
                 daily_pnl = 0.0
                 current_date = ts_date
+
+            if not np.isnan(sh_arr[i]):
+                csh_xgb = sh_arr[i]
+            if not np.isnan(sl_arr[i]):
+                csl_xgb = sl_arr[i]
 
             equity.append(balance if position == 0 else balance + position * (close[i] - entry_price))
 
@@ -856,6 +893,7 @@ class BacktestEngine:
                     exit_notional = abs(position) * exit_price
                     total_fee = (entry_notional + exit_notional) * _fee_rate
                     pnl = position * (exit_price - entry_price) - total_fee
+                    _record_xgb_outcome(pnl)
                     balance += pnl
                     daily_pnl += pnl
                     cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -883,6 +921,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_xgb_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -910,6 +949,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_xgb_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -935,6 +975,7 @@ class BacktestEngine:
                 exit_notional = abs(position) * exit_price
                 total_fee = (entry_notional + exit_notional) * _fee_rate
                 pnl = position * (exit_price - entry_price) - total_fee
+                _record_xgb_outcome(pnl)
                 balance += pnl
                 daily_pnl += pnl
                 cons_losses = cons_losses + 1 if pnl < 0 else 0
@@ -959,6 +1000,24 @@ class BacktestEngine:
 
             # ── Entry on signal (position == 0) ──
             if position == 0 and sig != 0:
+                xgb_feat = None
+                if csh_xgb > 0 and csl_xgb > 0:
+                    try:
+                        xgb_feat = self._compute_entry_features(df, i, csh_xgb, csl_xgb)
+                    except Exception:
+                        pass
+
+                if params.get("xgb_gate") and xgb_feat is not None:
+                    self._load_xgb_model()
+                    if self._xgb_model is not None:
+                        try:
+                            feat_arr = np.array([xgb_feat], dtype=np.float32)
+                            prob = self._xgb_model.predict_proba(feat_arr)[0][1]
+                            if prob < self._xgb_threshold:
+                                continue
+                        except Exception:
+                            pass
+
                 entry_price = close[i]
                 if use_atr_stops and not has_own_stops and not np.isnan(atr[i]) and atr[i] > 0:
                     # Risk-based sizing (engine manages stops)
@@ -984,6 +1043,14 @@ class BacktestEngine:
                     "size": round(float(abs(position)), 6),
                     "pnl": 0,
                 })
+                _xgb_dataset.append({
+                    "strategy": params.get("name", "unknown"),
+                    "timestamp": str(ts[i]),
+                    "direction": int(sig),
+                    "entry_price": float(entry_price),
+                    "features": xgb_feat,
+                    "outcome": None,
+                })
 
         if position != 0:
             final_close = float(close[-1])
@@ -991,6 +1058,7 @@ class BacktestEngine:
             exit_notional = abs(position) * final_close
             total_fee = (entry_notional + exit_notional) * _fee_rate
             pnl = float(position) * (final_close - float(entry_price)) - total_fee
+            _record_xgb_outcome(pnl)
             balance += pnl
             trades.append({
                 "time": str(ts[-1]), "side": "close_final",
@@ -1002,7 +1070,9 @@ class BacktestEngine:
             equity[-1] = balance
             position = 0
 
-        return self._build_results(df, initial_capital, balance, equity, trades, params)
+        result = self._build_results(df, initial_capital, balance, equity, trades, params)
+        result["xgb_dataset"] = _xgb_dataset
+        return result
 
     def _build_results(self, df, initial_capital, final_balance, equity, trades, params):
         total_return = final_balance - initial_capital

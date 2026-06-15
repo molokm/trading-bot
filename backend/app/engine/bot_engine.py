@@ -125,8 +125,8 @@ class BotEngine:
         self.last_cycle_at = None
         self.error = None
         self._task: Optional[asyncio.Task] = None
-        self._is_diff = ".diff()" in strategy_code
-        self._signal_type = "diff" if self._is_diff else "position"
+        self._signal_type = "position"
+        self._ct_val = None
         self.trade_count = 0
         self.win_count = 0
         self.loss_count = 0
@@ -187,24 +187,7 @@ class BotEngine:
         last = int(arr[-1])
         if last in (2, -2):
             return 0
-        if self._is_diff:
-            pos = 0
-            for s in arr:
-                if s == 1 and pos == 0:
-                    pos = 1
-                elif s == -1 and pos == 1:
-                    pos = 0
-                elif s == -1 and pos == 0:
-                    pos = -1
-                elif s == 1 and pos == -1:
-                    pos = 0
-                elif s == -2 and pos == 1:
-                    pos = -1
-                elif s == 2 and pos == -1:
-                    pos = 1
-            return int(pos)
-        else:
-            return int(arr[-1])
+        return int(arr[-1])
 
     async def _close_position(self, reason="signal", signal_id: int = None):
         if self.position == 0:
@@ -244,8 +227,8 @@ class BotEngine:
         return result
 
     async def _loop(self):
-        interval_map = {"1m": 60, "3m": 120, "5m": 240, "15m": 600,
-                        "30m": 900, "1H": 1200, "4H": 3600, "1D": 14400}
+        interval_map = {"1m": 60, "3m": 180, "5m": 300, "15m": 900,
+                        "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}
         interval = interval_map.get(self.timeframe, 600)
 
         while self.status == "running":
@@ -262,10 +245,11 @@ class BotEngine:
                 from datetime import timedelta as _td
                 bar_sec = {"1m":60,"3m":180,"5m":300,"15m":900,"30m":1800,
                            "1H":3600,"4H":14400,"1D":86400}.get(self.timeframe, 300)
-                lookback = max(3600, bar_sec * 2000)
+                lookback = max(3600, bar_sec * 3000)
                 start_dt = (datetime.now() - _td(seconds=lookback)).strftime("%Y-%m-%dT%H:%M:%S")
                 candles = await ensure_candles(
-                    self.symbol, self.timeframe, start_date=start_dt, live_limit=0
+                    self.symbol, self.timeframe, start_date=start_dt,
+                    live_limit=0
                 )
                 if not candles or len(candles) < 50:
                     self.error = "no_candles"
@@ -294,11 +278,6 @@ class BotEngine:
                     continue
 
                 sig_arr = signals.values if hasattr(signals, "values") else signals
-                # Auto-correct _is_diff: позиционные сигналы содержат только {-1,0,1}
-                if self._is_diff and len(sig_arr) > 0:
-                    uv = set(int(v) for v in np.unique(sig_arr))
-                    if uv.issubset({-1, 0, 1}):
-                        self._is_diff = False
                 current_position = self._get_intended_position(sig_arr)
 
                 current_price = float(df["close"].iloc[-1])
@@ -317,6 +296,9 @@ class BotEngine:
                 had_position = self.position != 0
                 wants_position = current_position != 0
                 signal_changed = current_position != self.last_position
+
+                if not signal_changed and self.cycle_count <= 5:
+                    print(f"[BOT {self.id}] NO CHANGE: sig={current_position} == last={self.last_position}", flush=True)
 
                 if signal_changed:
                     signal_side = ("buy" if current_position == 1
@@ -376,6 +358,7 @@ class BotEngine:
                                     print(f"[BOT {self.id}] XGB error: {e}", flush=True)
 
                             if xgb_allowed:
+                                print(f"[BOT {self.id}] OPENING {side} @ {current_price} capital={self.capital:.2f}", flush=True)
                                 result = await self._open_position(side, current_price,
                                                                    signal_id=signal_id)
                                 if result and result.get("ord_id"):
@@ -392,7 +375,7 @@ class BotEngine:
 
                     self.last_position = current_position
 
-                print(f"[BOT {self.id}] cycle={self.cycle_count} sig_pos={current_position} last_pos={self.last_position} pos={self.position:.6f} err={self.error or '-'} @ {ts_now}", flush=True)
+                print(f"[BOT {self.id}] cycle={self.cycle_count} sig_pos={current_position} last_pos={self.last_position} pos={self.position:.6f} candles={len(candles)} err={self.error or '-'} @ {ts_now}", flush=True)
                 await asyncio.sleep(interval)
 
             except asyncio.CancelledError:

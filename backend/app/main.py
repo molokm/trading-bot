@@ -620,9 +620,7 @@ async def deploy_live(req: LiveDeployRequest):
     strategy_params = strategy_meta.get("params", {}) if strategy_meta else {}
     merged_params = {**strategy_params, **req.params}
 
-    bot_id = str(uuid.uuid4())[:8]
-    is_diff = ".diff()" in strategy_code
-    signal_type = "diff" if is_diff else "position"
+    signal_type = "position"
     bot = BotEngine(
         bot_id=bot_id,
         strategy_id=req.strategy_id,
@@ -650,8 +648,8 @@ async def deploy_live(req: LiveDeployRequest):
         "status": "running",
         "name": req.name,
         "message": f"Strategy {req.strategy_id} deployed on {req.symbol}",
-        "cycle_interval_sec": {"1m": 60, "3m": 120, "5m": 240, "15m": 600,
-                               "30m": 900, "1H": 1200, "4H": 3600, "1D": 14400}.get(req.timeframe, 600),
+        "cycle_interval_sec": {"1m": 60, "3m": 180, "5m": 300, "15m": 900,
+                               "30m": 1800, "1H": 3600, "4H": 14400, "1D": 86400}.get(req.timeframe, 600),
     }
 
 
@@ -705,8 +703,7 @@ async def auto_trade_start(req: LiveDeployRequest):
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")
     bot_id = str(uuid.uuid4())[:8]
-    is_diff = ".diff()" in strategy_code
-    signal_type = "diff" if is_diff else "position"
+    signal_type = "position"
     bot = BotEngine(
         bot_id=bot_id,
         strategy_id=req.strategy_id,

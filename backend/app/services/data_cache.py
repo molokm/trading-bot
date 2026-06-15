@@ -86,6 +86,46 @@ async def _fetch_kucoin(client: httpx.AsyncClient, symbol: str, interval: str,
         return []
 
 
+async def _fetch_okx_paginated(client: httpx.AsyncClient, inst_id: str, bar: str,
+                                start_ms: int, end_ms: int, max_candles: int = 14400) -> list:
+    headers = {}
+    if os.getenv("OKX_DEMO", "").lower() in ("1", "true"):
+        headers["x-simulated-trading"] = "1"
+    all_candles = []
+    after = None
+    max_pages = (max_candles + 299) // 300
+    for _ in range(max_pages):
+        params = {"instId": inst_id, "bar": bar, "limit": "300"}
+        if after:
+            params["after"] = after
+        try:
+            r = await client.get(f"{OKX_BASE}/api/v5/market/history-candles", params=params,
+                                  headers=headers, timeout=15)
+            if r.status_code != 200:
+                break
+            d = r.json()
+            if d.get("code") != "0":
+                break
+            batch = d.get("data", [])
+            if not batch:
+                break
+            all_candles.extend(batch)
+            oldest_ts = int(batch[-1][0])
+            if oldest_ts <= start_ms:
+                break
+            after = str(oldest_ts)
+        except Exception:
+            break
+    if all_candles:
+        by_ts = {}
+        for c in all_candles:
+            ts = int(c[0])
+            if start_ms <= ts <= end_ms:
+                by_ts[ts] = c
+        return [by_ts[ts] for ts in sorted(by_ts.keys())]
+    return []
+
+
 async def ensure_candles(symbol: str, timeframe: str,
                          start_date: str = None, end_date: str = None,
                          force_refresh: bool = False,
@@ -107,19 +147,25 @@ async def ensure_candles(symbol: str, timeframe: str,
         f"range_days={(end_ms-start_ms)/86400000:.1f} "
         f"force={force_refresh} live={live_limit} max={max_candles} {symbol} {timeframe}")
 
-    if live_limit > 0:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            batch = await _fetch_okx(client, symbol, timeframe)
-            if not batch:
-                return []
-            batch.sort(key=lambda c: int(c[0]))
-            return batch[-live_limit:]
-
     if not force_refresh:
         cached = _load_cache(symbol, timeframe)
-        if cached and int(cached[0][0]) <= start_ms and int(cached[-1][0]) >= end_ms:
-            LOG(f"Cache hit: {len(cached)}")
-            return [c for c in cached if start_ms <= int(c[0]) <= end_ms]
+        if cached and int(cached[0][0]) <= start_ms:
+            result = [c for c in cached if start_ms <= int(c[0]) <= end_ms]
+            if len(result) >= 100:
+                cache_age_ms = now_ms - int(cached[-1][0])
+                bar_ms = BAR_MS.get(timeframe, 300000)
+                if cache_age_ms < bar_ms * 2:
+                    LOG(f"Cache hit: {len(result)} candles")
+                    return result
+                LOG(f"Cache stale ({cache_age_ms // 60000}min old), refreshing...")
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        okx_candles = await _fetch_okx_paginated(client, symbol, timeframe, start_ms, end_ms, max_candles)
+        if okx_candles and len(okx_candles) >= 100:
+            LOG(f"OKX paginated: {len(okx_candles)} candles")
+            okx_candles.sort(key=lambda c: int(c[0]))
+            _save_cache(symbol, timeframe, okx_candles, start_ms, end_ms)
+            return [c for c in okx_candles if start_ms <= int(c[0]) <= end_ms]
 
     kucoin_tf = _KUCOIN_INTERVAL.get(timeframe, "5min")
     kucoin_symbol = symbol.replace("-SWAP", "").replace("-USD-SWAP", "").split("-DELIVERY")[0]
