@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Activity, BarChart3, Zap, Clock, ArrowUpRight, ArrowDownRight, Bot, ScrollText, DollarSign, XCircle, Loader2 } from 'lucide-react'
+import { Wallet, TrendingUp, TrendingDown, Activity, BarChart3, Zap, Clock, ArrowUpRight, ArrowDownRight, Bot, ScrollText, DollarSign, XCircle, Loader2, Target } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
@@ -16,6 +16,128 @@ function StatCard({ label, value, change, icon: Icon, positive }) {
           {positive ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
           {change}
         </span>
+      )}
+    </div>
+  )
+}
+
+function DashboardPlannedTrade({ planned }) {
+  if (!planned) return null
+  const action = planned.action || 'WAIT'
+  const isEntry = action === 'LONG' || action === 'SHORT'
+  const isInPosition = action === 'IN_POSITION'
+
+  const actionLabels = {
+    LONG: 'Покупка (LONG)',
+    SHORT: 'Продажа (SHORT)',
+    HOLD: 'Удержание',
+    WAIT: 'Ожидание',
+    IN_POSITION: `${planned.side === 'LONG' ? 'Длинная' : 'Короткая'} позиция`,
+  }
+
+  const trendLabels = { UP: '▲ Восходящий', DOWN: '▼ Нисходящий', NEUTRAL: '— Боковой' }
+
+  return (
+    <div className="border-t border-white/5 px-4 py-3 space-y-2">
+      <div className="flex items-center gap-2 text-xs">
+        <Target size={12} className={action === 'LONG' ? 'text-neon-green' : action === 'SHORT' ? 'text-neon-red' : 'text-gray-400'} />
+        <span className="font-semibold text-white">План:</span>
+        <span className={
+          action === 'LONG' ? 'text-neon-green' :
+          action === 'SHORT' ? 'text-neon-red' :
+          action === 'IN_POSITION' ? 'text-neon-blue' :
+          'text-gray-400'
+        }>
+          {actionLabels[action] || action}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-xs">
+        <div className="text-gray-400">Цена: <span className="text-white font-mono">${planned.current_price?.toLocaleString()}</span></div>
+        <div className="text-gray-400">EMA200: <span className="text-white font-mono">${planned.ema200?.toLocaleString()}</span></div>
+        <div className="text-gray-400">RSI: <span className="text-white font-mono">{planned.rsi}</span></div>
+        <div className={`font-semibold ${planned.trend === 'UP' ? 'text-neon-green' : planned.trend === 'DOWN' ? 'text-neon-red' : 'text-gray-400'}`}>
+          {trendLabels[planned.trend] || planned.trend}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 text-xs">
+        <div className="text-gray-400">С윙 макс: <span className="text-neon-green font-mono">${planned.swing_high?.toLocaleString()}</span></div>
+        <div className="text-gray-400">С윙 мин: <span className="text-neon-red font-mono">${planned.swing_low?.toLocaleString()}</span></div>
+      </div>
+
+      {isEntry && planned.entry_zone && (
+        <div className="bg-white/5 rounded-lg px-3 py-2 space-y-1.5">
+          <div className="text-xs">
+            <span className="text-gray-400">Зона входа: </span>
+            <span className="font-mono font-bold text-white">${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}</span>
+          </div>
+          {planned.stop_loss && (
+            <div className="text-xs">
+              <span className="text-gray-400">Стоп-лосс: </span>
+              <span className="font-mono text-neon-red">${planned.stop_loss?.toLocaleString()}</span>
+            </div>
+          )}
+          {planned.conditions && (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+              {Object.entries(planned.conditions).map(([key, cond]) => {
+                const labels = {
+                  uptrend: 'Тренд вверх',
+                  downtrend: 'Тренд вниз',
+                  pulled_back: 'Откат от макс.',
+                  near_support: 'У поддержки',
+                  bounce: 'Отскок',
+                  climbed: 'Рост к сопрот.',
+                  near_resistance: 'У сопротивл.',
+                  reject: 'Отклонение',
+                }
+                return (
+                  <div key={key} className="flex items-center gap-1.5 text-[11px]">
+                    <span className={cond.met ? 'text-neon-green' : 'text-neon-red'}>{cond.met ? '✓' : '✗'}</span>
+                    <span className="text-gray-300">{labels[key] || key}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+          {planned.distance_to_long != null && (
+            <div className="text-[11px] text-gray-500">
+              Расстояние до входа: ${planned.distance_to_long?.toLocaleString()} ({((planned.distance_to_long / planned.current_price) * 100).toFixed(2)}%)
+            </div>
+          )}
+          {planned.distance_to_short != null && (
+            <div className="text-[11px] text-gray-500">
+              Расстояние до входа: ${planned.distance_to_short?.toLocaleString()} ({((planned.distance_to_short / planned.current_price) * 100).toFixed(2)}%)
+            </div>
+          )}
+        </div>
+      )}
+
+      {isInPosition && (
+        <div className="bg-white/5 rounded-lg px-3 py-2 space-y-1">
+          <div className="flex items-center gap-3 text-xs">
+            <span className="text-gray-400">Вход: <span className="font-mono text-white">${planned.entry_price?.toLocaleString()}</span></span>
+            {planned.unrealized_pnl != null && (
+              <span className={`font-bold ${planned.unrealized_pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
+                {planned.unrealized_pnl >= 0 ? '+' : ''}{planned.unrealized_pnl?.toFixed(2)} USDT
+              </span>
+            )}
+          </div>
+          {planned.stop_loss && (
+            <div className="text-[11px] text-gray-400">
+              Трейлинг стоп: {planned.trailing_stop_active ? '🟢 активен' : '⚪ ожидание'} · Стоп: <span className="font-mono">${planned.stop_loss?.toLocaleString()}</span>
+            </div>
+          )}
+          {planned.exit_conditions && (
+            <div className="text-[11px] text-gray-500 space-y-0.5">
+              {planned.exit_conditions.map((c, i) => <div key={i}>→ {c}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {planned.note && !isEntry && !isInPosition && (
+        <div className="text-[11px] text-gray-500 italic">{planned.note}</div>
       )}
     </div>
   )
@@ -198,45 +320,51 @@ export default function Dashboard({ health, connected, isGuest }) {
           )}
         </h3>
         {liveBots.filter(b => b.status === 'running').length > 0 ? (
-          <div className="space-y-2">
+          <div className="space-y-4">
             {liveBots.filter(b => b.status === 'running').map(bot => (
-              <div key={bot.id} className="flex items-center justify-between bg-white/5 rounded-lg px-4 py-3">
-                <div>
-                  <div className="text-sm font-medium text-white flex items-center gap-2">{bot.strategy_id} — {bot.symbol}{bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}</div>
-                  <div className="text-xs text-gray-400">{bot.timeframe} · циклов: {bot.cycle_count}</div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <div className="text-right">
-                    {bot.position !== 0 ? (
-                      <>
-                        <div className={`text-xs font-bold ${bot.position > 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                          {bot.position > 0 ? 'LONG' : 'SHORT'} {Math.abs(bot.position).toFixed(6)} BTC
-                        </div>
-                        {bot.pnl !== 0 && (
-                          <div className={`text-xs ${bot.pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                            {bot.pnl >= 0 ? '+' : ''}{bot.pnl.toFixed(2)} USDT
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <span className="text-xs text-gray-500">Нет позиции</span>
-                    )}
+              <div key={bot.id} className="bg-white/5 rounded-xl overflow-hidden">
+                <div className="flex items-center justify-between px-4 py-3">
+                  <div>
+                    <div className="text-sm font-medium text-white flex items-center gap-2">
+                      {bot.strategy_id} — {bot.symbol}
+                      {bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}
+                    </div>
+                    <div className="text-xs text-gray-400">{bot.timeframe} · циклов: {bot.cycle_count}</div>
                   </div>
-                  <button
-                    onClick={async () => {
-                      try {
-                        await api.stopBot(bot.id)
-                        loadData()
-                      } catch (e) {
-                        alert('Ошибка: ' + e.message)
-                      }
-                    }}
-                    className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                    title="Остановить бота"
-                  >
-                    Остановить
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      {bot.position !== 0 ? (
+                        <>
+                          <div className={`text-xs font-bold ${bot.position > 0 ? 'text-neon-green' : 'text-neon-red'}`}>
+                            {bot.position > 0 ? '▲ LONG' : '▼ SHORT'} {Math.abs(bot.position).toFixed(6)} BTC
+                          </div>
+                          {bot.pnl !== 0 && (
+                            <div className={`text-xs ${bot.pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
+                              {bot.pnl >= 0 ? '+' : ''}{bot.pnl.toFixed(2)} USDT
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <span className="text-xs text-gray-500">Нет позиции</span>
+                      )}
+                    </div>
+                    <button
+                      onClick={async () => {
+                        try {
+                          await api.stopBot(bot.id)
+                          loadData()
+                        } catch (e) {
+                          alert('Ошибка: ' + e.message)
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                      title="Остановить бота"
+                    >
+                      Стоп
+                    </button>
+                  </div>
                 </div>
+                {bot.planned_trade && <DashboardPlannedTrade planned={bot.planned_trade} />}
               </div>
             ))}
           </div>
