@@ -139,6 +139,8 @@ export const api = {
 
   getDbPositions: () => request('/db/positions'),
 
+  getBotPlanned: (botId) => request(`/bots/${botId}/planned`),
+
   wsStatus: () => request('/ws/status'),
 
   credentialsStatus: () => request('/credentials/status'),

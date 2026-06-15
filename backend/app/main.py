@@ -776,6 +776,14 @@ async def get_bot_signals(bot_id: str, limit: int = 100):
     return {"signals": signals}
 
 
+@app.get("/api/bots/{bot_id}/planned")
+async def get_bot_planned(bot_id: str):
+    bot = live_bots.get(bot_id)
+    if bot:
+        return {"planned": bot.planned_trade, "status": bot.status}
+    return {"planned": None, "status": "offline"}
+
+
 @app.get("/api/bots/{bot_id}/trades")
 async def get_bot_trades(bot_id: str, limit: int = 100):
     trades = await db.get_trades(bot_id=bot_id, limit=limit)

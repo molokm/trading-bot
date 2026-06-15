@@ -133,6 +133,7 @@ class BotEngine:
         self.mode = "demo"
         self._xgb_model, _, self._xgb_threshold = _load_xgb_gate()
         self._last_xgb_features = None
+        self.planned_trade = None
 
     def to_dict(self) -> dict:
         return {
@@ -160,6 +161,7 @@ class BotEngine:
             "win_count": self.win_count,
             "loss_count": self.loss_count,
             "mode": "demo",
+            "planned_trade": self.planned_trade,
         }
 
     async def start(self):
@@ -188,6 +190,119 @@ class BotEngine:
         if last in (2, -2):
             return 0
         return int(arr[-1])
+
+    def _compute_planned_trade(self, df, sig_arr, current_price):
+        close = df["close"].values.astype(float)
+        high = df["high"].values.astype(float)
+        low = df["low"].values.astype(float)
+        n = len(df)
+
+        intended = self._get_intended_position(sig_arr)
+
+        ema_trend = int(self.params.get("ema_trend", 200))
+        swing_window = int(self.params.get("swing_window", 40))
+        pullback_pct = float(self.params.get("pullback_pct", 0.993))
+        near_sl_pct = float(self.params.get("near_sl_pct", 1.003))
+
+        ema200 = pd.Series(close).ewm(span=ema_trend, adjust=False).mean().values
+        ema_val = ema200[-1]
+
+        sh_arr = np.full(n, np.nan)
+        sl_arr = np.full(n, np.nan)
+        for i in range(swing_window, n - swing_window):
+            if high[i] == max(high[i - swing_window: i + swing_window + 1]):
+                sh_arr[i] = high[i]
+            if low[i] == min(low[i - swing_window: i + swing_window + 1]):
+                sl_arr[i] = low[i]
+
+        csh, csl = 0.0, 0.0
+        for i in range(n - 1, max(n - 200, 0), -1):
+            if not np.isnan(sh_arr[i]) and sh_arr[i] > csh:
+                csh = sh_arr[i]
+        for i in range(n - 1, max(n - 200, 0), -1):
+            if not np.isnan(sl_arr[i]) and sl_arr[i] > 0:
+                csl = sl_arr[i]
+
+        delta = pd.Series(close).diff()
+        gain = delta.where(delta > 0, 0.0).rolling(14).mean().values
+        loss_arr = (-delta.where(delta < 0, 0.0)).rolling(14).mean().values
+        rsi_val = 100.0 - 100.0 / (1.0 + gain[-1] / loss_arr[-1]) if loss_arr[-1] != 0 else 50.0
+
+        uptrend = current_price > ema_val
+        downtrend = current_price < ema_val
+
+        result = {
+            "current_price": round(current_price, 2),
+            "ema200": round(ema_val, 2),
+            "rsi": round(rsi_val, 1),
+            "swing_high": round(csh, 2),
+            "swing_low": round(csl, 2),
+            "trend": "UP" if uptrend else ("DOWN" if downtrend else "NEUTRAL"),
+            "intended_position": intended,
+            "action": "HOLD" if intended != 0 else "WAIT",
+        }
+
+        if self.position != 0:
+            result["action"] = "IN_POSITION"
+            result["side"] = "LONG" if self.position > 0 else "SHORT"
+            result["entry_price"] = round(self.entry_price, 2)
+            result["unrealized_pnl"] = round(self.unrealized_pnl, 2)
+            exit_lo = float(self.params.get("rsi_exit_lo", 20))
+            exit_hi = float(self.params.get("rsi_exit_hi", 80))
+            if self.position > 0:
+                result["stop_loss"] = round(csl, 2)
+                result["trailing_stop_active"] = current_price > csl
+                result["exit_conditions"] = [
+                    f"Close below swing low ${csl:,.2f}",
+                    f"RSI > {exit_hi:.0f} (current: {rsi_val:.1f})",
+                ]
+            else:
+                result["stop_loss"] = round(csh, 2)
+                result["trailing_stop_active"] = current_price < csh
+                result["exit_conditions"] = [
+                    f"Close above swing high ${csh:,.2f}",
+                    f"RSI < {exit_lo:.0f} (current: {rsi_val:.1f})",
+                ]
+            return result
+
+        if csh == 0 or csl == 0:
+            result["action"] = "WAIT"
+            result["note"] = "No swing levels found yet"
+            return result
+
+        if intended == 1:
+            result["action"] = "LONG"
+            result["entry_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
+            result["stop_loss"] = round(csl, 2)
+            result["risk_reward"] = round((csh - csl) / (current_price - csl), 2) if current_price > csl else 0
+            result["conditions"] = {
+                "uptrend": {"met": uptrend, "detail": f"price ${current_price:,.2f} vs EMA200 ${ema_val:,.2f}"},
+                "pulled_back": {"met": current_price < csh * pullback_pct, "detail": f"price < ${csh * pullback_pct:,.2f}"},
+                "near_support": {"met": current_price <= csl * near_sl_pct, "detail": f"price <= ${csl * near_sl_pct:,.2f}"},
+                "bounce": {"met": low[-1] > low[-2] if n > 1 else False, "detail": f"low[-1]={low[-1]:,.2f} vs low[-2]={low[-2]:,.2f}"},
+            }
+        elif intended == -1:
+            result["action"] = "SHORT"
+            result["entry_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
+            result["stop_loss"] = round(csh, 2)
+            result["conditions"] = {
+                "downtrend": {"met": downtrend, "detail": f"price ${current_price:,.2f} vs EMA200 ${ema_val:,.2f}"},
+                "climbed": {"met": current_price > csl * near_sl_pct, "detail": f"price > ${csl * near_sl_pct:,.2f}"},
+                "near_resistance": {"met": current_price >= csh * pullback_pct, "detail": f"price >= ${csh * pullback_pct:,.2f}"},
+                "reject": {"met": high[-1] < high[-2] if n > 1 else False, "detail": f"high[-1]={high[-1]:,.2f} vs high[-2]={high[-2]:,.2f}"},
+            }
+        else:
+            result["action"] = "WAIT"
+            if uptrend:
+                result["long_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
+                result["distance_to_long"] = round(current_price - csh * pullback_pct, 2)
+                result["note"] = f"Uptrend. Need pullback to ${csh * pullback_pct:,.2f} zone"
+            else:
+                result["short_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
+                result["distance_to_short"] = round(csh * pullback_pct - current_price, 2)
+                result["note"] = f"Downtrend. Need rally to ${csl * near_sl_pct:,.2f} zone"
+
+        return result
 
     async def _close_position(self, reason="signal", signal_id: int = None):
         if self.position == 0:
@@ -292,6 +407,8 @@ class BotEngine:
                 self.current_price = current_price
                 self.unrealized_pnl = self.position * (current_price - self.entry_price) if self.position != 0 else 0.0
                 ts_now = str(df["ts"].iloc[-1])
+
+                self.planned_trade = self._compute_planned_trade(df, sig_arr, current_price)
 
                 had_position = self.position != 0
                 wants_position = current_position != 0

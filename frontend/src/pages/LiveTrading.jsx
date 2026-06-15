@@ -3,7 +3,7 @@ import {
   Play, StopCircle, Activity, Bot, Clock, Zap, ZapOff,
   AlertTriangle, CheckCircle, XCircle, Loader2, Plus,
   BarChart3, TrendingUp, Shield, RefreshCw, Radio,
-  DollarSign
+  DollarSign, Target
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -27,6 +27,103 @@ const STATUS_DOT = {
   starting: 'bg-neon-yellow animate-pulse',
   stopped: 'bg-gray-500',
   error: 'bg-neon-red',
+}
+
+const ACTION_COLORS = {
+  LONG: 'text-neon-green border-neon-green/20 bg-neon-green/5',
+  SHORT: 'text-neon-red border-neon-red/20 bg-neon-red/5',
+  HOLD: 'text-neon-yellow border-neon-yellow/20 bg-neon-yellow/5',
+  WAIT: 'text-gray-400 border-gray-500/20 bg-gray-500/5',
+  IN_POSITION: 'text-neon-blue border-neon-blue/20 bg-neon-blue/5',
+}
+
+function PlannedTradePanel({ planned }) {
+  if (!planned) return null
+  const action = planned.action || 'WAIT'
+  const isEntry = action === 'LONG' || action === 'SHORT'
+  const isInPosition = action === 'IN_POSITION'
+
+  return (
+    <div className={`mt-3 rounded-lg border px-3 py-2.5 text-xs space-y-2 ${ACTION_COLORS[action] || ACTION_COLORS.WAIT}`}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 font-bold">
+          <Target size={12} />
+          <span>План: {action === 'LONG' ? 'LONG' : action === 'SHORT' ? 'SHORT' : action === 'IN_POSITION' ? `${planned.side} (в позиции)` : 'Ожидание'}</span>
+        </div>
+        <div className="flex items-center gap-3 text-[10px] opacity-70">
+          <span>EMA200: ${planned.ema200?.toLocaleString()}</span>
+          <span>RSI: {planned.rsi}</span>
+        </div>
+      </div>
+
+      {planned.trend && (
+        <div className="flex items-center gap-2 text-[10px]">
+          <span className={`font-semibold ${planned.trend === 'UP' ? 'text-neon-green' : planned.trend === 'DOWN' ? 'text-neon-red' : 'text-gray-400'}`}>
+            {planned.trend === 'UP' ? '▲' : planned.trend === 'DOWN' ? '▼' : '—'} {planned.trend}
+          </span>
+          <span>Swing H: ${planned.swing_high?.toLocaleString()}</span>
+          <span>Swing L: ${planned.swing_low?.toLocaleString()}</span>
+        </div>
+      )}
+
+      {isEntry && planned.entry_zone && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] uppercase tracking-wider opacity-60">Зона входа:</span>
+            <span className="font-mono font-bold">${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}</span>
+          </div>
+          {planned.stop_loss && (
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] uppercase tracking-wider opacity-60">Стоп:</span>
+              <span className="font-mono">${planned.stop_loss?.toLocaleString()}</span>
+            </div>
+          )}
+          {planned.conditions && (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+              {Object.entries(planned.conditions).map(([key, cond]) => (
+                <div key={key} className="flex items-center gap-1.5">
+                  <span className={cond.met ? 'text-neon-green' : 'text-neon-red'}>{cond.met ? '✓' : '✗'}</span>
+                  <span className="text-[10px]">{key}: {cond.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {planned.distance_to_long != null && (
+            <div className="text-[10px] opacity-60">
+              До зоны входа: ${planned.distance_to_long?.toLocaleString()} ({((planned.distance_to_long / planned.current_price) * 100).toFixed(2)}%)
+            </div>
+          )}
+        </div>
+      )}
+
+      {isInPosition && (
+        <div className="space-y-1">
+          <div className="flex items-center gap-3">
+            <span>Вход: <b className="font-mono">${planned.entry_price?.toLocaleString()}</b></span>
+            {planned.unrealized_pnl != null && (
+              <span className={planned.unrealized_pnl >= 0 ? 'text-neon-green font-bold' : 'text-neon-red font-bold'}>
+                {planned.unrealized_pnl >= 0 ? '+' : ''}{planned.unrealized_pnl?.toFixed(2)} USDT
+              </span>
+            )}
+          </div>
+          {planned.stop_loss && (
+            <div className="text-[10px]">
+              Trailing stop: {planned.trailing_stop_active ? '🟢 активен' : '⚪ ожидание'} | Стоп: ${planned.stop_loss?.toLocaleString()}
+            </div>
+          )}
+          {planned.exit_conditions && (
+            <div className="text-[10px] opacity-60 space-y-0.5">
+              {planned.exit_conditions.map((c, i) => <div key={i}>→ {c}</div>)}
+            </div>
+          )}
+        </div>
+      )}
+
+      {planned.note && !isEntry && !isInPosition && (
+        <div className="text-[10px] opacity-60">{planned.note}</div>
+      )}
+    </div>
+  )
 }
 
 export default function LiveTrading() {
@@ -328,6 +425,9 @@ export default function LiveTrading() {
                     <AlertTriangle size={12} />
                     {bot.error}
                   </div>
+                )}
+                {bot.planned_trade && isRunning && (
+                  <PlannedTradePanel planned={bot.planned_trade} />
                 )}
                 {bot.status === 'stopped' && (
                   <div className="mt-3 flex items-center gap-2 text-xs text-gray-500 bg-gray-500/5 rounded-lg px-3 py-2">
