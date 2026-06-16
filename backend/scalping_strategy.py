@@ -131,6 +131,114 @@ def supertrend(high, low, close, period=10, multiplier=1.5):
 
 
 # ═══════════════════════════════════════════════════════════════
+# ORDER BOOK PROXY INDICATORS
+# ═══════════════════════════════════════════════════════════════
+
+def obv(close, vol):
+    """On Balance Volume — cumulative volume flow direction.
+    Rises when close > prev_close (buying pressure), falls when selling."""
+    n = len(close)
+    result = np.zeros(n)
+    result[0] = vol[0]
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            result[i] = result[i-1] + vol[i]
+        elif close[i] < close[i-1]:
+            result[i] = result[i-1] - vol[i]
+        else:
+            result[i] = result[i-1]
+    return result
+
+
+def volume_delta(high, low, close, vol):
+    """Volume Delta — estimate buy/sell pressure from candle position.
+    BUY% = (close - low) / (high - low) — how much of the bar range closed bullish.
+    Delta = vol * (2*buy_pct - 1) — positive = net buying, negative = net selling."""
+    n = len(close)
+    delta = np.zeros(n)
+    for i in range(n):
+        bar_range = high[i] - low[i]
+        if bar_range > 0:
+            buy_pct = (close[i] - low[i]) / bar_range
+        else:
+            buy_pct = 0.5
+        delta[i] = vol[i] * (2 * buy_pct - 1)
+    return delta
+
+
+def vwap_deviation(close, vwap_arr):
+    """VWAP deviation percentage — how far price is from VWAP.
+    Negative = below VWAP (potential buy), Positive = above (potential sell)."""
+    return np.where(vwap_arr > 0, (close - vwap_arr) / vwap_arr * 100, 0)
+
+
+def volume_profile_levels(close, vol, n_bins=20):
+    """Volume-weighted price distribution — find high-volume price levels.
+    Returns array where each bar gets the nearest high-volume level distance."""
+    n = len(close)
+    p_min, p_max = close.min(), close.max()
+    if p_max == p_min:
+        return np.zeros(n)
+    bins = np.linspace(p_min, p_max, n_bins + 1)
+    bin_vol = np.zeros(n_bins)
+    for i in range(n):
+        idx = min(int((close[i] - p_min) / (p_max - p_min) * n_bins), n_bins - 1)
+        bin_vol[idx] += vol[i]
+    # Find the price level with highest volume (POC — Point of Control)
+    poc_idx = np.argmax(bin_vol)
+    poc_price = (bins[poc_idx] + bins[poc_idx + 1]) / 2
+    return np.full(n, poc_price)
+
+
+def atr_percentile(atr_arr, lookback=100):
+    """ATR percentile — current ATR relative to recent history.
+    High percentile = high volatility, Low percentile = low volatility.
+    Returns value in [0, 100]."""
+    n = len(atr_arr)
+    result = np.full(n, 50.0)
+    for i in range(lookback, n):
+        window = atr_arr[max(0, i-lookback):i+1]
+        current = atr_arr[i]
+        result[i] = (np.sum(window < current) / len(window)) * 100
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# ADAPTIVE PARAMETERS
+# ═══════════════════════════════════════════════════════════════
+
+def adaptive_rsi_thresholds(atr_pctile):
+    """Adjust RSI thresholds based on volatility regime.
+    High vol (>75th pctile): wider RSI bands (25/75) — more room for swings.
+    Low vol (<25th pctile): tighter RSI bands (35/65) — quicker reversals.
+    Normal: standard (30/70)."""
+    rsi_ob = np.where(atr_pctile > 75, 75,      # high vol → easier to reach overbought
+             np.where(atr_pctile < 25, 65, 70))  # low vol → harder to reach
+    rsi_os = np.where(atr_pctile > 75, 25,      # high vol → easier to reach oversold
+             np.where(atr_pctile < 25, 35, 30))  # low vol → harder to reach
+    return rsi_os, rsi_ob
+
+
+def adaptive_atr_multipliers(atr_pctile):
+    """Adjust ATR multipliers for SL/TP based on volatility.
+    High vol: wider SL (2.0x) and TP (3.0x) to avoid premature stops.
+    Low vol: tighter SL (1.0x) and TP (1.5x) for quick profits."""
+    sl_mult = np.where(atr_pctile > 75, 2.0,
+              np.where(atr_pctile < 25, 1.0, 1.5))
+    tp_mult = np.where(atr_pctile > 75, 3.0,
+              np.where(atr_pctile < 25, 1.5, 2.0))
+    return sl_mult, tp_mult
+
+
+def adaptive_volume_threshold(atr_pctile):
+    """Volume spike threshold adjusts with volatility.
+    High vol: need less volume confirmation (1.0x) — moves are already strong.
+    Low vol: need stronger volume (1.5x) — confirm breakout."""
+    return np.where(atr_pctile > 75, 1.0,
+           np.where(atr_pctile < 25, 1.5, 1.2))
+
+
+# ═══════════════════════════════════════════════════════════════
 # PART 2: STRATEGY RULES
 # ═══════════════════════════════════════════════════════════════
 
@@ -193,6 +301,12 @@ def lowest(arr, period):
 def compute_all_indicators(close, high, low, vol):
     """Compute all indicators for the strategy."""
     bb_mid, bb_upper, bb_lower = bollinger(close, 20, 2.0)
+    atr14 = atr(high, low, close, 14)
+    vwap_arr = vwap(high, low, close, vol)
+    atr_pct = atr_percentile(atr14, lookback=100)
+    rsi_os, rsi_ob = adaptive_rsi_thresholds(atr_pct)
+    sl_mult, tp_mult = adaptive_atr_multipliers(atr_pct)
+    vol_thresh = adaptive_volume_threshold(atr_pct)
     return {
         "ema9": ema(close, 9),
         "ema21": ema(close, 21),
@@ -202,8 +316,8 @@ def compute_all_indicators(close, high, low, vol):
         "macd_line": macd(close)[0],
         "macd_signal": macd(close)[1],
         "macd_hist": macd(close)[2],
-        "atr14": atr(high, low, close, 14),
-        "vwap": vwap(high, low, close, vol),
+        "atr14": atr14,
+        "vwap": vwap_arr,
         "bb_mid": bb_mid,
         "bb_upper": bb_upper,
         "bb_lower": bb_lower,
@@ -211,6 +325,20 @@ def compute_all_indicators(close, high, low, vol):
         "vol_sma20": sma(vol, 20),
         "highest12": highest(high, 12),
         "lowest12": lowest(low, 12),
+        # Order book proxy indicators
+        "obv": obv(close, vol),
+        "obv_ema21": ema(obv(close, vol), 21),
+        "vol_delta": volume_delta(high, low, close, vol),
+        "vol_delta_sma": sma(volume_delta(high, low, close, vol), 20),
+        "vwap_dev": vwap_deviation(close, vwap_arr),
+        "poc": volume_profile_levels(close, vol, n_bins=20),
+        # Adaptive parameters
+        "atr_pctile": atr_pct,
+        "rsi_os": rsi_os,
+        "rsi_ob": rsi_ob,
+        "sl_mult": sl_mult,
+        "tp_mult": tp_mult,
+        "vol_thresh": vol_thresh,
     }
 
 
@@ -307,12 +435,88 @@ def mode_e_short(i, ind, close, vol):
         vol[i] > ind["vol_sma20"][i] * 1.5
     )
 
+# ═══════════════════════════════════════════════════════════════
+# ORDER BOOK PROXY MODES (F, H) + ADAPTIVE MODE (G)
+# ═══════════════════════════════════════════════════════════════
+
+# MODE F: Order Book Proxy — Volume Delta + VWAP Deviation + POC
+def mode_f_long(i, ind, close, vol):
+    """Volume delta > 0 (net buying) + price below VWAP + near POC support."""
+    return (
+        ind["vol_delta"][i] > ind["vol_delta_sma"][i] and  # buying pressure
+        ind["vwap_dev"][i] < -0.2 and  # price > 0.2% below VWAP
+        close[i] > ind["poc"][i] * 0.998 and  # near/above POC (support)
+        ind["rsi14"][i] < 50 and
+        ind["ema50"][i] > ind["ema200"][i]  # macro uptrend
+    )
+def mode_f_short(i, ind, close, vol):
+    """Volume delta < 0 (net selling) + price above VWAP + near POC resistance."""
+    return (
+        ind["vol_delta"][i] < ind["vol_delta_sma"][i] and  # selling pressure
+        ind["vwap_dev"][i] > 0.2 and  # price > 0.2% above VWAP
+        close[i] < ind["poc"][i] * 1.002 and  # near/below POC (resistance)
+        ind["rsi14"][i] > 50 and
+        ind["ema50"][i] < ind["ema200"][i]  # macro downtrend
+    )
+
+
+# MODE G: Adaptive Volatility — parameters adjust to ATR percentile
+def mode_g_long(i, ind, close, vol):
+    """Adaptive RSI + adaptive volume threshold + BB lower band."""
+    return (
+        close[i] <= ind["bb_lower"][i] and
+        ind["rsi14"][i] < ind["rsi_os"][i] and  # adaptive oversold
+        ind["rsi14"][i] > ind["rsi14"][i-1] and  # turning up
+        vol[i] > ind["vol_sma20"][i] * ind["vol_thresh"][i] and  # adaptive volume
+        ind["obv"][i] > ind["obv_ema21"][i]  # OBV confirms buying
+    )
+def mode_g_short(i, ind, close, vol):
+    """Adaptive RSI + adaptive volume threshold + BB upper band."""
+    return (
+        close[i] >= ind["bb_upper"][i] and
+        ind["rsi14"][i] > ind["rsi_ob"][i] and  # adaptive overbought
+        ind["rsi14"][i] < ind["rsi14"][i-1] and  # turning down
+        vol[i] > ind["vol_sma20"][i] * ind["vol_thresh"][i] and
+        ind["obv"][i] < ind["obv_ema21"][i]  # OBV confirms selling
+    )
+
+
+# MODE H: OBV Divergence — OBV trend vs price trend
+def mode_h_long(i, ind, close, vol):
+    """Price making lower low but OBV making higher low = bullish divergence."""
+    if i < 5:
+        return False
+    price_lower = close[i] < close[i-5]
+    obv_higher = ind["obv"][i] > ind["obv"][i-5]
+    return (
+        price_lower and obv_higher and  # bullish divergence
+        ind["rsi14"][i] < 40 and
+        ind["rsi14"][i] > ind["rsi14"][i-1] and
+        close[i] > ind["ema200"][i]
+    )
+def mode_h_short(i, ind, close, vol):
+    """Price making higher high but OBV making lower high = bearish divergence."""
+    if i < 5:
+        return False
+    price_higher = close[i] > close[i-5]
+    obv_lower = ind["obv"][i] < ind["obv"][i-5]
+    return (
+        price_higher and obv_lower and  # bearish divergence
+        ind["rsi14"][i] > 60 and
+        ind["rsi14"][i] < ind["rsi14"][i-1] and
+        close[i] < ind["ema200"][i]
+    )
+
+
 ENTRY_MODES = {
     "A: BB Mean Reversion":    (mode_a_long, mode_a_short),
     "B: VWAP Reversion":       (mode_b_long, mode_b_short),
     "C: Momentum Breakout":    (mode_c_long, mode_c_short),
     "D: EMA Pullback":         (mode_d_long, mode_d_short),
     "E: EMA Cross + Volume":   (mode_e_long, mode_e_short),
+    "F: OrderBook Proxy":      (mode_f_long, mode_f_short),
+    "G: Adaptive Volatility":  (mode_g_long, mode_g_short),
+    "H: OBV Divergence":       (mode_h_long, mode_h_short),
 }
 
 
@@ -488,13 +692,15 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
             if long_fn(i, ind, close, vol):
                 # Position sizing: risk 1% of capital
                 risk_amount = balance * risk_pct
-                sl_distance = cur_atr * sl_atr
+                cur_sl_mult = ind["sl_mult"][i] if "sl_mult" in ind else sl_atr
+                cur_tp_mult = ind["tp_mult"][i] if "tp_mult" in ind else tp_atr
+                sl_distance = cur_atr * cur_sl_mult
                 pos_size = risk_amount / sl_distance  # contracts
                 entry_price = close[i]
                 position = pos_size
                 sl_price = entry_price - sl_distance
-                tp_price = entry_price + cur_atr * tp_atr
-                trail_sl = entry_price - cur_atr * sl_atr
+                tp_price = entry_price + cur_atr * cur_tp_mult
+                trail_sl = entry_price - cur_atr * cur_sl_mult
                 trail_active = False
                 entry_atr = cur_atr
                 entry_bar = i
@@ -504,13 +710,15 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
             # SHORT entry
             elif short_fn(i, ind, close, vol):
                 risk_amount = balance * risk_pct
-                sl_distance = cur_atr * sl_atr
+                cur_sl_mult = ind["sl_mult"][i] if "sl_mult" in ind else sl_atr
+                cur_tp_mult = ind["tp_mult"][i] if "tp_mult" in ind else tp_atr
+                sl_distance = cur_atr * cur_sl_mult
                 pos_size = risk_amount / sl_distance
                 entry_price = close[i]
                 position = -pos_size
                 sl_price = entry_price + sl_distance
-                tp_price = entry_price - cur_atr * tp_atr
-                trail_sl = entry_price + cur_atr * sl_atr
+                tp_price = entry_price - cur_atr * cur_tp_mult
+                trail_sl = entry_price + cur_atr * cur_sl_mult
                 trail_active = False
                 entry_atr = cur_atr
                 entry_bar = i
@@ -642,6 +850,23 @@ def downsample_5m_to_15m(cache_5m):
     return result
 
 
+def downsample_5m_to_1h(cache_5m):
+    """Downsample 5m cache to 1H OHLCV (every 12 candles)."""
+    arr = np.array(cache_5m, dtype=object)
+    result = []
+    for i in range(0, len(arr) - 11, 12):
+        ts_val = arr[i, 0]
+        open_val = float(arr[i, 1])
+        highs = [float(arr[i+j, 2]) for j in range(12)]
+        lows = [float(arr[i+j, 3]) for j in range(12)]
+        high_val = max(highs)
+        low_val = min(lows)
+        close_val = float(arr[i+11, 4])
+        vol_val = sum(float(arr[i+j, 5]) for j in range(12))
+        result.append([ts_val, open_val, high_val, low_val, close_val, vol_val])
+    return result
+
+
 async def main():
     from app.services.data_cache import _load_cache
 
@@ -649,7 +874,13 @@ async def main():
     if not cache:
         print("No 5m cache found"); return
 
-    for tf_name, tf_cache in [("5m", cache), ("15m", downsample_5m_to_15m(cache))]:
+    timeframes = [
+        ("5m", cache, 288),
+        ("15m", downsample_5m_to_15m(cache), 96),
+        ("1H", downsample_5m_to_1h(cache), 24),
+    ]
+
+    for tf_name, tf_cache, bars_per_day in timeframes:
         arr = np.array(tf_cache, dtype=object)
         close = arr[:, 4].astype(float)
         high = arr[:, 2].astype(float)
@@ -658,7 +889,7 @@ async def main():
         ts = arr[:, 0]
 
         print(f"\n{'#'*70}")
-        print(f" TIMEFRAME: {tf_name} | {len(tf_cache)} candles (~{len(tf_cache)//(288 if tf_name=='5m' else 96)} days)")
+        print(f" TIMEFRAME: {tf_name} | {len(tf_cache)} candles (~{len(tf_cache)//bars_per_day} days)")
         print(f"{'#'*70}")
 
         # ─── Count signals for each mode ───
@@ -672,7 +903,7 @@ async def main():
             ns = sum(1 for i in range(start, n) if sf(i, ind, close, vol))
             print(f"  {name:<28} {nl:>6} {ns:>6} {nl+ns:>6}")
 
-        # ─── Test all 5 modes with default params ───
+        # ─── Test all 8 modes with default params ───
         print(f"\n  Default params — SL=1.5 TP=2.0 Trail=1.0/0.75 CD=5 MH=30")
         print(f"  {'Mode':<30} {'Ret%':>7} {'#':>4} {'WR%':>5} {'PF':>5} {'DD%':>5}")
         print(f"  {'-'*62}")
@@ -704,9 +935,9 @@ async def main():
 
         # ─── Parameter sweep on modes with positive signals ───
         profitable_modes = [(k, v) for k, v in mode_results.items()
-                           if v is not None and v[3] > -50 and v[5] > 0.3]
+                           if v is not None and v[3] > -30 and v[5] > 0.4]
         if not profitable_modes:
-            print(f"\n  No mode with PF > 0.3 on {tf_name}. Skipping sweep.")
+            print(f"\n  No mode with PF > 0.4 on {tf_name}. Skipping sweep.")
             continue
 
         for mode_name, (bal, trades, eq, ret, wr, pf, dd) in profitable_modes:
@@ -732,7 +963,7 @@ async def main():
                                         cooldown=cd, max_hold=mh, fee=0.0005,
                                         long_fn=lf, short_fn=sf,
                                     )
-                                    if len(trades2) < 8:
+                                    if len(trades2) < 5:
                                         continue
                                     ret2 = (bal2 / 10000 - 1) * 100
                                     wins2 = [t for t in trades2 if t["pnl"] > 0]
