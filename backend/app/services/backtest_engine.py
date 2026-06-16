@@ -550,15 +550,15 @@ class BacktestEngine:
         ts = df["ts"].values
         n = len(df)
 
-        # Pre-compute swing levels for feature extraction
-        sh_arr = np.full(n, np.nan)
-        sl_arr = np.full(n, np.nan)
-        swing_win = params.get("swing_window", 40)
-        for j in range(swing_win, n - swing_win):
-            if high[j] == max(high[j - swing_win: j + swing_win + 1]):
-                sh_arr[j] = high[j]
-            if low[j] == min(low[j - swing_win: j + swing_win + 1]):
-                sl_arr[j] = low[j]
+        # ATR for trailing stops
+        atr_period = int(params.get("atr_period", 14))
+        atr_sl_mult = float(params.get("atr_sl_mult", 2.0))
+        atr_lock_mult = float(params.get("atr_lock_mult", 3.0))
+
+        tr = np.maximum(high[1:] - low[1:],
+                        np.maximum(np.abs(high[1:] - close[:-1]),
+                                   np.abs(low[1:] - close[:-1])))
+        atr_arr = np.insert(pd.Series(tr).rolling(atr_period).mean().values, 0, 0)
 
         balance = float(initial_capital)
         equity = [float(balance)]
@@ -577,16 +577,12 @@ class BacktestEngine:
         _size_pct = params.get("size_pct", 0.95)
         _xgb_dataset = []  # for XGBoost training
 
-        # Track latest swing levels
-        csh, csl = 0.0, 0.0
+        # Trailing stop state
+        sl_price = 0.0
+        peak_price = 0.0
+        use_trailing = params.get("atr_lock_mult") is not None or params.get("use_trailing", False)
 
         for i in range(1, n):
-            if not np.isnan(sh_arr[i]):
-                csh = sh_arr[i]
-            if not np.isnan(sl_arr[i]):
-                csl = sl_arr[i]
-
-            ts_date = pd.Timestamp(ts[i]).date()
             ts_date = pd.Timestamp(ts[i]).date()
             if current_date is None:
                 current_date = ts_date
@@ -604,6 +600,7 @@ class BacktestEngine:
                 continue
 
             sig = int(raw[i])
+            cur_atr = atr_arr[i] if not np.isnan(atr_arr[i]) else 0
 
             def _record_outcome(pnl_val):
                 if _xgb_dataset and _xgb_dataset[-1]["outcome"] is None:
@@ -612,8 +609,78 @@ class BacktestEngine:
                         pnl_val / (abs(position) * entry_price + 1e-9), 6
                     )
 
-            # Exit: signal drops to 0 while in position
-            if position != 0 and sig == 0:
+            # ─── Trailing stop exit (when in position) ───
+            if position > 0 and cur_atr > 0:
+                # Lock profit after price moves atr_lock_mult * ATR above entry
+                if close[i] > entry_price + cur_atr * atr_lock_mult:
+                    new_sl = entry_price + cur_atr * (atr_lock_mult - 0.5)
+                    sl_price = max(sl_price, new_sl)
+                else:
+                    new_sl = close[i] - cur_atr * atr_sl_mult
+                    sl_price = max(sl_price, new_sl)
+
+                if close[i] < sl_price:
+                    exit_price = close[i]
+                    entry_notional = abs(position) * entry_price
+                    exit_notional = abs(position) * exit_price
+                    total_fee = (entry_notional + exit_notional) * _fee_rate
+                    pnl = position * (exit_price - entry_price) - total_fee
+                    _record_outcome(pnl)
+                    balance += pnl
+                    daily_pnl += pnl
+                    cons_losses = cons_losses + 1 if pnl < 0 else 0
+                    trades.append({
+                        "time": str(ts[i]),
+                        "side": "close_long",
+                        "price": round(float(exit_price), 2),
+                        "size": round(float(abs(position)), 6),
+                        "pnl": round(float(pnl), 2),
+                        "fee": round(float(total_fee), 6),
+                        "exit_reason": "trailing_stop"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                    sl_price = 0.0
+                    entry_features = None
+                    last_trade_bar = i
+                    continue
+
+            elif position < 0 and cur_atr > 0:
+                if close[i] < entry_price - cur_atr * atr_lock_mult:
+                    new_sl = entry_price - cur_atr * (atr_lock_mult - 0.5)
+                    sl_price = min(sl_price, new_sl)
+                else:
+                    new_sl = close[i] + cur_atr * atr_sl_mult
+                    sl_price = min(sl_price, new_sl)
+
+                if close[i] > sl_price:
+                    exit_price = close[i]
+                    entry_notional = abs(position) * entry_price
+                    exit_notional = abs(position) * exit_price
+                    total_fee = (entry_notional + exit_notional) * _fee_rate
+                    pnl = position * (exit_price - entry_price) - total_fee
+                    _record_outcome(pnl)
+                    balance += pnl
+                    daily_pnl += pnl
+                    cons_losses = cons_losses + 1 if pnl < 0 else 0
+                    trades.append({
+                        "time": str(ts[i]),
+                        "side": "close_short",
+                        "price": round(float(exit_price), 2),
+                        "size": round(float(abs(position)), 6),
+                        "pnl": round(float(pnl), 2),
+                        "fee": round(float(total_fee), 6),
+                        "exit_reason": "trailing_stop"
+                    })
+                    position = 0.0
+                    entry_price = 0.0
+                    sl_price = 0.0
+                    entry_features = None
+                    last_trade_bar = i
+                    continue
+
+            # Exit: signal drops to 0 while in position (skip when trailing handles exits)
+            if position != 0 and sig == 0 and not use_trailing:
                 exit_price = close[i]
                 entry_notional = abs(position) * entry_price
                 exit_notional = abs(position) * exit_price
@@ -638,8 +705,8 @@ class BacktestEngine:
                 last_trade_bar = i
                 continue
 
-            # Exit: signal flips (1 -> -1 or -1 -> 1)
-            if position > 0 and sig == -1:
+            # Exit: signal flips (1 -> -1 or -1 -> 1) (skip when trailing handles exits)
+            if position > 0 and sig == -1 and not use_trailing:
                 exit_price = close[i]
                 entry_notional = abs(position) * entry_price
                 exit_notional = abs(position) * exit_price
@@ -663,7 +730,7 @@ class BacktestEngine:
                 entry_features = None
                 # Fall through to open short below
 
-            if position < 0 and sig == 1:
+            if position < 0 and sig == 1 and not use_trailing:
                 exit_price = close[i]
                 entry_notional = abs(position) * entry_price
                 exit_notional = abs(position) * exit_price
@@ -691,8 +758,8 @@ class BacktestEngine:
                 continue
 
             # Entry: use reduced size (size_pct) to leave room for fees
-            if position == 0 and sig != 0 and csh > 0 and csl > 0:
-                entry_features = self._compute_entry_features(df, i, csh, csl)
+            if position == 0 and sig != 0 and cur_atr > 0:
+                entry_features = self._compute_entry_features(df, i, 0, 0)
                 # XGBoost gate: отсеиваем сигналы с prob_win < threshold
                 if params.get("xgb_gate"):
                     self._load_xgb_model()
@@ -710,6 +777,11 @@ class BacktestEngine:
                 pos_size = balance * _size_pct / entry_price
                 position = pos_size if sig == 1 else -pos_size
                 entry_bar = i
+                # Set initial trailing stop
+                if sig == 1:
+                    sl_price = entry_price - cur_atr * atr_sl_mult
+                else:
+                    sl_price = entry_price + cur_atr * atr_sl_mult
                 trades.append({
                     "time": str(ts[i]),
                     "side": "buy" if sig == 1 else "sell",
