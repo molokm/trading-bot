@@ -521,6 +521,79 @@ ENTRY_MODES = {
 
 
 # ═══════════════════════════════════════════════════════════════
+# ENSEMBLE MODE (I) — vote across top 3 independent modes
+# ═══════════════════════════════════════════════════════════════
+
+def _ensemble_vote(i, ind, close, vol, long_fns, short_fns, min_votes=2):
+    """Count how many modes signal long/short. Require min_votes."""
+    long_votes = sum(1 for fn in long_fns if fn(i, ind, close, vol))
+    short_votes = sum(1 for fn in short_fns if fn(i, ind, close, vol))
+    if long_votes >= min_votes:
+        return 1
+    elif short_votes >= min_votes:
+        return -1
+    return 0
+
+
+def mode_i_long(i, ind, close, vol):
+    """Ensemble: vote across F (OrderBook), H (OBV Div), A (BB Rev). Need 2/3."""
+    return _ensemble_vote(i, ind, close, vol,
+                          [mode_f_long, mode_h_long, mode_a_long],
+                          [mode_f_short, mode_h_short, mode_a_short]) == 1
+
+def mode_i_short(i, ind, close, vol):
+    return _ensemble_vote(i, ind, close, vol,
+                          [mode_f_long, mode_h_long, mode_a_long],
+                          [mode_f_short, mode_h_short, mode_a_short]) == -1
+
+ENTRY_MODES["I: Ensemble 3-vote"] = (mode_i_long, mode_i_short)
+
+
+# ═══════════════════════════════════════════════════════════════
+# MULTI-TF MODE (J) — 1H direction + 15m entry timing
+# ═══════════════════════════════════════════════════════════════
+
+def compute_1h_direction(close_1h, ema_period=50):
+    """Pre-compute 1H trend direction array. +1 = uptrend, -1 = downtrend."""
+    e = ema(close_1h, ema_period)
+    direction = np.zeros(len(close_1h))
+    for i in range(1, len(close_1h)):
+        direction[i] = 1 if close_1h[i] > e[i] else -1
+    return direction
+
+
+def mode_j_long(i, ind, close, vol):
+    """Multi-TF: 1H uptrend + OBV bullish + price near VWAP support."""
+    # Map 15m bar index to 1H direction
+    h_idx = i // 3  # 3 x 15m = 1H
+    if "h1_direction" not in ind or h_idx >= len(ind["h1_direction"]):
+        return False
+    h1_dir = ind["h1_direction"][h_idx]
+    return (
+        h1_dir > 0 and  # 1H uptrend
+        ind["obv"][i] > ind["obv_ema21"][i] and  # OBV bullish
+        ind["vwap_dev"][i] < 0 and  # price below VWAP
+        ind["rsi14"][i] < 45 and
+        ind["rsi14"][i] > ind["rsi14"][i-1]  # turning up
+    )
+
+def mode_j_short(i, ind, close, vol):
+    h_idx = i // 3
+    if "h1_direction" not in ind or h_idx >= len(ind["h1_direction"]):
+        return False
+    h1_dir = ind["h1_direction"][h_idx]
+    return (
+        h1_dir < 0 and  # 1H downtrend
+        ind["obv"][i] < ind["obv_ema21"][i] and
+        ind["vwap_dev"][i] > 0 and  # price above VWAP
+        ind["rsi14"][i] > 55 and
+        ind["rsi14"][i] < ind["rsi14"][i-1]  # turning down
+    )
+
+ENTRY_MODES["J: Multi-TF"] = (mode_j_long, mode_j_short)
+
+
+# ═══════════════════════════════════════════════════════════════
 # PART 3: BACKTEST ENGINE
 # ═══════════════════════════════════════════════════════════════
 
@@ -529,24 +602,24 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                        trail_activate=1.0, trail_atr=0.75,
                        max_daily_loss=0.03, max_daily_trades=10,
                        cooldown=3, max_hold=20, fee=0.0005,
-                       long_fn=None, short_fn=None):
+                       long_fn=None, short_fn=None,
+                       partial_tp_pct=0.0, partial_tp_atr=1.0,
+                       session_filter=False, dynamic_sizing=False,
+                       session_start=8, session_end=20,
+                       be_atr=0.0, precomputed_ind=None):
     """
-    Full backtest of scalping strategy with risk management.
+    Enhanced backtest: partial TP, session filter, breakeven, dynamic sizing.
 
-    Parameters:
-      - risk_pct: max risk per trade (1% = 0.01)
-      - sl_atr: stop loss in ATR multiples
-      - tp_atr: take profit in ATR multiples
-      - trail_activate: trailing activation in ATR from entry
-      - trail_atr: trailing distance in ATR
-      - max_daily_loss: max daily drawdown (3% = 0.03)
-      - max_daily_trades: max trades per day
-      - cooldown: bars between trades
-      - max_hold: max bars to hold position
-      - fee: taker fee rate
+    New params:
+      - partial_tp_pct: fraction of position to close at partial_tp_atr (0=disabled)
+      - partial_tp_atr: ATR level for partial take-profit
+      - session_filter: only trade during session_start..session_end UTC hours
+      - dynamic_sizing: scale risk_pct by recent win rate
+      - session_start/end: UTC hours (5m bar index // 288 * 24 + (bar % 288) // 12)
+      - be_atr: move SL to breakeven after this ATR profit (0=disabled)
     """
     n = len(close)
-    ind = compute_all_indicators(close, high, low, vol)
+    ind = precomputed_ind if precomputed_ind is not None else compute_all_indicators(close, high, low, vol)
     if long_fn is None:
         long_fn = mode_e_long
     if short_fn is None:
@@ -557,6 +630,7 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
     equity = [float(cap)]
 
     position = 0.0
+    position_remaining = 0.0  # after partial TP
     entry_price = 0.0
     entry_bar = -999
     sl_price = 0.0
@@ -564,11 +638,17 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
     trail_active = False
     trail_sl = 0.0
     entry_atr = 0.0
+    partial_taken = False
+    breakeven_active = False
 
     trades = []
     daily_pnl = 0.0
     daily_trades = 0
     current_date = None
+
+    # Recent trade stats for dynamic sizing
+    recent_wr = 0.5
+    recent_window = 20
 
     for i in range(50, n):
         # ─── Daily reset ───
@@ -583,9 +663,7 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
             current_date = ts_date
 
         # ─── Track equity ───
-        if position > 0:
-            unrealized = position * (close[i] - entry_price)
-        elif position < 0:
+        if position != 0:
             unrealized = position * (close[i] - entry_price)
         else:
             unrealized = 0
@@ -602,8 +680,21 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                 daily_pnl += pnl
                 trades.append({"pnl": pnl, "reason": "daily_limit", "bar": i})
                 position = 0
+                position_remaining = 0
             equity[-1] = balance
             continue
+
+        # ─── Session filter ───
+        if session_filter:
+            try:
+                # Use actual timestamp for session detection
+                ts_val = int(ts[i])
+                hour = (ts_val // 3600) % 24  # UTC hour
+                in_session = session_start <= hour < session_end
+            except:
+                in_session = True
+        else:
+            in_session = True
 
         # ─── Manage existing position ───
         if position != 0:
@@ -616,13 +707,34 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                     new_trail = close[i] - entry_atr * trail_atr
                     trail_sl = max(trail_sl, new_trail)
 
+                # Breakeven: move SL to entry + small buffer
+                if be_atr > 0 and not breakeven_active:
+                    if close[i] >= entry_price + entry_atr * be_atr:
+                        sl_price = max(sl_price, entry_price + entry_price * 0.0001)
+                        breakeven_active = True
+
+                # Partial TP: close partial_pct at partial_tp_atr
+                if not partial_taken and partial_tp_pct > 0:
+                    if close[i] >= entry_price + entry_atr * partial_tp_atr:
+                        partial_size = position * partial_tp_pct
+                        notional_p = partial_size * entry_price
+                        exit_p = entry_price + entry_atr * partial_tp_atr
+                        fee_p = (notional_p + partial_size * exit_p) * fee
+                        pnl_p = partial_size * (exit_p - entry_price) - fee_p
+                        balance += pnl_p
+                        daily_pnl += pnl_p
+                        position -= partial_size
+                        position_remaining = position
+                        partial_taken = True
+                        trades.append({"pnl": pnl_p, "reason": "partial_tp", "bar": i, "partial": True})
+
                 # Check exits (priority: SL > trail > TP > time)
                 exit_price = None
                 exit_reason = None
 
                 if close[i] <= sl_price:
                     exit_price = sl_price
-                    exit_reason = "stop_loss"
+                    exit_reason = "stop_loss" if not breakeven_active else "breakeven_exit"
                 elif trail_active and close[i] <= trail_sl:
                     exit_price = trail_sl
                     exit_reason = "trailing_stop"
@@ -639,12 +751,31 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                     new_trail = close[i] + entry_atr * trail_atr
                     trail_sl = min(trail_sl, new_trail)
 
+                if be_atr > 0 and not breakeven_active:
+                    if close[i] <= entry_price - entry_atr * be_atr:
+                        sl_price = min(sl_price, entry_price - entry_price * 0.0001)
+                        breakeven_active = True
+
+                if not partial_taken and partial_tp_pct > 0:
+                    if close[i] <= entry_price - entry_atr * partial_tp_atr:
+                        partial_size = abs(position) * partial_tp_pct
+                        exit_p = entry_price - entry_atr * partial_tp_atr
+                        notional_p = partial_size * entry_price
+                        fee_p = (notional_p + partial_size * exit_p) * fee
+                        pnl_p = partial_size * (entry_price - exit_p) - fee_p
+                        balance += pnl_p
+                        daily_pnl += pnl_p
+                        position += partial_size if position < 0 else -partial_size
+                        position_remaining = position
+                        partial_taken = True
+                        trades.append({"pnl": pnl_p, "reason": "partial_tp", "bar": i, "partial": True})
+
                 exit_price = None
                 exit_reason = None
 
                 if close[i] >= sl_price:
                     exit_price = sl_price
-                    exit_reason = "stop_loss"
+                    exit_reason = "stop_loss" if not breakeven_active else "breakeven_exit"
                 elif trail_active and close[i] >= trail_sl:
                     exit_price = trail_sl
                     exit_reason = "trailing_stop"
@@ -671,11 +802,14 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                     "bar": i,
                 })
                 position = 0
+                position_remaining = 0
                 trail_active = False
+                partial_taken = False
+                breakeven_active = False
                 entry_bar = i  # for cooldown
 
         # ─── Check for new entry ───
-        if position == 0:
+        if position == 0 and in_session:
             if i - entry_bar < cooldown:
                 equity.append(balance)
                 continue
@@ -688,16 +822,26 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                 equity.append(balance)
                 continue
 
+            # Dynamic sizing: scale risk by recent win rate
+            cur_risk = risk_pct
+            if dynamic_sizing and len(trades) >= recent_window:
+                recent_trades = trades[-recent_window:]
+                recent_wr = sum(1 for t in recent_trades if t["pnl"] > 0) / len(recent_trades)
+                if recent_wr > 0.55:
+                    cur_risk = risk_pct * 1.5  # hot streak → more risk
+                elif recent_wr < 0.45:
+                    cur_risk = risk_pct * 0.5  # cold streak → less risk
+
             # LONG entry
             if long_fn(i, ind, close, vol):
-                # Position sizing: risk 1% of capital
-                risk_amount = balance * risk_pct
+                risk_amount = balance * cur_risk
                 cur_sl_mult = ind["sl_mult"][i] if "sl_mult" in ind else sl_atr
                 cur_tp_mult = ind["tp_mult"][i] if "tp_mult" in ind else tp_atr
                 sl_distance = cur_atr * cur_sl_mult
                 pos_size = risk_amount / sl_distance  # contracts
                 entry_price = close[i]
                 position = pos_size
+                position_remaining = pos_size
                 sl_price = entry_price - sl_distance
                 tp_price = entry_price + cur_atr * cur_tp_mult
                 trail_sl = entry_price - cur_atr * cur_sl_mult
@@ -705,17 +849,20 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                 entry_atr = cur_atr
                 entry_bar = i
                 daily_trades += 1
+                partial_taken = False
+                breakeven_active = False
                 equity.append(balance)
 
             # SHORT entry
             elif short_fn(i, ind, close, vol):
-                risk_amount = balance * risk_pct
+                risk_amount = balance * cur_risk
                 cur_sl_mult = ind["sl_mult"][i] if "sl_mult" in ind else sl_atr
                 cur_tp_mult = ind["tp_mult"][i] if "tp_mult" in ind else tp_atr
                 sl_distance = cur_atr * cur_sl_mult
                 pos_size = risk_amount / sl_distance
                 entry_price = close[i]
                 position = -pos_size
+                position_remaining = -pos_size
                 sl_price = entry_price + sl_distance
                 tp_price = entry_price - cur_atr * cur_tp_mult
                 trail_sl = entry_price + cur_atr * cur_sl_mult
@@ -723,9 +870,13 @@ def run_scalp_backtest(close, high, low, vol, ts, cap=10000,
                 entry_atr = cur_atr
                 entry_bar = i
                 daily_trades += 1
+                partial_taken = False
+                breakeven_active = False
                 equity.append(balance)
             else:
                 equity.append(balance)
+        elif not in_session and position == 0:
+            equity.append(balance)
 
     # ─── Close remaining position ───
     if position != 0:
@@ -894,6 +1045,13 @@ async def main():
 
         # ─── Count signals for each mode ───
         ind = compute_all_indicators(close, high, low, vol)
+        # For mode J (Multi-TF): compute 1H direction from 5m data
+        if tf_name in ("15m", "5m"):
+            close_5m = arr[:, 4].astype(float)
+            close_1h = downsample_5m_to_1h(cache) if tf_name == "5m" else downsample_5m_to_15m(cache)
+            close_1h_arr = np.array([c[4] for c in close_1h], dtype=float)
+            if len(close_1h_arr) > 50:
+                ind["h1_direction"] = compute_1h_direction(close_1h_arr, ema_period=50)
         n = len(close)
         print(f"\n{'Mode':<30} {'LONG':>6} {'SHORT':>6} {'Total':>6}")
         print("-" * 52)
@@ -903,7 +1061,7 @@ async def main():
             ns = sum(1 for i in range(start, n) if sf(i, ind, close, vol))
             print(f"  {name:<28} {nl:>6} {ns:>6} {nl+ns:>6}")
 
-        # ─── Test all 8 modes with default params ───
+        # ─── Test all modes with default params ───
         print(f"\n  Default params — SL=1.5 TP=2.0 Trail=1.0/0.75 CD=5 MH=30")
         print(f"  {'Mode':<30} {'Ret%':>7} {'#':>4} {'WR%':>5} {'PF':>5} {'DD%':>5}")
         print(f"  {'-'*62}")
@@ -932,6 +1090,105 @@ async def main():
             mode_results[name] = (bal, trades, eq, ret, wr, pf, dd)
             marker = " *" if ret > 0 and pf > 1.0 else ""
             print(f"  {name:<28} {ret:>+6.1f}% {len(trades):>4} {wr:>5.1f}% {pf:>5.2f} {dd:>5.1f}%{marker}")
+
+        # ─── Test enhanced features on best modes ───
+        print(f"\n  === ENHANCED FEATURES TEST ===")
+        print(f"  Testing: partial TP, breakeven, session filter, dynamic sizing")
+        enhanced_modes = [
+            ("F: OrderBook Proxy", ENTRY_MODES["F: OrderBook Proxy"]),
+            ("H: OBV Divergence", ENTRY_MODES["H: OBV Divergence"]),
+            ("I: Ensemble 3-vote", ENTRY_MODES["I: Ensemble 3-vote"]),
+        ]
+        if f"J: Multi-TF" in ENTRY_MODES:
+            enhanced_modes.append(("J: Multi-TF", ENTRY_MODES["J: Multi-TF"]))
+
+        print(f"\n  {'Mode':<30} {'Enhancement':<25} {'Ret%':>7} {'#':>4} {'WR%':>5} {'PF':>5} {'DD%':>5}")
+        print(f"  {'-'*80}")
+
+        for mode_name, (lf, sf) in enhanced_modes:
+            # Baseline
+            bal0, trades0, eq0 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf)
+            if trades0:
+                ret0 = (bal0 / 10000 - 1) * 100
+                w0 = sum(1 for t in trades0 if t["pnl"] > 0) / len(trades0) * 100
+                g0 = sum(t["pnl"] for t in trades0 if t["pnl"] > 0)
+                l0 = abs(sum(t["pnl"] for t in trades0 if t["pnl"] <= 0)) or 0.001
+                print(f"  {mode_name:<30} {'Baseline':<25} {ret0:>+6.1f}% {len(trades0):>4} {w0:>5.1f}% {g0/l0:>5.2f}")
+
+            # + Partial TP (30% at 1.0 ATR)
+            bal1, trades1, eq1 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf,
+                partial_tp_pct=0.3, partial_tp_atr=1.0)
+            if trades1:
+                ret1 = (bal1 / 10000 - 1) * 100
+                w1 = sum(1 for t in trades1 if t["pnl"] > 0) / len(trades1) * 100
+                g1 = sum(t["pnl"] for t in trades1 if t["pnl"] > 0)
+                l1 = abs(sum(t["pnl"] for t in trades1 if t["pnl"] <= 0)) or 0.001
+                marker = " *" if ret1 > ret0 else ""
+                print(f"  {'':<30} {'+Partial TP 30%@1.0ATR':<25} {ret1:>+6.1f}% {len(trades1):>4} {w1:>5.1f}% {g1/l1:>5.2f}{marker}")
+
+            # + Breakeven at 0.5 ATR
+            bal2, trades2, eq2 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf,
+                be_atr=0.5)
+            if trades2:
+                ret2 = (bal2 / 10000 - 1) * 100
+                w2 = sum(1 for t in trades2 if t["pnl"] > 0) / len(trades2) * 100
+                g2 = sum(t["pnl"] for t in trades2 if t["pnl"] > 0)
+                l2 = abs(sum(t["pnl"] for t in trades2 if t["pnl"] <= 0)) or 0.001
+                marker = " *" if ret2 > ret0 else ""
+                print(f"  {'':<30} {'+Breakeven 0.5ATR':<25} {ret2:>+6.1f}% {len(trades2):>4} {w2:>5.1f}% {g2/l2:>5.2f}{marker}")
+
+            # + Session filter (UTC 8-20)
+            bal3, trades3, eq3 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf,
+                session_filter=True, session_start=8, session_end=20)
+            if trades3:
+                ret3 = (bal3 / 10000 - 1) * 100
+                w3 = sum(1 for t in trades3 if t["pnl"] > 0) / len(trades3) * 100
+                g3 = sum(t["pnl"] for t in trades3 if t["pnl"] > 0)
+                l3 = abs(sum(t["pnl"] for t in trades3 if t["pnl"] <= 0)) or 0.001
+                marker = " *" if ret3 > ret0 else ""
+                print(f"  {'':<30} {'+Session UTC 8-20':<25} {ret3:>+6.1f}% {len(trades3):>4} {w3:>5.1f}% {g3/l3:>5.2f}{marker}")
+
+            # + Dynamic sizing
+            bal4, trades4, eq4 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf,
+                dynamic_sizing=True)
+            if trades4:
+                ret4 = (bal4 / 10000 - 1) * 100
+                w4 = sum(1 for t in trades4 if t["pnl"] > 0) / len(trades4) * 100
+                g4 = sum(t["pnl"] for t in trades4 if t["pnl"] > 0)
+                l4 = abs(sum(t["pnl"] for t in trades4 if t["pnl"] <= 0)) or 0.001
+                marker = " *" if ret4 > ret0 else ""
+                print(f"  {'':<30} {'+Dynamic Sizing':<25} {ret4:>+6.1f}% {len(trades4):>4} {w4:>5.1f}% {g4/l4:>5.2f}{marker}")
+
+            # ALL COMBINED
+            bal5, trades5, eq5 = run_scalp_backtest(
+                close, high, low, vol, ts, cap=10000,
+                sl_atr=1.0, tp_atr=1.5, trail_activate=0.5, trail_atr=0.5,
+                cooldown=12, max_hold=30, fee=0.0005, long_fn=lf, short_fn=sf,
+                partial_tp_pct=0.3, partial_tp_atr=1.0,
+                be_atr=0.5, session_filter=True, session_start=8, session_end=20,
+                dynamic_sizing=True)
+            if trades5:
+                ret5 = (bal5 / 10000 - 1) * 100
+                w5 = sum(1 for t in trades5 if t["pnl"] > 0) / len(trades5) * 100
+                g5 = sum(t["pnl"] for t in trades5 if t["pnl"] > 0)
+                l5 = abs(sum(t["pnl"] for t in trades5 if t["pnl"] <= 0)) or 0.001
+                marker = " ★" if ret5 > ret0 else ""
+                print(f"  {'':<30} {'ALL COMBINED':<25} {ret5:>+6.1f}% {len(trades5):>4} {w5:>5.1f}% {g5/l5:>5.2f}{marker}")
 
         # ─── Parameter sweep on modes with positive signals ───
         profitable_modes = [(k, v) for k, v in mode_results.items()
@@ -989,6 +1246,97 @@ async def main():
                 analyze_results(10000, bal2, trades2, eq2)
             else:
                 print(f"\n  No profitable combo found for {mode_name} on {tf_name}.")
+
+    # ═══════════════════════════════════════════════════════════════
+    # DEEP COMBO SWEEP — combine all winning enhancements
+    # ═══════════════════════════════════════════════════════════════
+    print(f"\n{'#'*70}")
+    print(f" DEEP COMBO SWEEP: Mode F (OrderBook) + H (OBV) on 1H")
+    print(f"{'#'*70}")
+
+    # Use 1H data
+    arr_1h = np.array(timeframes[2][1], dtype=object)
+    close_1h = arr_1h[:, 4].astype(float)
+    high_1h = arr_1h[:, 2].astype(float)
+    low_1h = arr_1h[:, 3].astype(float)
+    vol_1h = arr_1h[:, 5].astype(float)
+    ts_1h = arr_1h[:, 0]
+
+    # Also use 15m for multi-TF mode J
+    arr_15m = np.array(timeframes[1][1], dtype=object)
+    close_15m = arr_15m[:, 4].astype(float)
+    high_15m = arr_15m[:, 2].astype(float)
+    low_15m = arr_15m[:, 3].astype(float)
+    vol_15m = arr_15m[:, 5].astype(float)
+    ts_15m = arr_15m[:, 0]
+
+    # 1H with all enhancements
+    print(f"\n Mode F (OrderBook) on 1H — FULL ENHANCEMENTS SWEEP")
+    print(f" {'risk%':>6} {'SL':>4} {'TP':>4} {'TrA':>4} {'TrD':>4} {'CD':>3} {'MH':>3} {'PT%':>4} {'BE':>4} {'Sess':>6} {'Dyn':>4} {'#':>4} {'Ret%':>7} {'WR%':>5} {'PF':>5} {'DD%':>5} {'R/D':>5}")
+    print(f" {'-'*92}")
+
+    best_score = -999
+    best_params = None
+    best_result = None
+    results_list = []
+
+    for risk in [0.005, 0.01, 0.015, 0.02]:
+        for sl in [0.8, 1.0, 1.5]:
+            for tp in [1.5, 2.0, 3.0]:
+                for tr_a in [0.3, 0.5, 0.8]:
+                    for tr_d in [0.3, 0.5]:
+                        for cd in [8, 12, 15]:
+                            for pt in [0.0, 0.3]:
+                                for be in [0.0, 0.5]:
+                                    for sess in [False, True]:
+                                        for dyn in [False, True]:
+                                            bal, tr, eq = run_scalp_backtest(
+                                                close_1h, high_1h, low_1h, vol_1h, ts_1h,
+                                                cap=10000, risk_pct=risk,
+                                                sl_atr=sl, tp_atr=tp,
+                                                trail_activate=tr_a, trail_atr=tr_d,
+                                                cooldown=cd, max_hold=30, fee=0.0005,
+                                                long_fn=mode_f_long, short_fn=mode_f_short,
+                                                partial_tp_pct=pt, partial_tp_atr=1.0,
+                                                be_atr=be, session_filter=sess,
+                                                session_start=8, session_end=20,
+                                                dynamic_sizing=dyn)
+                                            if len(tr) < 10:
+                                                continue
+                                            ret = (bal / 10000 - 1) * 100
+                                            wins = [t for t in tr if t["pnl"] > 0]
+                                            wr = len(wins) / len(tr) * 100
+                                            gp = sum(t["pnl"] for t in wins) if wins else 0
+                                            gl = abs(sum(t["pnl"] for t in tr if t["pnl"] <= 0)) or 0.001
+                                            pf = gp / gl
+                                            eq_a = np.array(eq)
+                                            dd = ((np.maximum.accumulate(eq_a) - eq_a) / np.maximum.accumulate(eq_a) * 100).max()
+                                            rdd = ret / dd if dd > 0 else 0
+
+                                            if ret > 0 and pf > 1.0 and rdd > best_score:
+                                                best_score = rdd
+                                                best_params = (risk, sl, tp, tr_a, tr_d, cd, pt, be, sess, dyn)
+                                                best_result = (bal, tr, eq)
+
+                                            if pf > 1.2 and ret > 5:
+                                                results_list.append((ret, wr, pf, dd, rdd, risk, sl, tp, tr_a, tr_d, cd, pt, be, sess, dyn, len(tr)))
+
+    # Sort by return
+    results_list.sort(key=lambda x: x[0], reverse=True)
+    for ret, wr, pf, dd, rdd, risk, sl, tp, tr_a, tr_d, cd, pt, be, sess, dyn, n_tr in results_list[:25]:
+        sess_s = "8-20" if sess else "all"
+        pt_s = f"{pt*100:.0f}%" if pt > 0 else "off"
+        be_s = f"{be:.1f}" if be > 0 else "off"
+        dyn_s = "on" if dyn else "off"
+        print(f"  {risk*100:>5.1f}% {sl:>4.1f} {tp:>4.1f} {tr_a:>4.1f} {tr_d:>4.2f} {cd:>3} {pt_s:>4} {be_s:>4} {sess_s:>6} {dyn_s:>4} {n_tr:>4} {ret:>+6.1f}% {wr:>5.1f}% {pf:>5.2f} {dd:>5.1f}% {rdd:>5.2f}")
+
+    if best_params:
+        risk, sl, tp, tr_a, tr_d, cd, pt, be, sess, dyn = best_params
+        print(f"\n >>> BEST COMBO: risk={risk*100:.1f}% SL={sl} TP={tp} Trail={tr_a}/{tr_d} CD={cd} Partial={pt*100:.0f}% BE={be} Session={'8-20' if sess else 'all'} Dynamic={dyn}")
+        bal, tr, eq = best_result
+        analyze_results(10000, bal, tr, eq)
+    else:
+        print(f"\n No profitable combo found.")
 
 
 if __name__ == "__main__":
