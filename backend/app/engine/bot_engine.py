@@ -203,6 +203,7 @@ class BotEngine:
         swing_window = int(self.params.get("swing_window", 40))
         pullback_pct = float(self.params.get("pullback_pct", 0.993))
         near_sl_pct = float(self.params.get("near_sl_pct", 1.003))
+        trend_buffer = float(self.params.get("trend_buffer_pct", 0.003))
 
         ema200 = pd.Series(close).ewm(span=ema_trend, adjust=False).mean().values
         ema_val = ema200[-1]
@@ -228,8 +229,8 @@ class BotEngine:
         loss_arr = (-delta.where(delta < 0, 0.0)).rolling(14).mean().values
         rsi_val = 100.0 - 100.0 / (1.0 + gain[-1] / loss_arr[-1]) if loss_arr[-1] != 0 else 50.0
 
-        uptrend = current_price > ema_val
-        downtrend = current_price < ema_val
+        uptrend = current_price > ema_val * (1 + trend_buffer)
+        downtrend = current_price < ema_val * (1 - trend_buffer)
 
         result = {
             "current_price": round(current_price, 2),
@@ -238,6 +239,7 @@ class BotEngine:
             "swing_high": round(csh, 2),
             "swing_low": round(csl, 2),
             "trend": "UP" if uptrend else ("DOWN" if downtrend else "NEUTRAL"),
+            "trend_buffer_pct": trend_buffer,
             "intended_position": intended,
             "action": "HOLD" if intended != 0 else "WAIT",
         }
@@ -296,11 +298,13 @@ class BotEngine:
             if uptrend:
                 result["long_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
                 result["distance_to_long"] = round(current_price - csh * pullback_pct, 2)
-                result["note"] = f"Uptrend. Need pullback to ${csh * pullback_pct:,.2f} zone"
-            else:
+                result["note"] = f"Тренд вверх. Ожидание отката к ${csh * pullback_pct:,.2f}"
+            elif downtrend:
                 result["short_zone"] = [round(csl * near_sl_pct, 2), round(csh * pullback_pct, 2)]
                 result["distance_to_short"] = round(csh * pullback_pct - current_price, 2)
-                result["note"] = f"Downtrend. Need rally to ${csl * near_sl_pct:,.2f} zone"
+                result["note"] = f"Тренд вниз. Ожидание роста к ${csl * near_sl_pct:,.2f}"
+            else:
+                result["note"] = f"Нейтральная зона (±{trend_buffer*100:.1f}% от EMA200). Ожидание подтверждения тренда"
 
         return result
 

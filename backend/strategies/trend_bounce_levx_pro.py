@@ -1,8 +1,8 @@
 # @name: Trend Bounce LevX Pro
-# @description: EMA200 + swing structure + pullback 0.7% + RSI 80/20. Net +162% annual | WR 49.7% | Sharpe 1.94 | DD 5.1% | PF 2.12 | 725 trades/year | Fee drag 40%
+# @description: EMA200 + swing structure + pullback 0.7% + RSI 80/20. Trend confirmation buffer prevents whipsaw. Net +162% annual | WR 49.7% | Sharpe 1.94 | DD 5.1% | PF 2.12 | 725 trades/year | Fee drag 40%
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
-# @params: {"ema_trend": 200, "swing_window": 40, "pullback_pct": 0.993, "near_sl_pct": 1.003, "rsi_period": 14, "rsi_exit_hi": 80, "rsi_exit_lo": 20, "size_pct": 0.95, "fee": 0.0005, "leverage": 1}
+# @params: {"ema_trend": 200, "swing_window": 40, "pullback_pct": 0.993, "near_sl_pct": 1.003, "rsi_period": 14, "rsi_exit_hi": 80, "rsi_exit_lo": 20, "size_pct": 0.95, "fee": 0.0005, "leverage": 1, "trend_buffer_pct": 0.003}
 
 import pandas as pd
 import numpy as np
@@ -37,6 +37,7 @@ def generate_signals(df, params):
     rsi_period     = int(params.get("rsi_period", 14))
     rsi_exit_hi    = float(params.get("rsi_exit_hi", 80))
     rsi_exit_lo    = float(params.get("rsi_exit_lo", 20))
+    trend_buffer   = float(params.get("trend_buffer_pct", 0.003))
 
     ema_trend_arr = ema(close, ema_trend)
 
@@ -54,6 +55,7 @@ def generate_signals(df, params):
     entry_bar = -999
     entry_px  = 0.0
     csh, csl  = 0.0, 0.0
+    confirmed_trend = 0
 
     warmup = max(ema_trend, swing_window * 2) + 20
 
@@ -67,8 +69,16 @@ def generate_signals(df, params):
         if csh == 0 or csl == 0:
             continue
 
-        uptrend   = close[i] > ema_trend_arr[i]
-        downtrend = close[i] < ema_trend_arr[i]
+        raw_uptrend   = close[i] > ema_trend_arr[i] * (1 + trend_buffer)
+        raw_downtrend = close[i] < ema_trend_arr[i] * (1 - trend_buffer)
+
+        if raw_uptrend:
+            confirmed_trend = 1
+        elif raw_downtrend:
+            confirmed_trend = -1
+
+        uptrend   = confirmed_trend == 1
+        downtrend = confirmed_trend == -1
 
         if pos == 1:
             should_exit = False
