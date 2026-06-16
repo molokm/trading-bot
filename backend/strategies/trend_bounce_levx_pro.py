@@ -1,5 +1,5 @@
 # @name: Trend Bounce LevX Pro
-# @description: EMA200 + swing structure + pullback 0.7% + RSI 80/20. Trend confirmation buffer prevents whipsaw. Net +162% annual | WR 49.7% | Sharpe 1.94 | DD 5.1% | PF 2.12 | 725 trades/year | Fee drag 40%
+# @description: EMA200 + swing structure + pullback 0.7% + RSI 80/20. Trend confirmation buffer prevents whipsaw. Net +104.5% annual | WR 51.2% | PF 1.84 | 424 trades/year (OKX data, 0.05% fee, 1x)
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
 # @params: {"ema_trend": 200, "swing_window": 40, "pullback_pct": 0.993, "near_sl_pct": 1.003, "rsi_period": 14, "rsi_exit_hi": 80, "rsi_exit_lo": 20, "size_pct": 0.95, "fee": 0.0005, "leverage": 1, "trend_buffer_pct": 0.003}

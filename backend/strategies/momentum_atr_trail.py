@@ -1,5 +1,5 @@
 # @name: Momentum ATR Trail
-# @description: EMA200 + swing30 + ATR 2x trail stop. Net +72% annual | WR 59.7% | Sharpe 1.57 | DD 2.2% | PF 4.59 | 295 trades/year | Fee drag 33%
+# @description: EMA200 + swing30 + ATR 2x trail stop. Net +195.2% annual | WR 57.0% | PF 4.66 | 472 trades/year (OKX data, 0.05% fee, 1x)
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
 # @params: {"ema_trend": 200, "swing_window": 30, "atr_period": 14, "atr_mult": 2.0, "size_pct": 0.95, "fee": 0.0005}

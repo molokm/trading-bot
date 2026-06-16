@@ -1,5 +1,5 @@
 # @name: Trend Bounce Pro
-# @description: EMA200 + MACD + RSI momentum. Net +86% annual | WR 43.9% | Sharpe 1.30 | DD 8.7% | PF 1.55 | 884 trades/year | Fee drag 56%
+# @description: EMA200 + MACD + RSI momentum. Net +138.8% annual | WR 56.0% | PF 2.33 | 393 trades/year (OKX data, 0.05% fee, 1x)
 # @timeframe: 5m
 # @symbol: BTC-USDT-SWAP
 # @params: {"ema_trend": 200, "swing_window": 40, "pullback_bars": 5, "size_pct": 0.95, "fee": 0.0005, "rsi_exit": 80}
