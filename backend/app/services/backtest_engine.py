@@ -554,6 +554,9 @@ class BacktestEngine:
         atr_period = int(params.get("atr_period", 14))
         atr_sl_mult = float(params.get("atr_sl_mult", 2.0))
         atr_lock_mult = float(params.get("atr_lock_mult", 3.0))
+        cooldown = int(params.get("cooldown_bars", 10))
+        _fee_rate = params.get("fee", 0.001)
+        _size_pct = params.get("size_pct", 0.95)
 
         tr = np.maximum(high[1:] - low[1:],
                         np.maximum(np.abs(high[1:] - close[:-1]),
@@ -754,7 +757,7 @@ class BacktestEngine:
                 entry_features = None
 
             # Cooldown
-            if i - entry_bar < 3:
+            if i - entry_bar < cooldown:
                 continue
 
             # Entry: use reduced size (size_pct) to leave room for fees
