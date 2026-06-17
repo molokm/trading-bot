@@ -860,6 +860,8 @@ class BacktestEngine:
         max_cons_losses = params.get("max_consecutive_losses", 5)
         use_atr_stops = params.get("use_atr_stops", True) and not has_own_stops
         use_trailing = params.get("use_trailing", False) and not has_own_stops
+        trail_activate_atr = float(params.get("trail_activate_atr", 2.0))
+        trail_dist = float(params.get("trail_dist", 1.5))
         _fee_rate = params.get("fee", 0.001)
         _size_pct = params.get("size_pct", 0.95)
 
