@@ -2,7 +2,7 @@
 # @description: SuperTrend + EMA200 + ADX + RSI AI scoring on 4H. Walk-forward validated: WF avg 22.3% annual at 1x, MaxDD 12%, PF 2.74, 100% consistency across 3 windows (2017-2026).
 # @timeframe: 4H
 # @symbol: BTC-USDT-SWAP
-# @params: {"st_period": 10, "st_mult": 3.0, "ema_period": 200, "adx_period": 14, "adx_threshold": 25, "rsi_period": 14, "min_score": 20, "trailing_pct": 0.03, "cooldown_bars": 3, "size_pct": 0.95, "fee": 0.0005, "leverage": 1}
+# @params: {"st_period": 10, "st_mult": 3.0, "ema_period": 200, "adx_period": 14, "adx_threshold": 25, "rsi_period": 14, "min_score": 20, "trailing_pct": 0.03, "cooldown_bars": 3, "size_pct": 0.95, "fee": 0.0005, "leverage": 1, "use_atr_stops": false}
 
 import pandas as pd
 import numpy as np
@@ -95,6 +95,7 @@ def generate_signals(df, params):
     rsi_period = int(params.get("rsi_period", 14))
     min_score = float(params.get("min_score", 20))
     cooldown = int(params.get("cooldown_bars", 3))
+    trailing_pct = float(params.get("trailing_pct", 0.03))
 
     st_line, st_dir = calc_supertrend(high, low, close, st_period, st_mult)
     ema_val = ema(close, ema_period)
@@ -104,6 +105,8 @@ def generate_signals(df, params):
     signals = np.zeros(n)
     pos = 0
     entry_bar = -999
+    entry_price = 0.0
+    peak_price = 0.0
     warmup = max(ema_period + 50, 300)
 
     for i in range(warmup, n):
@@ -111,6 +114,31 @@ def generate_signals(df, params):
             continue
 
         if pos != 0:
+            if pos == 1:
+                peak_price = max(peak_price, high[i])
+                if close[i] <= peak_price * (1 - trailing_pct):
+                    signals[i] = 2
+                    pos = 0
+                    entry_bar = i
+                    continue
+                if st_dir[i] == -1:
+                    signals[i] = 0
+                    pos = 0
+                    entry_bar = i
+                    continue
+            elif pos == -1:
+                peak_price = min(peak_price, low[i])
+                if close[i] >= peak_price * (1 + trailing_pct):
+                    signals[i] = -2
+                    pos = 0
+                    entry_bar = i
+                    continue
+                if st_dir[i] == 1:
+                    signals[i] = 0
+                    pos = 0
+                    entry_bar = i
+                    continue
+
             signals[i] = pos
             continue
 
@@ -143,9 +171,13 @@ def generate_signals(df, params):
             signals[i] = 1
             pos = 1
             entry_bar = i
+            entry_price = close[i]
+            peak_price = high[i]
         elif st_dir[i] == -1 and st_dir[i - 1] == 1 and score_short >= min_score:
             signals[i] = -1
             pos = -1
             entry_bar = i
+            entry_price = close[i]
+            peak_price = low[i]
 
     return pd.Series(signals, index=df.index)
