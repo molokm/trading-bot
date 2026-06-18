@@ -94,6 +94,9 @@ export const api = {
   stopBot: (botId) =>
     request(`/live/stop/${botId}`, { method: 'POST' }),
 
+  startBot: (botId) =>
+    request(`/live/start/${botId}`, { method: 'POST' }),
+
   restartBot: (botId) =>
     request(`/live/restart/${botId}`, { method: 'POST' }),
 

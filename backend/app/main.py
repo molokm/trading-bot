@@ -126,6 +126,14 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    # Gracefully stop all running bots
+    for bid, bot in list(live_bots.items()):
+        try:
+            if bot.status == "running":
+                print(f"[shutdown] Stopping bot {bid}...", flush=True)
+                await bot.stop()
+        except Exception as e:
+            print(f"[shutdown] Error stopping bot {bid}: {e}", flush=True)
     if ws_manager:
         await ws_manager.stop()
     await db.close()
@@ -187,6 +195,7 @@ async def _okx_call(coro_factory):
 async def _restore_bots():
     bots = await db.get_bots()
     restored = 0
+    auto_started = 0
     for b in bots:
         try:
             bid = b["id"]
@@ -209,14 +218,24 @@ async def _restore_bots():
             bot.status = "stopped"
             live_bots[bid] = bot
             restored += 1
-            # Auto-start bots that were running before restart
-            if b.get("status") == "running":
-                asyncio.create_task(bot.start())
-                print(f"[startup] Auto-started bot {bid}", flush=True)
+            # Auto-start bots that were running or starting before restart
+            db_status = b.get("status", "stopped")
+            if db_status in ("running", "starting"):
+                def _make_start_task(bid_ref, bot_ref):
+                    async def _safe_start():
+                        try:
+                            await bot_ref.start()
+                            print(f"[startup] Auto-started bot {bid_ref}", flush=True)
+                        except Exception as e:
+                            print(f"[startup] ERROR auto-starting bot {bid_ref}: {e}", flush=True)
+                            bot_ref.status = "stopped"
+                    return _safe_start()
+                asyncio.create_task(_make_start_task(bid, bot))
+                auto_started += 1
         except Exception as e:
             print(f"[startup] Error restoring bot {b.get('id', '?')}: {e}", flush=True)
     if bots:
-        print(f"[startup] Restored {len(bots)} bots from DB ({restored} total, {sum(1 for b in bots if b.get('status')=='running')} auto-started)", flush=True)
+        print(f"[startup] Restored {len(bots)} bots from DB ({restored} total, {auto_started} auto-started)", flush=True)
 
 
 # ── Auth helpers ──
@@ -673,8 +692,20 @@ async def stop_bot(bot_id: str):
     if bot_id not in live_bots:
         raise HTTPException(status_code=404, detail="Bot not found")
     await live_bots[bot_id].stop()
-    await db.update_bot_stopped(bot_id)
     return {"message": f"Bot {bot_id} stopped"}
+
+
+@app.post("/api/live/start/{bot_id}")
+async def start_bot(bot_id: str):
+    if bot_id not in live_bots:
+        raise HTTPException(status_code=404, detail="Bot not found")
+    bot = live_bots[bot_id]
+    if bot.status == "running":
+        return {"message": f"Bot {bot_id} is already running", "bot_id": bot_id}
+    bot.error = None
+    bot.status = "starting"
+    await bot.start()
+    return {"message": f"Bot {bot_id} started", "bot_id": bot_id}
 
 
 @app.post("/api/live/restart/{bot_id}")

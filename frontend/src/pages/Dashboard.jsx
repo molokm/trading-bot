@@ -319,25 +319,30 @@ export default function Dashboard({ health, connected, isGuest }) {
         <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
           <Bot size={16} className="text-neon-green" />
           {t('dashboard.active_bots') || 'Активные боты'}
-          {liveBots.filter(b => b.status === 'running').length > 0 && (
+          {liveBots.length > 0 && (
             <span className="text-xs text-neon-green bg-neon-green/10 px-2 py-0.5 rounded-full">
-              {liveBots.filter(b => b.status === 'running').length} активных
+              {liveBots.filter(b => b.status === 'running').length}/{liveBots.length}
             </span>
           )}
         </h3>
-        {liveBots.filter(b => b.status === 'running').length > 0 ? (
+        {liveBots.length > 0 ? (
           <div className="space-y-4">
-            {liveBots.filter(b => b.status === 'running').map(bot => (
+            {liveBots.map(bot => (
               <div key={bot.id} className="bg-white/5 rounded-xl overflow-hidden">
                 <div className="flex items-center justify-between px-4 py-3">
                   <div>
                     <div className="text-sm font-medium text-white flex items-center gap-2">
                       {bot.strategy_id} — {bot.symbol}
                       {bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}
+                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                        bot.status === 'running' ? 'bg-neon-green/20 text-neon-green' :
+                        bot.status === 'error' ? 'bg-red-500/20 text-red-400' :
+                        'bg-gray-500/20 text-gray-400'
+                      }`}>{bot.status}</span>
                     </div>
                     <div className="text-xs text-gray-400">{bot.timeframe} · циклов: {bot.cycle_count}</div>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
                     <div className="text-right">
                       {bot.position !== 0 ? (
                         <>
@@ -354,20 +359,35 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <span className="text-xs text-gray-500">Нет позиции</span>
                       )}
                     </div>
-                    <button
-                      onClick={async () => {
-                        try {
-                          await api.stopBot(bot.id)
-                          loadData()
-                        } catch (e) {
-                          alert('Ошибка: ' + e.message)
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                      title="Остановить бота"
-                    >
-                      Стоп
-                    </button>
+                    {bot.status === 'running' ? (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.stopBot(bot.id)
+                            loadData()
+                          } catch (e) {
+                            alert('Ошибка: ' + e.message)
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
+                      >
+                        Стоп
+                      </button>
+                    ) : (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.startBot(bot.id)
+                            loadData()
+                          } catch (e) {
+                            alert('Ошибка: ' + e.message)
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neon-green/10 text-neon-green hover:bg-neon-green/20 transition-colors"
+                      >
+                        Старт
+                      </button>
+                    )}
                   </div>
                 </div>
                 {bot.planned_trade && <DashboardPlannedTrade planned={bot.planned_trade} />}
@@ -375,7 +395,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             ))}
           </div>
         ) : (
-          <p className="text-sm text-gray-500">Нет активных ботов</p>
+          <p className="text-sm text-gray-500">Нет ботов. Задеплой стратегию на вкладке Live Trading</p>
         )}
       </div>
 
