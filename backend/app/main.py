@@ -103,6 +103,34 @@ async def _startup_ws():
         print(f"[startup] WS failed (non-fatal): {e}", flush=True)
 
 
+async def _orch_cycle_loop():
+    """Background loop: run orchestrator evaluation every 15 minutes."""
+    import json as _json
+    rules_path = Path(__file__).parent.parent / "rules.json"
+    await asyncio.sleep(30)  # wait for server to be ready
+    while True:
+        try:
+            if not client_manager.get_client():
+                await asyncio.sleep(60)
+                continue
+            orch = _get_orchestrator()
+            # Reload rules each cycle
+            if rules_path.exists():
+                with open(rules_path) as f:
+                    orch.rules = _json.load(f)
+            results = await orch.run_cycle()
+            signals = [r for r in results if r.get("rules_passed")]
+            if signals:
+                print(f"[orch] {len(signals)} signals found!", flush=True)
+                for sig in signals:
+                    await alert_planned_trade(sig, orch.rules.get("name", "Strategy"))
+            else:
+                print(f"[orch] No signals this cycle ({len(results)} evaluated)", flush=True)
+        except Exception as e:
+            print(f"[orch] Cycle error: {e}", flush=True)
+        await asyncio.sleep(900)  # 15 minutes
+
+
 @app.on_event("startup")
 async def startup():
     try:
@@ -119,6 +147,8 @@ async def startup():
         await _restore_bots()
         print("[startup] 5/5 Cleanup jobs ...", flush=True)
         asyncio.create_task(_cleanup_old_jobs())
+        print("[startup] 6/5 Orchestrator cycle ...", flush=True)
+        asyncio.create_task(_orch_cycle_loop())
         print("[startup] Done — server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -778,6 +808,135 @@ async def auto_trade_status():
 @app.get("/api/backtest/history")
 async def get_backtest_history():
     return {"results": list_backtest_results()}
+
+
+# ── AI Orchestrator ──
+
+from orchestrator import Orchestrator as AIOrchestrator
+from r_tracker import tracker as r_tracker_singleton
+from alerts import alert_entry, alert_exit, alert_planned_trade, alert_circuit_breaker, alert_daily_summary
+
+_orchestrator: Optional[AIOrchestrator] = None
+_orch_task: Optional[asyncio.Task] = None
+
+
+def _get_orchestrator() -> AIOrchestrator:
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = AIOrchestrator(
+            client_manager=client_manager,
+            trade_log=trade_log,
+        )
+    return _orchestrator
+
+
+@app.get("/api/orch/status")
+async def orch_status():
+    orch = _get_orchestrator()
+    return orch.get_status()
+
+
+@app.post("/api/orch/evaluate")
+async def orch_evaluate(symbol: str = "BTC-USDT-SWAP", timeframe: str = None):
+    orch = _get_orchestrator()
+    if timeframe:
+        orch.rules["timeframe"] = timeframe
+    planned = await orch.evaluate_symbol(symbol)
+    if not planned:
+        raise HTTPException(status_code=400, detail="Could not evaluate symbol")
+    return planned
+
+
+@app.post("/api/orch/scan")
+async def orch_scan():
+    from scanner import scan_market
+    results = await scan_market(client_manager)
+    orch = _get_orchestrator()
+    orch.last_scan = results
+    return {"results": results}
+
+
+@app.post("/api/orch/cycle")
+async def orch_cycle():
+    orch = _get_orchestrator()
+    results = await orch.run_cycle()
+    return {"evaluations": results, "count": len(results)}
+
+
+@app.post("/api/orch/cycle-run")
+async def orch_cycle_run():
+    orch = _get_orchestrator()
+    results = await orch.run_cycle()
+    # Filter to actionable signals
+    signals = [r for r in results if r.get("rules_passed")]
+    return {
+        "evaluated": len(results),
+        "signals": len(signals),
+        "trades": signals,
+        "all_results": results,
+    }
+
+
+@app.get("/api/orch/rules")
+async def orch_get_rules():
+    rules_path = Path(__file__).parent.parent / "rules.json"
+    if not rules_path.exists():
+        return {"error": "rules.json not found"}
+    with open(rules_path) as f:
+        rules = json.load(f)
+    return rules
+
+
+@app.post("/api/orch/rules")
+async def orch_update_rules(request: Request):
+    import json as _json
+    body = await request.json()
+    rules_path = Path(__file__).parent.parent / "rules.json"
+    with open(rules_path, "w") as f:
+        _json.dump(body, f, indent=2)
+    # Reload in orchestrator
+    orch = _get_orchestrator()
+    orch.rules = body
+    return {"status": "ok", "rules": body}
+
+
+@app.get("/api/r-stats")
+async def r_stats():
+    return r_tracker_singleton.get_stats()
+
+
+@app.get("/api/r-trades")
+async def r_trades():
+    open_trades = r_tracker_singleton.get_open_trades()
+    closed = r_tracker_singleton.get_closed_trades()[-20:]
+    return {"open": open_trades, "closed": closed}
+
+
+@app.get("/api/r-daily")
+async def r_daily():
+    return r_tracker_singleton.daily
+
+
+@app.post("/api/r-simulate")
+async def r_simulate(request: Request):
+    """Simulate a trade entry and track R."""
+    body = await request.json()
+    symbol = body.get("symbol", "BTC-USDT-SWAP")
+    entry = body.get("entry_price", 0)
+    stop = body.get("stop_loss", 0)
+    size = body.get("size", 1.0)
+    side = body.get("side", "long")
+
+    trade = r_tracker_singleton.open_trade(
+        symbol=symbol,
+        entry_price=entry,
+        stop_loss=stop,
+        size=size,
+        side=side,
+        signal_type=body.get("signal_type", "manual"),
+    )
+    await alert_entry(trade)
+    return trade
 
 
 # ── Database-backed endpoints ──
