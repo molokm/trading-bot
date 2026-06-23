@@ -118,6 +118,16 @@ async def _orch_cycle_loop():
             if rules_path.exists():
                 with open(rules_path) as f:
                     orch.rules = _json.load(f)
+            # Run scanner first
+            from scanner import scan_market
+            try:
+                scan_results = await scan_market(client_manager, orch.rules)
+                orch.last_scan = scan_results
+                if scan_results:
+                    print(f"[orch] Scanner found {len(scan_results)} movers", flush=True)
+            except Exception as e:
+                print(f"[orch] Scanner error (non-fatal): {e}", flush=True)
+            # Run evaluation cycle
             results = await orch.run_cycle()
             signals = [r for r in results if r.get("rules_passed")]
             if signals:

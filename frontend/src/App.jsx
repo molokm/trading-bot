@@ -2,13 +2,14 @@ import React, { useState, useEffect, createContext, useContext } from 'react'
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Settings, BarChart3, ScrollText,
-  Wallet, Activity, TrendingUp, Bot, LogOut, User, Shield
+  Wallet, Activity, TrendingUp, Bot, LogOut, User, Shield, Brain
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import SettingsPage from './pages/SettingsPage'
 import StrategiesPage from './pages/StrategiesPage'
 import TradeLogPage from './pages/TradeLogPage'
 import LiveTrading from './pages/LiveTrading'
+import OrchestratorPage from './pages/OrchestratorPage'
 // import ChartPage from './pages/ChartPage'
 import LoginPage from './pages/LoginPage'
 import { api } from './services/api'
@@ -65,6 +66,7 @@ function AppContent() {
     { to: '/strategies', icon: BarChart3, label: t('nav.strategies') },
     { to: '/trades', icon: ScrollText, label: t('nav.trade_log') },
     { to: '/live', icon: Bot, label: 'Лайв боты' },
+    { to: '/orchestrator', icon: Brain, label: 'AI Оркестратор' },
   ]
 
   return (
@@ -139,6 +141,7 @@ function AppContent() {
           <Route path="/strategies" element={<StrategiesPage isGuest={isGuest} />} />
           <Route path="/trades" element={<TradeLogPage />} />
           <Route path="/live" element={<LiveTrading isGuest={isGuest} />} />
+          <Route path="/orchestrator" element={<OrchestratorPage />} />
           {/* <Route path="/chart" element={<ChartPage />} /> */}
         </Routes>
       </main>

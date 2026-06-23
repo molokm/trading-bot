@@ -147,4 +147,19 @@ export const api = {
   wsStatus: () => request('/ws/status'),
 
   credentialsStatus: () => request('/credentials/status'),
+
+  // ── AI Orchestrator ──
+  orchStatus: () => request('/orch/status'),
+  orchEvaluate: (symbol) => request(`/orch/evaluate?symbol=${symbol}`, { method: 'POST' }),
+  orchScan: () => request('/orch/scan', { method: 'POST' }),
+  orchCycle: () => request('/orch/cycle', { method: 'POST' }),
+  orchCycleRun: () => request('/orch/cycle-run', { method: 'POST' }),
+  orchGetRules: () => request('/orch/rules'),
+  orchUpdateRules: (rules) => request('/orch/rules', { method: 'POST', body: JSON.stringify(rules) }),
+
+  // ── R-Multiple Tracking ──
+  rStats: () => request('/r-stats'),
+  rTrades: () => request('/r-trades'),
+  rDaily: () => request('/r-daily'),
+  rSimulate: (data) => request('/r-simulate', { method: 'POST', body: JSON.stringify(data) }),
 };

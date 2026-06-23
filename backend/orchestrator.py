@@ -211,6 +211,37 @@ def _evaluate_condition(df, idx, indicator, params, condition):
     return False
 
 
+def detect_regime(df, idx):
+    """Detect market regime: bull / bear / sideways."""
+    row = df.iloc[idx]
+    ema20 = row.get("EMA_20", 0)
+    ema50 = row.get("EMA_50", 0)
+    adx = row.get("ADX_14", 0)
+    rsi = row.get("RSI_14", 50)
+
+    if np.isnan(ema20) or np.isnan(ema50) or np.isnan(adx):
+        return "unknown", {}
+
+    ema_bull = ema20 > ema50
+    adx_trending = adx > 20 and not np.isnan(adx)
+
+    if ema_bull and adx_trending and rsi > 50:
+        regime = "bull"
+    elif not ema_bull and adx_trending and rsi < 50:
+        regime = "bear"
+    else:
+        regime = "sideways"
+
+    return regime, {
+        "ema20": round(ema20, 2),
+        "ema50": round(ema50, 2),
+        "adx": round(adx, 1),
+        "rsi": round(rsi, 1),
+        "ema_bull": ema_bull,
+        "adx_trending": adx_trending,
+    }
+
+
 def generate_planned_trade(df, idx, rules, symbol):
     """Generate a planned trade with full reasoning (AI analysis)."""
     row = df.iloc[idx]
@@ -218,6 +249,9 @@ def generate_planned_trade(df, idx, rules, symbol):
 
     entry_rules = rules.get("entry_rules", {})
     exit_rules = rules.get("exit_rules", {})
+
+    # Regime detection
+    regime, regime_info = detect_regime(df, idx)
 
     # Evaluate all rules
     passed, details = evaluate_rules(df, idx, rules, "entry")
@@ -243,8 +277,18 @@ def generate_planned_trade(df, idx, rules, symbol):
     # R-value
     r_value = entry_price - stop
 
+    # Regime filter — block trades in bad regimes
+    regime_ok = regime in ("bull", "unknown")
+    regime_block = not regime_ok and passed
+
     # Determine action
-    if passed:
+    if regime_block:
+        action = "BLOCKED"
+        failed = [r for r, d in details.items() if not d["passed"] and d["required"]]
+        reasoning = f"<b>BLOCKED</b> — {symbol}\n\n"
+        reasoning += f"⚠️ Regime: <b>{regime.upper()}</b> (trading only in BULL)\n"
+        reasoning += f"Failed rules: {', '.join(failed) if failed else 'none (regime filter)'}\n"
+    elif passed:
         action = "LONG"
         reasoning = f"<b>BUY SIGNAL</b> — {symbol}\n\n"
     else:
@@ -261,17 +305,12 @@ def generate_planned_trade(df, idx, rules, symbol):
     reasoning += f"  Target: ${target:,.2f} ({tp_mult}x ATR)\n"
     reasoning += f"  R:R = 1:{tp_mult/sl_mult:.1f}\n"
 
-    # Trend context
-    ema20_col = "EMA_20"
-    ema50_col = "EMA_50"
-    if ema20_col in df.columns:
-        trend = "UP" if prev[ema20_col] > prev.get(ema50_col, 0) else "DOWN"
-        reasoning += f"\n  Trend: {trend}\n"
-        reasoning += f"  EMA20: ${prev[ema20_col]:,.2f}\n"
-    if f"RSI_14" in df.columns:
-        reasoning += f"  RSI: {prev.get('RSI_14', 0):.1f}\n"
-    if f"ADX_14" in df.columns:
-        reasoning += f"  ADX: {prev.get('ADX_14', 0):.1f}\n"
+    # Regime context
+    regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡", "unknown": "⚪"}
+    reasoning += f"\n  {regime_emoji.get(regime, '⚪')} Regime: <b>{regime.upper()}</b>\n"
+    if regime_info:
+        reasoning += f"  EMA20: ${regime_info['ema20']:,.2f} | EMA50: ${regime_info['ema50']:,.2f}\n"
+        reasoning += f"  ADX: {regime_info['adx']} | RSI: {regime_info['rsi']}\n"
     reasoning += f"  Volume: {prev.get('Vol_Ratio', 0):.2f}x avg\n"
 
     return {
@@ -283,7 +322,9 @@ def generate_planned_trade(df, idx, rules, symbol):
         "target_price": round(target, 2),
         "r_value": round(r_value, 2),
         "reasoning": reasoning,
-        "rules_passed": passed,
+        "rules_passed": passed and not regime_block,
+        "regime": regime,
+        "regime_info": regime_info,
         "details": details,
         "timestamp": datetime.now().isoformat(),
     }
@@ -355,17 +396,22 @@ class Orchestrator:
         print(f"[ORCH] Cycle #{self.cycle_count} — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
         print(f"{'='*60}", flush=True)
 
+        # Merge: configured symbols + scanner results
         if watchlist is None:
-            watchlist = self.rules.get("symbols", [])
+            configured = self.rules.get("symbols", [])
+            scanner_symbols = [r["instId"] for r in self.last_scan]
+            watchlist = list(dict.fromkeys(configured + scanner_symbols))
 
         results = []
         for symbol in watchlist:
             planned = await self.evaluate_symbol(symbol)
             if planned:
                 results.append(planned)
-                action_emoji = "🟢" if planned["action"] == "LONG" else "⏳"
+                action_emoji = "🟢" if planned["action"] == "LONG" else "🔴" if planned["action"] == "BLOCKED" else "⏳"
+                regime = planned.get("regime", "?")
                 print(f"  {action_emoji} {symbol}: {planned['action']} "
                       f"@ ${planned['entry_price']:,.2f} "
+                      f"[{regime}] "
                       f"(rules {'PASSED' if planned['rules_passed'] else 'FAILED'})", flush=True)
             await asyncio.sleep(0.5)  # Rate limiting
 
