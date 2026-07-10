@@ -34,6 +34,7 @@ from app.database import db
 from app.services.ws_manager import WSManager
 from app.engine.bot_engine import BotEngine
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
+from app.services.copy_trader import CopyTrader, CopyTradeConfig
 
 load_dotenv()
 
@@ -763,6 +764,71 @@ async def restart_bot(bot_id: str):
     await bot.start()
     return {"message": f"Bot {bot_id} restarted", "bot_id": bot_id}
 
+
+# ─── Copy-Trader (Falcon Signals) ──────────────────────────────────────────
+
+copy_trader: Optional[CopyTrader] = None
+
+@app.get("/api/copy-trader/status")
+async def copy_trader_status():
+    global copy_trader
+    if not copy_trader:
+        return {"running": False, "signals_seen": 0, "trades_executed": 0}
+    return copy_trader.get_status()
+
+
+@app.post("/api/copy-trader/start")
+async def copy_trader_start(
+    telegram_channel: str = "falconinvestors",
+    youtube_channel: str = "AlexFalcony",
+    poll_interval: int = 300,
+    auto_execute: bool = False,
+    max_position_pct: float = 0.10,
+    min_confidence: float = 0.25,
+):
+    global copy_trader
+    if copy_trader and copy_trader._running:
+        return {"message": "Copy-trader already running"}
+
+    config = CopyTradeConfig(
+        telegram_channel=telegram_channel,
+        youtube_channel=youtube_channel,
+        poll_interval_sec=poll_interval,
+        auto_execute=auto_execute,
+        max_position_pct=max_position_pct,
+        min_confidence=min_confidence,
+    )
+    copy_trader = CopyTrader(config=config, client_manager=client_manager)
+    await copy_trader.start()
+    return {"message": "Copy-trader started", "config": config.__dict__}
+
+
+@app.post("/api/copy-trader/stop")
+async def copy_trader_stop():
+    global copy_trader
+    if not copy_trader or not copy_trader._running:
+        return {"message": "Copy-trader not running"}
+    await copy_trader.stop()
+    return {"message": "Copy-trader stopped"}
+
+
+@app.get("/api/copy-trader/signals")
+async def copy_trader_signals(limit: int = 20):
+    global copy_trader
+    if not copy_trader:
+        return {"signals": []}
+    return {"signals": copy_trader._signal_log[-limit:]}
+
+
+@app.get("/api/copy-trader/trades")
+async def copy_trader_trades(limit: int = 10):
+    global copy_trader
+    if not copy_trader:
+        return {"trades": []}
+    return {"trades": copy_trader._trade_log[-limit:]}
+
+
+# ─── Auto-Trade (Strategy Bots) ────────────────────────────────────────────
 
 @app.post("/api/auto-trade/start")
 async def auto_trade_start(req: LiveDeployRequest):
