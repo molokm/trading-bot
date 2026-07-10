@@ -84,6 +84,7 @@ class CopyTrader:
         """Fetch and process new Telegram posts."""
         try:
             posts = await self.telegram_parser.fetch_posts(limit=10)
+            print(f"[CopyTrader] Telegram: fetched {len(posts)} posts", flush=True)
             for post in posts:
                 post_id = post.post_url or post.text[:50]
                 if post_id in self._seen_posts:
@@ -105,14 +106,16 @@ class CopyTrader:
         """Fetch and process new YouTube videos."""
         try:
             videos = await self.youtube_parser.fetch_recent_videos(limit=5)
+            print(f"[CopyTrader] YouTube: fetched {len(videos)} videos (known_ids={len(self.youtube_parser._known_ids)})", flush=True)
             for video in videos:
                 if video.video_id in self._seen_videos:
+                    print(f"[CopyTrader] YouTube: skip seen {video.video_id} '{video.title[:50]}'", flush=True)
                     continue
                 self._seen_videos.add(video.video_id)
 
-                # Fetch subtitles for trade analysis
-                subs = await self.youtube_parser.fetch_subtitles(video.video_id)
-                text = f"{video.title}\n{video.description}\n{subs}"
+                text = f"{video.title}\n{video.description}"
+
+                print(f"[CopyTrader] YouTube: processing '{video.title[:60]}' (desc={len(video.description)} chars)", flush=True)
 
                 signals = extract_signals(
                     text=text,
@@ -120,10 +123,12 @@ class CopyTrader:
                     source_url=video.url,
                     timestamp=video.timestamp.isoformat() if video.timestamp else "",
                 )
+                if signals:
+                    print(f"[CopyTrader] YouTube: found {len(signals)} signals from '{video.title[:40]}'", flush=True)
                 for sig in signals:
                     await self._process_signal(sig, video=video)
         except Exception as e:
-            print(f"[CopyTrader] YouTube error: {e}", flush=True)
+            print(f"[CopyTrader] YouTube error: {type(e).__name__}: {e}", flush=True)
 
     async def _process_signal(
         self,
