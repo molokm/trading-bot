@@ -828,6 +828,49 @@ async def copy_trader_trades(limit: int = 10):
     return {"trades": copy_trader._trade_log[-limit:]}
 
 
+@app.get("/api/copy-trader/test-youtube")
+async def test_youtube():
+    """Debug: test YouTube RSS parsing on Render."""
+    from app.services.youtube_parser import YouTubeParser
+    import httpx
+
+    result = {"steps": []}
+
+    # Step 1: Get channel ID
+    parser = YouTubeParser("AlexFalcony")
+    try:
+        channel_id = await parser._get_channel_id()
+        result["steps"].append({"name": "channel_id", "ok": bool(channel_id), "value": channel_id})
+    except Exception as e:
+        result["steps"].append({"name": "channel_id", "ok": False, "error": str(e)})
+
+    if not channel_id:
+        return result
+
+    # Step 2: Fetch RSS
+    try:
+        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0"})
+            result["steps"].append({"name": "rss_feed", "ok": resp.status_code == 200, "status": resp.status_code, "length": len(resp.text)})
+            if resp.status_code == 200:
+                import re
+                titles = re.findall(r'<title>(.*?)</title>', resp.text)
+                result["rss_titles"] = [t.replace("&amp;", "&") for t in titles[1:4]]  # skip feed title
+    except Exception as e:
+        result["steps"].append({"name": "rss_feed", "ok": False, "error": str(e)})
+
+    # Step 3: Fetch videos
+    try:
+        videos = await parser.fetch_recent_videos(limit=3)
+        result["steps"].append({"name": "fetch_videos", "ok": True, "count": len(videos)})
+        result["videos"] = [{"id": v.video_id, "title": v.title[:60], "desc_len": len(v.description)} for v in videos]
+    except Exception as e:
+        result["steps"].append({"name": "fetch_videos", "ok": False, "error": str(e)})
+
+    return result
+
+
 # ─── Auto-Trade (Strategy Bots) ────────────────────────────────────────────
 
 @app.post("/api/auto-trade/start")
