@@ -1270,18 +1270,12 @@ async def copy_trader_positions():
     if not copy_trader or not copy_trader._trade_log:
         return {"positions": [], "total_pnl": 0}
 
-    client = client_manager.get_client()
-    if not client:
+    # Get all SWAP positions from OKX using the same helper as /api/positions
+    result = await _okx_call(lambda c: c.get_positions("SWAP"))
+    if result.get("error"):
         return {"positions": [], "total_pnl": 0}
 
-    # Get all SWAP positions from OKX
-    try:
-        live = await client.get_positions(inst_type="SWAP")
-        if not live.get("data"):
-            return {"positions": [], "total_pnl": 0}
-    except Exception as e:
-        print(f"[CopyTrader] Position fetch error: {e}", flush=True)
-        return {"positions": [], "total_pnl": 0}
+    live_data = result.get("data", [])
 
     # Match copy-trader symbols with live positions
     ct_symbols = set()
@@ -1290,7 +1284,7 @@ async def copy_trader_positions():
 
     positions = []
     total_pnl = 0.0
-    for lp in live["data"]:
+    for lp in live_data:
         inst = lp.get("instId", "")
         if inst not in ct_symbols:
             continue
