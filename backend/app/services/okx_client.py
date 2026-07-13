@@ -137,6 +137,10 @@ class OKXClient:
             params["instId"] = inst_id
         return await self._request("GET", "/api/v5/trade/fills", params=params)
 
+    async def get_bills(self, inst_type: str = "SWAP", limit: int = 100) -> dict:
+        return await self._request("GET", "/api/v5/account/bills",
+                                   params={"instType": inst_type, "limit": limit})
+
     async def close(self):
         await self._client.aclose()
         if self._ws:

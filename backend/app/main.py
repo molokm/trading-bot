@@ -447,11 +447,43 @@ async def copy_trader_positions():
 
 # ── PnL ──
 
+import time as _time
+
+async def _get_okx_realized_pnl() -> dict:
+    """Fetch realized PnL from OKX bills (trades only, type=2).
+    Returns dict with keys '1d', '7d', '30d' containing PnL sums."""
+    result = await _okx_call(lambda c: c.get_bills("SWAP", 100))
+    now_ms = int(_time.time() * 1000)
+    periods = {"1d": 86400_000, "7d": 604800_000, "30d": 2592000_000}
+    pnl = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
+
+    if result.get("error"):
+        return pnl
+
+    for bill in result.get("data", []):
+        if bill.get("type") != "2":
+            continue
+        try:
+            bill_pnl = float(bill.get("pnl", 0))
+        except (ValueError, TypeError):
+            continue
+        if bill_pnl == 0:
+            continue
+        bill_ts = int(bill.get("ts", 0))
+        for key, window in periods.items():
+            if bill_ts >= now_ms - window:
+                pnl[key] += bill_pnl
+
+    return pnl
+
+
 @app.get("/api/pnl")
 async def get_pnl():
-    pnl_1d = await db.get_pnl_by_period(1)
-    pnl_7d = await db.get_pnl_by_period(7)
-    pnl_30d = await db.get_pnl_by_period(30)
+    pnl_db_1d = await db.get_pnl_by_period(1)
+    pnl_db_7d = await db.get_pnl_by_period(7)
+    pnl_db_30d = await db.get_pnl_by_period(30)
+
+    okx_pnl = await _get_okx_realized_pnl()
 
     unrealized = 0.0
     result = await _okx_call(lambda c: c.get_positions("SWAP"))
@@ -460,9 +492,9 @@ async def get_pnl():
             unrealized += float(p.get("upl", 0))
 
     return {
-        "1d": round(pnl_1d, 2),
-        "7d": round(pnl_7d, 2),
-        "30d": round(pnl_30d, 2),
+        "1d": round(pnl_db_1d + okx_pnl["1d"], 2),
+        "7d": round(pnl_db_7d + okx_pnl["7d"], 2),
+        "30d": round(pnl_db_30d + okx_pnl["30d"], 2),
         "unrealized": round(unrealized, 2),
     }
 
