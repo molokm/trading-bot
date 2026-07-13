@@ -215,21 +215,37 @@ class YouTubeParser:
         import httpx
         try:
             url = f"https://www.youtube.com/watch?v={video.video_id}"
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(
-                    url,
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-                )
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            }
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
                 if resp.status_code != 200:
+                    print(f"[YT] page scrape {video.video_id}: HTTP {resp.status_code}", flush=True)
                     return
                 html = resp.text
 
-                # Extract description from meta or structured data
+                # Method 1: shortDescription from ytInitialPlayerResponse
                 desc_match = re.search(r'"shortDescription":"(.*?)"', html)
                 if desc_match:
                     desc = desc_match.group(1)
-                    desc = desc.replace("\\n", "\n").replace("\\u0026", "&")
-                    video.description = desc
+                    desc = desc.replace("\\n", "\n").replace("\\u0026", "&").replace('\\"', '"')
+                    if len(desc) > 10:
+                        video.description = desc
+
+                # Method 2: meta description tag (more reliable for bots)
+                if not video.description:
+                    meta_match = re.search(r'<meta\s+name="description"\s+content="(.*?)"', html, re.IGNORECASE)
+                    if meta_match:
+                        video.description = meta_match.group(1).replace("&amp;", "&").replace("&#39;", "'")
+
+                # Method 3: og:description
+                if not video.description:
+                    og_match = re.search(r'<meta\s+property="og:description"\s+content="(.*?)"', html, re.IGNORECASE)
+                    if og_match:
+                        video.description = og_match.group(1).replace("&amp;", "&").replace("&#39;", "'")
 
                 # Extract view count
                 views_match = re.search(r'"viewCount":"(\d+)"', html)
@@ -240,6 +256,8 @@ class YouTubeParser:
                 dur_match = re.search(r'"lengthSeconds":"(\d+)"', html)
                 if dur_match:
                     video.duration_seconds = int(dur_match.group(1))
+
+                print(f"[YT] scraped {video.video_id}: desc={len(video.description)} chars", flush=True)
         except Exception as e:
             print(f"[YT] page scrape error for {video.video_id}: {e}", flush=True)
 

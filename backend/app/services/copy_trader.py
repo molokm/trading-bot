@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import uuid
+import threading
 from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import dataclass, asdict
@@ -45,7 +46,8 @@ class CopyTrader:
         self.telegram_parser = TelegramParser(config.telegram_channel)
         self.youtube_parser = YouTubeParser(config.youtube_channel)
         self._running = False
-        self._task: Optional[asyncio.Task] = None
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._seen_posts: set = set()
         self._seen_videos: set = set()
         self._signal_log: list = []
@@ -114,35 +116,43 @@ class CopyTrader:
             print(f"[CopyTrader] DB reload error: {e}", flush=True)
 
     async def start(self):
-        """Start the copy-trader loop."""
+        """Start the copy-trader loop in a background thread."""
         if self._running:
             return
         self._running = True
         await self._ensure_bot()
         await self._reload_from_db()
-        self._task = asyncio.create_task(self._loop())
+        self._thread = threading.Thread(target=self._run_thread, daemon=True, name="copy-trader")
+        self._thread.start()
         print(f"[CopyTrader] Started — monitoring @{self.config.telegram_channel}", flush=True)
 
     async def stop(self):
         """Stop the copy-trader loop."""
         self._running = False
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
+        if self._loop and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread:
+            self._thread.join(timeout=10)
         print("[CopyTrader] Stopped", flush=True)
 
-    async def _loop(self):
-        """Main polling loop."""
+    def _run_thread(self):
+        """Background thread: creates its own event loop and runs polling."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._poll_loop())
+        except Exception as e:
+            print(f"[CopyTrader] Thread error: {e}", flush=True)
+        finally:
+            self._loop.close()
+
+    async def _poll_loop(self):
+        """Main polling loop — runs inside the thread's event loop."""
         while self._running:
             try:
                 await self._poll_telegram()
                 await self._poll_youtube()
                 await asyncio.sleep(self.config.poll_interval_sec)
-            except asyncio.CancelledError:
-                break
             except Exception as e:
                 print(f"[CopyTrader] Error: {e}", flush=True)
                 await asyncio.sleep(60)

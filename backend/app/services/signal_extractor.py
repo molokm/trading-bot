@@ -55,7 +55,7 @@ LONG_PATTERNS = [
     r"(?:отскок|bounce|поддержка|support)",
     r"(?:ставлю на рост|ставит на рост|ставим на рост|жду рост)",
     r"(?:бычий|быки|bull)",
-    r"(?:вырост|рост|вверх)",
+    r"(?:рост|вверх|вырост)",
 ]
 
 # Short signals
@@ -65,12 +65,20 @@ SHORT_PATTERNS = [
     r"(?:сопротивление|resistance|откат|разворот)",
     r"(?:ставлю на падение|ставит на падение|ставим на падение|жду падение)",
     r"(?:медвежий|медведи|bear)",
-    r"(?:снижени|падени|вниз|шорты|закрыл шорт|ловушк)",
+    r"(?:ловушк|снижени|падени|шорты)",
+]
+
+# Negation patterns — negate the adjacent bullish word
+NEGATION_PATTERNS = [
+    r"(?:не\s+(?:рост|расти|вырост|отскок))",
+    r"(?:нет\s+(?:рост|расти))",
+    r"(?:не\s+(?:бычий|быки))",
+    r"(?:не\s+(?:покупаю|покупаем))",
 ]
 
 # Close signals
 CLOSE_PATTERNS = [
-    r"(?:закрыл|закрыл позицию|close|закрываю|выход)",
+    r"(?:закрыл|закрыл\s+(?:позицию|лонг|шорт)|close|закрываю|выход)",
     r"(?:фиксир|take profit|tp сработал|цель достигнута)",
 ]
 
@@ -130,19 +138,32 @@ def extract_signals(
     signals = []
     lower = text.lower()
 
-    # Determine side
+    # Determine side — close has priority over long/short
+    close_score = _count_pattern_matches(lower, CLOSE_PATTERNS)
+    if close_score > 0:
+        side = Side.CLOSE
+        coin = _extract_coin(text)
+        confidence = min(1.0, close_score * 0.35)
+        return [TradeSignal(
+            source=source, source_url=source_url, coin=coin, side=side,
+            confidence=confidence, raw_text=text[:500], timestamp=timestamp, is_exit=True,
+        )]
+
     long_score = _count_pattern_matches(lower, LONG_PATTERNS)
     short_score = _count_pattern_matches(lower, SHORT_PATTERNS)
-    close_score = _count_pattern_matches(lower, CLOSE_PATTERNS)
+    negation_count = _count_pattern_matches(lower, NEGATION_PATTERNS)
+
+    # Negation: "не рост" = bearish, subtract long score and boost short
+    if negation_count > 0:
+        long_score = max(0, long_score - negation_count)
+        short_score += negation_count
 
     # Skip non-trade texts
-    if long_score == 0 and short_score == 0 and close_score == 0:
+    if long_score == 0 and short_score == 0:
         return []
 
     # Determine primary side
-    if close_score > 0 and long_score == 0 and short_score == 0:
-        side = Side.CLOSE
-    elif long_score > short_score:
+    if long_score > short_score:
         side = Side.LONG
     elif short_score > long_score:
         side = Side.SHORT
