@@ -238,10 +238,10 @@ export default function Dashboard({ health, connected, isGuest }) {
       </div>
 
       {/* PNL Row */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="glass p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-lg bg-neon-green/10 flex items-center justify-center">
-            <DollarSign size={20} className="text-neon-green" />
+          <div className="w-10 h-10 rounded-lg bg-neon-blue/10 flex items-center justify-center">
+            <DollarSign size={20} className="text-neon-blue" />
           </div>
           <div>
             <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">{t('dashboard.pnl_day')}</div>
@@ -262,13 +262,24 @@ export default function Dashboard({ health, connected, isGuest }) {
           </div>
         </div>
         <div className="glass p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-lg bg-neon-blue/10 flex items-center justify-center">
-            <DollarSign size={20} className="text-neon-blue" />
+          <div className="w-10 h-10 rounded-lg bg-neon-green/10 flex items-center justify-center">
+            <DollarSign size={20} className="text-neon-green" />
           </div>
           <div>
             <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">{t('dashboard.pnl_month')}</div>
             <div className={`text-xl font-bold ${pnl && pnl['30d'] >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
               {pnl ? `${pnl['30d'] >= 0 ? '+' : ''}$${pnl['30d'].toFixed(2)}` : t('dashboard.no_pnl')}
+            </div>
+          </div>
+        </div>
+        <div className="glass p-5 flex items-center gap-4">
+          <div className={`w-10 h-10 rounded-lg ${(pnl?.unrealized || 0) >= 0 ? 'bg-neon-green/10' : 'bg-neon-red/10'} flex items-center justify-center`}>
+            <DollarSign size={20} className={`${(pnl?.unrealized || 0) >= 0 ? 'text-neon-green' : 'text-neon-red'}`} />
+          </div>
+          <div>
+            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">UNREALIZED</div>
+            <div className={`text-xl font-bold ${(pnl?.unrealized || 0) >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
+              {pnl ? `${(pnl.unrealized || 0) >= 0 ? '+' : ''}$${(pnl.unrealized || 0).toFixed(2)}` : '---'}
             </div>
           </div>
         </div>

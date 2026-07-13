@@ -1261,7 +1261,20 @@ async def get_pnl():
     pnl_1d = await db.get_pnl_by_period(1)
     pnl_7d = await db.get_pnl_by_period(7)
     pnl_30d = await db.get_pnl_by_period(30)
-    return {"1d": round(pnl_1d, 2), "7d": round(pnl_7d, 2), "30d": round(pnl_30d, 2)}
+
+    # Add unrealized PNL from all open positions
+    unrealized = 0.0
+    result = await _okx_call(lambda c: c.get_positions("SWAP"))
+    if not result.get("error"):
+        for p in result.get("data", []):
+            unrealized += float(p.get("upl", 0))
+
+    return {
+        "1d": round(pnl_1d, 2),
+        "7d": round(pnl_7d, 2),
+        "30d": round(pnl_30d, 2),
+        "unrealized": round(unrealized, 2),
+    }
 
 
 @app.get("/api/copy-trader/positions")
