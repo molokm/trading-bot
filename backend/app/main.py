@@ -1263,10 +1263,91 @@ async def get_pnl():
     pnl_30d = await db.get_pnl_by_period(30)
     return {"1d": round(pnl_1d, 2), "7d": round(pnl_7d, 2), "30d": round(pnl_30d, 2)}
 
+
+@app.get("/api/copy-trader/positions")
+async def copy_trader_positions():
+    """Get current copy-trader open positions with live PNL from OKX."""
+    if not copy_trader or not copy_trader._trade_log:
+        return {"positions": [], "total_pnl": 0}
+
+    client = client_manager.get_client()
+    if not client:
+        return {"positions": [], "total_pnl": 0}
+
+    # Group open trades by symbol+side (find net position)
+    from collections import defaultdict
+    open_pos = {}
+    for trade in copy_trader._trade_log:
+        key = f"{trade['symbol']}_{trade['side']}"
+        if key in open_pos:
+            open_pos[key]["size"] += trade["size"]
+        else:
+            open_pos[key] = {
+                "symbol": trade["symbol"],
+                "side": trade["side"],
+                "size": trade["size"],
+                "entry_time": trade["time"],
+                "ord_id": trade["ord_id"],
+            }
+
+    # Get live positions from OKX
+    positions = []
+    total_pnl = 0.0
+    for key, pos in open_pos.items():
+        try:
+            live = await client.get_positions(inst_type="SWAP", inst_id=pos["symbol"])
+            if live.get("data"):
+                for lp in live["data"]:
+                    ps = lp.get("posSide", "")
+                    if (pos["side"] == "buy" and ps == "long") or (pos["side"] == "sell" and ps == "short"):
+                        upl = float(lp.get("upl", 0))
+                        avg_px = float(lp.get("avgPx", 0))
+                        mark_px = float(lp.get("markPx", 0))
+                        sz = float(lp.get("pos", 0))
+                        total_pnl += upl
+                        positions.append({
+                            "symbol": pos["symbol"],
+                            "side": pos["side"],
+                            "size": sz,
+                            "avg_px": avg_px,
+                            "mark_px": mark_px,
+                            "upl": upl,
+                            "entry_time": pos["entry_time"],
+                        })
+                        break
+        except Exception as e:
+            print(f"[CopyTrader] Position fetch error: {e}", flush=True)
+            positions.append({
+                "symbol": pos["symbol"],
+                "side": pos["side"],
+                "size": pos["size"],
+                "avg_px": 0,
+                "mark_px": 0,
+                "upl": 0,
+                "entry_time": pos["entry_time"],
+            })
+
+    return {"positions": positions, "total_pnl": round(total_pnl, 2)}
+
 @app.get("/api/trades")
 async def get_all_trades(limit: int = 100):
     trades = await db.get_trades(limit=limit)
-    return {"trades": trades}
+    # Merge copy-trader trades
+    if copy_trader and copy_trader._trade_log:
+        ct_trades = []
+        for t in copy_trader._trade_log[-limit:]:
+            ct_trades.append({
+                "bot_id": "copy-trader",
+                "side": t["side"],
+                "symbol": t["symbol"],
+                "sz": str(t.get("size", 0)),
+                "filled": t.get("time", ""),
+                "pnl": 0,
+                "source": "copy-trader",
+                "ord_id": t.get("ord_id", ""),
+            })
+        trades = ct_trades + (trades or [])
+    return {"trades": trades[:limit]}
 
 
 @app.get("/api/trades/paired")
