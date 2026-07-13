@@ -39,29 +39,35 @@ export const api = {
 
   health: () => request('/health'),
 
+  // ── Credentials ──
   testCredentials: (creds) =>
-    request('/credentials/test', {
-      method: 'POST',
-      body: JSON.stringify(creds),
-    }),
+    request('/credentials/test', { method: 'POST', body: JSON.stringify(creds) }),
 
   initCredentials: (creds) =>
-    request('/credentials/init', {
-      method: 'POST',
-      body: JSON.stringify(creds),
-    }),
+    request('/credentials/init', { method: 'POST', body: JSON.stringify(creds) }),
 
+  credentialsStatus: () => request('/credentials/status'),
+
+  // ── Portfolio / Positions ──
   getPortfolio: () => request('/portfolio'),
 
   getPositions: (instType = 'SWAP') =>
     request(`/positions?inst_type=${instType}`),
 
+  closePosition: (instId, posSide, sz, mgnMode = 'cross') =>
+    request('/positions/close', {
+      method: 'POST',
+      body: JSON.stringify({ instId, posSide, sz, mgnMode }),
+    }),
+
+  // ── Market ──
   getTicker: (instId = 'BTC-USDT') =>
     request(`/market/ticker?inst_id=${instId}`),
 
   getCandles: (instId = 'BTC-USDT', bar = '1H', limit = 200) =>
     request(`/market/candles?inst_id=${instId}&bar=${bar}&limit=${limit}`),
 
+  // ── Trade ──
   placeOrder: (order) =>
     request('/trade/order', { method: 'POST', body: JSON.stringify(order) }),
 
@@ -69,63 +75,8 @@ export const api = {
 
   getTradeLog: () => request('/trade/log'),
 
-  getStrategies: () => request('/strategies'),
-
-  uploadStrategy: (filename, content) =>
-    request('/strategies/upload', {
-      method: 'POST',
-      body: JSON.stringify({ filename, content }),
-    }),
-
-  deleteStrategy: (id) =>
-    request(`/strategies/${id}`, { method: 'DELETE' }),
-
-  runBacktest: (data) =>
-    request('/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
-
-  getBacktestStatus: (jobId) =>
-    request(`/backtest/status/${jobId}`),
-
-  getBacktestHistory: () => request('/backtest/history'),
-
-  deployLive: (data) =>
-    request('/live/deploy', { method: 'POST', body: JSON.stringify(data) }),
-
-  stopBot: (botId) =>
-    request(`/live/stop/${botId}`, { method: 'POST' }),
-
-  startBot: (botId) =>
-    request(`/live/start/${botId}`, { method: 'POST' }),
-
-  restartBot: (botId) =>
-    request(`/live/restart/${botId}`, { method: 'POST' }),
-
-  getBotDetail: (botId) => request(`/live/bots/${botId}`),
-
-  listBots: () => request('/live/bots'),
-
-  // ── Database-backed ──
-  listAllBots: () => request('/bots'),
-
-  getBotSignals: (botId, limit = 100) =>
-    request(`/bots/${botId}/signals?limit=${limit}`),
-
-  getBotTrades: (botId, limit = 100) =>
-    request(`/bots/${botId}/trades?limit=${limit}`),
-
-  getBotMetrics: (botId, limit = 100) =>
-    request(`/bots/${botId}/metrics?limit=${limit}`),
-
-  deleteBot: (botId) =>
-    request(`/bots/${botId}`, { method: 'DELETE' }),
-
-  getAllSignals: (limit = 100) => request(`/signals?limit=${limit}`),
-
+  // ── Trades & PnL ──
   getAllTrades: (limit = 50) => request(`/trades?limit=${limit}`),
-
-  getBotChart: (botId, params = '') => request(`/bots/${botId}/chart${params}`),
-
-  getPnl: () => request('/pnl'),
 
   getPairedTrades: (limit = 15, begin = '', end = '') => {
     let url = `/trades/paired?limit=${limit}`
@@ -134,32 +85,20 @@ export const api = {
     return request(url)
   },
 
-  closePosition: (instId, posSide, sz, mgnMode = 'cross') =>
-    request('/positions/close', {
-      method: 'POST',
-      body: JSON.stringify({ instId, posSide, sz, mgnMode }),
-    }),
+  getPnl: () => request('/pnl'),
 
-  getDbPositions: () => request('/db/positions'),
+  // ── Copy-Trader ──
+  copyTraderStatus: () => request('/copy-trader/status'),
 
-  getBotPlanned: (botId) => request(`/bots/${botId}/planned`),
+  copyTraderStart: (config = {}) =>
+    request('/copy-trader/start', { method: 'POST', body: JSON.stringify(config) }),
 
-  wsStatus: () => request('/ws/status'),
+  copyTraderStop: () =>
+    request('/copy-trader/stop', { method: 'POST' }),
 
-  credentialsStatus: () => request('/credentials/status'),
+  copyTraderSignals: (limit = 20) => request(`/copy-trader/signals?limit=${limit}`),
 
-  // ── AI Orchestrator ──
-  orchStatus: () => request('/orch/status'),
-  orchEvaluate: (symbol) => request(`/orch/evaluate?symbol=${symbol}`, { method: 'POST' }),
-  orchScan: () => request('/orch/scan', { method: 'POST' }),
-  orchCycle: () => request('/orch/cycle', { method: 'POST' }),
-  orchCycleRun: () => request('/orch/cycle-run', { method: 'POST' }),
-  orchGetRules: () => request('/orch/rules'),
-  orchUpdateRules: (rules) => request('/orch/rules', { method: 'POST', body: JSON.stringify(rules) }),
+  copyTraderTrades: (limit = 10) => request(`/copy-trader/trades?limit=${limit}`),
 
-  // ── R-Multiple Tracking ──
-  rStats: () => request('/r-stats'),
-  rTrades: () => request('/r-trades'),
-  rDaily: () => request('/r-daily'),
-  rSimulate: (data) => request('/r-simulate', { method: 'POST', body: JSON.stringify(data) }),
+  copyTraderPositions: () => request('/copy-trader/positions'),
 };

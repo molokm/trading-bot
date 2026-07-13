@@ -1,16 +1,12 @@
 import React, { useState, useEffect, createContext, useContext } from 'react'
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, Settings, BarChart3, ScrollText,
-  Wallet, Activity, TrendingUp, Bot, LogOut, User, Shield, Brain
+  LayoutDashboard, Settings, BarChart3,
+  Wallet, TrendingUp, Bot, LogOut, User, Shield
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import SettingsPage from './pages/SettingsPage'
-import StrategiesPage from './pages/StrategiesPage'
-import TradeLogPage from './pages/TradeLogPage'
-import LiveTrading from './pages/LiveTrading'
-import OrchestratorPage from './pages/OrchestratorPage'
-// import ChartPage from './pages/ChartPage'
+import ChartPage from './pages/ChartPage'
 import LoginPage from './pages/LoginPage'
 import { api } from './services/api'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -61,12 +57,8 @@ function AppContent() {
 
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.overview') },
-    // { to: '/chart', icon: CandlestickChart, label: 'График' },
+    { to: '/chart', icon: BarChart3, label: 'График' },
     ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
-    { to: '/strategies', icon: BarChart3, label: t('nav.strategies') },
-    { to: '/trades', icon: ScrollText, label: t('nav.trade_log') },
-    { to: '/live', icon: Bot, label: 'Лайв боты' },
-    { to: '/orchestrator', icon: Brain, label: 'AI Оркестратор' },
   ]
 
   return (
@@ -79,7 +71,7 @@ function AppContent() {
               <TrendingUp size={18} className="text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">OKX Terminal</h1>
+              <h1 className="text-lg font-bold text-white tracking-tight">Copy Trader</h1>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
                 <span className="text-xs text-gray-400">
@@ -138,11 +130,7 @@ function AppContent() {
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
-          <Route path="/strategies" element={<StrategiesPage isGuest={isGuest} />} />
-          <Route path="/trades" element={<TradeLogPage />} />
-          <Route path="/live" element={<LiveTrading isGuest={isGuest} />} />
-          <Route path="/orchestrator" element={<OrchestratorPage />} />
-          {/* <Route path="/chart" element={<ChartPage />} /> */}
+          <Route path="/chart" element={<ChartPage />} />
         </Routes>
       </main>
     </div>
