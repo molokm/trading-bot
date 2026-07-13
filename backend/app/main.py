@@ -798,7 +798,7 @@ async def copy_trader_start(
         max_position_pct=max_position_pct,
         min_confidence=min_confidence,
     )
-    copy_trader = CopyTrader(config=config, client_manager=client_manager)
+    copy_trader = CopyTrader(config=config, client_manager=client_manager, db=db)
     await copy_trader.start()
     return {"message": "Copy-trader started", "config": config.__dict__}
 
@@ -823,9 +823,27 @@ async def copy_trader_signals(limit: int = 20):
 @app.get("/api/copy-trader/trades")
 async def copy_trader_trades(limit: int = 10):
     global copy_trader
-    if not copy_trader:
-        return {"trades": []}
-    return {"trades": copy_trader._trade_log[-limit:]}
+    trades = []
+    if copy_trader and copy_trader._trade_log:
+        trades = copy_trader._trade_log[-limit:]
+    elif copy_trader and copy_trader.db:
+        # Fallback to DB if in-memory log is empty (e.g. after restart)
+        try:
+            db_trades = await copy_trader.db.get_trades(bot_id="copy_trader", limit=limit)
+            trades = [
+                {
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "ord_id": t.get("ord_id", ""),
+                    "signal": {},
+                }
+                for t in db_trades
+            ]
+        except Exception as e:
+            print(f"[CopyTrader] trades DB error: {e}", flush=True)
+    return {"trades": trades}
 
 
 @app.get("/api/copy-trader/test-youtube")

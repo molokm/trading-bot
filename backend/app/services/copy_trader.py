@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from dataclasses import dataclass, asdict
@@ -14,6 +15,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from app.services.telegram_parser import TelegramParser, TelegramPost
 from app.services.youtube_parser import YouTubeParser, YouTubeVideo
 from app.services.signal_extractor import extract_signals, TradeSignal, Side
+
+CT_BOT_ID = "copy_trader"
 
 
 @dataclass
@@ -48,11 +51,75 @@ class CopyTrader:
         self._signal_log: list = []
         self._trade_log: list = []
 
+    async def _ensure_bot(self):
+        """Ensure the copy_trader bot exists in the DB."""
+        if not self.db:
+            return
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            if self.db._pg_mode:
+                await self.db._execute(
+                    "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
+                    "capital, params, status, mode, signal_type, created_at, name) "
+                    "VALUES ($1, 'copy_trader', 'copy_trader', 'BTC-USDT-SWAP', '5m', "
+                    "0, '{}', 'running', $2, 'copy_trader', $3, 'Copy Trader') "
+                    "ON CONFLICT (id) DO NOTHING",
+                    (CT_BOT_ID, self.config.mode, now),
+                )
+            else:
+                await self.db._execute(
+                    "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
+                    "capital, params, status, mode, signal_type, created_at, name) "
+                    "VALUES (?, 'copy_trader', 'copy_trader', 'BTC-USDT-SWAP', '5m', "
+                    "0, '{}', 'running', ?, 'copy_trader', ?, 'Copy Trader')",
+                    (CT_BOT_ID, self.config.mode, now),
+                )
+        except Exception as e:
+            print(f"[CopyTrader] DB ensure_bot error: {e}", flush=True)
+
+    async def _reload_from_db(self):
+        """Reload signals and trades from DB so they survive restarts."""
+        if not self.db:
+            return
+        try:
+            signals = await self.db.get_signals(bot_id=CT_BOT_ID, limit=500)
+            for s in signals:
+                if s.get("status") not in ("rejected", "failed"):
+                    self._signal_log.append({
+                        "side": s.get("side", ""),
+                        "coin": "BTC",
+                        "confidence": 0.25,
+                        "source": "copy_trader",
+                        "source_url": "",
+                        "entry_price": None,
+                        "sl_price": None,
+                        "tp_price": None,
+                        "timestamp": s.get("timestamp", ""),
+                        "is_exit": False,
+                    })
+
+            trades = await self.db.get_trades(bot_id=CT_BOT_ID, limit=100)
+            for t in trades:
+                self._trade_log.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "ord_id": t.get("ord_id", ""),
+                    "signal": {},
+                })
+
+            print(f"[CopyTrader] Reloaded from DB: {len(self._signal_log)} signals, {len(self._trade_log)} trades", flush=True)
+        except Exception as e:
+            print(f"[CopyTrader] DB reload error: {e}", flush=True)
+
     async def start(self):
         """Start the copy-trader loop."""
         if self._running:
             return
         self._running = True
+        await self._ensure_bot()
+        await self._reload_from_db()
         self._task = asyncio.create_task(self._loop())
         print(f"[CopyTrader] Started — monitoring @{self.config.telegram_channel}", flush=True)
 
@@ -149,6 +216,7 @@ class CopyTrader:
         if signal.is_exit:
             print(f"[CopyTrader] CLOSE signal: {signal.coin} from {signal.source}", flush=True)
             self._signal_log.append(asdict(signal))
+            await self._save_signal_db(signal)
             return
 
         # Log the signal
@@ -168,10 +236,29 @@ class CopyTrader:
         )
 
         self._signal_log.append(asdict(signal))
+        await self._save_signal_db(signal)
 
         # Execute trade if enabled
         if self.config.auto_execute and self.client_manager:
             await self._execute_trade(signal)
+
+    async def _save_signal_db(self, signal: TradeSignal):
+        """Save signal to DB."""
+        if not self.db:
+            return
+        try:
+            side_str = "buy" if signal.side == Side.LONG else "sell"
+            if signal.is_exit:
+                side_str = "close"
+            await self.db.save_signal(
+                bot_id=CT_BOT_ID,
+                timestamp=signal.timestamp or datetime.now(timezone.utc).isoformat(),
+                side=side_str,
+                price=signal.entry_price,
+                status="executed" if self.config.auto_execute else "pending",
+            )
+        except Exception as e:
+            print(f"[CopyTrader] Save signal error: {e}", flush=True)
 
     async def _execute_trade(self, signal: TradeSignal):
         """Execute a trade on OKX based on the signal."""
@@ -210,18 +297,39 @@ class CopyTrader:
             if not result.get("error"):
                 ord_id = result.get("data", [{}])[0].get("ordId", "")
                 print(f"[CopyTrader] ORDER PLACED: {side} {symbol} sz={sz:.2f} ord={ord_id}", flush=True)
-                self._trade_log.append({
+
+                trade_entry = {
                     "time": datetime.now(timezone.utc).isoformat(),
                     "side": side,
                     "symbol": symbol,
                     "size": sz,
                     "ord_id": ord_id,
                     "signal": asdict(signal),
-                })
+                }
+                self._trade_log.append(trade_entry)
+
+                # Persist trade to DB
+                await self._save_trade_db(trade_entry, signal)
             else:
                 print(f"[CopyTrader] ORDER FAILED: {result.get('message', '')}", flush=True)
         except Exception as e:
             print(f"[CopyTrader] Execute error: {e}", flush=True)
+
+    async def _save_trade_db(self, trade: dict, signal: TradeSignal):
+        """Save executed trade to DB."""
+        if not self.db:
+            return
+        try:
+            await self.db.save_trade(
+                bot_id=CT_BOT_ID,
+                side=trade["side"],
+                sz=f"{trade['size']:.2f}",
+                ord_id=trade["ord_id"],
+                inst_id=trade["symbol"],
+                state="filled",
+            )
+        except Exception as e:
+            print(f"[CopyTrader] Save trade error: {e}", flush=True)
 
     def get_status(self) -> dict:
         """Get current copy-trader status."""
