@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Activity, BarChart3, Zap, Clock, ArrowUpRight, ArrowDownRight, Bot, ScrollText, DollarSign, XCircle, Loader2, Target } from 'lucide-react'
+import { Wallet, TrendingUp, TrendingDown, Activity, BarChart3, Zap, ArrowUpRight, ArrowDownRight, ScrollText, DollarSign, Bot, XCircle, Loader2 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
@@ -21,140 +21,14 @@ function StatCard({ label, value, change, icon: Icon, positive }) {
   )
 }
 
-function DashboardPlannedTrade({ planned }) {
-  if (!planned) return null
-  const action = planned.action || 'WAIT'
-  const isEntry = action === 'LONG' || action === 'SHORT'
-  const isInPosition = action === 'IN_POSITION'
-
-  const actionLabels = {
-    LONG: 'Покупка (LONG)',
-    SHORT: 'Продажа (SHORT)',
-    HOLD: 'Удержание',
-    WAIT: 'Ожидание',
-    IN_POSITION: `${planned.side === 'LONG' ? 'Длинная' : 'Короткая'} позиция`,
-  }
-
-  const trendLabels = { UP: '▲ Восходящий', DOWN: '▼ Нисходящий', NEUTRAL: '— Боковой' }
-
-  return (
-    <div className="border-t border-white/5 px-4 py-3 space-y-2.5">
-      <div className="flex items-center gap-2 text-xs">
-        <Target size={12} className={action === 'LONG' ? 'text-neon-green' : action === 'SHORT' ? 'text-neon-red' : 'text-gray-400'} />
-        <span className="font-semibold text-white">План:</span>
-        <span className={
-          action === 'LONG' ? 'text-neon-green' :
-          action === 'SHORT' ? 'text-neon-red' :
-          action === 'IN_POSITION' ? 'text-neon-blue' :
-          'text-gray-400'
-        }>
-          {actionLabels[action] || action}
-        </span>
-      </div>
-
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-xs">
-        <div className="text-gray-400">Цена: <span className="text-white font-mono">${planned.current_price?.toLocaleString()}</span></div>
-        <div className="text-gray-400">EMA200: <span className="text-white font-mono">${planned.ema200?.toLocaleString()}</span></div>
-        <div className="text-gray-400">RSI: <span className="text-white font-mono">{planned.rsi}</span></div>
-        <div className={`font-semibold ${planned.trend === 'UP' ? 'text-neon-green' : planned.trend === 'DOWN' ? 'text-neon-red' : 'text-gray-400'}`}>
-          {trendLabels[planned.trend] || planned.trend}
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-x-4 text-xs">
-        <div className="text-gray-400">С윙 макс: <span className="text-neon-green font-mono">${planned.swing_high?.toLocaleString()}</span></div>
-        <div className="text-gray-400">С윙 мин: <span className="text-neon-red font-mono">${planned.swing_low?.toLocaleString()}</span></div>
-      </div>
-
-      {isEntry && planned.entry_zone && (
-        <div className="bg-white/5 rounded-lg px-3 py-2.5 space-y-2">
-          <div className={`rounded-lg px-4 py-3 text-center ${
-            action === 'LONG' ? 'bg-neon-green/10 border border-neon-green/30' : 'bg-neon-red/10 border border-neon-red/30'
-          }`}>
-            <div className="text-[10px] text-gray-400 uppercase tracking-wider mb-1">Цена входа в сделку</div>
-            <div className={`text-xl font-bold font-mono tracking-wide ${
-              action === 'LONG' ? 'text-neon-green' : 'text-neon-red'
-            }`}>
-              ${planned.entry_zone[0]?.toLocaleString()} — ${planned.entry_zone[1]?.toLocaleString()}
-            </div>
-          </div>
-          {planned.stop_loss && (
-            <div className="flex items-center justify-between text-xs px-1">
-              <span className="text-gray-400">Стоп-лосс:</span>
-              <span className="font-mono font-bold text-neon-red">${planned.stop_loss?.toLocaleString()}</span>
-            </div>
-          )}
-          {planned.conditions && (
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
-              {Object.entries(planned.conditions).map(([key, cond]) => {
-                const labels = {
-                  uptrend: 'Тренд вверх',
-                  downtrend: 'Тренд вниз',
-                  pulled_back: 'Откат от макс.',
-                  near_support: 'У поддержки',
-                  bounce: 'Отскок',
-                  climbed: 'Рост к сопрот.',
-                  near_resistance: 'У сопротивл.',
-                  reject: 'Отклонение',
-                }
-                return (
-                  <div key={key} className="flex items-center gap-1.5 text-[11px]">
-                    <span className={cond.met ? 'text-neon-green' : 'text-neon-red'}>{cond.met ? '✓' : '✗'}</span>
-                    <span className="text-gray-300">{labels[key] || key}</span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-          {planned.distance_to_long != null && (
-            <div className="text-[11px] text-gray-500">
-              Расстояние до входа: ${planned.distance_to_long?.toLocaleString()} ({((planned.distance_to_long / planned.current_price) * 100).toFixed(2)}%)
-            </div>
-          )}
-          {planned.distance_to_short != null && (
-            <div className="text-[11px] text-gray-500">
-              Расстояние до входа: ${planned.distance_to_short?.toLocaleString()} ({((planned.distance_to_short / planned.current_price) * 100).toFixed(2)}%)
-            </div>
-          )}
-        </div>
-      )}
-
-      {isInPosition && (
-        <div className="bg-white/5 rounded-lg px-3 py-2 space-y-1">
-          <div className="flex items-center gap-3 text-xs">
-            <span className="text-gray-400">Вход: <span className="font-mono text-white">${planned.entry_price?.toLocaleString()}</span></span>
-            {planned.unrealized_pnl != null && (
-              <span className={`font-bold ${planned.unrealized_pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                {planned.unrealized_pnl >= 0 ? '+' : ''}{planned.unrealized_pnl?.toFixed(2)} USDT
-              </span>
-            )}
-          </div>
-          {planned.stop_loss && (
-            <div className="text-[11px] text-gray-400">
-              Трейлинг стоп: {planned.trailing_stop_active ? '🟢 активен' : '⚪ ожидание'} · Стоп: <span className="font-mono">${planned.stop_loss?.toLocaleString()}</span>
-            </div>
-          )}
-          {planned.exit_conditions && (
-            <div className="text-[11px] text-gray-500 space-y-0.5">
-              {planned.exit_conditions.map((c, i) => <div key={i}>→ {c}</div>)}
-            </div>
-          )}
-        </div>
-      )}
-
-      {planned.note && !isEntry && !isInPosition && (
-        <div className="text-[11px] text-gray-500 italic">{planned.note}</div>
-      )}
-    </div>
-  )
-}
-
 export default function Dashboard({ health, connected, isGuest }) {
   const { t } = useTranslation()
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
-  const [liveBots, setLiveBots] = useState([])
+  const [copyTraderStatus, setCopyTraderStatus] = useState(null)
+  const [copyTraderSignals, setCopyTraderSignals] = useState([])
+  const [copyTraderTrades, setCopyTraderTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -169,18 +43,22 @@ export default function Dashboard({ health, connected, isGuest }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, bots, trades, pnlData] = await Promise.all([
+      const [pf, pos, tk, ctStatus, ctSignals, ctTrades, trades, pnlData] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        api.listBots().catch(() => null),
+        api.copyTraderStatus().catch(() => null),
+        api.copyTraderSignals(10).catch(() => null),
+        api.copyTraderTrades(10).catch(() => null),
         api.getPairedTrades(15).catch(() => null),
         api.getPnl().catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (bots) setLiveBots(bots.bots || [])
+      if (ctStatus) setCopyTraderStatus(ctStatus)
+      if (ctSignals) setCopyTraderSignals(ctSignals.signals || [])
+      if (ctTrades) setCopyTraderTrades(ctTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
     } catch {}
@@ -325,88 +203,89 @@ export default function Dashboard({ health, connected, isGuest }) {
         )}
       </div>
 
-      {/* Live Bots */}
+      {/* Copy-Trader Status */}
       <div className="glass p-5">
         <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
           <Bot size={16} className="text-neon-green" />
-          {t('dashboard.active_bots') || 'Активные боты'}
-          {liveBots.length > 0 && (
-            <span className="text-xs text-neon-green bg-neon-green/10 px-2 py-0.5 rounded-full">
-              {liveBots.filter(b => b.status === 'running').length}/{liveBots.length}
+          Copy-Trader Falcon
+          {copyTraderStatus && (
+            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+              copyTraderStatus.running ? 'bg-neon-green/20 text-neon-green' : 'bg-gray-500/20 text-gray-400'
+            }`}>
+              {copyTraderStatus.running ? 'Активен' : 'Остановлен'}
             </span>
           )}
         </h3>
-        {liveBots.length > 0 ? (
-          <div className="space-y-4">
-            {liveBots.map(bot => (
-              <div key={bot.id} className="bg-white/5 rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between px-4 py-3">
-                  <div>
-                    <div className="text-sm font-medium text-white flex items-center gap-2">
-                      {bot.strategy_id} — {bot.symbol}
-                      {bot.strategy_id === 'trend_momentum_pro' && <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gradient-to-r from-purple-500 to-pink-500 text-white">AI</span>}
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        bot.status === 'running' ? 'bg-neon-green/20 text-neon-green' :
-                        bot.status === 'error' ? 'bg-red-500/20 text-red-400' :
-                        'bg-gray-500/20 text-gray-400'
-                      }`}>{bot.status}</span>
-                    </div>
-                    <div className="text-xs text-gray-400">{bot.timeframe} · циклов: {bot.cycle_count}</div>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="text-right">
-                      {bot.position !== 0 ? (
-                        <>
-                          <div className={`text-xs font-bold ${bot.position > 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                            {bot.position > 0 ? '▲ LONG' : '▼ SHORT'} {Math.abs(bot.position).toFixed(6)} BTC
-                          </div>
-                          {bot.pnl !== 0 && (
-                            <div className={`text-xs ${bot.pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                              {bot.pnl >= 0 ? '+' : ''}{bot.pnl.toFixed(2)} USDT
-                            </div>
-                          )}
-                        </>
-                      ) : (
-                        <span className="text-xs text-gray-500">Нет позиции</span>
-                      )}
-                    </div>
-                    {bot.status === 'running' ? (
-                      <button
-                        onClick={async () => {
-                          try {
-                            await api.stopBot(bot.id)
-                            loadData()
-                          } catch (e) {
-                            alert('Ошибка: ' + e.message)
-                          }
-                        }}
-                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-500/10 text-red-400 hover:bg-red-500/20 transition-colors"
-                      >
-                        Стоп
-                      </button>
-                    ) : (
-                      <button
-                        onClick={async () => {
-                          try {
-                            await api.startBot(bot.id)
-                            loadData()
-                          } catch (e) {
-                            alert('Ошибка: ' + e.message)
-                          }
-                        }}
-                        className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neon-green/10 text-neon-green hover:bg-neon-green/20 transition-colors"
-                      >
-                        Старт
-                      </button>
-                    )}
-                  </div>
-                </div>
-                {bot.planned_trade && <DashboardPlannedTrade planned={bot.planned_trade} />}
+        {copyTraderStatus ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Источники:</span>
+                <div className="text-white font-medium mt-0.5">Telegram + YouTube</div>
               </div>
-            ))}
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Интервал:</span>
+                <div className="text-white font-medium mt-0.5">{copyTraderStatus.poll_interval_sec || 300}с</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Сигналов:</span>
+                <div className="text-white font-medium mt-0.5">{copyTraderStatus.signals_count || 0}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Сделок:</span>
+                <div className="text-white font-medium mt-0.5">{copyTraderStatus.trades_count || 0}</div>
+              </div>
+            </div>
+
+            {copyTraderSignals.length > 0 && (
+              <div>
+                <div className="text-xs text-gray-400 font-medium mb-2">Последние сигналы</div>
+                <div className="space-y-1">
+                  {copyTraderSignals.slice(0, 5).map((s, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded font-bold ${
+                          s.side === 'LONG' || s.side === 'buy' ? 'bg-neon-green/20 text-neon-green' :
+                          s.side === 'SHORT' || s.side === 'sell' ? 'bg-neon-red/20 text-neon-red' :
+                          s.side === 'CLOSE' ? 'bg-neon-yellow/20 text-neon-yellow' :
+                          'bg-gray-500/20 text-gray-400'
+                        }`}>
+                          {s.side}
+                        </span>
+                        <span className="text-white font-medium">{s.coin}</span>
+                        {s.price && <span className="text-gray-400">${parseFloat(s.price).toLocaleString()}</span>}
+                      </div>
+                      <span className="text-gray-500">{s.time ? new Date(s.time).toLocaleTimeString() : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {copyTraderTrades.length > 0 && (
+              <div>
+                <div className="text-xs text-gray-400 font-medium mb-2">Последние сделки</div>
+                <div className="space-y-1">
+                  {copyTraderTrades.slice(0, 5).map((tr, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded font-bold ${
+                          tr.side === 'buy' ? 'bg-neon-green/20 text-neon-green' : 'bg-neon-red/20 text-neon-red'
+                        }`}>
+                          {tr.side === 'buy' ? 'LONG' : 'SHORT'}
+                        </span>
+                        <span className="text-white font-medium">{tr.inst_id}</span>
+                        {tr.px && <span className="text-gray-400">${parseFloat(tr.px).toLocaleString()}</span>}
+                      </div>
+                      <span className="text-gray-500">{tr.timestamp ? new Date(tr.timestamp).toLocaleTimeString() : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         ) : (
-          <p className="text-sm text-gray-500">Нет ботов. Задеплой стратегию на вкладке Live Trading</p>
+          <p className="text-sm text-gray-500">Загрузка...</p>
         )}
       </div>
 
