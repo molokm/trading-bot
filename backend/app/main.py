@@ -112,12 +112,16 @@ async def auth_middleware(request: Request, call_next):
 
 @app.post("/api/auth/login")
 async def auth_login(data: dict):
-    return login(data.get("password", ""))
+    token = login(data.get("password", ""))
+    if token:
+        return {"token": token, "role": "admin"}
+    raise HTTPException(status_code=401, detail="Invalid password")
 
 
 @app.post("/api/auth/guest")
 async def auth_guest():
-    return guest()
+    token = guest()
+    return {"token": token, "role": "guest"}
 
 
 @app.get("/api/auth/status")
@@ -125,7 +129,11 @@ async def auth_status(request: Request):
     token = get_token(request)
     valid = validate(token)
     admin = is_admin(token) if valid else False
-    return {"authenticated": valid, "role": "admin" if admin else ("guest" if valid else "none")}
+    return {
+        "authenticated": valid,
+        "role": "admin" if admin else ("guest" if valid else "none"),
+        "has_password": bool(PASSWORD),
+    }
 
 
 @app.post("/api/auth/logout")
