@@ -101,4 +101,15 @@ export const api = {
   copyTraderTrades: (limit = 10) => request(`/copy-trader/trades?limit=${limit}`),
 
   copyTraderPositions: () => request('/copy-trader/positions'),
+
+  // ── Momentum Strategy ──
+  momentumStatus: () => request('/momentum/status'),
+
+  momentumStart: (config = {}) =>
+    request('/momentum/start', { method: 'POST', body: JSON.stringify(config) }),
+
+  momentumStop: () =>
+    request('/momentum/stop', { method: 'POST' }),
+
+  momentumTrades: (limit = 20) => request(`/momentum/trades?limit=${limit}`),
 };

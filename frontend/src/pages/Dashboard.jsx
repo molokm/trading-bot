@@ -29,6 +29,8 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [copyTraderStatus, setCopyTraderStatus] = useState(null)
   const [copyTraderSignals, setCopyTraderSignals] = useState([])
   const [copyTraderTrades, setCopyTraderTrades] = useState([])
+  const [momentumStatus, setMomentumStatus] = useState(null)
+  const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -43,13 +45,15 @@ export default function Dashboard({ health, connected, isGuest }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, ctStatus, ctSignals, ctTrades, trades, pnlData] = await Promise.all([
+      const [pf, pos, tk, ctStatus, ctSignals, ctTrades, momStatus, momTrades, trades, pnlData] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.copyTraderStatus().catch(() => null),
         api.copyTraderSignals(10).catch(() => null),
         api.copyTraderTrades(10).catch(() => null),
+        api.momentumStatus().catch(() => null),
+        api.momentumTrades(10).catch(() => null),
         api.getPairedTrades(15).catch(() => null),
         api.getPnl().catch(() => null),
       ])
@@ -59,6 +63,8 @@ export default function Dashboard({ health, connected, isGuest }) {
       if (ctStatus) setCopyTraderStatus(ctStatus)
       if (ctSignals) setCopyTraderSignals(ctSignals.signals || [])
       if (ctTrades) setCopyTraderTrades(ctTrades.trades || [])
+      if (momStatus) setMomentumStatus(momStatus)
+      if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
     } catch {}
@@ -283,9 +289,127 @@ export default function Dashboard({ health, connected, isGuest }) {
                 </div>
               </div>
             )}
+        </div>
+      ) : (
+          <p className="text-sm text-gray-500">Загрузка...</p>
+        )}
+      </div>
+
+      {/* Momentum Strategy */}
+      <div className="glass p-5">
+        <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
+          <TrendingUp size={16} className="text-neon-purple" />
+          Momentum Strategy
+          {momentumStatus && (
+            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
+              momentumStatus.running ? 'bg-neon-green/20 text-neon-green' : 'bg-gray-500/20 text-gray-400'
+            }`}>
+              {momentumStatus.running ? 'Активна' : 'Остановлена'}
+            </span>
+          )}
+        </h3>
+        {momentumStatus && momentumStatus.running ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Капитал:</span>
+                <div className="text-neon-green font-medium mt-0.5">${momentumStatus.equity?.toLocaleString() || '---'}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Позиций:</span>
+                <div className="text-white font-medium mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 4}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Сделок:</span>
+                <div className="text-white font-medium mt-0.5">{momentumStatus.total_trades || 0}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Риск:</span>
+                <div className="text-white font-medium mt-0.5">{((momentumStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
+              </div>
+            </div>
+
+            {momentumStatus.open_positions?.length > 0 && (
+              <div>
+                <div className="text-xs text-gray-400 font-medium mb-2">Открытые позиции</div>
+                <div className="space-y-1">
+                  {momentumStatus.open_positions.map((p, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className="px-1.5 py-0.5 rounded font-bold bg-neon-green/20 text-neon-green">LONG</span>
+                        <span className="text-white font-medium">{p.symbol}</span>
+                        <span className="text-gray-400">entry=${p.entry?.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-gray-400">
+                        <span>stop=${p.stop?.toFixed(2)}</span>
+                        <span>tp=${p.target?.toFixed(2)}</span>
+                        <span>peak={p.peak_ratio}x</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {momentumTrades.length > 0 && (
+              <div>
+                <div className="text-xs text-gray-400 font-medium mb-2">Последние сделки</div>
+                <div className="space-y-1">
+                  {momentumTrades.slice(0, 5).map((tr, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded font-bold ${
+                          tr.side === 'buy' ? 'bg-neon-green/20 text-neon-green' : 'bg-neon-red/20 text-neon-red'
+                        }`}>
+                          {tr.side === 'buy' ? 'LONG' : 'EXIT'}
+                        </span>
+                        <span className="text-white font-medium">{tr.symbol}</span>
+                        {tr.pnl != null && (
+                          <span className={`font-bold ${tr.pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
+                            ${tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-gray-500">{tr.time ? new Date(tr.time).toLocaleString() : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 mt-2">
+              <button
+                onClick={async () => {
+                  try {
+                    await api.momentumStop()
+                    loadData()
+                  } catch (e) {
+                    alert('Ошибка: ' + e.message)
+                  }
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neon-red/10 border border-neon-red/20 text-neon-red hover:bg-neon-red/20 transition-colors"
+              >
+                Остановить
+              </button>
+            </div>
           </div>
         ) : (
-          <p className="text-sm text-gray-500">Загрузка...</p>
+          <div className="text-center py-4">
+            <p className="text-sm text-gray-500 mb-3">Стратегия не запущена</p>
+            <button
+              onClick={async () => {
+                try {
+                  await api.momentumStart({})
+                  loadData()
+                } catch (e) {
+                  alert('Ошибка: ' + e.message)
+                }
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-medium bg-neon-green/10 border border-neon-green/20 text-neon-green hover:bg-neon-green/20 transition-colors"
+            >
+              Запустить Momentum
+            </button>
+          </div>
         )}
       </div>
 

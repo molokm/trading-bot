@@ -5,6 +5,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from dataclasses import asdict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -16,6 +17,7 @@ from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.copy_trader import CopyTrader, CopyTradeConfig
+from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
 
 load_dotenv()
 
@@ -42,6 +44,7 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
 copy_trader: Optional[CopyTrader] = None
+momentum: Optional[MomentumStrategy] = None
 
 
 @app.on_event("startup")
@@ -62,6 +65,8 @@ async def startup():
 async def shutdown():
     if copy_trader and copy_trader._running:
         await copy_trader.stop()
+    if momentum and momentum._running:
+        await momentum.stop()
     await db.close()
 
 
@@ -443,6 +448,76 @@ async def copy_trader_positions():
         })
 
     return {"positions": positions, "total_pnl": round(total_pnl, 2)}
+
+
+# ── Momentum Strategy ──
+
+@app.get("/api/momentum/status")
+async def momentum_status():
+    if not momentum:
+        return {"running": False}
+    return momentum.get_status()
+
+
+@app.post("/api/momentum/start")
+async def momentum_start(data: dict = None):
+    global momentum
+    if momentum and momentum._running:
+        return {"message": "Momentum already running"}
+
+    d = data or {}
+    config = MomentumConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        risk_per_trade=d.get("risk_per_trade", 0.03),
+        max_positions=d.get("max_positions", 4),
+        auto_execute=d.get("auto_execute", True),
+        poll_interval_sec=d.get("poll_interval_sec", 3600),
+        roc_fast=d.get("roc_fast", 5),
+        roc_slow=d.get("roc_slow", 50),
+        ema_fast=d.get("ema_fast", 15),
+        ema_slow=d.get("ema_slow", 30),
+        atr_stop_mult=d.get("atr_stop_mult", 1.5),
+        atr_tp_mult=d.get("atr_tp_mult", 3.0),
+        adx_threshold=d.get("adx_threshold", 20.0),
+        mom_threshold=d.get("mom_threshold", 0.0),
+    )
+    momentum = MomentumStrategy(config=config, client_manager=client_manager, db=db)
+    await momentum.start()
+    return {"message": "Momentum started", "config": asdict(config)}
+
+
+@app.post("/api/momentum/stop")
+async def momentum_stop():
+    global momentum
+    if not momentum:
+        return {"message": "Momentum not running"}
+    await momentum.stop()
+    return {"message": "Momentum stopped"}
+
+
+@app.get("/api/momentum/trades")
+async def momentum_trades(limit: int = 20):
+    global momentum
+    trades = []
+    if momentum and momentum._trade_log:
+        trades = momentum._trade_log[-limit:]
+    elif momentum and momentum.db:
+        try:
+            db_trades = await momentum.db.get_trades(bot_id=MOM_BOT_ID, limit=limit)
+            trades = [
+                {
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "pnl": float(t.get("pnl", 0) or 0),
+                    "ord_id": t.get("ord_id", ""),
+                }
+                for t in db_trades
+            ]
+        except Exception as e:
+            print(f"[Momentum] trades DB error: {e}", flush=True)
+    return {"trades": trades}
 
 
 # ── PnL ──
