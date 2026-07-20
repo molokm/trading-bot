@@ -28,7 +28,7 @@ class CopyTradeConfig:
     min_confidence: float = 0.25
     max_position_pct: float = 0.10  # 10% of capital per trade
     enabled_coins: list = None  # None = all coins
-    auto_execute: bool = False  # True = place real orders
+    auto_execute: bool = True  # True = place real orders (demo by default)
     mode: str = "demo"  # "demo" or "live"
 
     def __post_init__(self):
@@ -282,18 +282,44 @@ class CopyTrader:
 
         side = "buy" if signal.side == Side.LONG else "sell"
         symbol = f"{signal.coin}-USDT-SWAP"
+        pos_side = "long" if side == "buy" else "short"
 
         try:
             # Get current price
             ticker = await client.get_ticker(symbol)
             if ticker.get("error") or not ticker.get("data"):
+                print(f"[CopyTrader] Failed to get ticker for {symbol}", flush=True)
                 return
             price = float(ticker["data"][0]["last"])
 
-            # Calculate position size
-            notional = 1000 * self.config.max_position_pct  # $100 default
-            ct_val = 0.01 if signal.coin == "BTC" else 0.1
-            sz = notional / (ct_val * price)
+            # Get actual account balance
+            balance = await client.get_balance()
+            if balance.get("error"):
+                print(f"[CopyTrader] Failed to get balance", flush=True)
+                return
+            details = balance.get("data", [{}])[0].get("details", [])
+            usdt_eq = 0.0
+            for d in details:
+                if d.get("ccy") == "USDT":
+                    usdt_eq = float(d.get("eqUsd", 0))
+                    break
+
+            if usdt_eq <= 0:
+                print(f"[CopyTrader] No USDT balance (eqUsd={usdt_eq})", flush=True)
+                return
+
+            # Calculate position size: max_position_pct of total equity
+            notional = usdt_eq * self.config.max_position_pct
+            ct_val = 0.01 if signal.coin == "BTC" else 0.1  # contract face value in base ccy
+            raw_sz = notional / (ct_val * price)
+
+            # Round to lot size (0.01 for both BTC and ETH SWAP)
+            sz = round(raw_sz, 2)
+            if sz < 0.01:
+                print(f"[CopyTrader] Size too small: {sz:.4f} (notional=${notional:.2f})", flush=True)
+                return
+
+            print(f"[CopyTrader] Executing: {side} {symbol} sz={sz} notional=${notional:.2f} balance=${usdt_eq:.2f} price=${price:.2f}", flush=True)
 
             result = await client.place_order(
                 inst_id=symbol,
@@ -301,7 +327,7 @@ class CopyTrader:
                 ord_type="market",
                 sz=f"{sz:.2f}",
                 td_mode="cross",
-                pos_side="long" if side == "buy" else "short",
+                pos_side=pos_side,
             )
 
             if not result.get("error"):
@@ -321,7 +347,8 @@ class CopyTrader:
                 # Persist trade to DB
                 await self._save_trade_db(trade_entry, signal)
             else:
-                print(f"[CopyTrader] ORDER FAILED: {result.get('message', '')}", flush=True)
+                msg = result.get("message", "unknown")
+                print(f"[CopyTrader] ORDER FAILED: {msg}", flush=True)
         except Exception as e:
             print(f"[CopyTrader] Execute error: {e}", flush=True)
 

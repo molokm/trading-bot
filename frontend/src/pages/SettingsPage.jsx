@@ -19,6 +19,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [ctStatus, setCtStatus] = useState(null)
   const [ctLoading, setCtLoading] = useState(false)
   const [ctAction, setCtAction] = useState(null)
+  const [ctAutoExecute, setCtAutoExecute] = useState(true)
 
   const loadCopyTrader = async () => {
     try {
@@ -258,6 +259,23 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               </div>
             </div>
 
+            <div className="flex items-center justify-between py-2">
+              <div>
+                <span className="text-sm text-white font-medium">Авто-исполнение сделок</span>
+                <p className="text-xs text-gray-500">Бот будет автоматически открывать позиции по сигналам</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="sr-only peer"
+                  checked={ctAutoExecute}
+                  onChange={e => setCtAutoExecute(e.target.checked)}
+                  disabled={ctStatus?.running}
+                />
+                <div className="w-11 h-6 bg-gray-600 rounded-full peer peer-checked:bg-neon-green peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all disabled:opacity-50" />
+              </label>
+            </div>
+
             <div className="flex gap-3">
               {ctStatus.running ? (
                 <button
@@ -286,7 +304,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                     setCtAction('start')
                     setCtLoading(true)
                     try {
-                      await api.copyTraderStart()
+                      await api.copyTraderStart({ auto_execute: ctAutoExecute })
                       await loadCopyTrader()
                     } catch (e) {
                       alert('Ошибка: ' + e.message)
