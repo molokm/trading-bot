@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi } from 'lucide-react'
+import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Bot, Play, Square, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
@@ -16,6 +16,17 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [testing, setTesting] = useState(false)
   const [status, setStatus] = useState(null)
 
+  const [ctStatus, setCtStatus] = useState(null)
+  const [ctLoading, setCtLoading] = useState(false)
+  const [ctAction, setCtAction] = useState(null)
+
+  const loadCopyTrader = async () => {
+    try {
+      const s = await api.copyTraderStatus()
+      setCtStatus(s)
+    } catch {}
+  }
+
   useEffect(() => {
     api.health().then(h => {
       if (h.env_configured) {
@@ -28,6 +39,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         }
       }
     }).catch(() => {})
+    loadCopyTrader()
   }, [])
 
   const handleTest = async () => {
@@ -182,6 +194,150 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
             {status.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
             {status.message}
           </div>
+        )}
+      </div>
+
+      {/* Copy-Trader Control */}
+      <div className="glass p-6 space-y-4">
+        <div className="flex items-center gap-3 pb-4 border-b border-white/5">
+          <div className="w-10 h-10 rounded-lg bg-neon-purple/10 flex items-center justify-center">
+            <Bot size={20} className="text-neon-purple" />
+          </div>
+          <div className="flex-1">
+            <h3 className="text-sm font-semibold text-white">Copy-Trader Falcon</h3>
+            <p className="text-xs text-gray-500">Автоматическое копирование сделок из Telegram и YouTube</p>
+          </div>
+          {ctStatus && (
+            <span className={`px-3 py-1.5 rounded-lg text-xs font-medium ${
+              ctStatus.running
+                ? 'bg-neon-green/10 text-neon-green border border-neon-green/20'
+                : 'bg-gray-500/10 text-gray-400 border border-white/5'
+            }`}>
+              {ctStatus.running ? 'Запущен' : 'Остановлен'}
+            </span>
+          )}
+        </div>
+
+        {ctStatus && (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Telegram</span>
+                <div className="text-white font-medium mt-0.5">@{ctStatus.config?.telegram_channel}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">YouTube</span>
+                <div className="text-white font-medium mt-0.5">@{ctStatus.config?.youtube_channel}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Интервал</span>
+                <div className="text-white font-medium mt-0.5">{ctStatus.config?.poll_interval_sec}с</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Режим</span>
+                <div className={`font-medium mt-0.5 ${ctStatus.config?.mode === 'demo' ? 'text-neon-yellow' : 'text-neon-red'}`}>
+                  {ctStatus.config?.mode === 'demo' ? 'Демо' : 'Реал'}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3 text-xs">
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Сигналов</span>
+                <div className="text-white font-medium mt-0.5">{ctStatus.signals_seen || 0}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Сделок</span>
+                <div className="text-white font-medium mt-0.5">{ctStatus.trades_executed || 0}</div>
+              </div>
+              <div className="bg-white/5 rounded-lg px-3 py-2">
+                <span className="text-gray-400">Авто-исполнение</span>
+                <div className={`font-medium mt-0.5 ${ctStatus.config?.auto_execute ? 'text-neon-green' : 'text-gray-400'}`}>
+                  {ctStatus.config?.auto_execute ? 'Вкл' : 'Выкл'}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              {ctStatus.running ? (
+                <button
+                  className="flex-1 py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-all"
+                  onClick={async () => {
+                    setCtAction('stop')
+                    setCtLoading(true)
+                    try {
+                      await api.copyTraderStop()
+                      await loadCopyTrader()
+                    } catch (e) {
+                      alert('Ошибка: ' + e.message)
+                    }
+                    setCtLoading(false)
+                    setCtAction(null)
+                  }}
+                  disabled={ctLoading}
+                >
+                  {ctLoading && ctAction === 'stop' ? <Loader2 size={14} className="animate-spin" /> : <Square size={14} />}
+                  Остановить
+                </button>
+              ) : (
+                <button
+                  className="btn-neon flex-1 py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2"
+                  onClick={async () => {
+                    setCtAction('start')
+                    setCtLoading(true)
+                    try {
+                      await api.copyTraderStart()
+                      await loadCopyTrader()
+                    } catch (e) {
+                      alert('Ошибка: ' + e.message)
+                    }
+                    setCtLoading(false)
+                    setCtAction(null)
+                  }}
+                  disabled={ctLoading}
+                >
+                  {ctLoading && ctAction === 'start' ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+                  Запустить
+                </button>
+              )}
+              <button
+                className="px-4 py-2.5 rounded-xl text-sm font-medium flex items-center justify-center gap-2 bg-white/5 text-gray-400 hover:text-white hover:bg-white/10 border border-white/5 transition-all"
+                onClick={async () => {
+                  setCtLoading(true)
+                  await loadCopyTrader()
+                  setCtLoading(false)
+                }}
+                disabled={ctLoading}
+              >
+                <RefreshCw size={14} />
+              </button>
+            </div>
+
+            {ctStatus.recent_signals?.length > 0 && (
+              <div>
+                <div className="text-xs text-gray-400 font-medium mb-2">Последние сигналы</div>
+                <div className="space-y-1">
+                  {ctStatus.recent_signals.map((s, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-1.5 py-0.5 rounded font-bold ${
+                          s.side === 'long' ? 'bg-neon-green/20 text-neon-green' :
+                          s.side === 'short' ? 'bg-neon-red/20 text-neon-red' :
+                          s.side === 'close' ? 'bg-neon-yellow/20 text-neon-yellow' :
+                          'bg-gray-500/20 text-gray-400'
+                        }`}>
+                          {s.side?.toUpperCase()}
+                        </span>
+                        <span className="text-white font-medium">{s.coin}</span>
+                        <span className="text-gray-500">{s.source}</span>
+                      </div>
+                      <span className="text-gray-500">{s.timestamp ? new Date(s.timestamp).toLocaleString() : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
 
