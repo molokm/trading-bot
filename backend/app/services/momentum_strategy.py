@@ -28,7 +28,7 @@ class MomentumConfig:
     ema_fast: int = 15
     ema_slow: int = 30
     atr_stop_mult: float = 1.5
-    atr_tp_mult: float = 3.0
+    tp_pct: float = 0.0085  # 0.85% take-profit
     adx_threshold: float = 20.0
     mom_threshold: float = 0.0
 
@@ -231,14 +231,48 @@ class MomentumStrategy:
             trs.append(tr)
         atr = sum(trs) / len(trs) if trs else 0
 
-        # ADX (simplified)
-        plus_dm = max(highs[-1] - highs[-2], 0) if n >= 2 else 0
-        minus_dm = max(lows[-2] - lows[-1], 0) if n >= 2 else 0
-        plus_di = (plus_dm / atr * 100) if atr > 0 else 0
-        minus_di = (minus_dm / atr * 100) if atr > 0 else 0
-        di_sum = plus_di + minus_di
-        dx = abs(plus_di - minus_di) / di_sum * 100 if di_sum > 0 else 0
-        adx = dx  # simplified: single-period DX as ADX proxy
+        # ADX (14-period Wilder smoothing)
+        period = 14
+        if n >= period + 2:
+            plus_dm_arr = []
+            minus_dm_arr = []
+            tr_arr = []
+            for i in range(1, n):
+                up = highs[i] - highs[i - 1]
+                dn = lows[i - 1] - lows[i]
+                plus_dm_arr.append(max(up, 0) if up > dn else 0)
+                minus_dm_arr.append(max(dn, 0) if dn > up else 0)
+                tr_arr.append(max(highs[i] - lows[i],
+                                  abs(highs[i] - closes[i - 1]),
+                                  abs(lows[i] - closes[i - 1])))
+            # Wilder smoothing for TR, +DM, -DM
+            atr_w = sum(tr_arr[:period])
+            plus_dm_w = sum(plus_dm_arr[:period])
+            minus_dm_w = sum(minus_dm_arr[:period])
+            pdi_arr = []
+            mdi_arr = []
+            for i in range(period, len(tr_arr)):
+                atr_w = atr_w - atr_w / period + tr_arr[i]
+                plus_dm_w = plus_dm_w - plus_dm_w / period + plus_dm_arr[i]
+                minus_dm_w = minus_dm_w - minus_dm_w / period + minus_dm_arr[i]
+                pdi = 100 * plus_dm_w / atr_w if atr_w > 0 else 0
+                mdi = 100 * minus_dm_w / atr_w if atr_w > 0 else 0
+                pdi_arr.append(pdi)
+                mdi_arr.append(mdi)
+            # DX series
+            dx_arr = []
+            for p, m in zip(pdi_arr, mdi_arr):
+                s = p + m
+                dx_arr.append(abs(p - m) / s * 100 if s > 0 else 0)
+            # ADX = EMA of DX
+            if dx_arr:
+                adx = sum(dx_arr[-period:]) / min(period, len(dx_arr))
+            else:
+                adx = 0
+            plus_di = pdi_arr[-1] if pdi_arr else 0
+            minus_di = mdi_arr[-1] if mdi_arr else 0
+        else:
+            adx = 0; plus_di = 0; minus_di = 0
 
         return {
             "roc_fast": roc_f,
@@ -312,7 +346,7 @@ class MomentumStrategy:
             return
 
         stop_price = price - self.config.atr_stop_mult * atr
-        target_price = price + self.config.atr_tp_mult * atr
+        target_price = price * (1 + self.config.tp_pct)
         risk_per_contract = price - stop_price
         if risk_per_contract <= 0:
             return

@@ -486,7 +486,7 @@ async def momentum_start(data: dict = None):
         ema_fast=d.get("ema_fast", 15),
         ema_slow=d.get("ema_slow", 30),
         atr_stop_mult=d.get("atr_stop_mult", 1.5),
-        atr_tp_mult=d.get("atr_tp_mult", 3.0),
+        tp_pct=d.get("tp_pct", 0.0085),
         adx_threshold=d.get("adx_threshold", 20.0),
         mom_threshold=d.get("mom_threshold", 0.0),
     )
