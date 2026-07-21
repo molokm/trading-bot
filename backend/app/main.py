@@ -201,7 +201,7 @@ async def credentials_init(data: dict):
 
 @app.get("/api/portfolio")
 async def get_portfolio():
-    result = await _okx_call(lambda c: c.get_account_balance())
+    result = await _okx_call(lambda c: c.get_balance())
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
     data = result.get("data", [])
@@ -216,6 +216,7 @@ async def get_portfolio():
             "eq": float(d.get("eq", 0)),
             "eqUsd": float(d.get("eqUsd", 0)),
             "availBal": float(d.get("availBal", 0)),
+            "frozenBal": float(d.get("frozenBal", 0)),
         })
     return {"totalEqUsd": total_eq, "details": details}
 
