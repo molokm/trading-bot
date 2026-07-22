@@ -19,7 +19,6 @@ export default function ChartPage() {
   const chartRef = useRef(null)
   const containerRef = useRef(null)
   const markersRef = useRef(null)
-  const stopLinesRef = useRef([])
 
   const loadChartData = useCallback(async () => {
     try {
@@ -68,7 +67,6 @@ export default function ChartPage() {
       chartRef.current = null
     }
     markersRef.current = null
-    stopLinesRef.current = []
 
     const container = containerRef.current
     if (!container) return
@@ -164,25 +162,39 @@ export default function ChartPage() {
     chartTrades.open_positions
       .filter(p => p.inst_id === selectedPair || p.symbol === pairName)
       .forEach(pos => {
-        const stopLine = candlestickSeries.createPriceLine({
-          price: pos.stop,
-          color: '#ff4444',
-          lineWidth: 2,
-          lineStyle: 2,
-          axisLabelVisible: true,
-          title: `STOP $${pos.stop.toFixed(decimals)}`,
-        })
-        stopLinesRef.current.push(stopLine)
+        const posOpenTime = filteredMarkers.find(m => m.side === 'buy')?.time
+        if (!posOpenTime) return
 
-        const entryLine = candlestickSeries.createPriceLine({
-          price: pos.entry,
-          color: '#00ff8888',
-          lineWidth: 1,
-          lineStyle: 1,
-          axisLabelVisible: true,
-          title: `ENTRY $${pos.entry.toFixed(decimals)}`,
-        })
-        stopLinesRef.current.push(entryLine)
+        const stopLineData = chartData
+          .filter(c => c.time >= posOpenTime)
+          .map(c => ({ time: c.time, value: pos.stop }))
+        const entryLineData = chartData
+          .filter(c => c.time >= posOpenTime)
+          .map(c => ({ time: c.time, value: pos.entry }))
+
+        if (stopLineData.length > 0) {
+          const stopSeries = chart.addSeries(LineSeries, {
+            color: '#ff4444',
+            lineWidth: 2,
+            lineStyle: 2,
+            priceScaleId: 'right',
+            lastValueVisible: true,
+            priceLineVisible: false,
+          })
+          stopSeries.setData(stopLineData)
+        }
+
+        if (entryLineData.length > 0) {
+          const entrySeries = chart.addSeries(LineSeries, {
+            color: '#00ff8888',
+            lineWidth: 1,
+            lineStyle: 1,
+            priceScaleId: 'right',
+            lastValueVisible: true,
+            priceLineVisible: false,
+          })
+          entrySeries.setData(entryLineData)
+        }
       })
 
     const lastTime = chartData[chartData.length - 1].time
@@ -201,7 +213,6 @@ export default function ChartPage() {
       chart.remove()
       chartRef.current = null
       markersRef.current = null
-      stopLinesRef.current = []
     }
   }, [chartData, selectedPair, chartTrades])
 
