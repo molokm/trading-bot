@@ -510,7 +510,7 @@ class MomentumStrategy:
                 "stop": pos.stop_price,
                 "target": pos.target_price,
                 "size": pos.size,
-                "peak_ratio": round(pos.peak_profit_ratio, 2),
+                "peak_ratio": round((pos.peak_price / pos.entry_price - 1) * 100, 2) if pos.entry_price else 0,
             })
         return {
             "running": self._running,

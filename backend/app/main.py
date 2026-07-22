@@ -303,7 +303,7 @@ async def get_trade_log():
 @app.get("/api/momentum/status")
 async def momentum_status():
     if not momentum:
-        return {"running": False}
+        return {"running": False, "config": None, "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0, "recent_signals": [], "recent_trades": []}
     return momentum.get_status()
 
 
