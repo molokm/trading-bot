@@ -71,7 +71,7 @@ function AppContent() {
               <TrendingUp size={18} className="text-white" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">Copy Trader</h1>
+              <h1 className="text-lg font-bold text-white tracking-tight">Trading Bot</h1>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
                 <span className="text-xs text-gray-400">

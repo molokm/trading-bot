@@ -26,9 +26,6 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
-  const [copyTraderStatus, setCopyTraderStatus] = useState(null)
-  const [copyTraderSignals, setCopyTraderSignals] = useState([])
-  const [copyTraderTrades, setCopyTraderTrades] = useState([])
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
@@ -45,13 +42,10 @@ export default function Dashboard({ health, connected, isGuest }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, ctStatus, ctSignals, ctTrades, momStatus, momTrades, trades, pnlData] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, trades, pnlData] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        api.copyTraderStatus().catch(() => null),
-        api.copyTraderSignals(10).catch(() => null),
-        api.copyTraderTrades(10).catch(() => null),
         api.momentumStatus().catch(() => null),
         api.momentumTrades(10).catch(() => null),
         api.getPairedTrades(15).catch(() => null),
@@ -60,9 +54,6 @@ export default function Dashboard({ health, connected, isGuest }) {
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (ctStatus) setCopyTraderStatus(ctStatus)
-      if (ctSignals) setCopyTraderSignals(ctSignals.signals || [])
-      if (ctTrades) setCopyTraderTrades(ctTrades.trades || [])
       if (momStatus) setMomentumStatus(momStatus)
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
@@ -206,92 +197,6 @@ export default function Dashboard({ health, connected, isGuest }) {
           <div className="text-center py-8 text-gray-500">
             <p>{t('dashboard.no_portfolio')}</p>
           </div>
-        )}
-      </div>
-
-      {/* Copy-Trader Status */}
-      <div className="glass p-5">
-        <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-          <Bot size={16} className="text-neon-green" />
-          Copy-Trader Falcon
-          {copyTraderStatus && (
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-              copyTraderStatus.running ? 'bg-neon-green/20 text-neon-green' : 'bg-gray-500/20 text-gray-400'
-            }`}>
-              {copyTraderStatus.running ? 'Активен' : 'Остановлен'}
-            </span>
-          )}
-        </h3>
-        {copyTraderStatus ? (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Источники:</span>
-                <div className="text-white font-medium mt-0.5">Telegram + YouTube</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Интервал:</span>
-                <div className="text-white font-medium mt-0.5">{copyTraderStatus.poll_interval_sec || 300}с</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Сигналов:</span>
-                <div className="text-white font-medium mt-0.5">{copyTraderStatus.signals_count || 0}</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Сделок:</span>
-                <div className="text-white font-medium mt-0.5">{copyTraderStatus.trades_count || 0}</div>
-              </div>
-            </div>
-
-            {copyTraderSignals.length > 0 && (
-              <div>
-                <div className="text-xs text-gray-400 font-medium mb-2">Последние сигналы</div>
-                <div className="space-y-1">
-                  {copyTraderSignals.slice(0, 5).map((s, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`px-1.5 py-0.5 rounded font-bold ${
-                          s.side === 'LONG' || s.side === 'buy' ? 'bg-neon-green/20 text-neon-green' :
-                          s.side === 'SHORT' || s.side === 'sell' ? 'bg-neon-red/20 text-neon-red' :
-                          s.side === 'CLOSE' ? 'bg-neon-yellow/20 text-neon-yellow' :
-                          'bg-gray-500/20 text-gray-400'
-                        }`}>
-                          {s.side}
-                        </span>
-                        <span className="text-white font-medium">{s.coin}</span>
-                        {s.price && <span className="text-gray-400">${parseFloat(s.price).toLocaleString()}</span>}
-                      </div>
-                      <span className="text-gray-500">{s.time ? new Date(s.time).toLocaleTimeString() : ''}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {copyTraderTrades.length > 0 && (
-              <div>
-                <div className="text-xs text-gray-400 font-medium mb-2">Последние сделки</div>
-                <div className="space-y-1">
-                  {copyTraderTrades.slice(0, 5).map((tr, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`px-1.5 py-0.5 rounded font-bold ${
-                          tr.side === 'buy' ? 'bg-neon-green/20 text-neon-green' : 'bg-neon-red/20 text-neon-red'
-                        }`}>
-                          {tr.side === 'buy' ? 'LONG' : 'SHORT'}
-                        </span>
-                        <span className="text-white font-medium">{tr.inst_id}</span>
-                        {tr.px && <span className="text-gray-400">${parseFloat(tr.px).toLocaleString()}</span>}
-                      </div>
-                      <span className="text-gray-500">{tr.timestamp ? new Date(tr.timestamp).toLocaleTimeString() : ''}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-        </div>
-      ) : (
-          <p className="text-sm text-gray-500">Загрузка...</p>
         )}
       </div>
 

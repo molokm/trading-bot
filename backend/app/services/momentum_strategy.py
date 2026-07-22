@@ -22,13 +22,12 @@ class MomentumConfig:
     max_positions: int = 4
     auto_execute: bool = True
     poll_interval_sec: int = 3600
-    # Backtested params (best: CAGR +107%, Sharpe 2.92)
     roc_fast: int = 5
     roc_slow: int = 50
     ema_fast: int = 15
     ema_slow: int = 30
     atr_stop_mult: float = 1.5
-    tp_pct: float = 0.0085  # 0.85% take-profit
+    trail_pct: float = 0.03  # 3% trailing stop from peak
     adx_threshold: float = 20.0
     mom_threshold: float = 0.0
 
@@ -42,10 +41,9 @@ class OpenPosition:
     symbol: str
     entry_price: float
     stop_price: float
-    target_price: float
+    peak_price: float  # highest price since entry
     size: float
     atr: float
-    peak_profit_ratio: float = 0.0
     opened_at: str = ""
     inst_id: str = ""
 
@@ -346,7 +344,6 @@ class MomentumStrategy:
             return
 
         stop_price = price - self.config.atr_stop_mult * atr
-        target_price = price * (1 + self.config.tp_pct)
         risk_per_contract = price - stop_price
         if risk_per_contract <= 0:
             return
@@ -376,14 +373,14 @@ class MomentumStrategy:
 
             self._positions[coin] = OpenPosition(
                 symbol=coin, entry_price=price, stop_price=stop_price,
-                target_price=target_price, size=sz, atr=atr,
+                peak_price=price, size=sz, atr=atr,
                 opened_at=now, inst_id=inst_id,
             )
 
             signal_entry = {
                 "time": now, "side": "buy", "symbol": inst_id,
                 "size": sz, "ord_id": ord_id,
-                "entry": price, "stop": stop_price, "target": target_price,
+                "entry": price, "stop": stop_price,
                 "adx": round(ind["adx"], 1),
                 "roc_f": round(ind["roc_fast"], 2),
                 "roc_s": round(ind["roc_slow"], 2),
@@ -392,7 +389,7 @@ class MomentumStrategy:
             self._trade_log.append(signal_entry)
 
             print(f"[Momentum] OPEN {coin} @ {price:.2f} sz={sz:.2f} "
-                  f"stop={stop_price:.2f} tp={target_price:.2f} ADX={ind['adx']:.1f}",
+                  f"stop={stop_price:.2f} ADX={ind['adx']:.1f}",
                   flush=True)
 
             await self._save_signal_db("buy", coin, price)
@@ -416,27 +413,17 @@ class MomentumStrategy:
                     continue
                 current_price = float(ticker["data"][0]["last"])
 
-                rd = pos.entry_price - pos.stop_price
-                if rd <= 0:
-                    continue
-                pk = (current_price - pos.entry_price) / rd
-                pos.peak_profit_ratio = max(pos.peak_profit_ratio, pk)
-
-                # Trailing stop logic (matches backtest)
-                if pos.peak_profit_ratio >= 1:
-                    pos.stop_price = max(pos.stop_price, pos.entry_price)
-                if pos.peak_profit_ratio >= 2:
-                    pos.stop_price = max(pos.stop_price,
-                                         pos.entry_price + pos.peak_profit_ratio * rd * 0.5)
-                if pos.peak_profit_ratio >= 3:
-                    pos.stop_price = max(pos.stop_price,
-                                         current_price - pos.atr * 1.5)
+                # Update peak price
+                if current_price > pos.peak_price:
+                    pos.peak_price = current_price
+                    # Trail stop: 3% below peak
+                    new_stop = pos.peak_price * (1 - self.config.trail_pct)
+                    if new_stop > pos.stop_price:
+                        pos.stop_price = new_stop
 
                 # Check exit
                 if current_price <= pos.stop_price:
-                    await self._close_position(coin, pos, current_price, "stop")
-                elif current_price >= pos.target_price:
-                    await self._close_position(coin, pos, current_price, "target")
+                    await self._close_position(coin, pos, current_price, "trail_stop")
 
             except Exception as e:
                 print(f"[Momentum] {coin}: manage error: {e}", flush=True)

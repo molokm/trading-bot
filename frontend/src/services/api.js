@@ -87,21 +87,6 @@ export const api = {
 
   getPnl: () => request('/pnl'),
 
-  // ── Copy-Trader ──
-  copyTraderStatus: () => request('/copy-trader/status'),
-
-  copyTraderStart: (config = {}) =>
-    request('/copy-trader/start', { method: 'POST', body: JSON.stringify(config) }),
-
-  copyTraderStop: () =>
-    request('/copy-trader/stop', { method: 'POST' }),
-
-  copyTraderSignals: (limit = 20) => request(`/copy-trader/signals?limit=${limit}`),
-
-  copyTraderTrades: (limit = 10) => request(`/copy-trader/trades?limit=${limit}`),
-
-  copyTraderPositions: () => request('/copy-trader/positions'),
-
   // ── Momentum Strategy ──
   momentumStatus: () => request('/momentum/status'),
 

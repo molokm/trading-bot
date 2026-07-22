@@ -16,12 +16,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
-from app.services.copy_trader import CopyTrader, CopyTradeConfig
 from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
 
 load_dotenv()
 
-app = FastAPI(title="OKX Copy-Trader Terminal", version="3.0.0")
+app = FastAPI(title="OKX Trading Bot", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,7 +42,6 @@ _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
-copy_trader: Optional[CopyTrader] = None
 momentum: Optional[MomentumStrategy] = None
 
 
@@ -63,8 +61,6 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    if copy_trader and copy_trader._running:
-        await copy_trader.stop()
     if momentum and momentum._running:
         await momentum.stop()
     await db.close()
@@ -302,163 +298,6 @@ async def get_trade_log():
     return {"orders": trade_log[-100:]}
 
 
-# ── Copy-Trader ──
-
-@app.get("/api/copy-trader/status")
-async def copy_trader_status():
-    if not copy_trader:
-        return {"running": False}
-    return copy_trader.get_status()
-
-
-@app.post("/api/copy-trader/start")
-async def copy_trader_start(data: dict = None):
-    global copy_trader
-    if copy_trader and copy_trader._running:
-        return {"message": "Copy-trader already running"}
-
-    telegram_channel = (data or {}).get("telegram_channel", "falconinvestors")
-    youtube_channel = (data or {}).get("youtube_channel", "AlexFalcony")
-    poll_interval = (data or {}).get("poll_interval", 300)
-    auto_execute = (data or {}).get("auto_execute", False)
-    max_position_pct = (data or {}).get("max_position_pct", 0.10)
-    min_confidence = (data or {}).get("min_confidence", 0.25)
-
-    config = CopyTradeConfig(
-        telegram_channel=telegram_channel,
-        youtube_channel=youtube_channel,
-        poll_interval_sec=poll_interval,
-        auto_execute=auto_execute,
-        max_position_pct=max_position_pct,
-        min_confidence=min_confidence,
-    )
-    copy_trader = CopyTrader(config=config, client_manager=client_manager, db=db)
-    await copy_trader.start()
-    return {"message": "Copy-trader started", "config": config.__dict__}
-
-
-@app.post("/api/copy-trader/stop")
-async def copy_trader_stop():
-    global copy_trader
-    if not copy_trader:
-        return {"message": "Copy-trader not running"}
-    await copy_trader.stop()
-    return {"message": "Copy-trader stopped"}
-
-
-@app.get("/api/copy-trader/signals")
-async def copy_trader_signals(limit: int = 20):
-    global copy_trader
-    if not copy_trader:
-        return {"signals": []}
-    return {"signals": copy_trader._signal_log[-limit:]}
-
-
-@app.get("/api/copy-trader/trades")
-async def copy_trader_trades(limit: int = 10):
-    global copy_trader
-    trades = []
-    if copy_trader and copy_trader._trade_log:
-        trades = copy_trader._trade_log[-limit:]
-    elif copy_trader and copy_trader.db:
-        try:
-            db_trades = await copy_trader.db.get_trades(bot_id="copy_trader", limit=limit)
-            trades = [
-                {
-                    "time": t.get("timestamp", ""),
-                    "side": t.get("side", ""),
-                    "symbol": t.get("inst_id", ""),
-                    "size": float(t.get("sz", 0) or 0),
-                    "ord_id": t.get("ord_id", ""),
-                    "signal": {},
-                }
-                for t in db_trades
-            ]
-        except Exception as e:
-            print(f"[CopyTrader] trades DB error: {e}", flush=True)
-    return {"trades": trades}
-
-
-@app.get("/api/copy-trader/test-youtube")
-async def test_youtube():
-    """Debug: test YouTube RSS parsing on Render."""
-    from app.services.youtube_parser import YouTubeParser
-    import httpx
-
-    result = {"steps": []}
-
-    parser = YouTubeParser("AlexFalcony")
-    try:
-        channel_id = await parser._get_channel_id()
-        result["steps"].append({"name": "channel_id", "value": channel_id})
-    except Exception as e:
-        result["steps"].append({"name": "channel_id", "error": str(e)})
-
-    if channel_id:
-        rss_url = f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(rss_url, headers={"User-Agent": "Mozilla/5.0"})
-                result["steps"].append({"name": "rss_status", "value": resp.status_code})
-                import re
-                entries = re.findall(r'<entry>(.*?)</entry>', resp.text, re.DOTALL)
-                result["steps"].append({"name": "rss_entries", "value": len(entries)})
-        except Exception as e:
-            result["steps"].append({"name": "rss_error", "error": str(e)})
-
-    try:
-        videos = await parser.fetch_recent_videos(limit=3)
-        result["steps"].append({
-            "name": "parsed_videos",
-            "value": [{"title": v.title, "desc_len": len(v.description), "url": v.url} for v in videos],
-        })
-    except Exception as e:
-        result["steps"].append({"name": "parse_error", "error": str(e)})
-
-    return result
-
-
-@app.get("/api/copy-trader/positions")
-async def copy_trader_positions():
-    """Get current copy-trader open positions with live PNL from OKX."""
-    if not copy_trader or not copy_trader._trade_log:
-        return {"positions": [], "total_pnl": 0}
-
-    result = await _okx_call(lambda c: c.get_positions("SWAP"))
-    if result.get("error"):
-        return {"positions": [], "total_pnl": 0}
-
-    live_data = result.get("data", [])
-
-    ct_symbols = set()
-    for trade in copy_trader._trade_log:
-        ct_symbols.add(trade["symbol"])
-
-    positions = []
-    total_pnl = 0.0
-    for lp in live_data:
-        inst = lp.get("instId", "")
-        if inst not in ct_symbols:
-            continue
-        pos_amt = float(lp.get("pos", 0))
-        if pos_amt == 0:
-            continue
-        upl = float(lp.get("upl", 0))
-        total_pnl += upl
-        positions.append({
-            "symbol": inst,
-            "side": lp.get("posSide", "net"),
-            "size": pos_amt,
-            "avg_px": float(lp.get("avgPx", 0)),
-            "mark_px": float(lp.get("markPx", 0)),
-            "upl": upl,
-            "upl_ratio": float(lp.get("uplRatio", 0)),
-            "mgn_mode": lp.get("mgnMode", ""),
-        })
-
-    return {"positions": positions, "total_pnl": round(total_pnl, 2)}
-
-
 # ── Momentum Strategy ──
 
 @app.get("/api/momentum/status")
@@ -486,7 +325,7 @@ async def momentum_start(data: dict = None):
         ema_fast=d.get("ema_fast", 15),
         ema_slow=d.get("ema_slow", 30),
         atr_stop_mult=d.get("atr_stop_mult", 1.5),
-        tp_pct=d.get("tp_pct", 0.0085),
+        trail_pct=d.get("trail_pct", 0.03),
         adx_threshold=d.get("adx_threshold", 20.0),
         mom_threshold=d.get("mom_threshold", 0.0),
     )
@@ -588,21 +427,7 @@ async def get_pnl():
 @app.get("/api/trades")
 async def get_all_trades(limit: int = 100):
     trades = await db.get_trades(limit=limit)
-    if copy_trader and copy_trader._trade_log:
-        ct_trades = []
-        for t in copy_trader._trade_log[-limit:]:
-            ct_trades.append({
-                "bot_id": "copy-trader",
-                "side": t["side"],
-                "symbol": t["symbol"],
-                "sz": str(t.get("size", 0)),
-                "filled": t.get("time", ""),
-                "pnl": 0,
-                "source": "copy-trader",
-                "ord_id": t.get("ord_id", ""),
-            })
-        trades = ct_trades + (trades or [])
-    return {"trades": trades[:limit]}
+    return {"trades": (trades or [])[:limit]}
 
 
 @app.get("/api/trades/paired")
