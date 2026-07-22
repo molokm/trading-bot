@@ -169,8 +169,14 @@ export default function ChartPage() {
         const fromIdx = chartData.reduce((best, c, i) => c.time <= posOpenTime ? i : best, -1)
         if (fromIdx < 0) return
 
-        const stopLineData = chartData.slice(fromIdx).map(c => ({ time: c.time, value: pos.stop }))
-        const entryLineData = chartData.slice(fromIdx).map(c => ({ time: c.time, value: pos.entry }))
+        const stopLineData = [
+          { time: chartData[fromIdx].time, value: pos.stop },
+          { time: chartData[chartData.length - 1].time, value: pos.stop },
+        ]
+        const entryLineData = [
+          { time: chartData[fromIdx].time, value: pos.entry },
+          { time: chartData[chartData.length - 1].time, value: pos.entry },
+        ]
 
         if (stopLineData.length > 0) {
           chart.addSeries(LineSeries, {
