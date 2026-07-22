@@ -1,26 +1,44 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { createChart, ColorType, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { api } from '../services/api'
-import { BarChart3, Activity } from 'lucide-react'
+import { BarChart3, Activity, RefreshCw } from 'lucide-react'
 
 const PAIRS = [
   { id: 'BTC-USDT-SWAP', label: 'BTC/USDT' },
   { id: 'ETH-USDT-SWAP', label: 'ETH/USDT' },
   { id: 'SOL-USDT-SWAP', label: 'SOL/USDT' },
-  { id: 'XRP-USDT-SWAP', label: 'XRP/USDT' },
+  { id: 'BNB-USDT-SWAP', label: 'BNB/USDT' },
 ]
 
 export default function ChartPage() {
   const [selectedPair, setSelectedPair] = useState('BTC-USDT-SWAP')
   const [chartData, setChartData] = useState(null)
   const [loading, setLoading] = useState(false)
-  const [tf, setTf] = useState('1H')
+  const [tf, setTf] = useState('1D')
+  const [chartTrades, setChartTrades] = useState({ markers: [], open_positions: [] })
   const chartRef = useRef(null)
   const containerRef = useRef(null)
+  const markersRef = useRef(null)
+  const stopLinesRef = useRef([])
+
+  const loadChartData = useCallback(async () => {
+    try {
+      const data = await api.momentumChartData()
+      setChartTrades(data)
+    } catch {
+      setChartTrades({ markers: [], open_positions: [] })
+    }
+  }, [])
 
   useEffect(() => {
     loadCandles()
+    loadChartData()
   }, [selectedPair, tf])
+
+  useEffect(() => {
+    const interval = setInterval(loadChartData, 30000)
+    return () => clearInterval(interval)
+  }, [loadChartData])
 
   async function loadCandles() {
     setLoading(true)
@@ -49,6 +67,8 @@ export default function ChartPage() {
       chartRef.current.remove()
       chartRef.current = null
     }
+    markersRef.current = null
+    stopLinesRef.current = []
 
     const container = containerRef.current
     if (!container) return
@@ -109,6 +129,62 @@ export default function ChartPage() {
       })
     }
 
+    const pairName = selectedPair.replace('-USDT-SWAP', '')
+
+    const filteredMarkers = chartTrades.markers
+      .filter(m => m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName))
+      .map(m => {
+        const ts = m.time
+        if (m.side === 'buy') {
+          return {
+            time: ts,
+            position: 'belowBar',
+            color: '#00ff88',
+            shape: 'arrowUp',
+            text: `▲ $${m.entry?.toFixed?.(0) || m.entry}`,
+          }
+        } else {
+          const pnl = m.pnl || 0
+          const pnlSign = pnl >= 0 ? '+' : ''
+          return {
+            time: ts,
+            position: 'aboveBar',
+            color: pnl >= 0 ? '#00ff88' : '#ff4444',
+            shape: 'arrowDown',
+            text: `▼ $${m.exit_price?.toFixed?.(0) || m.exit_price} ${pnlSign}$${pnl.toFixed(0)}`,
+          }
+        }
+      })
+      .sort((a, b) => a.time - b.time)
+
+    if (filteredMarkers.length > 0) {
+      markersRef.current = createSeriesMarkers(candlestickSeries, filteredMarkers)
+    }
+
+    chartTrades.open_positions
+      .filter(p => p.inst_id === selectedPair || p.symbol === pairName)
+      .forEach(pos => {
+        const stopLine = candlestickSeries.createPriceLine({
+          price: pos.stop,
+          color: '#ff4444',
+          lineWidth: 2,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: `STOP $${pos.stop.toFixed(decimals)}`,
+        })
+        stopLinesRef.current.push(stopLine)
+
+        const entryLine = candlestickSeries.createPriceLine({
+          price: pos.entry,
+          color: '#00ff8888',
+          lineWidth: 1,
+          lineStyle: 1,
+          axisLabelVisible: true,
+          title: `ENTRY $${pos.entry.toFixed(decimals)}`,
+        })
+        stopLinesRef.current.push(entryLine)
+      })
+
     const lastTime = chartData[chartData.length - 1].time
     const firstTime = chartData[0].time
     const range = lastTime - firstTime
@@ -124,8 +200,10 @@ export default function ChartPage() {
       window.removeEventListener('resize', handleResize)
       chart.remove()
       chartRef.current = null
+      markersRef.current = null
+      stopLinesRef.current = []
     }
-  }, [chartData, selectedPair])
+  }, [chartData, selectedPair, chartTrades])
 
   const intervals = ['5m', '15m', '1H', '4H', '1D']
 
@@ -137,8 +215,15 @@ export default function ChartPage() {
             <BarChart3 size={22} className="text-neon-blue" />
             График
           </h2>
-          <p className="text-sm text-gray-400 mt-1">Свечной график</p>
+          <p className="text-sm text-gray-400 mt-1">Свечной график + сделки momentum</p>
         </div>
+        <button
+          onClick={() => { loadCandles(); loadChartData() }}
+          className="glass px-3 py-2 text-xs text-gray-400 hover:text-white flex items-center gap-2 rounded-lg border border-white/5 hover:border-white/20 transition-all"
+        >
+          <RefreshCw size={14} />
+          Обновить
+        </button>
       </div>
 
       <div className="flex items-center gap-4 flex-wrap">
@@ -167,6 +252,21 @@ export default function ChartPage() {
             </button>
           ))}
         </div>
+
+        {chartTrades.open_positions.length > 0 && (
+          <div className="flex items-center gap-2 ml-auto">
+            {chartTrades.open_positions
+              .filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', ''))
+              .map((p, i) => (
+                <div key={i} className="glass px-3 py-1.5 text-xs flex items-center gap-3 rounded-lg border border-neon-green/20">
+                  <span className="text-neon-green font-bold">▲ LONG</span>
+                  <span className="text-gray-400">Entry: <span className="text-white">${p.entry.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span></span>
+                  <span className="text-neon-red">Stop: <span className="text-white">${p.stop.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span></span>
+                  <span className="text-neon-yellow">Peak: <span className="text-white">${p.peak.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span></span>
+                </div>
+              ))}
+          </div>
+        )}
       </div>
 
       {loading && (
@@ -179,6 +279,23 @@ export default function ChartPage() {
       {!loading && chartData && chartData.length > 0 && (
         <div className="glass p-4">
           <div ref={containerRef} className="w-full" style={{ height: 500 }} />
+          <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full bg-neon-green" /> Вход (LONG)
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full bg-neon-red" /> Выход
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full border border-neon-red" style={{borderStyle:'dashed'}} /> Trail Stop
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full border border-neon-green" style={{borderStyle:'dotted'}} /> Entry Level
+            </span>
+            {chartTrades.markers.length > 0 && (
+              <span className="ml-auto">{chartTrades.markers.filter(m => m.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))).length} сделок</span>
+            )}
+          </div>
         </div>
       )}
 

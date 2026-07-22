@@ -368,6 +368,57 @@ async def momentum_trades(limit: int = 20):
     return {"trades": trades}
 
 
+@app.get("/api/momentum/chart-data")
+async def momentum_chart_data():
+    """Return trade markers + open position stops for chart overlay."""
+    global momentum
+    markers = []
+    open_positions = []
+
+    if momentum:
+        for t in momentum._trade_log:
+            side = t.get("side", "")
+            symbol = t.get("symbol", "")
+            time_str = t.get("time", "")
+            if not time_str or not symbol:
+                continue
+            try:
+                ts = int(datetime.fromisoformat(time_str).timestamp())
+            except Exception:
+                continue
+            if side == "buy":
+                markers.append({
+                    "time": ts,
+                    "side": "buy",
+                    "symbol": symbol,
+                    "entry": t.get("entry", 0),
+                    "stop": t.get("stop", 0),
+                    "adx": t.get("adx", 0),
+                })
+            elif side == "sell":
+                markers.append({
+                    "time": ts,
+                    "side": "sell",
+                    "symbol": symbol,
+                    "exit_price": t.get("exit_price", 0),
+                    "entry_price": t.get("entry_price", 0),
+                    "pnl": t.get("pnl", 0),
+                    "reason": t.get("reason", ""),
+                })
+
+        for coin, pos in momentum._positions.items():
+            open_positions.append({
+                "symbol": pos.symbol,
+                "inst_id": pos.inst_id,
+                "entry": pos.entry_price,
+                "stop": pos.stop_price,
+                "peak": pos.peak_price,
+                "size": pos.size,
+            })
+
+    return {"markers": markers, "open_positions": open_positions}
+
+
 # ── PnL ──
 
 import time as _time
