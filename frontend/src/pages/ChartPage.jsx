@@ -162,7 +162,8 @@ export default function ChartPage() {
     chartTrades.open_positions
       .filter(p => p.inst_id === selectedPair || p.symbol === pairName)
       .forEach(pos => {
-        const posOpenTime = filteredMarkers.find(m => m.side === 'buy')?.time
+        const entryMarker = chartTrades.markers.find(m => m.side === 'buy' && (m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName)))
+        const posOpenTime = entryMarker?.time
         if (!posOpenTime) return
 
         const stopLineData = chartData
@@ -173,27 +174,25 @@ export default function ChartPage() {
           .map(c => ({ time: c.time, value: pos.entry }))
 
         if (stopLineData.length > 0) {
-          const stopSeries = chart.addSeries(LineSeries, {
+          chart.addSeries(LineSeries, {
             color: '#ff4444',
             lineWidth: 2,
             lineStyle: 2,
             priceScaleId: 'right',
             lastValueVisible: true,
             priceLineVisible: false,
-          })
-          stopSeries.setData(stopLineData)
+          }).setData(stopLineData)
         }
 
         if (entryLineData.length > 0) {
-          const entrySeries = chart.addSeries(LineSeries, {
+          chart.addSeries(LineSeries, {
             color: '#00ff8888',
             lineWidth: 1,
             lineStyle: 1,
             priceScaleId: 'right',
             lastValueVisible: true,
             priceLineVisible: false,
-          })
-          entrySeries.setData(entryLineData)
+          }).setData(entryLineData)
         }
       })
 
