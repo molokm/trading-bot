@@ -53,6 +53,21 @@ async def startup():
         print("[startup] 2/3 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        print("[startup] 3/3 Momentum auto-start ...", flush=True)
+        if _env_key and _env_secret and _env_pass:
+            config = MomentumConfig(
+                symbols=["BTC", "ETH", "BNB", "SOL"],
+                risk_per_trade=0.03,
+                max_positions=4,
+                auto_execute=True,
+                poll_interval_sec=900,
+                trail_pct=0.03,
+                adx_threshold=20.0,
+            )
+            m = MomentumStrategy(config=config, client_manager=client_manager, db=db)
+            global momentum
+            momentum = m
+            await momentum.start()
         print("[startup] Done — server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
