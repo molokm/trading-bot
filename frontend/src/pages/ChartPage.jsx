@@ -164,14 +164,13 @@ export default function ChartPage() {
       .forEach(pos => {
         const entryMarker = chartTrades.markers.find(m => m.side === 'buy' && (m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName)))
         const posOpenTime = entryMarker?.time
-        if (!posOpenTime) return
+        if (!posOpenTime || chartData.length === 0) return
 
-        const stopLineData = chartData
-          .filter(c => c.time >= posOpenTime)
-          .map(c => ({ time: c.time, value: pos.stop }))
-        const entryLineData = chartData
-          .filter(c => c.time >= posOpenTime)
-          .map(c => ({ time: c.time, value: pos.entry }))
+        const fromIdx = chartData.reduce((best, c, i) => c.time <= posOpenTime ? i : best, -1)
+        if (fromIdx < 0) return
+
+        const stopLineData = chartData.slice(fromIdx).map(c => ({ time: c.time, value: pos.stop }))
+        const entryLineData = chartData.slice(fromIdx).map(c => ({ time: c.time, value: pos.entry }))
 
         if (stopLineData.length > 0) {
           chart.addSeries(LineSeries, {
