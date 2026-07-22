@@ -508,7 +508,6 @@ class MomentumStrategy:
                 "inst_id": pos.inst_id,
                 "entry": pos.entry_price,
                 "stop": pos.stop_price,
-                "target": pos.target_price,
                 "size": pos.size,
                 "peak_ratio": round((pos.peak_price / pos.entry_price - 1) * 100, 2) if pos.entry_price else 0,
             })
