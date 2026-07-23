@@ -137,6 +137,15 @@ class OKXClient:
             params["instId"] = inst_id
         return await self._request("GET", "/api/v5/trade/fills", params=params)
 
+    async def close_position(self, inst_id: str, mgn_mode: str = "cross",
+                              pos_side: str = None, auto_cxl: bool = True) -> dict:
+        body = {"instId": inst_id, "mgnMode": mgn_mode}
+        if pos_side:
+            body["posSide"] = pos_side
+        if auto_cxl:
+            body["autoCxl"] = "true"
+        return await self._request("POST", "/api/v5/trade/close-position", body=body)
+
     async def get_bills(self, inst_type: str = "SWAP", limit: int = 100) -> dict:
         return await self._request("GET", "/api/v5/account/bills",
                                    params={"instType": inst_type, "limit": limit})
