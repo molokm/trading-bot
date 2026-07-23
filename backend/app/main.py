@@ -60,9 +60,12 @@ async def startup():
                 risk_per_trade=0.03,
                 max_positions=4,
                 auto_execute=True,
-                poll_interval_sec=900,
+                poll_interval_sec=60,
                 trail_pct=0.03,
                 adx_threshold=20.0,
+                breakeven_pct=0.005,
+                tp1_pct=0.02,
+                tp1_frac=0.75,
             )
             m = MomentumStrategy(config=config, client_manager=client_manager, db=db)
             global momentum
@@ -334,7 +337,7 @@ async def momentum_start(data: dict = None):
         risk_per_trade=d.get("risk_per_trade", 0.03),
         max_positions=d.get("max_positions", 4),
         auto_execute=d.get("auto_execute", True),
-        poll_interval_sec=d.get("poll_interval_sec", 3600),
+        poll_interval_sec=d.get("poll_interval_sec", 60),
         roc_fast=d.get("roc_fast", 5),
         roc_slow=d.get("roc_slow", 50),
         ema_fast=d.get("ema_fast", 15),
@@ -343,6 +346,9 @@ async def momentum_start(data: dict = None):
         trail_pct=d.get("trail_pct", 0.03),
         adx_threshold=d.get("adx_threshold", 20.0),
         mom_threshold=d.get("mom_threshold", 0.0),
+        breakeven_pct=d.get("breakeven_pct", 0.005),
+        tp1_pct=d.get("tp1_pct", 0.02),
+        tp1_frac=d.get("tp1_frac", 0.75),
     )
     momentum = MomentumStrategy(config=config, client_manager=client_manager, db=db)
     await momentum.start()

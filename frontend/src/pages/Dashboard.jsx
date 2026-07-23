@@ -32,6 +32,16 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [momConfigForm, setMomConfigForm] = useState({
+    risk_per_trade: 0.03,
+    max_positions: 4,
+    poll_interval_sec: 60,
+    trail_pct: 0.03,
+    breakeven_pct: 0.005,
+    tp1_pct: 0.02,
+    tp1_frac: 0.75,
+    adx_threshold: 20,
+  })
 
   useEffect(() => {
     loadData()
@@ -54,7 +64,22 @@ export default function Dashboard({ health, connected, isGuest }) {
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (momStatus) setMomentumStatus(momStatus)
+      if (momStatus) {
+        setMomentumStatus(momStatus)
+        if (momStatus.config) {
+          setMomConfigForm(prev => ({
+            ...prev,
+            risk_per_trade: momStatus.config.risk_per_trade ?? prev.risk_per_trade,
+            max_positions: momStatus.config.max_positions ?? prev.max_positions,
+            poll_interval_sec: momStatus.config.poll_interval_sec ?? prev.poll_interval_sec,
+            trail_pct: momStatus.config.trail_pct ?? prev.trail_pct,
+            breakeven_pct: momStatus.config.breakeven_pct ?? prev.breakeven_pct,
+            tp1_pct: momStatus.config.tp1_pct ?? prev.tp1_pct,
+            tp1_frac: momStatus.config.tp1_frac ?? prev.tp1_frac,
+            adx_threshold: momStatus.config.adx_threshold ?? prev.adx_threshold,
+          }))
+        }
+      }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
@@ -213,6 +238,10 @@ export default function Dashboard({ health, connected, isGuest }) {
             </span>
           )}
         </h3>
+        <div className="text-xs text-gray-500 mb-3 leading-relaxed">
+          Моментум на дневных свечах (ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI).
+          Выход: трейлинг → безубыток при +0.5% → частичное закрытие 75% при +2%.
+        </div>
         {momentumStatus && momentumStatus.running ? (
           <div className="space-y-3">
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
@@ -247,7 +276,6 @@ export default function Dashboard({ health, connected, isGuest }) {
                       </div>
                       <div className="flex items-center gap-3 text-gray-400">
                         <span>stop=${p.stop?.toFixed(2)}</span>
-                        <span>tp=${p.target?.toFixed(2)}</span>
                         <span>peak={p.peak_ratio}x</span>
                       </div>
                     </div>
@@ -266,7 +294,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <span className={`px-1.5 py-0.5 rounded font-bold ${
                           tr.side === 'buy' ? 'bg-neon-green/20 text-neon-green' : 'bg-neon-red/20 text-neon-red'
                         }`}>
-                          {tr.side === 'buy' ? 'LONG' : 'EXIT'}
+                          {tr.side === 'buy' ? 'LONG' : tr.reason ? `EXIT ${tr.reason}` : 'EXIT'}
                         </span>
                         <span className="text-white font-medium">{tr.symbol}</span>
                         {tr.pnl != null && (
@@ -301,10 +329,60 @@ export default function Dashboard({ health, connected, isGuest }) {
         ) : (
           <div className="text-center py-4">
             <p className="text-sm text-gray-500 mb-3">Стратегия не запущена</p>
+            <div className="max-w-md mx-auto text-left mb-4 space-y-2">
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Риск на сделку</span>
+                <input type="range" min="0.5" max="10" step="0.5"
+                  value={(momConfigForm.risk_per_trade * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, risk_per_trade: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{(momConfigForm.risk_per_trade * 100).toFixed(0)}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Макс. позиций</span>
+                <input type="range" min="1" max="8" step="1"
+                  value={momConfigForm.max_positions}
+                  onChange={e => setMomConfigForm(f => ({...f, max_positions: Number(e.target.value)}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{momConfigForm.max_positions}</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Трейлинг стоп</span>
+                <input type="range" min="0.5" max="10" step="0.5"
+                  value={(momConfigForm.trail_pct * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, trail_pct: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{(momConfigForm.trail_pct * 100).toFixed(0)}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">Безубыток при</span>
+                <input type="range" min="0.1" max="3" step="0.1"
+                  value={(momConfigForm.breakeven_pct * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, breakeven_pct: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{(momConfigForm.breakeven_pct * 100).toFixed(0)}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">TP1 частичное при</span>
+                <input type="range" min="0.5" max="8" step="0.5"
+                  value={(momConfigForm.tp1_pct * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, tp1_pct: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{(momConfigForm.tp1_pct * 100).toFixed(0)}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">TP1 размер закрытия</span>
+                <input type="range" min="20" max="100" step="5"
+                  value={(momConfigForm.tp1_frac * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, tp1_frac: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{(momConfigForm.tp1_frac * 100).toFixed(0)}%</span>
+              </label>
+            </div>
             <button
               onClick={async () => {
                 try {
-                  await api.momentumStart({})
+                  await api.momentumStart(momConfigForm)
                   loadData()
                 } catch (e) {
                   alert('Ошибка: ' + e.message)

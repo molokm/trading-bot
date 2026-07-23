@@ -21,19 +21,29 @@ class MomentumConfig:
     risk_per_trade: float = 0.03
     max_positions: int = 4
     auto_execute: bool = True
-    poll_interval_sec: int = 3600
+    poll_interval_sec: int = 60
     roc_fast: int = 5
     roc_slow: int = 50
     ema_fast: int = 15
     ema_slow: int = 30
     atr_stop_mult: float = 1.5
-    trail_pct: float = 0.03  # 3% trailing stop from peak
+    trail_pct: float = 0.03
     adx_threshold: float = 20.0
     mom_threshold: float = 0.0
+    breakeven_pct: float = 0.005  # 0.5% → move stop to entry
+    tp1_pct: float = 0.02         # 2% → partial close
+    tp1_frac: float = 0.75        # close 75% at TP1
 
     def __post_init__(self):
         if self.symbols is None:
             self.symbols = ["BTC", "ETH", "BNB", "SOL"]
+
+
+STRATEGY_DESC = (
+    "Momentum на дневных свечах: вход при ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI. "
+    "Выход: 3-стадийный — (1) трейлинг 3% от пика сразу, (2) безубыток при +0.5%, "
+    "(3) частичное закрытие 75% при +2%, остаток безрисково с трейлингом."
+)
 
 
 @dataclass
@@ -41,8 +51,10 @@ class OpenPosition:
     symbol: str
     entry_price: float
     stop_price: float
-    peak_price: float  # highest price since entry
+    peak_price: float
     size: float
+    size_remaining: float  # after partial close
+    stage: str = "initial"  # initial → breakeven → trailing
     atr: float
     opened_at: str = ""
     inst_id: str = ""
@@ -373,8 +385,8 @@ class MomentumStrategy:
 
             self._positions[coin] = OpenPosition(
                 symbol=coin, entry_price=price, stop_price=stop_price,
-                peak_price=price, size=sz, atr=atr,
-                opened_at=now, inst_id=inst_id,
+                peak_price=price, size=sz, size_remaining=sz,
+                stage="initial", atr=atr, opened_at=now, inst_id=inst_id,
             )
 
             signal_entry = {
@@ -408,22 +420,68 @@ class MomentumStrategy:
         for coin in list(self._positions.keys()):
             pos = self._positions[coin]
             try:
+                if pos.size_remaining <= 0:
+                    del self._positions[coin]
+                    continue
+
                 ticker = await client.get_ticker(pos.inst_id)
                 if ticker.get("error") or not ticker.get("data"):
                     continue
-                current_price = float(ticker["data"][0]["last"])
+                cur = float(ticker["data"][0]["last"])
 
-                # Update peak price
-                if current_price > pos.peak_price:
-                    pos.peak_price = current_price
-                    # Trail stop: 3% below peak
-                    new_stop = pos.peak_price * (1 - self.config.trail_pct)
+                if cur > pos.peak_price:
+                    pos.peak_price = cur
+
+                stage = pos.stage
+                entry = pos.entry_price
+                be_pct = self.config.breakeven_pct
+                tp1_pct = self.config.tp1_pct
+                trail_pct = self.config.trail_pct
+
+                if stage == "initial":
+                    # Trail from peak
+                    new_stop = pos.peak_price * (1 - trail_pct)
                     if new_stop > pos.stop_price:
                         pos.stop_price = new_stop
 
-                # Check exit
-                if current_price <= pos.stop_price:
-                    await self._close_position(coin, pos, current_price, "trail_stop")
+                    # Breakeven trigger
+                    if cur >= entry * (1 + be_pct):
+                        pos.stop_price = max(pos.stop_price, entry * 0.999)
+                        pos.stage = "breakeven"
+                        print(f"[Momentum] {coin}: breakeven stage @ {cur:.2f}", flush=True)
+
+                elif stage == "breakeven":
+                    # TP1 partial close
+                    if cur >= entry * (1 + tp1_pct):
+                        if pos.size_remaining == pos.size:
+                            close_sz = round(pos.size * self.config.tp1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
+                            close_sz = min(close_sz, pos.size_remaining)
+                            if close_sz >= LOT_SZ.get(coin, 0.01):
+                                await self._partial_close_position(coin, pos, cur, close_sz)
+                                pos.stop_price = max(pos.stop_price, entry * 0.999)
+                                pos.stage = "trailing"
+                                print(f"[Momentum] {coin}: TP1 hit @ {cur:.2f}, closed {close_sz}, "
+                                      f"remaining {pos.size_remaining}", flush=True)
+                            else:
+                                pos.stage = "trailing"
+                        else:
+                            pos.stage = "trailing"
+                    else:
+                        # Still trail
+                        new_stop = max(pos.stop_price, entry * 0.999)
+                        trail_stop = pos.peak_price * (1 - trail_pct)
+                        if trail_stop > new_stop:
+                            new_stop = trail_stop
+                        pos.stop_price = new_stop
+
+                elif stage == "trailing":
+                    new_stop = pos.peak_price * (1 - trail_pct)
+                    if new_stop > pos.stop_price:
+                        pos.stop_price = new_stop
+
+                # Generic stop check (all stages)
+                if cur <= pos.stop_price:
+                    await self._close_position(coin, pos, cur, pos.stage)
 
             except Exception as e:
                 print(f"[Momentum] {coin}: manage error: {e}", flush=True)
@@ -436,23 +494,26 @@ class MomentumStrategy:
             return
 
         try:
+            close_sz = pos.size_remaining
+            if close_sz <= 0:
+                return
             result = await client.place_order(
                 inst_id=pos.inst_id, side="sell", ord_type="market",
-                sz=f"{pos.size:.2f}", td_mode="cross", pos_side="long",
+                sz=f"{close_sz:.2f}", td_mode="cross", pos_side="long",
             )
             if result.get("error"):
                 print(f"[Momentum] {coin}: close failed: {result.get('message')}", flush=True)
                 return
 
-            pnl = pos.size * (exit_price - pos.entry_price) * CT_VAL.get(coin, 0.1)
-            fee = pos.size * (pos.entry_price + exit_price) * 0.001
+            pnl = close_sz * (exit_price - pos.entry_price) * CT_VAL.get(coin, 0.1)
+            fee = close_sz * (pos.entry_price + exit_price) * 0.001
             net_pnl = pnl - fee
             self._equity += net_pnl
 
             trade = {
                 "time": datetime.now(timezone.utc).isoformat(),
                 "side": "sell", "symbol": pos.inst_id,
-                "size": pos.size, "exit_price": exit_price,
+                "size": close_sz, "exit_price": exit_price,
                 "entry_price": pos.entry_price, "pnl": round(net_pnl, 2),
                 "reason": reason,
             }
@@ -470,6 +531,42 @@ class MomentumStrategy:
 
         except Exception as e:
             print(f"[Momentum] {coin}: close error: {e}", flush=True)
+
+    async def _partial_close_position(self, coin: str, pos: OpenPosition, exit_price: float, close_sz: float):
+        if not self.client_manager:
+            return
+        client = self.client_manager.get_client()
+        if not client:
+            return
+
+        try:
+            result = await client.place_order(
+                inst_id=pos.inst_id, side="sell", ord_type="market",
+                sz=f"{close_sz:.2f}", td_mode="cross", pos_side="long",
+            )
+            if result.get("error"):
+                print(f"[Momentum] {coin}: partial close failed: {result.get('message')}", flush=True)
+                return
+
+            pnl = close_sz * (exit_price - pos.entry_price) * CT_VAL.get(coin, 0.1)
+            fee = close_sz * (pos.entry_price + exit_price) * 0.001
+            net_pnl = pnl - fee
+            self._equity += net_pnl
+            pos.size_remaining = round(pos.size_remaining - close_sz, 4)
+
+            trade = {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "side": "sell", "symbol": pos.inst_id,
+                "size": close_sz, "exit_price": exit_price,
+                "entry_price": pos.entry_price, "pnl": round(net_pnl, 2),
+                "reason": "tp1",
+            }
+            self._trade_log.append(trade)
+            await self._save_signal_db("sell", coin, exit_price)
+            await self._save_trade_db(trade)
+
+        except Exception as e:
+            print(f"[Momentum] {coin}: partial close error: {e}", flush=True)
 
     async def _save_signal_db(self, side: str, coin: str, price: float):
         if not self.db:
@@ -509,6 +606,8 @@ class MomentumStrategy:
                 "entry": pos.entry_price,
                 "stop": pos.stop_price,
                 "size": pos.size,
+                "size_remaining": pos.size_remaining,
+                "stage": pos.stage,
                 "peak_ratio": round((pos.peak_price / pos.entry_price - 1) * 100, 2) if pos.entry_price else 0,
             })
         return {
