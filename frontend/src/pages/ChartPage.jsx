@@ -258,35 +258,35 @@ export default function ChartPage() {
           ))}
         </div>
 
-        {chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))).length > 0 && (
-          <div className="flex items-center gap-2 ml-auto">
-            {chartTrades.trade_lines
-              .filter(p => p.stage !== 'closed' && (p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))))
-              .slice(0, 3)
-              .map((p, i) => (
+        {(() => {
+          const pairLines = chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', '')))
+          if (pairLines.length === 0) {
+            const lastPx = chartData?.length > 0 ? chartData[chartData.length - 1] : null
+            return (
+              <div className="flex items-center gap-2 ml-auto">
+                <div className="glass px-3 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400">
+                  Нет сделок — линии появятся после входа в позицию
+                  {lastPx && <span className="ml-2 text-white">Текущая цена: ${lastPx.close}</span>}
+                </div>
+              </div>
+            )
+          }
+          const activeLines = pairLines.filter(p => p.stage !== 'closed')
+          return activeLines.length > 0 && (
+            <div className="flex items-center gap-2 ml-auto">
+              {activeLines.slice(0, 3).map((p, i) => (
                 <div key={i} className="glass px-3 py-1.5 text-xs flex items-center gap-3 rounded-lg border border-neon-green/20">
                   <span className="text-neon-green font-bold">▲ LONG</span>
-                  <span className="text-gray-400">
-                    Entry: <span className="text-white">${p.entry}</span>
-                  </span>
-                  <span className="text-gray-400">
-                    Стоп: <span className="text-neon-red">${p.stop}</span>
-                  </span>
-                  <span className="text-gray-400">
-                    BE: <span className="text-neon-yellow">${p.breakeven}</span>
-                  </span>
-                  <span className="text-gray-400">
-                    TP1: <span className="text-neon-blue">${p.tp1}</span>
-                  </span>
-                  {p.stage !== 'closed' && (
-                    <span className="text-gray-400">
-                      Стадия: <span className="text-neon-purple">{p.stage}</span>
-                    </span>
-                  )}
+                  <span className="text-gray-400">Entry: <span className="text-white">${p.entry}</span></span>
+                  <span className="text-gray-400">Стоп: <span className="text-neon-red">${p.stop}</span></span>
+                  <span className="text-gray-400">BE: <span className="text-neon-yellow">${p.breakeven}</span></span>
+                  <span className="text-gray-400">TP1: <span className="text-neon-blue">${p.tp1}</span></span>
+                  {p.stage !== 'closed' && <span className="text-gray-400">Стадия: <span className="text-neon-purple">{p.stage}</span></span>}
                 </div>
               ))}
-          </div>
-        )}
+            </div>
+          )
+        })()}
       </div>
 
       {loading && (
