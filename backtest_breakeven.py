@@ -59,11 +59,12 @@ def precomp(raw):
 
 def bt_be(pc, rf, rm, ef, es, init_stop_mult, breakeven_pct, tp1_pct, tp1_frac, trail_pct, adxt, mm, mp, rp):
     """
-    Multi-stage exit:
-    1. Initial: stop at -init_stop_mult*ATR
-    2. Breakeven: if price reaches +breakeven_pct, move stop to entry
-    3. TP1: if price reaches +tp1_pct, close tp1_frac of position
-    4. Trail: remaining position trails at trail_pct below peak
+    Multi-stage exit (honest — no future data):
+    1. Signal at close of day j-1 → enter at open of day j
+    2. Initial: stop at -init_stop_mult*ATR
+    3. Breakeven: if price reaches +breakeven_pct, move stop to entry
+    4. TP1: if price reaches +tp1_pct, close tp1_frac of position
+    5. Trail: remaining position trails at trail_pct below peak
     """
     eq = IC
     pos = {}  # symbol -> [entry, stop, peak, size_remaining, size_initial, stage]
@@ -87,6 +88,12 @@ def bt_be(pc, rf, rm, ef, es, init_stop_mult, breakeven_pct, tp1_pct, tp1_frac, 
                 cur_low = p['L'][j]
 
                 if stage == 'initial':
+                    if cur_high > peak:
+                        peak = cur_high
+                        new_stop = peak * (1 - trail_pct/100)
+                        if new_stop > stop:
+                            stop = new_stop
+                        ps[1], ps[2] = stop, peak
                     if cur_low <= stop:
                         pnl = size_rem * (stop - entry) - (size_rem * entry + size_rem * stop) * 0.001
                         eq += pnl
@@ -95,10 +102,11 @@ def bt_be(pc, rf, rm, ef, es, init_stop_mult, breakeven_pct, tp1_pct, tp1_frac, 
                         del pos[s]
                         continue
                     if cur_high >= entry * (1 + breakeven_pct/100):
-                        stop = entry
-                        peak = max(peak, cur_high)
+                        if stop < entry:
+                            stop = entry
+                            ps[1] = stop
                         stage = 'breakeven'
-                        ps[1], ps[2], ps[5] = stop, peak, stage
+                        ps[5] = stage
 
                 if stage == 'breakeven':
                     if cur_low <= stop:
@@ -140,10 +148,12 @@ def bt_be(pc, rf, rm, ef, es, init_stop_mult, breakeven_pct, tp1_pct, tp1_frac, 
             if pos.get(s) is None:
                 if sum(1 for v in pos.values() if v is not None) >= mp: continue
                 if cd.get(s, 0) > 0: cd[s] -= 1; continue
-                rf_v = p[f'R{rf}'][j]; rm_v = p[f'R{rm}'][j]
-                ef_v = p[f'E{ef}'][j]; es_v = p[f'E{es}'][j]
-                ad = p['ADX'][j]; pdi_v = p['PDI'][j]; mdi_v = p['MDI'][j]
-                at = p['A'][j]
+                # Signal at j-1 (yesterday's close), enter at opens[j] (today's open)
+                if j < 2: continue
+                rf_v = p[f'R{rf}'][j-1]; rm_v = p[f'R{rm}'][j-1]
+                ef_v = p[f'E{ef}'][j-1]; es_v = p[f'E{es}'][j-1]
+                ad = p['ADX'][j-1]; pdi_v = p['PDI'][j-1]; mdi_v = p['MDI'][j-1]
+                at = p['A'][j-1]
                 if np.isnan(at) or at <= 0 or np.isnan(ef_v) or np.isnan(es_v): continue
                 if rf_v > 0 and rm_v > 0 and (rf_v * .5 + rm_v * .5) > mm and ef_v > es_v and ad > adxt and pdi_v > mdi_v:
                     ep = p['O'][j]

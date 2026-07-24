@@ -10,12 +10,21 @@ const PAIRS = [
   { id: 'BNB-USDT-SWAP', label: 'BNB/USDT' },
 ]
 
+function PriceLine({ value, label, color, style }) {
+  return (
+    <span className="flex items-center gap-1">
+      <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: color, borderStyle: style || 'solid' }} />
+      {label}: <span className="text-white font-mono">${value}</span>
+    </span>
+  )
+}
+
 export default function ChartPage() {
   const [selectedPair, setSelectedPair] = useState('BTC-USDT-SWAP')
   const [chartData, setChartData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [tf, setTf] = useState('1D')
-  const [chartTrades, setChartTrades] = useState({ markers: [], open_positions: [] })
+  const [chartTrades, setChartTrades] = useState({ markers: [], trade_lines: [] })
   const chartRef = useRef(null)
   const containerRef = useRef(null)
   const markersRef = useRef(null)
@@ -25,7 +34,7 @@ export default function ChartPage() {
       const data = await api.momentumChartData()
       setChartTrades(data)
     } catch {
-      setChartTrades({ markers: [], open_positions: [] })
+      setChartTrades({ markers: [], trade_lines: [] })
     }
   }, [])
 
@@ -159,32 +168,27 @@ export default function ChartPage() {
       markersRef.current = createSeriesMarkers(candlestickSeries, filteredMarkers)
     }
 
-    chartTrades.open_positions
-      .filter(p => p.inst_id === selectedPair || p.symbol === pairName)
+    chartTrades.trade_lines
+      .filter(p => p.inst_id === selectedPair || p.symbol === pairName || p.symbol?.includes(pairName))
       .forEach(pos => {
-        const entryMarker = chartTrades.markers.find(m => m.side === 'buy' && (m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName)))
-        const posOpenTime = entryMarker?.time
-        if (!posOpenTime || chartData.length === 0) return
-
-        const fromIdx = chartData.reduce((best, c, i) => c.time <= posOpenTime ? i : best, -1)
-        if (fromIdx < 0) return
-
+        if (chartData.length === 0) return
         const endTime = chartData[chartData.length - 1].time
         const makeLine = (value, color, width, style) => {
-          if (value == null) return
-          chart.addSeries(LineSeries, {
+          if (value == null || value <= 0) return
+          const s = chart.addSeries(LineSeries, {
             color, lineWidth: width, lineStyle: style,
             priceScaleId: 'right', lastValueVisible: true, priceLineVisible: false,
-          }).setData([
-            { time: chartData[fromIdx].time, value },
+          })
+          s.setData([
+            { time: chartData[0].time, value },
             { time: endTime, value },
           ])
         }
 
         makeLine(pos.stop, '#ff4444', 2, 2)
         makeLine(pos.entry, '#00ff8888', 1, 1)
-        if (pos.breakeven_price) makeLine(pos.breakeven_price, '#ffaa0088', 1, 2)
-        if (pos.tp1_price) makeLine(pos.tp1_price, '#4a9eff88', 1, 2)
+        makeLine(pos.breakeven, '#ffaa0088', 1, 2)
+        makeLine(pos.tp1, '#4a9eff88', 1, 2)
       })
 
     const lastTime = chartData[chartData.length - 1].time
@@ -254,36 +258,32 @@ export default function ChartPage() {
           ))}
         </div>
 
-        {chartTrades.open_positions.length > 0 && (
+        {chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))).length > 0 && (
           <div className="flex items-center gap-2 ml-auto">
-            {chartTrades.open_positions
-              .filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', ''))
+            {chartTrades.trade_lines
+              .filter(p => p.stage !== 'closed' && (p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))))
+              .slice(0, 3)
               .map((p, i) => (
-                  <div key={i} className="glass px-3 py-1.5 text-xs flex items-center gap-3 rounded-lg border border-neon-green/20">
-                    <span className="text-neon-green font-bold">▲ LONG</span>
-                    <span className="text-gray-400">
-                      <span className="text-white">${p.entry.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span>
-                    </span>
-                    <span className="text-gray-400">
-                      Стоп: <span className="text-neon-red">${p.stop.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span>
-                    </span>
-                    {p.breakeven_price && (
-                      <span className="text-gray-400">
-                        BE: <span className="text-neon-yellow">${p.breakeven_price.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span>
-                      </span>
-                    )}
-                    {p.tp1_price && (
-                      <span className="text-gray-400">
-                        TP1: <span className="text-neon-blue">${p.tp1_price.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span>
-                      </span>
-                    )}
-                    <span className="text-gray-400">
-                      Пик: <span className="text-white">${p.peak.toFixed(p.inst_id?.includes('BTC') ? 0 : 2)}</span>
-                    </span>
+                <div key={i} className="glass px-3 py-1.5 text-xs flex items-center gap-3 rounded-lg border border-neon-green/20">
+                  <span className="text-neon-green font-bold">▲ LONG</span>
+                  <span className="text-gray-400">
+                    Entry: <span className="text-white">${p.entry}</span>
+                  </span>
+                  <span className="text-gray-400">
+                    Стоп: <span className="text-neon-red">${p.stop}</span>
+                  </span>
+                  <span className="text-gray-400">
+                    BE: <span className="text-neon-yellow">${p.breakeven}</span>
+                  </span>
+                  <span className="text-gray-400">
+                    TP1: <span className="text-neon-blue">${p.tp1}</span>
+                  </span>
+                  {p.stage !== 'closed' && (
                     <span className="text-gray-400">
                       Стадия: <span className="text-neon-purple">{p.stage}</span>
                     </span>
-                  </div>
+                  )}
+                </div>
               ))}
           </div>
         )}
@@ -301,7 +301,7 @@ export default function ChartPage() {
           <div ref={containerRef} className="w-full" style={{ height: 500 }} />
           <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
             <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-neon-green" /> Вход (LONG)
+              <span className="inline-block w-2 h-2 rounded-full bg-neon-green" /> Вход
             </span>
             <span className="flex items-center gap-1">
               <span className="inline-block w-2 h-2 rounded-full bg-neon-red" /> Выход
@@ -310,7 +310,7 @@ export default function ChartPage() {
               <span className="inline-block w-2 h-2 border border-neon-red" style={{borderStyle:'dashed'}} /> Стоп
             </span>
             <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 border border-neon-green" style={{borderStyle:'dotted'}} /> Entry
+              <span className="inline-block w-2 h-2 border border-neon-green" style={{borderStyle:'solid'}} /> Entry
             </span>
             <span className="flex items-center gap-1">
               <span className="inline-block w-2 h-2 border border-neon-yellow" style={{borderStyle:'dashed'}} /> Безубыток
@@ -318,8 +318,8 @@ export default function ChartPage() {
             <span className="flex items-center gap-1">
               <span className="inline-block w-2 h-2 border border-neon-blue" style={{borderStyle:'dashed'}} /> TP1
             </span>
-            {chartTrades.markers.length > 0 && (
-              <span className="ml-auto">{chartTrades.markers.filter(m => m.symbol?.includes(selectedPair.replace('-USDT-SWAP', ''))).length} сделок</span>
+            {chartTrades.trade_lines.length > 0 && (
+              <span className="ml-auto">{chartTrades.trade_lines.length} линий</span>
             )}
           </div>
         </div>

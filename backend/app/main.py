@@ -391,57 +391,83 @@ async def momentum_trades(limit: int = 20):
 
 @app.get("/api/momentum/chart-data")
 async def momentum_chart_data():
-    """Return trade markers + open position stops for chart overlay."""
+    """Return trade markers + entry/stop/be/tp1 lines for chart overlay."""
     global momentum
     markers = []
-    open_positions = []
+    trade_lines = []
+
+    def ts_or_none(t):
+        if not t:
+            return None
+        try:
+            return int(datetime.fromisoformat(t).timestamp())
+        except Exception:
+            return None
+
+    def be_price(entry, pct=0.005):
+        return round(entry * (1 + pct), 2)
+
+    def tp1_price(entry, pct=0.02):
+        return round(entry * (1 + pct), 2)
 
     if momentum:
+        cfg = momentum.config
+        be_pct = cfg.breakeven_pct if hasattr(cfg, 'breakeven_pct') else 0.005
+        tp1_pct = cfg.tp1_pct if hasattr(cfg, 'tp1_pct') else 0.02
+
+        buys: dict[str, dict] = {}
         for t in momentum._trade_log:
             side = t.get("side", "")
             symbol = t.get("symbol", "")
             time_str = t.get("time", "")
             if not time_str or not symbol:
                 continue
-            try:
-                ts = int(datetime.fromisoformat(time_str).timestamp())
-            except Exception:
+            t_ts = ts_or_none(time_str)
+            if not t_ts:
                 continue
+
             if side == "buy":
                 markers.append({
-                    "time": ts,
-                    "side": "buy",
-                    "symbol": symbol,
-                    "entry": t.get("entry", 0),
+                    "time": t_ts, "side": "buy", "symbol": symbol,
+                    "entry": t.get("entry", 0), "stop": t.get("stop", 0),
+                })
+                buys.setdefault(symbol, []).append({
+                    "ts": t_ts, "entry": t.get("entry", 0),
                     "stop": t.get("stop", 0),
-                    "adx": t.get("adx", 0),
                 })
             elif side == "sell":
                 markers.append({
-                    "time": ts,
-                    "side": "sell",
-                    "symbol": symbol,
+                    "time": t_ts, "side": "sell", "symbol": symbol,
                     "exit_price": t.get("exit_price", 0),
                     "entry_price": t.get("entry_price", 0),
-                    "pnl": t.get("pnl", 0),
-                    "reason": t.get("reason", ""),
+                    "pnl": t.get("pnl", 0), "reason": t.get("reason", ""),
                 })
 
         for coin, pos in momentum._positions.items():
-            cfg = momentum.config
-            open_positions.append({
-                "symbol": pos.symbol,
-                "inst_id": pos.inst_id,
-                "entry": pos.entry_price,
-                "stop": pos.stop_price,
+            entry = pos.entry_price
+            trade_lines.append({
+                "symbol": pos.symbol, "inst_id": pos.inst_id,
+                "entry": entry, "stop": pos.stop_price,
+                "breakeven": be_price(entry, be_pct),
+                "tp1": tp1_price(entry, tp1_pct),
                 "peak": pos.peak_price,
-                "size": pos.size,
-                "breakeven_price": round(pos.entry_price * (1 + cfg.breakeven_pct), 2),
-                "tp1_price": round(pos.entry_price * (1 + cfg.tp1_pct), 2),
-                "stage": pos.stage,
+                "stage": pos.stage, "size": pos.size,
             })
 
-    return {"markers": markers, "open_positions": open_positions}
+        # Past closed trades: pair buy/sell markers
+        for symbol, ent in buys.items():
+            for b in ent:
+                entry = b["entry"]
+                trade_lines.append({
+                    "symbol": symbol,
+                    "entry": entry,
+                    "stop": b["stop"],
+                    "breakeven": be_price(entry, be_pct),
+                    "tp1": tp1_price(entry, tp1_pct),
+                    "stage": "closed",
+                })
+
+    return {"markers": markers, "trade_lines": trade_lines}
 
 
 # ── PnL ──
