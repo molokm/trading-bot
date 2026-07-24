@@ -53,9 +53,9 @@ class OpenPosition:
     stop_price: float
     peak_price: float
     size: float
-    size_remaining: float  # after partial close
-    stage: str = "initial"  # initial → breakeven → trailing
     atr: float
+    size_remaining: float = 0.0
+    stage: str = "initial"
     opened_at: str = ""
     inst_id: str = ""
 
