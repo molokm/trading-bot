@@ -428,6 +428,7 @@ async def momentum_chart_data():
                 })
 
         for coin, pos in momentum._positions.items():
+            cfg = momentum.config
             open_positions.append({
                 "symbol": pos.symbol,
                 "inst_id": pos.inst_id,
@@ -435,6 +436,9 @@ async def momentum_chart_data():
                 "stop": pos.stop_price,
                 "peak": pos.peak_price,
                 "size": pos.size,
+                "breakeven_price": round(pos.entry_price * (1 + cfg.breakeven_pct), 2),
+                "tp1_price": round(pos.entry_price * (1 + cfg.tp1_pct), 2),
+                "stage": pos.stage,
             })
 
     return {"markers": markers, "open_positions": open_positions}
