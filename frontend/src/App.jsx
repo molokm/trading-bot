@@ -1,12 +1,13 @@
 import React, { useState, useEffect, createContext, useContext } from 'react'
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, Settings, BarChart3,
+  LayoutDashboard, Settings, BarChart3, ScrollText,
   Wallet, TrendingUp, Bot, LogOut, User, Shield
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import SettingsPage from './pages/SettingsPage'
 import ChartPage from './pages/ChartPage'
+import TradeHistoryPage from './pages/TradeHistoryPage'
 import LoginPage from './pages/LoginPage'
 import { api } from './services/api'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -58,6 +59,7 @@ function AppContent() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.overview') },
     { to: '/chart', icon: BarChart3, label: 'График' },
+    { to: '/trades', icon: ScrollText, label: 'История' },
     ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
   ]
 
@@ -131,6 +133,7 @@ function AppContent() {
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
           <Route path="/chart" element={<ChartPage />} />
+          <Route path="/trades" element={<TradeHistoryPage />} />
         </Routes>
       </main>
     </div>
