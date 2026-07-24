@@ -389,6 +389,14 @@ async def momentum_trades(limit: int = 20):
     return {"trades": trades}
 
 
+@app.get("/api/momentum/indicators")
+async def momentum_indicators():
+    """Return latest computed indicators per coin (debug)."""
+    global momentum
+    if not momentum:
+        return {"indicators": {}}
+    return {"indicators": getattr(momentum, "_latest_indicators", {})}
+
 @app.get("/api/momentum/chart-data")
 async def momentum_chart_data():
     """Return trade markers + entry/stop/be/tp1 lines for chart overlay."""

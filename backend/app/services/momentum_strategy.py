@@ -73,6 +73,7 @@ class MomentumStrategy:
         self._signal_log: list = []
         self._trade_log: list = []
         self._equity = 10000.0
+        self._latest_indicators: dict = {}
 
     async def _ensure_bot(self):
         if not self.db:
@@ -316,6 +317,11 @@ class MomentumStrategy:
             ind = self._compute_indicators(candles)
             if not ind:
                 continue
+
+            self._latest_indicators[coin] = {
+                "pass": self._check_entry_signal(ind),
+                **{k: v for k, v in ind.items() if isinstance(v, (int, float, bool))},
+            }
 
             if self._check_entry_signal(ind):
                 await self._open_position(coin, ind)
