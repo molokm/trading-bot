@@ -33,7 +33,7 @@ class MomentumConfig:
     breakeven_pct: float = 0.005  # 0.5% → move stop to entry
     tp1_pct: float = 0.02         # 2% → partial close
     tp1_frac: float = 0.75        # close 75% at TP1
-    sl1_pct: float = 0.0          # 0=off, 1.0=-1% → cascade stop partial close
+    sl1_pct: float = 1.0          # 0=off, 1.0=-1% → cascade stop partial close
     sl1_frac: float = 0.5         # close 50% at SL1
 
     def __post_init__(self):
