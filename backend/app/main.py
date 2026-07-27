@@ -459,7 +459,7 @@ async def momentum_chart_data():
                 "breakeven": be_price(entry, be_pct),
                 "tp1": tp1_price(entry, tp1_pct),
                 "peak": pos.peak_price,
-                "stage": pos.stage, "size": pos.size,
+                "stage": pos.stage, "size": pos.size_remaining, "original_size": pos.size,
             })
 
         # Past closed trades: pair buy/sell markers

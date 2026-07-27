@@ -281,6 +281,7 @@ export default function ChartPage() {
                   <span className="text-gray-400">Стоп: <span className="text-neon-red">${p.stop}</span></span>
                   <span className="text-gray-400">BE: <span className="text-neon-yellow">${p.breakeven}</span></span>
                   <span className="text-gray-400">TP1: <span className="text-neon-blue">${p.tp1}</span></span>
+                  <span className="text-gray-400">Размер: <span className="text-white">{p.size}{p.original_size && p.original_size !== p.size ? `/${p.original_size}` : ''}</span></span>
                   {p.stage !== 'closed' && <span className="text-gray-400">Стадия: <span className="text-neon-purple">{p.stage}</span></span>}
                 </div>
               ))}
