@@ -481,10 +481,17 @@ async def momentum_chart_data():
                 "stage": pos.stage, "size": pos.size_remaining, "original_size": pos.size,
             })
 
-        # Past closed trades: pair buy/sell markers
+        # Past closed trades: skip buys that match current open positions
+        open_keys = set()
+        for coin, pos in momentum._positions.items():
+            open_keys.add((pos.symbol, round(pos.entry_price, 2)))
         for symbol, ent in buys.items():
             for b in ent:
                 entry = b["entry"]
+                sym_short = symbol.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                key = (sym_short, round(entry, 2))
+                if key in open_keys:
+                    continue
                 trade_lines.append({
                     "symbol": symbol,
                     "entry": entry,
