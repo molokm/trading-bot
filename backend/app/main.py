@@ -364,6 +364,25 @@ async def momentum_stop():
     return {"message": "Momentum stopped"}
 
 
+@app.post("/api/momentum/config")
+async def momentum_update_config(data: dict = None):
+    global momentum
+    if not momentum:
+        return {"message": "Momentum not running"}
+    if not data:
+        return {"message": "No config provided"}
+    cfg = momentum.config
+    if "symbols" in data:
+        cfg.symbols = data["symbols"]
+    for key in ("risk_per_trade", "max_positions", "auto_execute", "poll_interval_sec",
+                "roc_fast", "roc_slow", "ema_fast", "ema_slow", "atr_stop_mult",
+                "trail_pct", "adx_threshold", "mom_threshold",
+                "breakeven_pct", "tp1_pct", "tp1_frac"):
+        if key in data:
+            setattr(cfg, key, data[key])
+    return {"message": "Config updated", "config": cfg}
+
+
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
     global momentum
