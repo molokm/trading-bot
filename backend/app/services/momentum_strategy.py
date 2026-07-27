@@ -33,6 +33,8 @@ class MomentumConfig:
     breakeven_pct: float = 0.005  # 0.5% → move stop to entry
     tp1_pct: float = 0.02         # 2% → partial close
     tp1_frac: float = 0.75        # close 75% at TP1
+    sl1_pct: float = 0.0          # 0=off, 1.0=-1% → cascade stop partial close
+    sl1_frac: float = 0.5         # close 50% at SL1
 
     def __post_init__(self):
         if self.symbols is None:
@@ -41,8 +43,8 @@ class MomentumConfig:
 
 STRATEGY_DESC = (
     "Momentum на дневных свечах: вход при ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI. "
-    "Выход: 3-стадийный — (1) трейлинг 3% от пика сразу, (2) безубыток при +0.5%, "
-    "(3) частичное закрытие 75% при +2%, остаток безрисково с трейлингом."
+    "Выход: 4-стадийный — (1) каскадный стоп -1%/close50%, (2) трейлинг 1.5% от пика, "
+    "(3) безубыток при +0.5%, (4) частичное закрытие 50% при +2%, остаток с трейлингом."
 )
 
 
@@ -450,11 +452,35 @@ class MomentumStrategy:
                     if new_stop > pos.stop_price:
                         pos.stop_price = new_stop
 
-                    # Breakeven trigger
-                    if cur >= entry * (1 + be_pct):
+                    # SL1 cascade stop
+                    sl1_pct = self.config.sl1_pct
+                    sl1_frac = self.config.sl1_frac
+                    if sl1_pct > 0 and sl1_frac > 0 and pos.size_remaining == pos.size:
+                        if cur <= entry * (1 - sl1_pct / 100):
+                            close_sz = round(pos.size * sl1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
+                            close_sz = min(close_sz, pos.size_remaining)
+                            if close_sz >= LOT_SZ.get(coin, 0.01):
+                                await self._partial_close_position(coin, pos, cur, close_sz)
+                                pos.stage = "sl1_trimmed"
+                                print(f"[Momentum] {coin}: SL1 hit @ {cur:.2f}, closed {close_sz}, "
+                                      f"remaining {pos.size_remaining}", flush=True)
+
+                    # Breakeven trigger (only if SL1 didn't fire or size remaining > 0)
+                    if pos.size_remaining > 0 and cur >= entry * (1 + be_pct):
                         pos.stop_price = max(pos.stop_price, entry * 0.999)
                         pos.stage = "breakeven"
                         print(f"[Momentum] {coin}: breakeven stage @ {cur:.2f}", flush=True)
+
+                elif stage == "sl1_trimmed":
+                    # After SL1: trail, then BE → TP1 → trailing
+                    new_stop = pos.peak_price * (1 - trail_pct)
+                    if new_stop > pos.stop_price:
+                        pos.stop_price = new_stop
+
+                    if cur >= entry * (1 + be_pct):
+                        pos.stop_price = max(pos.stop_price, entry * 0.999)
+                        pos.stage = "breakeven"
+                        print(f"[Momentum] {coin}: SL1→BE stage @ {cur:.2f}", flush=True)
 
                 elif stage == "breakeven":
                     # TP1 partial close

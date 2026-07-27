@@ -377,7 +377,8 @@ async def momentum_update_config(data: dict = None):
     for key in ("risk_per_trade", "max_positions", "auto_execute", "poll_interval_sec",
                 "roc_fast", "roc_slow", "ema_fast", "ema_slow", "atr_stop_mult",
                 "trail_pct", "adx_threshold", "mom_threshold",
-                "breakeven_pct", "tp1_pct", "tp1_frac"):
+                "breakeven_pct", "tp1_pct", "tp1_frac",
+                "sl1_pct", "sl1_frac"):
         if key in data:
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": cfg}
