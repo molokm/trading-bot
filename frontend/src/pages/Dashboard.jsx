@@ -36,10 +36,12 @@ export default function Dashboard({ health, connected, isGuest }) {
     risk_per_trade: 0.03,
     max_positions: 4,
     poll_interval_sec: 60,
-    trail_pct: 0.03,
+    trail_pct: 0.015,
     breakeven_pct: 0.005,
     tp1_pct: 0.02,
     tp1_frac: 0.75,
+    sl1_pct: 1.0,
+    sl1_frac: 0.5,
     adx_threshold: 20,
   })
 
@@ -240,7 +242,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         </h3>
         <div className="text-xs text-gray-500 mb-3 leading-relaxed">
           Моментум на дневных свечах (ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI).
-          Выход: трейлинг → безубыток при +0.5% → частичное закрытие 75% при +2%.
+          Выход: трейлинг 1.5% → каскадный стоп -1%/50% → безубыток +0.5% → TP1 +2%/50%.
         </div>
         {momentumStatus && momentumStatus.running ? (
           <div className="space-y-3">
@@ -377,6 +379,22 @@ export default function Dashboard({ health, connected, isGuest }) {
                   onChange={e => setMomConfigForm(f => ({...f, tp1_frac: e.target.value / 100}))}
                   className="w-32" />
                 <span className="text-white font-mono w-12 text-right">{(momConfigForm.tp1_frac * 100).toFixed(0)}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">SL1 каскад при</span>
+                <input type="range" min="0" max="5" step="0.5"
+                  value={(momConfigForm.sl1_pct || 0).toFixed(1)}
+                  onChange={e => setMomConfigForm(f => ({...f, sl1_pct: parseFloat(e.target.value)}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{momConfigForm.sl1_pct || 0}%</span>
+              </label>
+              <label className="flex items-center justify-between text-xs">
+                <span className="text-gray-400">SL1 размер закрытия</span>
+                <input type="range" min="20" max="100" step="5"
+                  value={((momConfigForm.sl1_frac || 0.5) * 100).toFixed(0)}
+                  onChange={e => setMomConfigForm(f => ({...f, sl1_frac: e.target.value / 100}))}
+                  className="w-32" />
+                <span className="text-white font-mono w-12 text-right">{((momConfigForm.sl1_frac || 0.5) * 100).toFixed(0)}%</span>
               </label>
             </div>
             <button
