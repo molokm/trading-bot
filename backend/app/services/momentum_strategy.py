@@ -486,17 +486,14 @@ class MomentumStrategy:
                 elif stage == "breakeven":
                     # TP1 partial close
                     if cur >= entry * (1 + tp1_pct):
-                        if pos.size_remaining == pos.size:
-                            close_sz = round(pos.size * self.config.tp1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
-                            close_sz = min(close_sz, pos.size_remaining)
-                            if close_sz >= LOT_SZ.get(coin, 0.01):
-                                await self._partial_close_position(coin, pos, cur, close_sz)
-                                pos.stop_price = max(pos.stop_price, entry * 0.999)
-                                pos.stage = "trailing"
-                                print(f"[Momentum] {coin}: TP1 hit @ {cur:.2f}, closed {close_sz}, "
-                                      f"remaining {pos.size_remaining}", flush=True)
-                            else:
-                                pos.stage = "trailing"
+                        close_sz = round(pos.size_remaining * self.config.tp1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
+                        close_sz = min(close_sz, pos.size_remaining)
+                        if close_sz >= LOT_SZ.get(coin, 0.01):
+                            await self._partial_close_position(coin, pos, cur, close_sz)
+                            pos.stop_price = max(pos.stop_price, entry * 0.999)
+                            pos.stage = "trailing"
+                            print(f"[Momentum] {coin}: TP1 hit @ {cur:.2f}, closed {close_sz}, "
+                                  f"remaining {pos.size_remaining}", flush=True)
                         else:
                             pos.stage = "trailing"
                     else:
