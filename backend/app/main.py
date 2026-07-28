@@ -349,7 +349,7 @@ async def momentum_start(data: dict = None):
         breakeven_pct=d.get("breakeven_pct", 0.005),
         tp1_pct=d.get("tp1_pct", 0.02),
         tp1_frac=d.get("tp1_frac", 0.75),
-        sl1_pct=d.get("sl1_pct", 1.0),
+        sl1_pct=d.get("sl1_pct", 0.0),
         sl1_frac=d.get("sl1_frac", 0.5),
     )
     momentum = MomentumStrategy(config=config, client_manager=client_manager, db=db)

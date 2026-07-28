@@ -44,8 +44,8 @@ const DEFAULT_BOT = {
   status: 'stopped',
   config: {
     risk_per_trade: 3, max_positions: 4, poll_interval_sec: 60,
-    trail_pct: 1.5, breakeven_pct: 0.5, tp1_pct: 2, tp1_frac: 75,
-    sl1_pct: 1, sl1_frac: 50, adx_threshold: 20,
+    trail_pct: 0.15, breakeven_pct: 0.3, tp1_pct: 2, tp1_frac: 75,
+    sl1_pct: 0, sl1_frac: 50, adx_threshold: 20,
   },
   pnl: 0, trades: 0, created: new Date().toISOString(),
 }
@@ -352,8 +352,8 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
     pair: bot?.pair || 'BTC-USDT-SWAP',
     config: bot?.config || {
       risk_per_trade: 3, max_positions: 4, poll_interval_sec: 60,
-      trail_pct: 1.5, breakeven_pct: 0.5, tp1_pct: 2, tp1_frac: 75,
-      sl1_pct: 1, sl1_frac: 50, adx_threshold: 20,
+      trail_pct: 0.15, breakeven_pct: 0.3, tp1_pct: 2, tp1_frac: 75,
+      sl1_pct: 0, sl1_frac: 50, adx_threshold: 20,
     },
   })
 

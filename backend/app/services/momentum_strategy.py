@@ -27,13 +27,13 @@ class MomentumConfig:
     ema_fast: int = 15
     ema_slow: int = 30
     atr_stop_mult: float = 1.5
-    trail_pct: float = 0.03
+    trail_pct: float = 0.015        # 1.5% trailing from peak (optimized from 3%)
     adx_threshold: float = 20.0
     mom_threshold: float = 0.0
-    breakeven_pct: float = 0.005  # 0.5% → move stop to entry
+    breakeven_pct: float = 0.003  # 0.3% → move stop to entry (optimized from 0.5%)
     tp1_pct: float = 0.02         # 2% → partial close
     tp1_frac: float = 0.75        # close 75% at TP1
-    sl1_pct: float = 1.0          # 0=off, 1.0=-1% → cascade stop partial close
+    sl1_pct: float = 0.0           # 0=off (disabled — backtest showed -9831 PnL impact)
     sl1_frac: float = 0.5         # close 50% at SL1
 
     def __post_init__(self):
@@ -42,10 +42,10 @@ class MomentumConfig:
 
 
 STRATEGY_DESC = (
-    "Momentum на дневных свечах: вход при ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI. "
-    "Выход: 4-стадийный — (1) трейлинг 1.5% от пика с момента входа, (2) каскадный стоп "
-    "-1%/close50%, (3) безубыток при +0.5%, (4) частичное закрытие 50% при +2% на остатке, "
-    "затем трейлинг 1.5%. 3x плечо, ETH только."
+    "Momentum на дневных свечах (backtest-optimized v2): вход при ROC5>0, ROC50>0, "
+    "EMA15>EMA30, ADX>20, PDI>MDI. Выход: (1) трейлинг 1.5% от пика, "
+    "(2) безубыток при +0.3%, (3) частичное закрытие 75% при +2% на остатке, "
+    "затем трейлинг 1.5%. SL1 каскад ОТКЛЮЧЁН. 3x плечо."
 )
 
 
@@ -538,8 +538,9 @@ class MomentumStrategy:
                 print(f"[Momentum] {coin}: close failed: {result.get('message')}", flush=True)
                 return
 
-            pnl = close_sz * (exit_price - pos.entry_price) * CT_VAL.get(coin, 0.1)
-            fee = close_sz * (pos.entry_price + exit_price) * 0.001
+            ct_val = CT_VAL.get(coin, 0.1)
+            pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            fee = close_sz * ct_val * (pos.entry_price + exit_price) * 0.001
             net_pnl = pnl - fee
             self._equity += net_pnl
 
@@ -581,8 +582,9 @@ class MomentumStrategy:
                 print(f"[Momentum] {coin}: partial close failed: {result.get('message')}", flush=True)
                 return
 
-            pnl = close_sz * (exit_price - pos.entry_price) * CT_VAL.get(coin, 0.1)
-            fee = close_sz * (pos.entry_price + exit_price) * 0.001
+            ct_val = CT_VAL.get(coin, 0.1)
+            pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            fee = close_sz * ct_val * (pos.entry_price + exit_price) * 0.001
             net_pnl = pnl - fee
             self._equity += net_pnl
             pos.size_remaining = round(pos.size_remaining - close_sz, 4)
