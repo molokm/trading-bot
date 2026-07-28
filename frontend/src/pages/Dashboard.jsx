@@ -18,10 +18,10 @@ const REASON_MAP = {
 }
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
-function AnimatedValue({ value, className = '' }) {
+function AnimatedValue({ children, className = '' }) {
   return (
     <span className={`transition-all duration-500 ${className}`}>
-      {value}
+      {children}
     </span>
   )
 }
