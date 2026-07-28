@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
@@ -63,19 +63,26 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [botUptime, setBotUptime] = useState(0)
 
   // Filters
   const [filterPair, setFilterPair] = useState('Все')
   const [filterResult, setFilterResult] = useState('all') // all | win | loss
   const [filterReason, setFilterReason] = useState('all')
 
-  // Uptime counter
+  // Persisted uptime — calculated from server-side started_at
+  const [uptimeSec, setUptimeSec] = useState(0)
+  const uptimeRef = useRef(null)
+
   useEffect(() => {
-    if (!momentumStatus?.running) { setBotUptime(0); return }
-    const id = setInterval(() => setBotUptime(s => s + 1), 1000)
-    return () => clearInterval(id)
-  }, [momentumStatus?.running])
+    const started = momentumStatus?.started_at
+    if (!started) { setUptimeSec(0); return }
+    const startedMs = new Date(started).getTime()
+    if (isNaN(startedMs)) { setUptimeSec(0); return }
+    const tick = () => setUptimeSec(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)))
+    tick()
+    uptimeRef.current = setInterval(tick, 1000)
+    return () => { if (uptimeRef.current) clearInterval(uptimeRef.current) }
+  }, [momentumStatus?.started_at])
 
   useEffect(() => {
     loadData()
@@ -440,7 +447,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       <Clock size={12} className="text-[var(--profit)]" />
                       <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">Время работы</span>
                     </div>
-                    <span className="mono text-sm font-bold text-[var(--profit)]">{formatUptime(botUptime)}</span>
+                    <span className="mono text-sm font-bold text-[var(--profit)]">{formatUptime(uptimeSec)}</span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">

@@ -77,6 +77,7 @@ class MomentumStrategy:
         self._trade_log: list = []
         self._equity = 10000.0
         self._latest_indicators: dict = {}
+        self._started_at: str = ""
 
     async def _ensure_bot(self):
         if not self.db:
@@ -126,6 +127,7 @@ class MomentumStrategy:
         if self._running:
             return
         self._running = True
+        self._started_at = datetime.now(timezone.utc).isoformat()
         await self._ensure_bot()
         await self._reload_from_db()
         await self._load_equity()
@@ -135,6 +137,7 @@ class MomentumStrategy:
 
     async def stop(self):
         self._running = False
+        self._started_at = ""
         if self._loop and self._loop.is_running():
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
@@ -642,6 +645,7 @@ class MomentumStrategy:
             })
         return {
             "running": self._running,
+            "started_at": self._started_at,
             "config": asdict(self.config),
             "equity": round(self._equity, 2),
             "open_positions": open_pos,
