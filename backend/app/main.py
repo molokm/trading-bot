@@ -61,11 +61,20 @@ async def startup():
                 max_positions=4,
                 auto_execute=True,
                 poll_interval_sec=60,
-                trail_pct=0.03,
+                trail_pct=0.015,
                 adx_threshold=20.0,
-                breakeven_pct=0.005,
+                breakeven_pct=0.003,
                 tp1_pct=0.02,
                 tp1_frac=0.75,
+                trend_adx_min=22.0,
+                range_adx_max=18.0,
+                range_bb_period=20,
+                range_bb_mult=2.0,
+                range_rsi_period=14,
+                range_rsi_oversold=35.0,
+                range_rsi_overbought=65.0,
+                range_risk_divisor=2.0,
+                range_sl_mult=1.0,
             )
             m = MomentumStrategy(config=config, client_manager=client_manager, db=db)
             global momentum

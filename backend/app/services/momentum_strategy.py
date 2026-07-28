@@ -1,4 +1,4 @@
-"""Momentum strategy service — daily multi-timeframe momentum with trailing stops."""
+"""Momentum strategy service — bilateral (long+short) with trend/range market detection."""
 
 import asyncio
 import threading
@@ -35,6 +35,17 @@ class MomentumConfig:
     tp1_frac: float = 0.75        # close 75% at TP1
     sl1_pct: float = 0.0           # 0=off (disabled — backtest showed -9831 PnL impact)
     sl1_frac: float = 0.5         # close 50% at SL1
+    # Trend/Range detection
+    trend_adx_min: float = 22.0
+    range_adx_max: float = 18.0
+    # Range mode settings
+    range_bb_period: int = 20
+    range_bb_mult: float = 2.0
+    range_rsi_period: int = 14
+    range_rsi_oversold: float = 35.0
+    range_rsi_overbought: float = 65.0
+    range_risk_divisor: float = 2.0
+    range_sl_mult: float = 1.0
 
     def __post_init__(self):
         if self.symbols is None:
@@ -42,10 +53,10 @@ class MomentumConfig:
 
 
 STRATEGY_DESC = (
-    "Momentum на дневных свечах (backtest-optimized v2): вход при ROC5>0, ROC50>0, "
-    "EMA15>EMA30, ADX>20, PDI>MDI. Выход: (1) трейлинг 1.5% от пика, "
-    "(2) безубыток при +0.3%, (3) частичное закрытие 75% при +2% на остатке, "
-    "затем трейлинг 1.5%. SL1 каскад ОТКЛЮЧЁН. 3x плечо."
+    "Bilateral Momentum v3: лонг+шорт с определением режима рынка. "
+    "Тренд (ADX>22): лонг при ROC>0,EMA15>EMA30,PDI>MDI; шорт при ROC<0,EMA15<EMA30,MDI>PDI. "
+    "Флэт (ADX<18): бортовые позиции по Bollinger Bands+RSI. "
+    "Выход: трейлинг 1.5%, безубыток 0.3%, частичное закрытие 75% при 2%."
 )
 
 
@@ -61,6 +72,10 @@ class OpenPosition:
     stage: str = "initial"
     opened_at: str = ""
     inst_id: str = ""
+    side: str = "long"            # "long" or "short"
+    pos_mode: str = "trend"       # "trend" or "range"
+    trough: float = 0.0           # for shorts: lowest price seen
+    bb_target: float = 0.0        # for range mode: target price (BB mean)
 
 
 class MomentumStrategy:
@@ -77,6 +92,7 @@ class MomentumStrategy:
         self._trade_log: list = []
         self._equity = 10000.0
         self._latest_indicators: dict = {}
+        self._latest_modes: dict[str, str] = {}
         self._started_at: str = ""
 
     async def _ensure_bot(self):
@@ -291,6 +307,46 @@ class MomentumStrategy:
         else:
             adx = 0; plus_di = 0; minus_di = 0
 
+        # Bollinger Bands
+        bb_period = self.config.range_bb_period
+        bb_mult = self.config.range_bb_mult
+        if n >= bb_period:
+            bb_closes = closes[-bb_period:]
+            bb_mean = sum(bb_closes) / len(bb_closes)
+            bb_std = (sum((x - bb_mean) ** 2 for x in bb_closes) / len(bb_closes)) ** 0.5
+            bb_upper = bb_mean + bb_mult * bb_std
+            bb_lower = bb_mean - bb_mult * bb_std
+            price = closes[-1]
+            bb_width = bb_upper - bb_lower
+            bb_pct = (price - bb_lower) / bb_width if bb_width > 0 else 0.5
+        else:
+            bb_upper = None
+            bb_lower = None
+            bb_mean = None
+            bb_pct = None
+
+        # RSI
+        rsi_period = self.config.range_rsi_period
+        if n > rsi_period:
+            deltas = [closes[i] - closes[i - 1] for i in range(max(1, n - rsi_period * 2), n)]
+            gains = [d if d > 0 else 0 for d in deltas]
+            losses = [-d if d < 0 else 0 for d in deltas]
+            if len(deltas) >= rsi_period:
+                avg_gain = sum(gains[:rsi_period]) / rsi_period
+                avg_loss = sum(losses[:rsi_period]) / rsi_period
+                for i in range(rsi_period, len(deltas)):
+                    avg_gain = (avg_gain * (rsi_period - 1) + gains[i]) / rsi_period
+                    avg_loss = (avg_loss * (rsi_period - 1) + losses[i]) / rsi_period
+                if avg_loss > 0:
+                    rs = avg_gain / avg_loss
+                    rsi = 100 - (100 / (1 + rs))
+                else:
+                    rsi = 100.0
+            else:
+                rsi = None
+        else:
+            rsi = None
+
         return {
             "roc_fast": roc_f,
             "roc_slow": roc_s,
@@ -301,7 +357,91 @@ class MomentumStrategy:
             "pdi": plus_di,
             "mdi": minus_di,
             "price": closes[-1],
+            "bb_upper": bb_upper,
+            "bb_lower": bb_lower,
+            "bb_mean": bb_mean,
+            "bb_pct": bb_pct,
+            "rsi": rsi,
         }
+
+    def detect_market_mode(self, ind: dict) -> str:
+        """Determine market mode: 'trend_long', 'trend_short', or 'range'."""
+        adx = ind.get("adx", 0)
+        ef = ind.get("ema_fast")
+        es = ind.get("ema_slow")
+        rf = ind.get("roc_fast")
+
+        if None in (ef, es, rf):
+            return "range"
+
+        trend_adx_min = self.config.trend_adx_min
+        range_adx_max = self.config.range_adx_max
+
+        # Strong trend
+        if adx >= trend_adx_min:
+            if ef > es and rf > 0:
+                return "trend_long"
+            if ef < es and rf < 0:
+                return "trend_short"
+
+        # Strong range/choppy
+        if adx <= range_adx_max:
+            return "range"
+
+        # Grey zone (range_adx_max < ADX < trend_adx_min): EMA/ROC tiebreaker
+        if ef > es and rf > 0:
+            return "trend_long"
+        if ef < es and rf < 0:
+            return "trend_short"
+
+        return "range"
+
+    def _check_entry_signal(self, ind: dict, mode: str) -> Optional[str]:
+        """Check entry signal based on market mode. Returns None, 'long', or 'short'."""
+        if mode == "trend_long":
+            rf = ind.get("roc_fast")
+            rm = ind.get("roc_slow")
+            ef = ind.get("ema_fast")
+            es = ind.get("ema_slow")
+            if None in (rf, rm, ef, es):
+                return None
+            mom_score = rf * 0.5 + rm * 0.5
+            if (rf > 0 and rm > 0
+                    and mom_score > self.config.mom_threshold
+                    and ef > es
+                    and ind.get("adx", 0) > self.config.adx_threshold
+                    and ind.get("pdi", 0) > ind.get("mdi", 0)):
+                return "long"
+            return None
+
+        elif mode == "trend_short":
+            rf = ind.get("roc_fast")
+            rm = ind.get("roc_slow")
+            ef = ind.get("ema_fast")
+            es = ind.get("ema_slow")
+            if None in (rf, rm, ef, es):
+                return None
+            mom_score = rf * 0.5 + rm * 0.5
+            if (rf < 0 and rm < 0
+                    and mom_score < -self.config.mom_threshold
+                    and ef < es
+                    and ind.get("adx", 0) > self.config.adx_threshold
+                    and ind.get("mdi", 0) > ind.get("pdi", 0)):
+                return "short"
+            return None
+
+        elif mode == "range":
+            bb_pct = ind.get("bb_pct")
+            rsi = ind.get("rsi")
+            if bb_pct is None or rsi is None:
+                return None
+            if bb_pct < 0.15 and rsi < self.config.range_rsi_oversold:
+                return "long"
+            if bb_pct > 0.85 and rsi > self.config.range_rsi_overbought:
+                return "short"
+            return None
+
+        return None
 
     async def _check_and_trade(self):
         await self._load_equity()
@@ -324,36 +464,20 @@ class MomentumStrategy:
             if not ind:
                 continue
 
+            mode = self.detect_market_mode(ind)
+            self._latest_modes[coin] = mode
+            side = self._check_entry_signal(ind, mode)
+
             self._latest_indicators[coin] = {
-                "pass": self._check_entry_signal(ind),
+                "mode": mode,
+                "signal": side,
                 **{k: v for k, v in ind.items() if isinstance(v, (int, float, bool))},
             }
 
-            if self._check_entry_signal(ind):
-                await self._open_position(coin, ind)
+            if side is not None:
+                await self._open_position(coin, ind, side, mode)
 
-    def _check_entry_signal(self, ind: dict) -> bool:
-        rf = ind.get("roc_fast")
-        rm = ind.get("roc_slow")
-        ef = ind.get("ema_fast")
-        es = ind.get("ema_slow")
-        ad = ind.get("adx", 0)
-        pdi = ind.get("pdi", 0)
-        mdi = ind.get("mdi", 0)
-
-        if None in (rf, rm, ef, es):
-            return False
-
-        mom_score = rf * 0.5 + rm * 0.5
-        return (
-            rf > 0 and rm > 0
-            and mom_score > self.config.mom_threshold
-            and ef > es
-            and ad > self.config.adx_threshold
-            and pdi > mdi
-        )
-
-    async def _open_position(self, coin: str, ind: dict):
+    async def _open_position(self, coin: str, ind: dict, side: str = "long", mode: str = "trend"):
         if not self.client_manager:
             return
         client = self.client_manager.get_client()
@@ -367,15 +491,31 @@ class MomentumStrategy:
         if atr <= 0 or price <= 0:
             return
 
-        stop_price = price - self.config.atr_stop_mult * atr
-        risk_per_contract = price - stop_price
+        # Calculate stop and risk
+        if side == "long":
+            if mode == "range":
+                stop_price = price - self.config.range_sl_mult * atr
+            else:
+                stop_price = price - self.config.atr_stop_mult * atr
+            risk_per_contract = price - stop_price
+        else:  # short
+            if mode == "range":
+                stop_price = price + self.config.range_sl_mult * atr
+            else:
+                stop_price = price + self.config.atr_stop_mult * atr
+            risk_per_contract = stop_price - price
+
         if risk_per_contract <= 0:
             return
 
-        risk_amount = self._equity * self.config.risk_per_trade
-        raw_sz = risk_amount / risk_per_contract
+        # Risk sizing — range mode uses reduced risk
+        if mode == "range":
+            risk_amount = self._equity * self.config.risk_per_trade / self.config.range_risk_divisor
+        else:
+            risk_amount = self._equity * self.config.risk_per_trade
+
         ct_val = CT_VAL.get(coin, 0.1)
-        raw_sz = raw_sz / ct_val
+        raw_sz = risk_amount / risk_per_contract / ct_val
         lot = LOT_SZ.get(coin, 0.01)
         sz = round(raw_sz / lot) * lot
 
@@ -383,10 +523,21 @@ class MomentumStrategy:
             print(f"[Momentum] {coin}: size too small {sz:.4f}", flush=True)
             return
 
+        # Determine order side and pos_side
+        if side == "long":
+            order_side = "buy"
+            pos_side = "long"
+        else:
+            order_side = "sell"
+            pos_side = "short"
+
+        # BB target for range mode
+        bb_target = ind.get("bb_mean", 0.0) or 0.0
+
         try:
             result = await client.place_order(
-                inst_id=inst_id, side="buy", ord_type="market",
-                sz=f"{sz:.2f}", td_mode="cross", pos_side="long",
+                inst_id=inst_id, side=order_side, ord_type="market",
+                sz=f"{sz:.2f}", td_mode="cross", pos_side=pos_side,
             )
             if result.get("error"):
                 print(f"[Momentum] {coin}: order failed: {result.get('message')}", flush=True)
@@ -399,24 +550,26 @@ class MomentumStrategy:
                 symbol=coin, entry_price=price, stop_price=stop_price,
                 peak_price=price, size=sz, size_remaining=sz,
                 stage="initial", atr=atr, opened_at=now, inst_id=inst_id,
+                side=side, pos_mode=mode, trough=price, bb_target=bb_target,
             )
 
             signal_entry = {
-                "time": now, "side": "buy", "symbol": inst_id,
+                "time": now, "side": order_side, "symbol": inst_id,
                 "size": sz, "ord_id": ord_id,
                 "entry": price, "stop": stop_price,
                 "adx": round(ind["adx"], 1),
                 "roc_f": round(ind["roc_fast"], 2),
                 "roc_s": round(ind["roc_slow"], 2),
+                "pos_side": side, "mode": mode,
             }
             self._signal_log.append(signal_entry)
             self._trade_log.append(signal_entry)
 
-            print(f"[Momentum] OPEN {coin} @ {price:.2f} sz={sz:.2f} "
-                  f"stop={stop_price:.2f} ADX={ind['adx']:.1f}",
+            print(f"[Momentum] OPEN {side.upper()} {coin} @ {price:.2f} sz={sz:.2f} "
+                  f"stop={stop_price:.2f} mode={mode} ADX={ind['adx']:.1f}",
                   flush=True)
 
-            await self._save_signal_db("buy", coin, price)
+            await self._save_signal_db(order_side, coin, price)
             await self._save_trade_db(signal_entry)
 
         except Exception as e:
@@ -441,83 +594,151 @@ class MomentumStrategy:
                     continue
                 cur = float(ticker["data"][0]["last"])
 
-                if cur > pos.peak_price:
-                    pos.peak_price = cur
-
-                stage = pos.stage
-                entry = pos.entry_price
-                be_pct = self.config.breakeven_pct
-                tp1_pct = self.config.tp1_pct
-                trail_pct = self.config.trail_pct
-
-                if stage == "initial":
-                    # Trail from peak
-                    new_stop = pos.peak_price * (1 - trail_pct)
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
-
-                    # SL1 cascade stop
-                    sl1_pct = self.config.sl1_pct
-                    sl1_frac = self.config.sl1_frac
-                    if sl1_pct > 0 and sl1_frac > 0 and pos.size_remaining == pos.size:
-                        if cur <= entry * (1 - sl1_pct / 100):
-                            close_sz = round(pos.size * sl1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
-                            close_sz = min(close_sz, pos.size_remaining)
-                            if close_sz >= LOT_SZ.get(coin, 0.01):
-                                await self._partial_close_position(coin, pos, cur, close_sz)
-                                pos.stage = "sl1_trimmed"
-                                print(f"[Momentum] {coin}: SL1 hit @ {cur:.2f}, closed {close_sz}, "
-                                      f"remaining {pos.size_remaining}", flush=True)
-
-                    # Breakeven trigger (only if SL1 didn't fire or size remaining > 0)
-                    if pos.size_remaining > 0 and cur >= entry * (1 + be_pct):
-                        pos.stop_price = max(pos.stop_price, entry * 0.999)
-                        pos.stage = "breakeven"
-                        print(f"[Momentum] {coin}: breakeven stage @ {cur:.2f}", flush=True)
-
-                elif stage == "sl1_trimmed":
-                    # After SL1: trail, then BE → TP1 → trailing
-                    new_stop = pos.peak_price * (1 - trail_pct)
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
-
-                    if cur >= entry * (1 + be_pct):
-                        pos.stop_price = max(pos.stop_price, entry * 0.999)
-                        pos.stage = "breakeven"
-                        print(f"[Momentum] {coin}: SL1→BE stage @ {cur:.2f}", flush=True)
-
-                elif stage == "breakeven":
-                    # TP1 partial close
-                    if cur >= entry * (1 + tp1_pct):
-                        close_sz = round(pos.size_remaining * self.config.tp1_frac / LOT_SZ.get(coin, 0.01)) * LOT_SZ.get(coin, 0.01)
-                        close_sz = min(close_sz, pos.size_remaining)
-                        if close_sz >= LOT_SZ.get(coin, 0.01):
-                            await self._partial_close_position(coin, pos, cur, close_sz)
-                            pos.stop_price = max(pos.stop_price, entry * 0.999)
-                            pos.stage = "trailing"
-                            print(f"[Momentum] {coin}: TP1 hit @ {cur:.2f}, closed {close_sz}, "
-                                  f"remaining {pos.size_remaining}", flush=True)
-                        else:
-                            pos.stage = "trailing"
-                    else:
-                        # Still trail
-                        new_stop = max(pos.stop_price, entry * 0.999)
-                        trail_stop = pos.peak_price * (1 - trail_pct)
-                        if trail_stop > new_stop:
-                            new_stop = trail_stop
-                        pos.stop_price = new_stop
-
-                elif stage == "trailing":
-                    new_stop = pos.peak_price * (1 - trail_pct)
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
-
-                # Generic stop check (all stages)
-                if cur <= pos.stop_price:
-                    await self._close_position(coin, pos, cur, pos.stage)
+                if pos.side == "long":
+                    await self._manage_long_position(coin, pos, cur)
+                else:
+                    await self._manage_short_position(coin, pos, cur)
 
             except Exception as e:
                 print(f"[Momentum] {coin}: manage error: {e}", flush=True)
+
+    async def _manage_long_position(self, coin: str, pos: OpenPosition, cur: float):
+        """Manage a LONG position: update peak, apply stage logic, check stops/targets."""
+        if cur > pos.peak_price:
+            pos.peak_price = cur
+
+        # Range mode: check BB target
+        if pos.pos_mode == "range" and pos.bb_target > 0 and cur >= pos.bb_target:
+            await self._close_position(coin, pos, pos.bb_target, "range_target")
+            return
+
+        stage = pos.stage
+        entry = pos.entry_price
+        be_pct = self.config.breakeven_pct
+        tp1_pct = self.config.tp1_pct
+        trail_pct = self.config.trail_pct
+        lot = LOT_SZ.get(coin, 0.01)
+
+        if stage == "initial":
+            # Trail from peak
+            new_stop = pos.peak_price * (1 - trail_pct)
+            if new_stop > pos.stop_price:
+                pos.stop_price = new_stop
+
+            # SL1 cascade stop
+            sl1_pct = self.config.sl1_pct
+            sl1_frac = self.config.sl1_frac
+            if sl1_pct > 0 and sl1_frac > 0 and pos.size_remaining == pos.size:
+                if cur <= entry * (1 - sl1_pct / 100):
+                    close_sz = round(pos.size * sl1_frac / lot) * lot
+                    close_sz = min(close_sz, pos.size_remaining)
+                    if close_sz >= lot:
+                        await self._partial_close_position(coin, pos, cur, close_sz)
+                        pos.stage = "sl1_trimmed"
+                        print(f"[Momentum] {coin}: SL1 hit @ {cur:.2f}, closed {close_sz}, "
+                              f"remaining {pos.size_remaining}", flush=True)
+
+            # Breakeven trigger
+            if pos.size_remaining > 0 and cur >= entry * (1 + be_pct):
+                pos.stop_price = max(pos.stop_price, entry * 0.999)
+                pos.stage = "breakeven"
+                print(f"[Momentum] {coin}: breakeven stage @ {cur:.2f}", flush=True)
+
+        elif stage == "sl1_trimmed":
+            new_stop = pos.peak_price * (1 - trail_pct)
+            if new_stop > pos.stop_price:
+                pos.stop_price = new_stop
+
+            if cur >= entry * (1 + be_pct):
+                pos.stop_price = max(pos.stop_price, entry * 0.999)
+                pos.stage = "breakeven"
+                print(f"[Momentum] {coin}: SL1→BE stage @ {cur:.2f}", flush=True)
+
+        elif stage == "breakeven":
+            if cur >= entry * (1 + tp1_pct):
+                close_sz = round(pos.size_remaining * self.config.tp1_frac / lot) * lot
+                close_sz = min(close_sz, pos.size_remaining)
+                if close_sz >= lot:
+                    await self._partial_close_position(coin, pos, cur, close_sz)
+                    pos.stop_price = max(pos.stop_price, entry * 0.999)
+                    pos.stage = "trailing"
+                    print(f"[Momentum] {coin}: TP1 hit @ {cur:.2f}, closed {close_sz}, "
+                          f"remaining {pos.size_remaining}", flush=True)
+                else:
+                    pos.stage = "trailing"
+            else:
+                new_stop = max(pos.stop_price, entry * 0.999)
+                trail_stop = pos.peak_price * (1 - trail_pct)
+                if trail_stop > new_stop:
+                    new_stop = trail_stop
+                pos.stop_price = new_stop
+
+        elif stage == "trailing":
+            new_stop = pos.peak_price * (1 - trail_pct)
+            if new_stop > pos.stop_price:
+                pos.stop_price = new_stop
+
+        # Stop check (all stages)
+        if cur <= pos.stop_price:
+            await self._close_position(coin, pos, cur, pos.stage)
+
+    async def _manage_short_position(self, coin: str, pos: OpenPosition, cur: float):
+        """Manage a SHORT position: update trough, apply stage logic, check stops/targets."""
+        if cur < pos.trough:
+            pos.trough = cur
+
+        # Range mode: check BB target
+        if pos.pos_mode == "range" and pos.bb_target > 0 and cur <= pos.bb_target:
+            await self._close_position(coin, pos, pos.bb_target, "range_target")
+            return
+
+        stage = pos.stage
+        entry = pos.entry_price
+        be_pct = self.config.breakeven_pct
+        tp1_pct = self.config.tp1_pct
+        trail_pct = self.config.trail_pct
+        lot = LOT_SZ.get(coin, 0.01)
+
+        if stage == "initial":
+            # Trail stop DOWN from trough
+            new_stop = pos.trough * (1 + trail_pct)
+            if new_stop < pos.stop_price:
+                pos.stop_price = new_stop
+
+            # Breakeven trigger (price drops, so cur <= entry * (1 - be_pct))
+            if pos.size_remaining > 0 and cur <= entry * (1 - be_pct):
+                pos.stop_price = min(pos.stop_price, entry * 1.001)
+                pos.stage = "breakeven"
+                print(f"[Momentum] {coin}: breakeven stage (short) @ {cur:.2f}", flush=True)
+
+        elif stage == "breakeven":
+            # TP1 for shorts: price drops further, cur <= entry * (1 - tp1_pct)
+            if cur <= entry * (1 - tp1_pct):
+                close_sz = round(pos.size_remaining * self.config.tp1_frac / lot) * lot
+                close_sz = min(close_sz, pos.size_remaining)
+                if close_sz >= lot:
+                    await self._partial_close_position(coin, pos, cur, close_sz)
+                    pos.stop_price = min(pos.stop_price, entry * 1.001)
+                    pos.stage = "trailing"
+                    print(f"[Momentum] {coin}: TP1 hit (short) @ {cur:.2f}, closed {close_sz}, "
+                          f"remaining {pos.size_remaining}", flush=True)
+                else:
+                    pos.stage = "trailing"
+            else:
+                new_stop = min(pos.stop_price, entry * 1.001)
+                trail_stop = pos.trough * (1 + trail_pct)
+                if trail_stop < new_stop:
+                    new_stop = trail_stop
+                pos.stop_price = new_stop
+
+        elif stage == "trailing":
+            new_stop = pos.trough * (1 + trail_pct)
+            if new_stop < pos.stop_price:
+                pos.stop_price = new_stop
+
+        # Stop check for shorts: cur >= stop means stop hit
+        if cur >= pos.stop_price:
+            await self._close_position(coin, pos, cur, pos.stage)
 
     async def _close_position(self, coin: str, pos: OpenPosition, exit_price: float, reason: str):
         if not self.client_manager:
@@ -530,37 +751,49 @@ class MomentumStrategy:
             close_sz = pos.size_remaining
             if close_sz <= 0:
                 return
+
+            # For LONG: sell to close. For SHORT: buy to cover.
+            if pos.side == "long":
+                order_side = "sell"
+                pos_side = "long"
+            else:
+                order_side = "buy"
+                pos_side = "short"
+
             result = await client.place_order(
-                inst_id=pos.inst_id, side="sell", ord_type="market",
-                sz=f"{close_sz:.2f}", td_mode="cross", pos_side="long",
+                inst_id=pos.inst_id, side=order_side, ord_type="market",
+                sz=f"{close_sz:.2f}", td_mode="cross", pos_side=pos_side,
             )
             if result.get("error"):
                 print(f"[Momentum] {coin}: close failed: {result.get('message')}", flush=True)
                 return
 
             ct_val = CT_VAL.get(coin, 0.1)
-            pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            if pos.side == "long":
+                pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            else:
+                pnl = close_sz * (pos.entry_price - exit_price) * ct_val
             fee = close_sz * ct_val * (pos.entry_price + exit_price) * 0.001
             net_pnl = pnl - fee
             self._equity += net_pnl
 
             trade = {
                 "time": datetime.now(timezone.utc).isoformat(),
-                "side": "sell", "symbol": pos.inst_id,
+                "side": order_side, "symbol": pos.inst_id,
                 "size": close_sz, "exit_price": exit_price,
                 "entry_price": pos.entry_price, "pnl": round(net_pnl, 2),
-                "reason": reason,
+                "reason": reason, "pos_side": pos.side,
             }
             self._trade_log.append(trade)
 
-            print(f"[Momentum] CLOSE {coin} @ {exit_price:.2f} reason={reason} "
+            print(f"[Momentum] CLOSE {pos.side.upper()} {coin} @ {exit_price:.2f} reason={reason} "
                   f"pnl=${net_pnl:+.2f} equity=${self._equity:.0f}",
                   flush=True)
 
             del self._positions[coin]
             self._cooldowns[coin] = 3
 
-            await self._save_signal_db("sell", coin, exit_price)
+            await self._save_signal_db(order_side, coin, exit_price)
             await self._save_trade_db(trade)
 
         except Exception as e:
@@ -574,16 +807,27 @@ class MomentumStrategy:
             return
 
         try:
+            # For LONG: sell partial. For SHORT: buy to cover partial.
+            if pos.side == "long":
+                order_side = "sell"
+                pos_side = "long"
+            else:
+                order_side = "buy"
+                pos_side = "short"
+
             result = await client.place_order(
-                inst_id=pos.inst_id, side="sell", ord_type="market",
-                sz=f"{close_sz:.2f}", td_mode="cross", pos_side="long",
+                inst_id=pos.inst_id, side=order_side, ord_type="market",
+                sz=f"{close_sz:.2f}", td_mode="cross", pos_side=pos_side,
             )
             if result.get("error"):
                 print(f"[Momentum] {coin}: partial close failed: {result.get('message')}", flush=True)
                 return
 
             ct_val = CT_VAL.get(coin, 0.1)
-            pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            if pos.side == "long":
+                pnl = close_sz * (exit_price - pos.entry_price) * ct_val
+            else:
+                pnl = close_sz * (pos.entry_price - exit_price) * ct_val
             fee = close_sz * ct_val * (pos.entry_price + exit_price) * 0.001
             net_pnl = pnl - fee
             self._equity += net_pnl
@@ -591,13 +835,13 @@ class MomentumStrategy:
 
             trade = {
                 "time": datetime.now(timezone.utc).isoformat(),
-                "side": "sell", "symbol": pos.inst_id,
+                "side": order_side, "symbol": pos.inst_id,
                 "size": close_sz, "exit_price": exit_price,
                 "entry_price": pos.entry_price, "pnl": round(net_pnl, 2),
                 "reason": "tp1",
             }
             self._trade_log.append(trade)
-            await self._save_signal_db("sell", coin, exit_price)
+            await self._save_signal_db(order_side, coin, exit_price)
             await self._save_trade_db(trade)
 
         except Exception as e:
@@ -634,7 +878,13 @@ class MomentumStrategy:
 
     def get_status(self) -> dict:
         open_pos = []
+        long_count = 0
+        short_count = 0
         for coin, pos in self._positions.items():
+            if pos.side == "long":
+                long_count += 1
+            else:
+                short_count += 1
             open_pos.append({
                 "symbol": pos.symbol,
                 "inst_id": pos.inst_id,
@@ -643,7 +893,10 @@ class MomentumStrategy:
                 "size": pos.size,
                 "size_remaining": pos.size_remaining,
                 "stage": pos.stage,
+                "side": pos.side,
+                "pos_mode": pos.pos_mode,
                 "peak_ratio": round((pos.peak_price / pos.entry_price - 1) * 100, 2) if pos.entry_price else 0,
+                "trough_ratio": round((1 - pos.trough / pos.entry_price) * 100, 2) if pos.entry_price else 0,
             })
         return {
             "running": self._running,
@@ -651,6 +904,9 @@ class MomentumStrategy:
             "config": asdict(self.config),
             "equity": round(self._equity, 2),
             "open_positions": open_pos,
+            "long_positions": long_count,
+            "short_positions": short_count,
+            "market_mode": self._latest_modes,
             "total_signals": len(self._signal_log),
             "total_trades": len(self._trade_log),
             "recent_signals": self._signal_log[-10:],
