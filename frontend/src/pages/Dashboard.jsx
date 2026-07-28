@@ -41,12 +41,18 @@ function Sparkline({ data, width = 60, height = 20 }) {
   const isPositive = data[data.length - 1] >= data[0]
   const color = isPositive ? 'var(--profit)' : 'var(--loss)'
   return (
-    <svg width={width} height={height} className="flex-shrink-0">
-      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    <svg width={width} height={height} className='inline-block'>
+      <path d={pathD} fill='none' stroke={color} strokeWidth='1.5' strokeLinecap='round' strokeLinejoin='round' />
     </svg>
   )
 }
 
+/* ═══════ Helper: check admin access ═══════ */
+function isAdmin(isGuest) {
+  return !isGuest
+}
+
+/* ═══════ Dashboard ═══════ */
 export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
@@ -100,6 +106,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     setLoading(false)
   }
 
+  // Derived values (declared early — before any useMemo that depends on them)
+  const btcUsd = ticker ? parseFloat(ticker.last) : 0
+  const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
+  const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
+  const unrealizedPnl = pnl?.unrealized || 0
+  const pnlDay = pnl?.['1d'] || 0
+  const pnlWeek = pnl?.['7d'] || 0
+  const pnlMonth = pnl?.['30d'] || 0
+
   // Filtered trades
   const filteredTrades = useMemo(() => {
     return tradeLog.filter(t => {
@@ -133,7 +148,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return { totalPnl, wins, losses, count: visible.length }
   }, [filteredTrades, tradeLog])
 
-  // Synthetic BTC sparkline (visual only)
+  // Synthetic BTC sparkline (visual only) — btcChange is now declared above
   const btcSparkData = useMemo(() => {
     const isUp = parseFloat(btcChange) >= 0
     return Array.from({ length: 10 }, (_, i) =>
@@ -147,14 +162,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const sec = s % 60
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
   }
-
-  const btcUsd = ticker ? parseFloat(ticker.last) : 0
-  const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
-  const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
-  const unrealizedPnl = pnl?.unrealized || 0
-  const pnlDay = pnl?.['1d'] || 0
-  const pnlWeek = pnl?.['7d'] || 0
-  const pnlMonth = pnl?.['30d'] || 0
 
   const handleClosePosition = async (p) => {
     const posId = `${p.instId}_${p.posSide}`
@@ -571,8 +578,4 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       </div>
     </div>
   )
-}
-
-function isAdmin(isGuest) {
-  return !isGuest
 }
