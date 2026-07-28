@@ -122,9 +122,58 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlWeek = pnl?.['7d'] || 0
   const pnlMonth = pnl?.['30d'] || 0
 
+  // Filtered trades — combined from paired DB trades + momentum bot log
+  const allTrades = useMemo(() => {
+    // Start with paired trades from DB
+    const combined = [...tradeLog]
+    // Add momentum sell trades (closed positions) — they have entry_price, exit_price, pnl
+    const pairedKeys = new Set(tradeLog.map(t => `${t.inst_id}_${t.entry_time}_${t.exit_time}`))
+    for (const mt of momentumTrades) {
+      if (mt.side === 'sell' && mt.entry_price && mt.exit_price) {
+        combined.push({
+          entry_time: mt.time,
+          exit_time: mt.time,
+          inst_id: mt.symbol,
+          side: 'buy',
+          entry_px: mt.entry_price,
+          exit_px: mt.exit_price,
+          pnl: mt.pnl,
+          reason: mt.reason || '',
+          signal_id: mt.ord_id,
+        })
+      }
+    }
+    // Add momentum buy trades without a matching sell (open bot positions)
+    const sellSymbols = new Set(
+      momentumTrades.filter(t => t.side === 'sell').map(t => t.symbol)
+    )
+    for (const mt of momentumTrades) {
+      if (mt.side === 'buy' && !sellSymbols.has(mt.symbol) && mt.entry) {
+        combined.push({
+          entry_time: mt.time,
+          exit_time: null,
+          inst_id: mt.symbol,
+          side: 'buy',
+          entry_px: mt.entry,
+          exit_px: null,
+          pnl: null,
+          reason: 'open',
+          signal_id: mt.ord_id,
+        })
+      }
+    }
+    // Sort by time descending, most recent first
+    combined.sort((a, b) => {
+      const ta = a.exit_time || a.entry_time || ''
+      const tb = b.exit_time || b.entry_time || ''
+      return tb.localeCompare(ta)
+    })
+    return combined
+  }, [tradeLog, momentumTrades])
+
   // Filtered trades
   const filteredTrades = useMemo(() => {
-    return tradeLog.filter(t => {
+    return allTrades.filter(t => {
       if (filterPair !== 'Все') {
         const pair = (t.inst_id || '').toUpperCase()
         if (!pair.includes(filterPair)) return false
@@ -137,7 +186,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       }
       return true
     })
-  }, [tradeLog, filterPair, filterResult, filterReason])
+  }, [allTrades, filterPair, filterResult, filterReason])
 
   // Sparkline data for golden-zone MetricCards (stable random 10-point trends)
   const sparkData = useMemo(() =>
@@ -148,12 +197,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   // Summary stats for visible trades
   const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : tradeLog).slice(0, 30)
-    const totalPnl = visible.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
-    const wins = visible.filter(t => parseFloat(t.pnl || 0) >= 0).length
-    const losses = visible.filter(t => parseFloat(t.pnl || 0) < 0).length
+    const visible = (filteredTrades.length > 0 ? filteredTrades : allTrades).slice(0, 30)
+    const withPnl = visible.filter(t => t.pnl != null)
+    const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
+    const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
+    const losses = withPnl.filter(t => parseFloat(t.pnl || 0) < 0).length
     return { totalPnl, wins, losses, count: visible.length }
-  }, [filteredTrades, tradeLog])
+  }, [filteredTrades, allTrades])
 
   // Synthetic BTC sparkline (visual only) — btcChange is now declared above
   const btcSparkData = useMemo(() => {
@@ -337,7 +387,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 ))}
               </div>
             </div>
-            {tradeLog.length > 0 && (
+            {allTrades.length > 0 && (
               <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
                 <span className="text-[var(--txt-muted)]">
                   Показано: <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
@@ -368,10 +418,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : tradeLog).slice(0, 30).map((t, i) => {
+                  {(filteredTrades.length > 0 ? filteredTrades : allTrades).slice(0, 30).map((t, i) => {
                     const pnlVal = parseFloat(t.pnl || 0)
                     const reason = (t.reason || '').toLowerCase()
-                    const reasonInfo = REASON_MAP[reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' }
+                    const isOpen = reason === 'open'
+                    const reasonInfo = isOpen
+                      ? { label: 'Открыта', color: 'text-[var(--info)]' }
+                      : REASON_MAP[reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' }
                     return (
                       <tr key={t.signal_id || i}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.entry_time)}</td>
@@ -385,12 +438,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         <td className="text-right mono">{t.entry_px ? `$${parseFloat(t.entry_px).toLocaleString()}` : '—'}</td>
                         <td className="text-right mono">{t.exit_px ? `$${parseFloat(t.exit_px).toLocaleString()}` : '—'}</td>
                         <td className="text-right">
-                          <div className="flex items-center justify-end gap-2">
-                            <PnlBar value={pnlVal} maxAbs={200} />
-                            <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                              {t.pnl != null ? `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)}` : '—'}
-                            </span>
-                          </div>
+                          {t.pnl != null ? (
+                            <div className="flex items-center justify-end gap-2">
+                              <PnlBar value={pnlVal} maxAbs={200} />
+                              <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                                {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
+                              </span>
+                            </div>
+                          ) : (
+                            <span className="text-2xs text-[var(--txt-muted)]">—</span>
+                          )}
                         </td>
                         <td className="text-right">
                           <span className={`text-2xs font-medium ${reasonInfo.color}`}>{reasonInfo.label}</span>
@@ -400,7 +457,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   })}
                 </tbody>
               </table>
-              {tradeLog.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
+              {allTrades.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
             </div>
           </div>
         </div>
