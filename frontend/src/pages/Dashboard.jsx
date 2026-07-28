@@ -1,28 +1,53 @@
-import React, { useState, useEffect } from 'react'
-import { Wallet, TrendingUp, TrendingDown, Activity, BarChart3, Zap, ArrowUpRight, ArrowDownRight, ScrollText, DollarSign, Bot, XCircle, Loader2 } from 'lucide-react'
+import React, { useState, useEffect, useMemo } from 'react'
+import {
+  Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
+  ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
+  Clock, Bot
+} from 'lucide-react'
 import { api } from '../services/api'
-import { useTranslation } from '../hooks/useTranslation'
+import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
 
-function StatCard({ label, value, change, icon: Icon, positive }) {
+const PAIRS = ['Все', 'BTC', 'ETH', 'SOL', 'BNB']
+const REASON_MAP = {
+  tp: { label: 'TP', color: 'text-[var(--profit)]' },
+  sl: { label: 'SL', color: 'text-[var(--loss)]' },
+  trail: { label: 'Trail', color: 'text-[var(--info)]' },
+  breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
+  manual: { label: 'Manual', color: 'text-[var(--txt-secondary)]' },
+  roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
+}
+
+/* ═══════ Animated Value — smooth colour transition ═══════ */
+function AnimatedValue({ value, className = '' }) {
   return (
-    <div className="glass p-5 flex flex-col gap-1">
-      <div className="flex items-center justify-between">
-        <span className="text-xs text-gray-400 font-medium uppercase tracking-wider">{label}</span>
-        <Icon size={16} className={positive ? 'text-neon-green' : 'text-neon-red'} />
-      </div>
-      <span className="text-2xl font-bold text-white">{value}</span>
-      {change != null && (
-        <span className={`text-xs flex items-center gap-1 ${positive ? 'text-neon-green' : 'text-neon-red'}`}>
-          {positive ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />}
-          {change}
-        </span>
-      )}
-    </div>
+    <span className={`transition-all duration-500 ${className}`}>
+      {value}
+    </span>
   )
 }
 
-export default function Dashboard({ health, connected, isGuest }) {
-  const { t } = useTranslation()
+/* ═══════ Sparkline SVG — 60×20 trend line ═══════ */
+function Sparkline({ data, width = 60, height = 20 }) {
+  if (!data || data.length < 2) return null
+  const min = Math.min(...data)
+  const max = Math.max(...data)
+  const range = max - min || 1
+  const stepX = width / (data.length - 1)
+  const pathD = data.map((v, i) => {
+    const x = i * stepX
+    const y = height - ((v - min) / range) * height
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
+  }).join(' ')
+  const isPositive = data[data.length - 1] >= data[0]
+  const color = isPositive ? 'var(--profit)' : 'var(--loss)'
+  return (
+    <svg width={width} height={height} className="flex-shrink-0">
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
@@ -32,18 +57,19 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
-  const [momConfigForm, setMomConfigForm] = useState({
-    risk_per_trade: 0.03,
-    max_positions: 4,
-    poll_interval_sec: 60,
-    trail_pct: 0.015,
-    breakeven_pct: 0.005,
-    tp1_pct: 0.02,
-    tp1_frac: 0.75,
-    sl1_pct: 1.0,
-    sl1_frac: 0.5,
-    adx_threshold: 20,
-  })
+  const [botUptime, setBotUptime] = useState(0)
+
+  // Filters
+  const [filterPair, setFilterPair] = useState('Все')
+  const [filterResult, setFilterResult] = useState('all') // all | win | loss
+  const [filterReason, setFilterReason] = useState('all')
+
+  // Uptime counter
+  useEffect(() => {
+    if (!momentumStatus?.running) { setBotUptime(0); return }
+    const id = setInterval(() => setBotUptime(s => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [momentumStatus?.running])
 
   useEffect(() => {
     loadData()
@@ -59,29 +85,14 @@ export default function Dashboard({ health, connected, isGuest }) {
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
-        api.momentumTrades(10).catch(() => null),
-        api.getPairedTrades(15).catch(() => null),
+        api.momentumTrades(30).catch(() => null),
+        api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (momStatus) {
-        setMomentumStatus(momStatus)
-        if (momStatus.config) {
-          setMomConfigForm(prev => ({
-            ...prev,
-            risk_per_trade: momStatus.config.risk_per_trade ?? prev.risk_per_trade,
-            max_positions: momStatus.config.max_positions ?? prev.max_positions,
-            poll_interval_sec: momStatus.config.poll_interval_sec ?? prev.poll_interval_sec,
-            trail_pct: momStatus.config.trail_pct ?? prev.trail_pct,
-            breakeven_pct: momStatus.config.breakeven_pct ?? prev.breakeven_pct,
-            tp1_pct: momStatus.config.tp1_pct ?? prev.tp1_pct,
-            tp1_frac: momStatus.config.tp1_frac ?? prev.tp1_frac,
-            adx_threshold: momStatus.config.adx_threshold ?? prev.adx_threshold,
-          }))
-        }
-      }
+      if (momStatus) setMomentumStatus(momStatus)
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
@@ -89,498 +100,479 @@ export default function Dashboard({ health, connected, isGuest }) {
     setLoading(false)
   }
 
+  // Filtered trades
+  const filteredTrades = useMemo(() => {
+    return tradeLog.filter(t => {
+      if (filterPair !== 'Все') {
+        const pair = (t.inst_id || '').toUpperCase()
+        if (!pair.includes(filterPair)) return false
+      }
+      const pnlVal = parseFloat(t.pnl || 0)
+      if (filterResult === 'win' && pnlVal < 0) return false
+      if (filterResult === 'loss' && pnlVal >= 0) return false
+      if (filterReason !== 'all') {
+        if ((t.reason || '').toLowerCase() !== filterReason) return false
+      }
+      return true
+    })
+  }, [tradeLog, filterPair, filterResult, filterReason])
+
+  // Sparkline data for golden-zone MetricCards (stable random 10-point trends)
+  const sparkData = useMemo(() =>
+    Array.from({ length: 6 }, () =>
+      Array.from({ length: 10 }, () => Math.random() * 100)
+    )
+  , [])
+
+  // Summary stats for visible trades
+  const tradesSummary = useMemo(() => {
+    const visible = (filteredTrades.length > 0 ? filteredTrades : tradeLog).slice(0, 30)
+    const totalPnl = visible.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
+    const wins = visible.filter(t => parseFloat(t.pnl || 0) >= 0).length
+    const losses = visible.filter(t => parseFloat(t.pnl || 0) < 0).length
+    return { totalPnl, wins, losses, count: visible.length }
+  }, [filteredTrades, tradeLog])
+
+  // Synthetic BTC sparkline (visual only)
+  const btcSparkData = useMemo(() => {
+    const isUp = parseFloat(btcChange) >= 0
+    return Array.from({ length: 10 }, (_, i) =>
+      isUp ? 50 - i * 2 + Math.random() * 4 : 50 + i * 2 + Math.random() * 4
+    )
+  }, [btcChange])
+
+  const formatUptime = (s) => {
+    const h = Math.floor(s / 3600)
+    const m = Math.floor((s % 3600) / 60)
+    const sec = s % 60
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+  }
+
   const btcUsd = ticker ? parseFloat(ticker.last) : 0
   const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
-  const btcPositive = parseFloat(btcChange) >= 0
+  const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
+  const unrealizedPnl = pnl?.unrealized || 0
+  const pnlDay = pnl?.['1d'] || 0
+  const pnlWeek = pnl?.['7d'] || 0
+  const pnlMonth = pnl?.['30d'] || 0
+
+  const handleClosePosition = async (p) => {
+    const posId = `${p.instId}_${p.posSide}`
+    setClosing(posId)
+    try {
+      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross')
+      loadData()
+    } catch (e) { alert('Ошибка: ' + e.message) }
+    finally { setClosing(null) }
+  }
+
+  const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
+  const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '---'
 
   return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-white">{t('dashboard.title')}</h2>
-          <p className="text-sm text-gray-400 mt-1">{t('dashboard.subtitle')}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Activity size={14} className="text-gray-400" />
-          <span className="text-xs text-gray-500">
-            {connected ? t('dashboard.websocket') : t('dashboard.websocket_offline')}
-          </span>
-          <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
-        </div>
-      </div>
+    <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          label={t('dashboard.portfolio_value')}
-          value={portfolio ? `$${(portfolio.totalEqUsd || 0).toLocaleString()}` : '---'}
-          icon={Wallet}
-          positive
+      {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
+      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 lg:grid-cols-6 gap-3">
+        <MetricCard
+          label="Баланс"
+          value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
+          mono
+          tip="Общая стоимость портфеля по рыночным ценам"
+          sparkData={sparkData[0]}
         />
-        <StatCard
-          label={t('dashboard.btc_price')}
-          value={btcUsd ? `$${btcUsd.toLocaleString()}` : '---'}
+        <MetricCard
+          label="Unrealized PnL"
+          value={
+            <AnimatedValue className={unrealizedPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              {unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
+            </AnimatedValue>
+          }
+          changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
+          mono
+          tip="Нереализованная прибыль/убыток по открытым позициям"
+          sparkData={sparkData[1]}
+        />
+        <MetricCard
+          label="PnL сегодня"
+          value={
+            <AnimatedValue className={pnlDay >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              {pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
+            </AnimatedValue>
+          }
+          changeType={pnlDay >= 0 ? 'positive' : 'negative'}
+          mono
+          tip="Реализованная прибыль/убыток за последние 24 часа"
+          sparkData={sparkData[2]}
+        />
+        <MetricCard
+          label="PnL неделя"
+          value={
+            <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
+            </AnimatedValue>
+          }
+          changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
+          mono
+          tip="Реализованная прибыль/убыток за 7 дней"
+          sparkData={sparkData[3]}
+        />
+        <MetricCard
+          label="Позиций"
+          value={<AnimatedValue>{positions.length}</AnimatedValue>}
+          mono
+          tip="Количество открытых позиций"
+          sparkData={sparkData[4]}
+        />
+        <MetricCard
+          label="BTC"
+          value={<AnimatedValue>{btcUsd ? `$${btcUsd.toLocaleString()}` : '---'}</AnimatedValue>}
           change={`${btcChange}%`}
-          icon={TrendingUp}
-          positive={btcPositive}
-        />
-        <StatCard
-          label={t('dashboard.open_positions')}
-          value={positions.length}
-          icon={BarChart3}
-          positive={positions.length > 0}
-        />
-        <StatCard
-          label={t('dashboard.status')}
-          value={connected ? t('dashboard.online') : t('dashboard.offline')}
-          icon={Zap}
-          positive={connected}
+          changeType={parseFloat(btcChange) >= 0 ? 'positive' : 'negative'}
+          mono
+          tip="Текущая цена Bitcoin-USDT Perpetual Swap"
+          sparkData={sparkData[5]}
         />
       </div>
 
-      {/* PNL Row */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <div className="glass p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-lg bg-neon-blue/10 flex items-center justify-center">
-            <DollarSign size={20} className="text-neon-blue" />
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">{t('dashboard.pnl_day')}</div>
-            <div className={`text-xl font-bold ${pnl && pnl['1d'] >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-              {pnl ? `${pnl['1d'] >= 0 ? '+' : ''}$${pnl['1d'].toFixed(2)}` : t('dashboard.no_pnl')}
-            </div>
-          </div>
-        </div>
-        <div className="glass p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-lg bg-neon-purple/10 flex items-center justify-center">
-            <DollarSign size={20} className="text-neon-purple" />
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">{t('dashboard.pnl_week')}</div>
-            <div className={`text-xl font-bold ${pnl && pnl['7d'] >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-              {pnl ? `${pnl['7d'] >= 0 ? '+' : ''}$${pnl['7d'].toFixed(2)}` : t('dashboard.no_pnl')}
-            </div>
-          </div>
-        </div>
-        <div className="glass p-5 flex items-center gap-4">
-          <div className="w-10 h-10 rounded-lg bg-neon-green/10 flex items-center justify-center">
-            <DollarSign size={20} className="text-neon-green" />
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">{t('dashboard.pnl_month')}</div>
-            <div className={`text-xl font-bold ${pnl && pnl['30d'] >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-              {pnl ? `${pnl['30d'] >= 0 ? '+' : ''}$${pnl['30d'].toFixed(2)}` : t('dashboard.no_pnl')}
-            </div>
-          </div>
-        </div>
-        <div className="glass p-5 flex items-center gap-4">
-          <div className={`w-10 h-10 rounded-lg ${(pnl?.unrealized || 0) >= 0 ? 'bg-neon-green/10' : 'bg-neon-red/10'} flex items-center justify-center`}>
-            <DollarSign size={20} className={`${(pnl?.unrealized || 0) >= 0 ? 'text-neon-green' : 'text-neon-red'}`} />
-          </div>
-          <div>
-            <div className="text-xs text-gray-400 font-medium uppercase tracking-wider">UNREALIZED</div>
-            <div className={`text-xl font-bold ${(pnl?.unrealized || 0) >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-              {pnl ? `${(pnl.unrealized || 0) >= 0 ? '+' : ''}$${(pnl.unrealized || 0).toFixed(2)}` : '---'}
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* ═══ MAIN GRID 65/35 ═══ */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
-      {/* Portfolio Details */}
-      <div className="glass p-5">
-        <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-          <Wallet size={16} className="text-neon-green" />
-          {t('dashboard.portfolio_balance')}
-        </h3>
-        {portfolio ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-gray-400 border-b border-white/5">
-                  <th className="text-left py-3 px-2 font-medium">{t('dashboard.asset')}</th>
-                  <th className="text-right py-3 px-2 font-medium">{t('dashboard.balance')}</th>
-                  <th className="text-right py-3 px-2 font-medium">{t('dashboard.usd_value')}</th>
-                  <th className="text-right py-3 px-2 font-medium">{t('dashboard.available')}</th>
-                  <th className="text-right py-3 px-2 font-medium">{t('dashboard.frozen')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(portfolio.details || []).map(d => (
-                  <tr key={d.ccy} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                    <td className="py-3 px-2 font-medium text-white">{d.ccy}</td>
-                    <td className="py-3 px-2 text-right mono">{parseFloat(d.eq).toFixed(4)}</td>
-                    <td className="py-3 px-2 text-right mono text-neon-green">
-                      ${parseFloat(d.eqUsd).toLocaleString()}
-                    </td>
-                    <td className="py-3 px-2 text-right mono">{parseFloat(d.availBal).toFixed(4)}</td>
-                    <td className="py-3 px-2 text-right mono text-gray-400">{parseFloat(d.frozenBal).toFixed(4)}</td>
-                  </tr>
+        {/* ═══ LEFT — Positions + Trades ═══ */}
+        <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
+
+          {/* Open Positions */}
+          <div className="panel flex-1 flex flex-col min-h-0">
+            <div className="panel-header">
+              <Zap size={13} className="text-[var(--profit)]" />
+              Открытые позиции
+              <span className="ml-auto text-[var(--txt-muted)]">{positions.length}</span>
+            </div>
+            <div className="flex-1 overflow-auto">
+              {loading ? (
+                <div className="flex items-center justify-center py-12"><Loader /></div>
+              ) : positions.length === 0 ? (
+                <EmptyState icon={Zap} text="Нет открытых позиций" sub="Позиции появятся после запуска бота" />
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Пара</th>
+                      <th className="text-right">Размер</th>
+                      <th className="text-right">Entry</th>
+                      <th className="text-right">Mark</th>
+                      <th className="text-right">PnL</th>
+                      <th className="text-right">ROE</th>
+                      {isAdmin(isGuest) ? null : <th className="text-right"></th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {positions.map((p, i) => {
+                      const upl = parseFloat(p.upl || 0)
+                      const roe = parseFloat(p.uplRatio || 0) * 100
+                      const posId = `${p.instId}_${p.posSide}`
+                      return (
+                        <tr key={i} style={{
+                          background: upl >= 0
+                            ? 'linear-gradient(90deg, rgba(0,255,136,0.06) 0%, transparent 50%)'
+                            : 'linear-gradient(90deg, rgba(255,51,102,0.06) 0%, transparent 50%)',
+                          boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
+                        }}>
+                          <td className="text-[var(--txt)] font-medium">{p.instId?.replace('-USDT-SWAP', '')}</td>
+                          <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
+                          <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
+                          <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
+                          <td className={`text-right mono font-semibold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                          </td>
+                          <td className={`text-right mono ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {roe.toFixed(2)}%
+                          </td>
+                          {!isGuest && (
+                            <td className="text-right">
+                              <button
+                                className="btn btn-danger btn-sm"
+                                onClick={() => handleClosePosition(p)}
+                                disabled={closing === posId}
+                              >
+                                {closing === posId ? <Loader /> : <XCircle size={11} />}
+                                Закрыть
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+
+          {/* Bot Status + Recent Trades */}
+          <div className="panel flex-1 flex flex-col min-h-0">
+            <div className="panel-header">
+              <Activity size={13} className="text-accent-purple" />
+              Последние сделки
+              <div className="ml-auto flex gap-1">
+                {['all', 'win', 'loss'].map(f => (
+                  <Chip key={f} active={filterResult === f} onClick={() => setFilterResult(f)}>
+                    {f === 'all' ? 'Все' : f === 'win' ? 'Прибыль' : 'Убыток'}
+                  </Chip>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="text-center py-8 text-gray-500">
-            <p>{t('dashboard.no_portfolio')}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Momentum Strategy */}
-      <div className="glass p-5">
-        <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-          <TrendingUp size={16} className="text-neon-purple" />
-          Momentum Strategy
-          {momentumStatus && (
-            <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
-              momentumStatus.running ? 'bg-neon-green/20 text-neon-green' : 'bg-gray-500/20 text-gray-400'
-            }`}>
-              {momentumStatus.running ? 'Активна' : 'Остановлена'}
-            </span>
-          )}
-        </h3>
-        <div className="text-xs text-gray-500 mb-3 leading-relaxed">
-          Моментум на дневных свечах (ROC5>0, ROC50>0, EMA15>EMA30, ADX>20, PDI>MDI).
-          Выход: трейлинг 1.5% → каскадный стоп -1%/50% → безубыток +0.5% → TP1 +2%/50%.
-        </div>
-        {momentumStatus && momentumStatus.running ? (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Капитал:</span>
-                <div className="text-neon-green font-medium mt-0.5">${momentumStatus.equity?.toLocaleString() || '---'}</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Позиций:</span>
-                <div className="text-white font-medium mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 4}</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Сделок:</span>
-                <div className="text-white font-medium mt-0.5">{momentumStatus.total_trades || 0}</div>
-              </div>
-              <div className="bg-white/5 rounded-lg px-3 py-2">
-                <span className="text-gray-400">Риск:</span>
-                <div className="text-white font-medium mt-0.5">{((momentumStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
               </div>
             </div>
-
-            {momentumStatus.open_positions?.length > 0 && (
-              <div>
-                <div className="text-xs text-gray-400 font-medium mb-2">Открытые позиции</div>
-                <div className="space-y-1">
-                  {momentumStatus.open_positions.map((p, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className="px-1.5 py-0.5 rounded font-bold bg-neon-green/20 text-neon-green">LONG</span>
-                        <span className="text-white font-medium">{p.symbol}</span>
-                        <span className="text-gray-400">entry=${p.entry?.toFixed(2)}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-gray-400">
-                        <span>stop=${p.stop?.toFixed(2)}</span>
-                        <span>peak={p.peak_ratio}x</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+            {tradeLog.length > 0 && (
+              <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
+                <span className="text-[var(--txt-muted)]">
+                  Показано: <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
+                </span>
+                <span className="text-[var(--txt-muted)]">
+                  Сумма PnL: <span className={`mono font-bold ${tradesSummary.totalPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tradesSummary.totalPnl >= 0 ? '+' : ''}{tradesSummary.totalPnl.toFixed(2)}</span>
+                </span>
+                <span className="text-[var(--txt-muted)]">
+                  Прибыльных: <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
+                </span>
+                <span className="text-[var(--txt-muted)]">
+                  Убыточных: <span className="mono text-[var(--loss)] font-medium">{tradesSummary.losses}</span>
+                </span>
               </div>
             )}
-
-            {momentumTrades.length > 0 && (
-              <div>
-                <div className="text-xs text-gray-400 font-medium mb-2">Последние сделки</div>
-                <div className="space-y-1">
-                  {momentumTrades.slice(0, 5).map((tr, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-white/5 rounded-lg px-3 py-2">
-                      <div className="flex items-center gap-2">
-                        <span className={`px-1.5 py-0.5 rounded font-bold ${
-                          tr.side === 'buy' ? 'bg-neon-green/20 text-neon-green' : 'bg-neon-red/20 text-neon-red'
-                        }`}>
-                          {tr.side === 'buy' ? 'LONG' : tr.reason ? `EXIT ${tr.reason}` : 'EXIT'}
-                        </span>
-                        <span className="text-white font-medium">{tr.symbol}</span>
-                        {tr.pnl != null && (
-                          <span className={`font-bold ${tr.pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                            ${tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}
-                          </span>
-                        )}
-                      </div>
-                      <span className="text-gray-500">{tr.time ? new Date(tr.time).toLocaleString() : ''}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                onClick={async () => {
-                  try {
-                    await api.momentumStop()
-                    loadData()
-                  } catch (e) {
-                    alert('Ошибка: ' + e.message)
-                  }
-                }}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-neon-red/10 border border-neon-red/20 text-neon-red hover:bg-neon-red/20 transition-colors"
-              >
-                Остановить
-              </button>
-            </div>
-          </div>
-        ) : (
-          <div className="text-center py-4">
-            <p className="text-sm text-gray-500 mb-3">Стратегия не запущена</p>
-            <div className="max-w-md mx-auto text-left mb-4 space-y-2">
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">Риск на сделку</span>
-                <input type="range" min="0.5" max="10" step="0.5"
-                  value={(momConfigForm.risk_per_trade * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, risk_per_trade: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{(momConfigForm.risk_per_trade * 100).toFixed(0)}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">Макс. позиций</span>
-                <input type="range" min="1" max="8" step="1"
-                  value={momConfigForm.max_positions}
-                  onChange={e => setMomConfigForm(f => ({...f, max_positions: Number(e.target.value)}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{momConfigForm.max_positions}</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">Трейлинг стоп</span>
-                <input type="range" min="0.5" max="10" step="0.5"
-                  value={(momConfigForm.trail_pct * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, trail_pct: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{(momConfigForm.trail_pct * 100).toFixed(0)}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">Безубыток при</span>
-                <input type="range" min="0.1" max="3" step="0.1"
-                  value={(momConfigForm.breakeven_pct * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, breakeven_pct: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{(momConfigForm.breakeven_pct * 100).toFixed(0)}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">TP1 частичное при</span>
-                <input type="range" min="0.5" max="8" step="0.5"
-                  value={(momConfigForm.tp1_pct * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, tp1_pct: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{(momConfigForm.tp1_pct * 100).toFixed(0)}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">TP1 размер закрытия</span>
-                <input type="range" min="20" max="100" step="5"
-                  value={(momConfigForm.tp1_frac * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, tp1_frac: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{(momConfigForm.tp1_frac * 100).toFixed(0)}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">SL1 каскад при</span>
-                <input type="range" min="0" max="5" step="0.5"
-                  value={(momConfigForm.sl1_pct || 0).toFixed(1)}
-                  onChange={e => setMomConfigForm(f => ({...f, sl1_pct: parseFloat(e.target.value)}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{momConfigForm.sl1_pct || 0}%</span>
-              </label>
-              <label className="flex items-center justify-between text-xs">
-                <span className="text-gray-400">SL1 размер закрытия</span>
-                <input type="range" min="20" max="100" step="5"
-                  value={((momConfigForm.sl1_frac || 0.5) * 100).toFixed(0)}
-                  onChange={e => setMomConfigForm(f => ({...f, sl1_frac: e.target.value / 100}))}
-                  className="w-32" />
-                <span className="text-white font-mono w-12 text-right">{((momConfigForm.sl1_frac || 0.5) * 100).toFixed(0)}%</span>
-              </label>
-            </div>
-            <button
-              onClick={async () => {
-                try {
-                  await api.momentumStart(momConfigForm)
-                  loadData()
-                } catch (e) {
-                  alert('Ошибка: ' + e.message)
-                }
-              }}
-              className="px-4 py-2 rounded-lg text-sm font-medium bg-neon-green/10 border border-neon-green/20 text-neon-green hover:bg-neon-green/20 transition-colors"
-            >
-              Запустить Momentum
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* Recent Trades */}
-      <div className="glass p-5">
-        <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-          <ScrollText size={16} className="text-neon-blue" />
-          {t('dashboard.recent_trades') || 'Последние сделки'}
-        </h3>
-        {tradeLog.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-gray-400 border-b border-white/5">
-                  <th className="text-left py-2 px-1 font-medium">Время входа</th>
-                  <th className="text-left py-2 px-1 font-medium">Выход</th>
-                  <th className="text-left py-2 px-1 font-medium">Пара</th>
-                  <th className="text-center py-2 px-1 font-medium">Направление</th>
-                  <th className="text-right py-2 px-1 font-medium">Цена входа</th>
-                  <th className="text-right py-2 px-1 font-medium">Цена выхода</th>
-                  <th className="text-right py-2 px-1 font-medium">Объём</th>
-                  <th className="text-right py-2 px-1 font-medium">P&amp;L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradeLog.slice(0, 20).map((t, i) => {
-                  const pnl = t.pnl != null ? parseFloat(t.pnl) : null
-                  return (
-                  <tr key={t.signal_id || i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                    <td className="py-2 px-1 text-xs text-gray-400">
-                      {t.entry_time ? new Date(t.entry_time).toLocaleString() : '-'}
-                    </td>
-                    <td className="py-2 px-1 text-xs text-gray-400">
-                      {t.exit_time ? new Date(t.exit_time).toLocaleString() : 'открыта'}
-                    </td>
-                    <td className="py-2 px-1 text-white font-medium">{t.inst_id || '-'}</td>
-                    <td className="py-2 px-1 text-center">
-                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-                        t.side === 'buy' ? 'bg-neon-green/10 text-neon-green' : 'bg-neon-red/10 text-neon-red'
-                      }`}>
-                        {t.side === 'buy' ? 'LONG' : 'SHORT'}
-                      </span>
-                    </td>
-                    <td className="py-2 px-1 text-right mono">
-                      {t.entry_px ? `$${parseFloat(t.entry_px).toLocaleString()}` : '-'}
-                    </td>
-                    <td className="py-2 px-1 text-right mono">
-                      {t.exit_px ? `$${parseFloat(t.exit_px).toLocaleString()}` : '-'}
-                    </td>
-                    <td className="py-2 px-1 text-right mono">{t.entry_sz || '-'}</td>
-                    <td className="py-2 px-1 text-right">
-                      {pnl !== null ? (
-                        <span className={`mono text-xs font-bold ${pnl >= 0 ? 'text-neon-green' : 'text-neon-red'}`}>
-                          {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)} USDT
-                        </span>
-                      ) : (
-                        <span className="text-xs text-gray-500">открыта</span>
-                      )}
-                    </td>
-                  </tr>
-                )})}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <p className="text-sm text-gray-500">Сделок пока нет</p>
-        )}
-      </div>
-
-      {/* Positions & Market Info */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="glass p-5">
-          <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-            <TrendingUp size={16} className="text-neon-blue" />
-            {t('dashboard.open_positions_title')}
-          </h3>
-          {positions.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
+            <div className="flex-1 overflow-auto">
+              <table className="data-table">
                 <thead>
-                  <tr className="text-gray-400 border-b border-white/5">
-                    <th className="text-left py-2 px-1 font-medium">{t('dashboard.pair')}</th>
-                    <th className="text-right py-2 px-1 font-medium">{t('dashboard.size')}</th>
-                    <th className="text-right py-2 px-1 font-medium">{t('dashboard.entry')}</th>
-                    <th className="text-right py-2 px-1 font-medium">{t('dashboard.mark')}</th>
-                    <th className="text-right py-2 px-1 font-medium">{t('dashboard.pnl')}</th>
-                    <th className="text-right py-2 px-1 font-medium">{t('dashboard.actions')}</th>
+                  <tr>
+                    <th>Вход</th>
+                    <th>Выход</th>
+                    <th>Пара</th>
+                    <th>Direction</th>
+                    <th className="text-right">Entry</th>
+                    <th className="text-right">Exit</th>
+                    <th className="text-right">PnL</th>
+                    <th className="text-right">Причина</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {positions.slice(0, 10).map((p, i) => {
-                    const pnl = parseFloat(p.upl || 0)
-                    const positive = pnl >= 0
-                    const posId = `${p.instId}_${p.posSide}`
+                  {(filteredTrades.length > 0 ? filteredTrades : tradeLog).slice(0, 30).map((t, i) => {
+                    const pnlVal = parseFloat(t.pnl || 0)
+                    const reason = (t.reason || '').toLowerCase()
+                    const reasonInfo = REASON_MAP[reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' }
                     return (
-                      <tr key={i} className="border-b border-white/5 hover:bg-white/5 transition-colors">
-                        <td className="py-2 px-1 text-white font-medium">{p.instId}</td>
-                        <td className="py-2 px-1 text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
-                        <td className="py-2 px-1 text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
-                        <td className="py-2 px-1 text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
-                        <td className={`py-2 px-1 text-right mono ${positive ? 'text-neon-green' : 'text-neon-red'}`}>
-                          ${pnl.toLocaleString()}
+                      <tr key={t.signal_id || i}>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.entry_time)}</td>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{t.exit_time ? fmtTime(t.exit_time) : '—'}</td>
+                        <td className="text-[var(--txt)] font-medium">{t.inst_id?.replace('-USDT-SWAP', '') || '-'}</td>
+                        <td>
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${t.side === 'buy' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                            {t.side === 'buy' ? 'LONG' : 'SHORT'}
+                          </span>
                         </td>
-                        <td className="py-2 px-1 text-right">
-                          {isGuest ? (
-                            <span className="text-xs text-gray-500">—</span>
-                          ) : (
-                          <button
-                            onClick={async () => {
-                              setClosing(posId)
-                              try {
-                                await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross')
-                                loadData()
-                              } catch (e) {
-                                alert('Ошибка закрытия: ' + e.message)
-                              } finally {
-                                setClosing(null)
-                              }
-                            }}
-                            disabled={closing === posId}
-                            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-neon-red/10 border border-neon-red/20 text-neon-red hover:bg-neon-red/20 transition-colors disabled:opacity-50"
-                            title="Закрыть позицию"
-                          >
-                            {closing === posId ? <Loader2 size={12} className="animate-spin" /> : <XCircle size={12} />}
-                            {closing === posId ? '...' : 'Закрыть'}
-                          </button>
-                          )}
+                        <td className="text-right mono">{t.entry_px ? `$${parseFloat(t.entry_px).toLocaleString()}` : '—'}</td>
+                        <td className="text-right mono">{t.exit_px ? `$${parseFloat(t.exit_px).toLocaleString()}` : '—'}</td>
+                        <td className="text-right">
+                          <div className="flex items-center justify-end gap-2">
+                            <PnlBar value={pnlVal} maxAbs={200} />
+                            <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {t.pnl != null ? `${pnlVal >= 0 ? '+' : ''}${pnlVal.toFixed(2)}` : '—'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="text-right">
+                          <span className={`text-2xs font-medium ${reasonInfo.color}`}>{reasonInfo.label}</span>
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
+              {tradeLog.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
             </div>
-          ) : (
-            <div className="text-center py-8 text-gray-500">
-              <p>{t('dashboard.no_positions')}</p>
-            </div>
-          )}
+          </div>
         </div>
 
-        <div className="glass p-5">
-          <h3 className="text-sm font-semibold text-white mb-4 flex items-center gap-2">
-            <BarChart3 size={16} className="text-neon-purple" />
-            {t('dashboard.market_data')}
-          </h3>
-          {ticker ? (
-            <div className="space-y-3">
-              {[
-                { label: t('dashboard.last_price'), value: `$${parseFloat(ticker.last).toLocaleString()}`, color: 'text-white' },
-                { label: t('dashboard.bid'), value: `$${parseFloat(ticker.bid).toLocaleString()}`, color: 'text-neon-green' },
-                { label: t('dashboard.ask'), value: `$${parseFloat(ticker.ask).toLocaleString()}`, color: 'text-neon-red' },
-                { label: t('dashboard.high_24h'), value: `$${parseFloat(ticker.high24h).toLocaleString()}`, color: 'text-neon-green' },
-                { label: t('dashboard.low_24h'), value: `$${parseFloat(ticker.low24h).toLocaleString()}`, color: 'text-neon-red' },
-                { label: t('dashboard.change_24h'), value: `${btcChange}%`, color: btcPositive ? 'text-neon-green' : 'text-neon-red' },
-                { label: t('dashboard.volume_24h'), value: ticker.vol24h ? `${parseFloat(ticker.vol24h).toFixed(2)} BTC` : '---', color: 'text-gray-300' },
-              ].map(item => (
-                <div key={item.label} className="flex justify-between items-center">
-                  <span className="text-sm text-gray-400">{item.label}</span>
-                  <span className={`mono text-sm font-medium ${item.color}`}>{item.value}</span>
+        {/* ═══ RIGHT — Filters + Bot Log ═══ */}
+        <div className="flex flex-col gap-3 min-h-0 right-panel">
+
+          {/* Filter Chips */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <Filter size={13} className="text-[var(--info)]" />
+              Фильтры
+            </div>
+            <div className="p-3 space-y-2">
+              <div className="text-2xs text-[var(--txt-muted)] mb-1">Инструмент</div>
+              <div className="flex flex-wrap gap-1">
+                {PAIRS.map(p => (
+                  <Chip key={p} active={filterPair === p} onClick={() => setFilterPair(p)}>{p}</Chip>
+                ))}
+              </div>
+              <div className="text-2xs text-[var(--txt-muted)] mb-1 mt-3">Причина выхода</div>
+              <div className="flex flex-wrap gap-1">
+                {[{ k: 'all', l: 'Все' }, { k: 'tp', l: 'TP' }, { k: 'sl', l: 'SL' }, { k: 'trail', l: 'Trail' }, { k: 'breakeven', l: 'BE' }, { k: 'manual', l: 'Manual' }].map(r => (
+                  <Chip key={r.k} active={filterReason === r.k} onClick={() => setFilterReason(r.k)}>{r.l}</Chip>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Bot Status Card */}
+          <div className="panel flex-1 flex flex-col min-h-0">
+            <div className="panel-header">
+              <Bot size={13} className="text-[var(--warn)]" />
+              Momentum Bot
+              {momentumStatus?.running && <StatusBadge mode="live" label="Running" />}
+              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label="Stopped" />}
+            </div>
+            <div className="flex-1 overflow-auto p-3 space-y-3">
+              {momentumStatus?.running ? (
+                <>
+                  {/* Uptime */}
+                  <div className="flex items-center justify-between px-3 py-2 rounded-md bg-[var(--bg)] border border-[var(--border)]">
+                    <div className="flex items-center gap-1.5">
+                      <Clock size={12} className="text-[var(--profit)]" />
+                      <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">Время работы</span>
+                    </div>
+                    <span className="mono text-sm font-bold text-[var(--profit)]">{formatUptime(botUptime)}</span>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="p-2 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Капитал</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">${momentumStatus.equity?.toLocaleString() || '---'}</div>
+                    </div>
+                    <div className="p-2 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Позиций</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 4}</div>
+                    </div>
+                    <div className="p-2 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Сделок</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.total_trades || 0}</div>
+                    </div>
+                    <div className="p-2 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Риск</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{((momentumStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
+                    </div>
+                  </div>
+
+                  {/* Open bot positions */}
+                  {momentumStatus.open_positions?.length > 0 && (
+                    <div>
+                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Активные позиции бота</div>
+                      <div className="space-y-1">
+                        {momentumStatus.open_positions.map((p, i) => (
+                          <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
+                            <div className="flex items-center gap-2">
+                              <span className="px-1.5 py-0.5 rounded font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LONG</span>
+                              <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
+                            </div>
+                            <div className="flex items-center gap-2 text-[var(--txt-muted)]">
+                              <span>${p.entry?.toFixed(0)}</span>
+                              <span className="text-[var(--loss)]">SL ${p.stop?.toFixed(0)}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Recent bot trades */}
+                  {momentumTrades.length > 0 && (
+                    <div>
+                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Лог бота</div>
+                      <div className="space-y-1">
+                        {momentumTrades.slice(0, 15).map((tr, i) => {
+                          const isBuy = tr.side === 'buy'
+                          return (
+                            <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                              <div className="flex items-center gap-1.5">
+                                <span className={`w-1.5 h-1.5 rounded-full ${isBuy ? 'bg-[var(--profit)]' : 'bg-[var(--loss)]'}`} />
+                                <span className="text-[var(--txt)]">{tr.symbol}</span>
+                              </div>
+                              {tr.pnl != null && (
+                                <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                                  {tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}
+                                </span>
+                              )}
+                              <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {!isGuest && (
+                    <button
+                      className="btn btn-danger btn-sm w-full"
+                      onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}
+                    >
+                      <Square size={12} /> Остановить бота
+                    </button>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-6">
+                  <p className="text-xs text-[var(--txt-muted)] mb-3">Бот не запущен</p>
+                  {!isGuest && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}
+                    >
+                      <Play size={12} /> Запустить
+                    </button>
+                  )}
                 </div>
-              ))}
+              )}
             </div>
-          ) : (
-            <div className="text-center py-8 text-gray-500">
-              <p>{t('dashboard.no_market_data')}</p>
+          </div>
+
+          {/* Market Data */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <BarChart3 size={13} className="text-[var(--info)]" />
+              BTC-USDT
+              {ticker && (
+                <span className={`ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-2xs font-bold ${
+                  parseFloat(btcChange) >= 0
+                    ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
+                    : 'bg-[var(--loss-dim)] text-[var(--loss)]'
+                }`}>
+                  {parseFloat(btcChange) >= 0 ? '▲' : '▼'} {parseFloat(btcChange) >= 0 ? '+' : '-'}{Math.abs(parseFloat(btcChange)).toFixed(2)}%
+                </span>
+              )}
             </div>
-          )}
+            <div className="p-3">
+              {ticker && (
+                <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-[var(--border)]">
+                  <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">Тренд</span>
+                  <Sparkline data={btcSparkData} />
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-2xs">
+                {ticker ? [
+                  { l: 'Last', v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
+                  { l: 'Bid', v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: 'Ask', v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                  { l: '24h High', v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: '24h Low', v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                ].map(item => (
+                  <div key={item.l} className="flex justify-between">
+                    <span className="text-[var(--txt-muted)]">{item.l}</span>
+                    <span className={`mono font-medium ${item.c}`}>{item.v}</span>
+                  </div>
+                )) : (
+                  <span className="text-[var(--txt-muted)] col-span-2 text-center py-2">Нет данных</span>
+                )}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   )
+}
+
+function isAdmin(isGuest) {
+  return !isGuest
 }

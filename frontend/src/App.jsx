@@ -1,16 +1,23 @@
-import React, { useState, useEffect, createContext, useContext } from 'react'
-import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
+import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
+import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
-  LayoutDashboard, Settings, BarChart3, ScrollText,
-  Wallet, TrendingUp, Bot, LogOut, User, Shield
+  LayoutDashboard, Bot, BarChart3, ScrollText, Settings, BookOpen,
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, ChevronDown, X
 } from 'lucide-react'
-import Dashboard from './pages/Dashboard'
-import SettingsPage from './pages/SettingsPage'
-import ChartPage from './pages/ChartPage'
-import TradeHistoryPage from './pages/TradeHistoryPage'
 import LoginPage from './pages/LoginPage'
+import { Loader } from './components/ui'
+
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const BotsPage = lazy(() => import('./pages/BotsPage'))
+const BacktestPage = lazy(() => import('./pages/BacktestPage'))
+const ChartPage = lazy(() => import('./pages/ChartPage'))
+const HistoryPage = lazy(() => import('./pages/HistoryPage'))
+const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const DocsPage = lazy(() => import('./pages/DocsPage'))
 import { api } from './services/api'
-import { TranslationProvider, useTranslation } from './hooks/useTranslation'
+import { ThemeProvider, useTheme } from './context/ThemeContext'
+import { OnboardingProvider } from './context/OnboardingContext'
+import { GlossaryModal, OnboardingTour } from './components/ui'
 
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
@@ -18,16 +25,22 @@ export const useAuth = () => useContext(AuthContext)
 function AppRouter() {
   const { auth, setAuth } = useAuth()
   if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
-  return <AppContent />
+  return <AppLayout />
 }
 
-function AppContent() {
-  const { t } = useTranslation()
+function AppLayout() {
   const { auth, setAuth } = useAuth()
+  const { theme, toggle } = useTheme()
   const navigate = useNavigate()
+  const location = useLocation()
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
+  const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [docsOpen, setDocsOpen] = useState(false)
+
+  const isGuest = auth?.role === 'guest'
+  const isAdmin = auth?.role === 'admin'
 
   useEffect(() => {
     const check = async () => {
@@ -53,89 +66,100 @@ function AppContent() {
     setAuth(null)
   }
 
-  const isGuest = auth?.role === 'guest'
-  const isAdmin = auth?.role === 'admin'
-
   const navItems = [
-    { to: '/', icon: LayoutDashboard, label: t('nav.overview') },
-    { to: '/chart', icon: BarChart3, label: 'График' },
-    { to: '/trades', icon: ScrollText, label: 'История' },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
+    { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
+    { to: '/bots', icon: Bot, label: 'Bots' },
+    { to: '/backtest', icon: BarChart3, label: 'Backtest' },
+    { to: '/chart', icon: BarChart3, label: 'Chart' },
+    { to: '/history', icon: ScrollText, label: 'History' },
+    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: 'Settings' }] : []),
   ]
 
   return (
-    <div className="min-h-screen bg-dark-bg flex">
-      {/* Sidebar */}
-      <aside className="w-64 glass m-4 rounded-2xl flex flex-col border-r-0" style={{border: '1px solid rgba(255,255,255,0.06)'}}>
-        <div className="p-5 border-b border-white/5">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-neon-green to-neon-blue flex items-center justify-center">
-              <TrendingUp size={18} className="text-white" />
+    <div className="h-screen flex flex-col bg-[var(--bg)] overflow-hidden">
+      {/* ═══ HEADER ═══ */}
+      <header className="flex items-center justify-between px-4 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
+        {/* Left: Logo + Nav */}
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center">
+              <TrendingUp size={14} className="text-white" />
             </div>
-            <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">Trading Bot</h1>
-              <div className="flex items-center gap-2 mt-0.5">
-                <span className={`status-dot ${connected ? 'online' : 'offline'}`} />
-                <span className="text-xs text-gray-400">
-                  {connected ? t('nav.connected') : t('nav.offline')}
-                </span>
-              </div>
-            </div>
+            <span className="text-sm font-bold text-[var(--txt)] tracking-tight hidden lg:inline">OKX Terminal</span>
           </div>
+
+          <nav className="flex items-center gap-1">
+            {navItems.map(item => (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                end={item.to === '/'}
+                className={({ isActive }) =>
+                  `flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    isActive
+                      ? 'bg-[var(--info-dim)] text-[var(--info)]'
+                      : 'text-[var(--txt-muted)] hover:text-[var(--txt)] hover:bg-[var(--surface-overlay)]'
+                  }`
+                }
+              >
+                <item.icon size={14} />
+                <span className="hidden md:inline">{item.label}</span>
+              </NavLink>
+            ))}
+          </nav>
         </div>
 
-        <nav className="flex-1 p-3 space-y-1">
-          {navItems.map(item => (
-            <NavLink
-              key={item.to}
-              to={item.to}
-              end={item.to === '/'}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${
-                  isActive
-                    ? 'bg-white/5 text-neon-green neon-glow-green'
-                    : 'text-gray-400 hover:text-white hover:bg-white/5'
-                }`
-              }
-            >
-              <item.icon size={18} />
-              {item.label}
-            </NavLink>
-          ))}
-        </nav>
+        {/* Right: Status + Controls */}
+        <div className="flex items-center gap-3">
+          {/* Connection Status */}
+          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-[var(--bg)] border border-[var(--border)]">
+            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
+            <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+            </span>
+          </div>
 
-        <div className="p-4 border-t border-white/5 space-y-2">
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5">
-            <Wallet size={14} className="text-gray-400" />
-            <span className={`text-xs font-medium ${demoMode ? 'text-neon-yellow' : 'text-neon-green'}`}>
-              {demoMode ? t('sidebar.demo') : t('sidebar.live')}
-            </span>
+          {/* User role */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[var(--bg)] border border-[var(--border)]">
+            {isGuest ? <User size={12} className="text-[var(--info)]" /> : <Shield size={12} className="text-[var(--profit)]" />}
+            <span className="text-2xs font-medium text-[var(--txt-secondary)]">{isGuest ? 'Гость' : 'Админ'}</span>
           </div>
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-white/5">
-            {isGuest ? <User size={14} className="text-neon-blue" /> : <Shield size={14} className="text-neon-green" />}
-            <span className={`text-xs font-medium ${isGuest ? 'text-neon-blue' : 'text-neon-green'}`}>
-              {isGuest ? 'Гость' : 'Админ'}
-            </span>
-          </div>
-          <button
-            className="flex items-center gap-2 px-3 py-2 rounded-lg w-full text-xs text-gray-400 hover:text-white hover:bg-white/5 transition-all"
-            onClick={handleLogout}
-          >
-            <LogOut size={14} />
-            Выйти
+
+          {/* Glossary */}
+          <button className="btn-icon" onClick={() => setGlossaryOpen(true)} title="Глоссарий">
+            <HelpCircle size={15} />
+          </button>
+
+          {/* Theme toggle */}
+          <button className="btn-icon" onClick={toggle} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+            {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
+          </button>
+
+          {/* Logout */}
+          <button className="btn-icon" onClick={handleLogout} title="Выйти">
+            <LogOut size={15} />
           </button>
         </div>
-      </aside>
+      </header>
 
-      {/* Main */}
-      <main className="flex-1 p-6 overflow-auto">
+      {/* ═══ MAIN CONTENT ═══ */}
+      <main className="flex-1 overflow-hidden">
+        <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
-          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
-          <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
+          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
+          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
+          <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
-          <Route path="/trades" element={<TradeHistoryPage />} />
+          <Route path="/history" element={<HistoryPage />} />
+          <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
+          <Route path="/docs" element={<DocsPage />} />
         </Routes>
+        </Suspense>
       </main>
+
+      {/* ═══ MODALS ═══ */}
+      <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
+      <OnboardingTour />
     </div>
   )
 }
@@ -148,13 +172,15 @@ export default function App() {
   })
 
   return (
-    <TranslationProvider>
-      <AuthContext.Provider value={{ auth, setAuth }}>
-        <Routes>
-          <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
-          <Route path="/*" element={<AppRouter />} />
-        </Routes>
-      </AuthContext.Provider>
-    </TranslationProvider>
+    <ThemeProvider>
+      <OnboardingProvider>
+        <AuthContext.Provider value={{ auth, setAuth }}>
+          <Routes>
+            <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
+            <Route path="/*" element={<AppRouter />} />
+          </Routes>
+        </AuthContext.Provider>
+      </OnboardingProvider>
+    </ThemeProvider>
   )
 }

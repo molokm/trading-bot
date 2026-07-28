@@ -40,86 +40,80 @@ export default function LoginPage({ onLogin }) {
     setLoading(false)
   }
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter') handleLogin()
-  }
-
   return (
-    <div className="min-h-screen bg-dark-bg flex items-center justify-center p-4">
-      <div className="glass rounded-2xl p-8 w-full max-w-sm space-y-6" style={{border: '1px solid rgba(255,255,255,0.06)'}}>
-        <div className="text-center space-y-3">
-          <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-neon-green to-neon-blue flex items-center justify-center mx-auto">
-            <TrendingUp size={28} className="text-white" />
+    <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden">
+      {/* Animated background gradient */}
+      <div className="absolute inset-0 login-bg-anim" />
+      <div className="relative panel w-full max-w-sm" style={{ maxWidth: 380 }}>
+        <div className="p-8 space-y-6">
+          <div className="text-center space-y-3">
+            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center mx-auto">
+              <TrendingUp size={28} className="text-white" />
+            </div>
+            <h1 className="text-xl font-bold text-[var(--txt)]">OKX Terminal</h1>
+            <p className="text-xs text-[var(--txt-muted)]">Вход в панель управления</p>
           </div>
-          <h1 className="text-xl font-bold text-white">OKX Terminal</h1>
-          <p className="text-sm text-gray-400">Вход в панель управления</p>
-        </div>
 
-        {error && (
-          <div className="bg-neon-red/5 border border-neon-red/20 rounded-xl p-3 text-sm text-neon-red text-center">
-            {error}
-          </div>
-        )}
+          {error && (
+            <div className="bg-[var(--loss-dim)] border border-[var(--loss)]/20 rounded-lg p-3 text-xs text-[var(--loss)] text-center">
+              {error}
+            </div>
+          )}
 
-        {hasPassword && (
-          <div className="space-y-2">
-            <label className="text-xs font-medium text-gray-400 uppercase tracking-wider">Пароль</label>
-            <div className="relative">
-              <input
-                type={showPw ? 'text' : 'password'}
-                className="w-full pr-10"
-                placeholder="Введите пароль"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                onKeyDown={handleKeyDown}
-                autoFocus
-              />
+          {hasPassword && (
+            <div className="space-y-2">
+              <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Пароль</label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  className="w-full pr-10"
+                  placeholder="Введите пароль"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleLogin()}
+                  autoFocus
+                />
+                <button
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--txt-muted)] hover:text-[var(--txt)]"
+                  onClick={() => setShowPw(!showPw)}
+                  tabIndex={-1}
+                >
+                  {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
               <button
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
-                onClick={() => setShowPw(!showPw)}
-                tabIndex={-1}
+                className="btn btn-primary w-full py-2.5"
+                onClick={handleLogin}
+                disabled={loading || !password}
               >
-                {showPw ? <EyeOff size={16} /> : <Eye size={16} />}
+                {loading ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}
+                {loading ? 'Вход...' : 'Войти'}
               </button>
             </div>
-            <button
-              className="btn-neon w-full py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 mt-3"
-              onClick={handleLogin}
-              disabled={loading || !password}
-            >
-              {loading ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}
-              {loading ? 'Вход...' : 'Войти'}
-            </button>
+          )}
+
+          <div className="relative">
+            <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-[var(--border)]" /></div>
+            <div className="relative flex justify-center"><span className="bg-[var(--surface)] px-2 text-2xs text-[var(--txt-muted)]">или</span></div>
           </div>
-        )}
 
-        <div className="relative">
-          <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-white/5" />
+          <button
+            className="btn btn-ghost w-full py-2.5"
+            onClick={handleGuest}
+            disabled={loading}
+          >
+            {loading ? <Loader2 size={14} className="animate-spin" /> : <User size={14} />}
+            Гостевой режим (только просмотр)
+          </button>
+
+          {!hasPassword && (
+            <p className="text-2xs text-center text-[var(--txt-muted)]">Пароль не установлен — вход без авторизации</p>
+          )}
+
+          <div className="flex items-center justify-center gap-2 text-2xs text-[var(--txt-muted)] pt-2">
+            <Shield size={12} />
+            <span>Все данные передаются по HTTPS</span>
           </div>
-          <div className="relative flex justify-center text-xs">
-            <span className="bg-dark-bg px-2 text-gray-500">или</span>
-          </div>
-        </div>
-
-        <button
-          className="w-full py-2.5 rounded-xl text-sm font-semibold flex items-center justify-center gap-2 border border-white/10 text-gray-300 hover:bg-white/5 hover:text-white transition-all"
-          onClick={handleGuest}
-          disabled={loading}
-        >
-          {loading ? <Loader2 size={14} className="animate-spin" /> : <User size={14} />}
-          Гостевой режим (только просмотр)
-        </button>
-
-        {!hasPassword && (
-          <p className="text-xs text-center text-gray-500">
-            Пароль не установлен — вход без авторизации
-          </p>
-        )}
-
-        <div className="flex items-center justify-center gap-2 text-xs text-gray-500 pt-2">
-          <Shield size={12} />
-          <span>Все данные передаются по HTTPS</span>
         </div>
       </div>
     </div>

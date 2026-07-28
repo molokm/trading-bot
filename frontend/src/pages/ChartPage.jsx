@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { createChart, ColorType, CandlestickSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
+import { BarChart3, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
-import { BarChart3, Activity, RefreshCw } from 'lucide-react'
+import { Tip, Chip, Loader } from '../components/ui'
 
 const PAIRS = [
   { id: 'BTC-USDT-SWAP', label: 'BTC/USDT' },
@@ -9,15 +10,11 @@ const PAIRS = [
   { id: 'SOL-USDT-SWAP', label: 'SOL/USDT' },
   { id: 'BNB-USDT-SWAP', label: 'BNB/USDT' },
 ]
-
-function PriceLine({ value, label, color, style }) {
-  return (
-    <span className="flex items-center gap-1">
-      <span className="inline-block w-2 h-2 rounded-sm" style={{ backgroundColor: color, borderStyle: style || 'solid' }} />
-      {label}: <span className="text-white font-mono">${value}</span>
-    </span>
-  )
-}
+const INTERVALS = ['5m', '15m', '1H', '4H', '1D']
+const INDICATORS = [
+  { id: 'sma', label: 'SMA 20', color: '#4a9eff', tip: 'Simple Moving Average — средняя цена за 20 периодов. Помогает определить тренд.' },
+  { id: 'ema', label: 'EMA 50', color: '#ff9500', tip: 'Exponential Moving Average — придает больший вес последним ценам. Быстрее реагирует.' },
+]
 
 export default function ChartPage() {
   const [selectedPair, setSelectedPair] = useState('BTC-USDT-SWAP')
@@ -25,9 +22,11 @@ export default function ChartPage() {
   const [loading, setLoading] = useState(false)
   const [tf, setTf] = useState('1D')
   const [chartTrades, setChartTrades] = useState({ markers: [], trade_lines: [] })
+  const [activeIndicators, setActiveIndicators] = useState(['sma'])
   const chartRef = useRef(null)
   const containerRef = useRef(null)
   const markersRef = useRef(null)
+  const indicatorSeriesRef = useRef({})
 
   const loadChartData = useCallback(async () => {
     try {
@@ -51,7 +50,7 @@ export default function ChartPage() {
   async function loadCandles() {
     setLoading(true)
     try {
-      const result = await api.getCandles(selectedPair, tf, 200)
+      const result = await api.getCandles(selectedPair, tf, 300)
       const rawCandles = result.candles || []
       const candles = rawCandles.map(c => ({
         time: Math.floor(parseInt(c[0]) / 1000),
@@ -68,6 +67,28 @@ export default function ChartPage() {
     setLoading(false)
   }
 
+  // Compute SMA/EMA
+  function computeSMA(data, period) {
+    const result = []
+    for (let i = period - 1; i < data.length; i++) {
+      let sum = 0
+      for (let j = i - period + 1; j <= i; j++) sum += data[j].close
+      result.push({ time: data[i].time, value: sum / period })
+    }
+    return result
+  }
+
+  function computeEMA(data, period) {
+    const k = 2 / (period + 1)
+    const result = []
+    let ema = data[0]?.close || 0
+    for (let i = 0; i < data.length; i++) {
+      ema = data[i].close * k + ema * (1 - k)
+      if (i >= period - 1) result.push({ time: data[i].time, value: ema })
+    }
+    return result
+  }
+
   useEffect(() => {
     if (!chartData || chartData.length === 0) return
 
@@ -75,99 +96,79 @@ export default function ChartPage() {
       chartRef.current.remove()
       chartRef.current = null
     }
-    markersRef.current = null
+    markersRef.current = {}
+    indicatorSeriesRef.current = {}
 
     const container = containerRef.current
     if (!container) return
 
+    const bgColor = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim() || '#13161d'
+    const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || 'rgba(255,255,255,0.06)'
+    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--txt-muted').trim() || '#5c6370'
+
     const chart = createChart(container, {
-      layout: {
-        background: { type: ColorType.Solid, color: '#0d1117' },
-        textColor: '#8b949e',
-        fontSize: 11,
-      },
-      grid: {
-        vertLines: { color: '#1a2332' },
-        horzLines: { color: '#1a2332' },
-      },
+      layout: { background: { type: ColorType.Solid, color: bgColor }, textColor, fontSize: 11 },
+      grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
       crosshair: {
         mode: 0,
-        vertLine: { color: '#30363d', width: 1, style: 3, labelBackgroundColor: '#1a2332' },
-        horzLine: { color: '#30363d', width: 1, style: 3, labelBackgroundColor: '#1a2332' },
+        vertLine: { color: 'var(--border-hover)', width: 1, style: 3, labelBackgroundColor: bgColor },
+        horzLine: { color: 'var(--border-hover)', width: 1, style: 3, labelBackgroundColor: bgColor },
       },
-      timeScale: {
-        borderColor: '#1a2332',
-        timeVisible: true,
-        secondsVisible: false,
-      },
-      rightPriceScale: {
-        borderColor: '#1a2332',
-        scaleMargins: { top: 0.1, bottom: 0.1 },
-      },
+      timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
+      rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.1, bottom: 0.1 } },
       width: container.clientWidth,
-      height: 500,
+      height: container.clientHeight || 500,
     })
 
-    const candlestickSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#00ff88',
-      downColor: '#ff4444',
-      borderUpColor: '#00ff88',
-      borderDownColor: '#ff4444',
-      wickUpColor: '#00ff88',
-      wickDownColor: '#ff4444',
+    // Candlestick series
+    const candleSeries = chart.addSeries(CandlestickSeries, {
+      upColor: 'var(--profit)', downColor: 'var(--loss)',
+      borderUpColor: 'var(--profit)', borderDownColor: 'var(--loss)',
+      wickUpColor: 'var(--profit)', wickDownColor: 'var(--loss)',
       priceFormat: { type: 'price', precision: selectedPair.includes('BTC') ? 0 : 2, minMove: selectedPair.includes('BTC') ? 1 : 0.01 },
     })
+    candleSeries.setData(chartData)
 
-    candlestickSeries.setData(chartData)
-
+    // Price lines
     const lastClose = chartData[chartData.length - 1].close
-    const decimals = selectedPair.includes('BTC') ? 0 : 2
     const step = selectedPair.includes('BTC') ? 500 : 10
     const center = Math.round(lastClose / step) * step
     for (let i = -4; i <= 4; i++) {
-      const price = center + i * step
-      candlestickSeries.createPriceLine({
-        price,
-        color: i === 0 ? '#4a9eff44' : '#1a233288',
-        lineWidth: 1,
-        lineStyle: i === 0 ? 1 : 2,
-        axisLabelVisible: true,
-        title: '',
+      candleSeries.createPriceLine({
+        price: center + i * step,
+        color: i === 0 ? 'rgba(74,158,255,0.3)' : 'rgba(255,255,255,0.04)',
+        lineWidth: 1, lineStyle: i === 0 ? 1 : 2, axisLabelVisible: true, title: '',
       })
     }
 
-    const pairName = selectedPair.replace('-USDT-SWAP', '')
+    // Indicators
+    INDICATORS.forEach(ind => {
+      if (!activeIndicators.includes(ind.id)) return
+      let data
+      if (ind.id === 'sma') data = computeSMA(chartData, 20)
+      else if (ind.id === 'ema') data = computeEMA(chartData, 50)
+      if (!data || data.length === 0) return
+      const s = chart.addSeries(LineSeries, {
+        color: ind.color, lineWidth: 1, lineStyle: 0,
+        priceScaleId: 'right', lastValueVisible: true, priceLineVisible: false,
+        title: ind.label,
+      })
+      s.setData(data)
+      indicatorSeriesRef.current[ind.id] = s
+    })
 
+    // Trade markers
+    const pairName = selectedPair.replace('-USDT-SWAP', '')
     const filteredMarkers = chartTrades.markers
       .filter(m => m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName))
       .map(m => {
-        const ts = m.time
-        if (m.side === 'buy') {
-          return {
-            time: ts,
-            position: 'belowBar',
-            color: '#00ff88',
-            shape: 'arrowUp',
-            text: `▲ $${m.entry?.toFixed?.(0) || m.entry}`,
-          }
-        } else {
-          const pnl = m.pnl || 0
-          const pnlSign = pnl >= 0 ? '+' : ''
-          return {
-            time: ts,
-            position: 'aboveBar',
-            color: pnl >= 0 ? '#00ff88' : '#ff4444',
-            shape: 'arrowDown',
-            text: `▼ $${m.exit_price?.toFixed?.(0) || m.exit_price} ${pnlSign}$${pnl.toFixed(0)}`,
-          }
-        }
-      })
-      .sort((a, b) => a.time - b.time)
+        if (m.side === 'buy') return { time: m.time, position: 'belowBar', color: 'var(--profit)', shape: 'arrowUp', text: `$${m.entry?.toFixed?.(0) || m.entry}` }
+        const pnl = m.pnl || 0
+        return { time: m.time, position: 'aboveBar', color: pnl >= 0 ? 'var(--profit)' : 'var(--loss)', shape: 'arrowDown', text: `$${m.exit_price?.toFixed?.(0) || m.exit_price} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}` }
+      }).sort((a, b) => a.time - b.time)
+    if (filteredMarkers.length > 0) markersRef.current.main = createSeriesMarkers(candleSeries, filteredMarkers)
 
-    if (filteredMarkers.length > 0) {
-      markersRef.current = createSeriesMarkers(candlestickSeries, filteredMarkers)
-    }
-
+    // Trade lines (TP/SL/BE)
     chartTrades.trade_lines
       .filter(p => p.inst_id === selectedPair || p.symbol === pairName || p.symbol?.includes(pairName))
       .forEach(pos => {
@@ -175,163 +176,103 @@ export default function ChartPage() {
         const endTime = chartData[chartData.length - 1].time
         const makeLine = (value, color, width, style) => {
           if (value == null || value <= 0) return
-          const s = chart.addSeries(LineSeries, {
-            color, lineWidth: width, lineStyle: style,
-            priceScaleId: 'right', lastValueVisible: true, priceLineVisible: false,
-          })
-          s.setData([
-            { time: chartData[0].time, value },
-            { time: endTime, value },
-          ])
+          const s = chart.addSeries(LineSeries, { color, lineWidth: width, lineStyle: style, priceScaleId: 'right', lastValueVisible: true, priceLineVisible: false })
+          s.setData([{ time: chartData[0].time, value }, { time: endTime, value }])
         }
-
-        makeLine(pos.stop, '#ff4444', 2, 2)
-        makeLine(pos.entry, '#00ff8888', 1, 1)
-        makeLine(pos.breakeven, '#ffaa0088', 1, 2)
-        makeLine(pos.tp1, '#4a9eff88', 1, 2)
+        makeLine(pos.stop, 'var(--loss)', 2, 2)
+        makeLine(pos.entry, 'rgba(0,255,136,0.5)', 1, 1)
+        makeLine(pos.breakeven, 'rgba(255,215,0,0.5)', 1, 2)
+        makeLine(pos.tp1, 'rgba(74,158,255,0.5)', 1, 2)
       })
 
+    // Visible range
     const lastTime = chartData[chartData.length - 1].time
     const firstTime = chartData[0].time
     const range = lastTime - firstTime
-    const visibleSecs = Math.max(Math.floor(range * 0.25), 3600)
+    const visibleSecs = Math.max(Math.floor(range * 0.3), 3600)
     chart.timeScale().setVisibleRange({ from: lastTime - visibleSecs, to: lastTime + 60 })
     chartRef.current = chart
 
-    const handleResize = () => {
-      if (container) chart.applyOptions({ width: container.clientWidth })
-    }
+    const handleResize = () => { if (container) chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }) }
     window.addEventListener('resize', handleResize)
-    return () => {
-      window.removeEventListener('resize', handleResize)
-      chart.remove()
-      chartRef.current = null
-      markersRef.current = null
-    }
-  }, [chartData, selectedPair, chartTrades])
+    const ro = new ResizeObserver(handleResize)
+    ro.observe(container)
+    return () => { ro.disconnect(); window.removeEventListener('resize', handleResize); chart.remove(); chartRef.current = null }
+  }, [chartData, selectedPair, chartTrades, activeIndicators])
 
-  const intervals = ['5m', '15m', '1H', '4H', '1D']
+  const toggleIndicator = (id) => {
+    setActiveIndicators(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-bold text-white flex items-center gap-2">
-            <BarChart3 size={22} className="text-neon-blue" />
-            График
-          </h2>
-          <p className="text-sm text-gray-400 mt-1">Свечной график + сделки momentum</p>
+    <div data-tour="chart" className="h-full flex flex-col p-4 gap-3">
+      {/* Toolbar */}
+      <div className="flex items-center justify-between flex-shrink-0">
+        <div className="flex items-center gap-2">
+          <BarChart3 size={18} className="text-[var(--info)]" />
+          <h2 className="text-lg font-bold text-[var(--txt)]">График</h2>
         </div>
-        <button
-          onClick={() => { loadCandles(); loadChartData() }}
-          className="glass px-3 py-2 text-xs text-gray-400 hover:text-white flex items-center gap-2 rounded-lg border border-white/5 hover:border-white/20 transition-all"
-        >
-          <RefreshCw size={14} />
-          Обновить
-        </button>
-      </div>
-
-      <div className="flex items-center gap-4 flex-wrap">
-        <select
-          className="glass px-4 py-2 text-sm text-white rounded-lg border border-white/10 focus:border-neon-blue/50 outline-none"
-          value={selectedPair}
-          onChange={e => setSelectedPair(e.target.value)}
-        >
-          {PAIRS.map(p => (
-            <option key={p.id} value={p.id}>{p.label}</option>
-          ))}
-        </select>
-
-        <div className="flex gap-1">
-          {intervals.map(i => (
-            <button
-              key={i}
-              onClick={() => setTf(i)}
-              className={`px-3 py-1.5 text-xs rounded-lg font-medium transition-all ${
-                tf === i
-                  ? 'bg-neon-blue/20 text-neon-blue border border-neon-blue/30'
-                  : 'text-gray-400 border border-white/5 hover:border-white/20'
-              }`}
-            >
-              {i}
-            </button>
-          ))}
-        </div>
-
-        {(() => {
-          const pairLines = chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', '')))
-          if (pairLines.length === 0) {
-            const lastPx = chartData?.length > 0 ? chartData[chartData.length - 1] : null
-            return (
-              <div className="flex items-center gap-2 ml-auto">
-                <div className="glass px-3 py-1.5 text-xs rounded-lg border border-gray-600 text-gray-400">
-                  Нет сделок — линии появятся после входа в позицию
-                  {lastPx && <span className="ml-2 text-white">Текущая цена: ${lastPx.close}</span>}
-                </div>
-              </div>
-            )
-          }
-          const activeLines = pairLines.filter(p => p.stage !== 'closed')
-          return activeLines.length > 0 && (
-            <div className="flex items-center gap-2 ml-auto">
-              {activeLines.slice(0, 3).map((p, i) => (
-                <div key={i} className="glass px-3 py-1.5 text-xs flex items-center gap-3 rounded-lg border border-neon-green/20">
-                  <span className="text-neon-green font-bold">▲ LONG</span>
-                  <span className="text-gray-400">Entry: <span className="text-white">${p.entry}</span></span>
-                  <span className="text-gray-400">Стоп: <span className="text-neon-red">${p.stop}</span></span>
-                  <span className="text-gray-400">BE: <span className="text-neon-yellow">${p.breakeven}</span></span>
-                  <span className="text-gray-400">TP1: <span className="text-neon-blue">${p.tp1}</span></span>
-                  <span className="text-gray-400">Размер: <span className="text-white">{p.size}{p.original_size && p.original_size !== p.size ? `/${p.original_size}` : ''}</span></span>
-                  {p.stage !== 'closed' && <span className="text-gray-400">Стадия: <span className="text-neon-purple">{p.stage}</span></span>}
-                </div>
-              ))}
-            </div>
-          )
-        })()}
-      </div>
-
-      {loading && (
-        <div className="glass p-10 text-center text-gray-500">
-          <div className="animate-spin w-6 h-6 border-2 border-neon-blue border-t-transparent rounded-full mx-auto mb-2" />
-          Загрузка данных...
-        </div>
-      )}
-
-      {!loading && chartData && chartData.length > 0 && (
-        <div className="glass p-4">
-          <div ref={containerRef} className="w-full" style={{ height: 500 }} />
-          <div className="flex items-center gap-4 mt-3 text-xs text-gray-500">
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-neon-green" /> Вход
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-neon-red" /> Выход
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 border border-neon-red" style={{borderStyle:'dashed'}} /> Стоп
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 border border-neon-green" style={{borderStyle:'solid'}} /> Entry
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 border border-neon-yellow" style={{borderStyle:'dashed'}} /> Безубыток
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block w-2 h-2 border border-neon-blue" style={{borderStyle:'dashed'}} /> TP1
-            </span>
-            {chartTrades.trade_lines.length > 0 && (
-              <span className="ml-auto">{chartTrades.trade_lines.length} линий</span>
-            )}
+        <div className="flex items-center gap-4 flex-wrap">
+          <select className="!py-1.5 !px-3 !text-xs" value={selectedPair} onChange={e => setSelectedPair(e.target.value)}>
+            {PAIRS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+          <div className="flex gap-1">
+            {INTERVALS.map(i => (
+              <Chip key={i} active={tf === i} onClick={() => setTf(i)}>{i}</Chip>
+            ))}
           </div>
+          <div className="flex gap-1">
+            {INDICATORS.map(ind => (
+              <button
+                key={ind.id}
+                onClick={() => toggleIndicator(ind.id)}
+                className={`chip ${activeIndicators.includes(ind.id) ? 'active' : ''}`}
+                style={activeIndicators.includes(ind.id) ? { borderColor: ind.color, color: ind.color, background: ind.color + '15' } : {}}
+              >
+                {ind.label}
+                <Tip text={ind.tip} />
+              </button>
+            ))}
+          </div>
+          <button className="btn btn-ghost btn-sm" onClick={() => { loadCandles(); loadChartData() }}><RefreshCw size={12} /> Обновить</button>
         </div>
-      )}
+      </div>
 
-      {!loading && chartData && chartData.length === 0 && (
-        <div className="glass p-10 text-center text-gray-500">
-          <BarChart3 size={40} className="mx-auto mb-3 opacity-30" />
-          <p>Нет данных для отображения</p>
-        </div>
-      )}
+      {/* Active position info bar */}
+      {(() => {
+        const pairLines = chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', '')))
+        const activeLines = pairLines.filter(p => p.stage !== 'closed')
+        if (activeLines.length === 0) return null
+        return (
+          <div className="flex gap-2 flex-shrink-0 overflow-x-auto">
+            {activeLines.map((p, i) => (
+              <div key={i} className="panel flex items-center gap-3 px-3 py-2 flex-shrink-0">
+                <span className="text-2xs font-bold text-[var(--profit)]">▲ LONG</span>
+                <span className="text-2xs text-[var(--txt-muted)]">Entry: <span className="mono text-[var(--txt)]">${p.entry}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">SL: <span className="mono text-[var(--loss)]">${p.stop}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">BE: <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">TP1: <span className="mono text-[var(--info)]">${p.tp1}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">Stage: <span className="text-accent-purple font-semibold">{p.stage}</span></span>
+              </div>
+            ))}
+          </div>
+        )
+      })()}
+
+      {/* Chart */}
+      <div className="panel flex-1 min-h-0">
+        {loading && (
+          <div className="flex items-center justify-center py-16"><Loader /></div>
+        )}
+        {chartData && chartData.length > 0 && (
+          <div ref={containerRef} className="w-full h-full" style={{ minHeight: 300 }} />
+        )}
+        {!loading && chartData?.length === 0 && (
+          <div className="flex items-center justify-center h-full">
+            <span className="text-sm text-[var(--txt-muted)]">Нет данных</span>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
