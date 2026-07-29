@@ -352,14 +352,17 @@ async def momentum_start(data: dict = None):
         ema_fast=d.get("ema_fast", 15),
         ema_slow=d.get("ema_slow", 30),
         atr_stop_mult=d.get("atr_stop_mult", 1.5),
-        trail_pct=d.get("trail_pct", 0.03),
+        trail_pct=d.get("trail_pct", 0.015),
         adx_threshold=d.get("adx_threshold", 20.0),
         mom_threshold=d.get("mom_threshold", 0.0),
-        breakeven_pct=d.get("breakeven_pct", 0.005),
+        breakeven_pct=d.get("breakeven_pct", 0.003),
         tp1_pct=d.get("tp1_pct", 0.02),
         tp1_frac=d.get("tp1_frac", 0.75),
         sl1_pct=d.get("sl1_pct", 0.0),
         sl1_frac=d.get("sl1_frac", 0.5),
+        trend_adx_min=d.get("trend_adx_min", 22.0),
+        range_adx_max=d.get("range_adx_max", 18.0),
+        range_sl_mult=d.get("range_sl_mult", 1.0),
     )
     momentum = MomentumStrategy(config=config, client_manager=client_manager, db=db)
     await momentum.start()
@@ -389,7 +392,8 @@ async def momentum_update_config(data: dict = None):
                 "roc_fast", "roc_slow", "ema_fast", "ema_slow", "atr_stop_mult",
                 "trail_pct", "adx_threshold", "mom_threshold",
                 "breakeven_pct", "tp1_pct", "tp1_frac",
-                "sl1_pct", "sl1_frac"):
+                "sl1_pct", "sl1_frac",
+                "trend_adx_min", "range_adx_max", "range_sl_mult"):
         if key in data:
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": cfg}
