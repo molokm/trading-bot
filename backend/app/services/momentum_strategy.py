@@ -134,22 +134,72 @@ class MomentumStrategy:
             print(f"[Momentum] DB ensure_bot error: {e}", flush=True)
 
     async def _reload_from_db(self):
+        """Restore trade_log from DB — includes entry price for open trades."""
         if not self.db:
             return
         try:
             trades = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=200)
             for t in trades:
-                self._trade_log.append({
+                entry = {
                     "time": t.get("timestamp", ""),
                     "side": t.get("side", ""),
                     "symbol": t.get("inst_id", ""),
                     "size": float(t.get("sz", 0) or 0),
                     "ord_id": t.get("ord_id", ""),
                     "pnl": float(t.get("pnl", 0) or 0),
-                })
+                }
+                # Entry trades (pnl=0): restore entry price from px column
+                px = t.get("px")
+                if px:
+                    entry["entry"] = float(px)
+                # Infer pos_side from side for entries
+                if float(t.get("pnl", 0) or 0) == 0 and t.get("side"):
+                    entry["pos_side"] = "long" if t["side"] == "buy" else "short"
+                self._trade_log.append(entry)
             print(f"[Momentum] Reloaded {len(self._trade_log)} trades from DB", flush=True)
         except Exception as e:
             print(f"[Momentum] DB reload error: {e}", flush=True)
+
+    async def _sync_open_positions(self):
+        """After restart, detect open positions from OKX and add missing entries to trade_log."""
+        if not self.client_manager:
+            return
+        client = self.client_manager.get_client()
+        if not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+
+            # Build set of symbols that already have entry records in trade_log
+            entry_symbols = set()
+            for t in self._trade_log:
+                if t.get("entry") and float(t.get("pnl", 0) or 0) == 0:
+                    sym = t["symbol"].replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    entry_symbols.add(sym)
+
+            for p in result.get("data", []):
+                inst_id = p.get("instId", "")
+                sym = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if sym in self.config.symbols and sym not in entry_symbols:
+                    pos_side = p.get("posSide", "net")
+                    is_long = pos_side != "short"
+                    entry_px = float(p.get("avgPx", 0))
+                    sz = float(p.get("pos", 0))
+                    if entry_px > 0 and sz > 0:
+                        self._trade_log.append({
+                            "time": datetime.now(timezone.utc).isoformat(),
+                            "side": "buy" if is_long else "sell",
+                            "symbol": inst_id,
+                            "size": sz,
+                            "entry": entry_px,
+                            "reason": "open",
+                            "pos_side": "long" if is_long else "short",
+                        })
+                        print(f"[Momentum] Restored open {"LONG" if is_long else "SHORT"} {sym} from OKX @ {entry_px:.2f}", flush=True)
+        except Exception as e:
+            print(f"[Momentum] Sync open positions error: {e}", flush=True)
 
     async def start(self):
         if self._running:
@@ -158,6 +208,7 @@ class MomentumStrategy:
         self._started_at = datetime.now(timezone.utc).isoformat()
         await self._ensure_bot()
         await self._reload_from_db()
+        await self._sync_open_positions()
         await self._load_equity()
         self._thread = threading.Thread(target=self._run_thread, daemon=True, name="momentum-strategy")
         self._thread.start()
