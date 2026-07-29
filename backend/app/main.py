@@ -431,20 +431,28 @@ async def momentum_trades(limit: int = 20):
             except Exception as e:
                 print(f"[Momentum] trades DB fallback error: {e}", flush=True)
 
-        # Append current open positions as "open" trades so they appear in the trades table
-        open_symbols = set()
+        # Append current open positions as "open" trades ONLY if not already present in trade_log
+        # (avoids duplication: entries are already added to _trade_log on open)
+        trade_symbols = set()
+        for t in trades:
+            if t.get("pos_side") and not t.get("pnl") and float(t.get("pnl", 0) or 0) == 0:
+                sym = t["symbol"].replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                trade_symbols.add(sym)
+            elif t.get("reason") == "open":
+                sym = t["symbol"].replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                trade_symbols.add(sym)
         for coin, pos in momentum._positions.items():
-            open_symbols.add(pos.inst_id)
-            trades.append({
-                "time": pos.opened_at,
-                "side": "buy" if pos.side == "long" else "sell",
-                "symbol": pos.inst_id,
-                "size": pos.size,
-                "entry": pos.entry_price,
-                "stop": pos.stop_price,
-                "reason": "open",
-                "pos_side": pos.side,
-            })
+            if coin not in trade_symbols:
+                trades.append({
+                    "time": pos.opened_at,
+                    "side": "buy" if pos.side == "long" else "sell",
+                    "symbol": pos.inst_id,
+                    "size": pos.size,
+                    "entry": pos.entry_price,
+                    "stop": pos.stop_price,
+                    "reason": "open",
+                    "pos_side": pos.side,
+                })
 
         # Sort by time descending, most recent first
         trades.sort(key=lambda t: t.get("time", ""), reverse=True)

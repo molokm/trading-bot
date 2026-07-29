@@ -161,7 +161,7 @@ class MomentumStrategy:
             print(f"[Momentum] DB reload error: {e}", flush=True)
 
     async def _sync_open_positions(self):
-        """After restart, detect open positions from OKX and add missing entries to trade_log."""
+        """After restart, detect open positions from OKX and restore _positions + missing trade_log entries."""
         if not self.client_manager:
             return
         client = self.client_manager.get_client()
@@ -182,22 +182,60 @@ class MomentumStrategy:
             for p in result.get("data", []):
                 inst_id = p.get("instId", "")
                 sym = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-                if sym in self.config.symbols and sym not in entry_symbols:
-                    pos_side = p.get("posSide", "net")
-                    is_long = pos_side != "short"
-                    entry_px = float(p.get("avgPx", 0))
-                    sz = float(p.get("pos", 0))
-                    if entry_px > 0 and sz > 0:
-                        self._trade_log.append({
-                            "time": datetime.now(timezone.utc).isoformat(),
-                            "side": "buy" if is_long else "sell",
-                            "symbol": inst_id,
-                            "size": sz,
-                            "entry": entry_px,
-                            "reason": "open",
-                            "pos_side": "long" if is_long else "short",
-                        })
-                        print(f"[Momentum] Restored open {"LONG" if is_long else "SHORT"} {sym} from OKX @ {entry_px:.2f}", flush=True)
+                if sym not in self.config.symbols:
+                    continue
+
+                pos_side = p.get("posSide", "net")
+                is_long = pos_side != "short"
+                entry_px = float(p.get("avgPx", 0))
+                sz = float(p.get("pos", 0))
+
+                if entry_px <= 0 or sz <= 0:
+                    continue
+
+                side = "long" if is_long else "short"
+
+                # Restore _positions so the bot manages these positions (trailing, stops)
+                if sym not in self._positions:
+                    # Estimate ATR from current price (rough: 1.5% of entry)
+                    estimated_atr = entry_px * 0.015
+                    # Set stop: for longs below entry, for shorts above entry
+                    if is_long:
+                        stop_price = entry_px * 0.985  # ~1.5% below entry
+                    else:
+                        stop_price = entry_px * 1.015  # ~1.5% above entry
+
+                    self._positions[sym] = OpenPosition(
+                        symbol=sym,
+                        entry_price=entry_px,
+                        stop_price=stop_price,
+                        peak_price=entry_px,
+                        size=sz,
+                        size_remaining=sz,
+                        stage="breakeven",  # Start in breakeven for safety after restart
+                        atr=estimated_atr,
+                        opened_at=datetime.now(timezone.utc).isoformat(),
+                        inst_id=inst_id,
+                        side=side,
+                        pos_mode="trend",
+                        trough=entry_px,
+                        bb_target=0.0,
+                    )
+                    print(f"[Momentum] Restored _positions {side.upper()} {sym} sz={sz} @ {entry_px:.2f}", flush=True)
+
+                # Add to trade_log only if not already restored from DB
+                if sym not in entry_symbols:
+                    self._trade_log.append({
+                        "time": datetime.now(timezone.utc).isoformat(),
+                        "side": "buy" if is_long else "sell",
+                        "symbol": inst_id,
+                        "size": sz,
+                        "entry": entry_px,
+                        "reason": "open",
+                        "pos_side": side,
+                    })
+                    print(f"[Momentum] Restored trade_log entry {side.upper()} {sym} @ {entry_px:.2f}", flush=True)
+
         except Exception as e:
             print(f"[Momentum] Sync open positions error: {e}", flush=True)
 
