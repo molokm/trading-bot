@@ -1030,6 +1030,7 @@ class MomentumStrategy:
                 "stage": pos.stage,
                 "side": pos.side,
                 "pos_mode": pos.pos_mode,
+                "opened_at": pos.opened_at,
                 "peak_ratio": round((pos.peak_price / pos.entry_price - 1) * 100, 2) if pos.entry_price else 0,
                 "trough_ratio": round((1 - pos.trough / pos.entry_price) * 100, 2) if pos.entry_price else 0,
             })

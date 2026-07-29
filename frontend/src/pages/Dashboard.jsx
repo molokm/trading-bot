@@ -15,6 +15,13 @@ const REASON_MAP = {
   breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
   manual: { label: 'Manual', color: 'text-[var(--txt-secondary)]' },
   roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
+  range_target: { label: 'Range', color: 'text-[var(--info)]' },
+}
+const STAGE_MAP = {
+  initial:    { label: 'Initial', color: 'text-[var(--txt-muted)]' },
+  sl1_trimmed:{ label: 'SL1',    color: 'text-[var(--loss)]' },
+  breakeven:  { label: 'BE',     color: 'text-[var(--warn)]' },
+  trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
 }
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
@@ -122,50 +129,31 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlWeek = pnl?.['7d'] || 0
   const pnlMonth = pnl?.['30d'] || 0
 
-  // Filtered trades — combined from paired DB trades + momentum bot log
+    // Raw trades from DB + bot log (used as source for activeTrades)
   const allTrades = useMemo(() => {
-    // Start with paired trades from DB
     const combined = [...tradeLog]
-    // Dedup keys from paired trades to avoid duplicates
     const pairedKeys = new Set(tradeLog.map(t => `${t.inst_id}_${t.entry_time}_${t.exit_time}`))
-
     for (const mt of momentumTrades) {
       const key = `${mt.symbol}_${mt.time}_${mt.time}`
       if (pairedKeys.has(key)) continue
-
-      // Closed trades: have both entry_price and exit_price
       if (mt.entry_price && mt.exit_price) {
         const isLongClose = (mt.pos_side === 'long' && mt.side === 'sell')
                            || (mt.pos_side === 'short' && mt.side === 'buy')
-        if (!isLongClose && mt.pos_side) continue  // skip duplicate partial closes
+        if (!isLongClose && mt.pos_side) continue
         combined.push({
-          entry_time: mt.time,
-          exit_time: mt.time,
-          inst_id: mt.symbol,
+          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
           side: mt.pos_side === 'short' ? 'sell' : 'buy',
-          entry_px: mt.entry_price,
-          exit_px: mt.exit_price,
-          pnl: mt.pnl,
-          reason: mt.reason || '',
-          signal_id: mt.ord_id,
+          entry_px: mt.entry_price, exit_px: mt.exit_price,
+          pnl: mt.pnl, reason: mt.reason || '', signal_id: mt.ord_id,
         })
-      }
-      // Open trades: from /api/momentum/trades with reason='open' or entry without exit
-      else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
+      } else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
         combined.push({
-          entry_time: mt.time,
-          exit_time: null,
-          inst_id: mt.symbol,
+          entry_time: mt.time, exit_time: null, inst_id: mt.symbol,
           side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: mt.entry,
-          exit_px: null,
-          pnl: null,
-          reason: 'open',
-          signal_id: mt.ord_id,
+          entry_px: mt.entry, exit_px: null, pnl: null, reason: 'open', signal_id: mt.ord_id,
         })
       }
     }
-    // Sort by time descending, most recent first
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
@@ -174,22 +162,91 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return combined
   }, [tradeLog, momentumTrades])
 
-  // Filtered trades
+  // Active trades — one row per position (open from live status, closed from trade log)
+  const activeTrades = useMemo(() => {
+    const rows = []
+    const tp1Pct = momentumStatus?.config?.tp1_pct || 0.015
+
+    // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
+    const livePositions = momentumStatus?.open_positions || []
+    for (const p of livePositions) {
+      const isLong = p.side !== 'short'
+      rows.push({
+        type: 'open',
+        time: p.opened_at || '',
+        symbol: p.symbol,
+        inst_id: p.inst_id,
+        side: isLong ? 'buy' : 'sell',
+        pos_side: p.side,
+        entry: p.entry,
+        stop: p.stop,
+        tp1: isLong ? p.entry * (1 + tp1Pct) : p.entry * (1 - tp1Pct),
+        be: isLong ? p.entry * 0.999 : p.entry * 1.001,
+        size: p.size,
+        size_remaining: p.size_remaining,
+        stage: p.stage,
+        pos_mode: p.pos_mode,
+        pnl: null,
+        reason: 'open',
+      })
+    }
+
+    // 2. Closed trades — from combined trade log, skip 'open' and 'tp1' (partial closes)
+    for (const t of allTrades) {
+      const r = (t.reason || '').toLowerCase()
+      if (r === 'open') continue   // covered by live positions above
+      if (r === 'tp1') continue    // partial close — position row updates in-place
+      rows.push({
+        type: 'closed',
+        time: t.exit_time || t.entry_time || '',
+        symbol: t.inst_id?.replace('-USDT-SWAP', '') || '',
+        inst_id: t.inst_id,
+        side: t.side,
+        entry: t.entry_px,
+        exit: t.exit_px,
+        pnl: parseFloat(t.pnl || 0),
+        reason: r,
+        stage: null,
+      })
+    }
+
+    // Open first (sorted by time desc), then closed
+    rows.sort((a, b) => {
+      if (a.type === 'open' && b.type !== 'open') return -1
+      if (a.type !== 'open' && b.type === 'open') return 1
+      return (b.time || '').localeCompare(a.time || '')
+    })
+    return rows
+  }, [momentumStatus?.open_positions, allTrades])
+
+  // Keep allTrades for summary stats (closed only)
+  const closedTrades = useMemo(() =>
+    allTrades.filter(t => {
+      const r = (t.reason || '').toLowerCase()
+      return r !== 'open' && r !== 'tp1'
+    })
+  , [allTrades])
+
+  // Filtered active trades
   const filteredTrades = useMemo(() => {
-    return allTrades.filter(t => {
+    return activeTrades.filter(t => {
       if (filterPair !== 'Все') {
-        const pair = (t.inst_id || '').toUpperCase()
+        const pair = (t.inst_id || t.symbol || '').toUpperCase()
         if (!pair.includes(filterPair)) return false
       }
       const pnlVal = parseFloat(t.pnl || 0)
       if (filterResult === 'win' && pnlVal < 0) return false
       if (filterResult === 'loss' && pnlVal >= 0) return false
       if (filterReason !== 'all') {
-        if ((t.reason || '').toLowerCase() !== filterReason) return false
+        if (t.type === 'open') {
+          if (filterReason !== 'open') return false
+        } else {
+          if ((t.reason || '').toLowerCase() !== filterReason) return false
+        }
       }
       return true
     })
-  }, [allTrades, filterPair, filterResult, filterReason])
+  }, [activeTrades, filterPair, filterResult, filterReason])
 
   // Sparkline data for golden-zone MetricCards (stable random 10-point trends)
   const sparkData = useMemo(() =>
@@ -198,15 +255,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     )
   , [])
 
-  // Summary stats for visible trades
+  // Summary stats for visible trades (closed only for PnL counts)
   const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : allTrades).slice(0, 30)
+    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 30)
     const withPnl = visible.filter(t => t.pnl != null)
     const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
     const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
     const losses = withPnl.filter(t => parseFloat(t.pnl || 0) < 0).length
     return { totalPnl, wins, losses, count: visible.length }
-  }, [filteredTrades, allTrades])
+  }, [filteredTrades, activeTrades])
 
   // Synthetic BTC sparkline (visual only) — btcChange is now declared above
   const btcSparkData = useMemo(() => {
@@ -377,11 +434,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* Bot Status + Recent Trades */}
+          {/* Trades — one row per position */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
-              Последние сделки
+              Сделки
               <div className="ml-auto flex gap-1">
                 {['all', 'win', 'loss'].map(f => (
                   <Chip key={f} active={filterResult === f} onClick={() => setFilterResult(f)}>
@@ -390,7 +447,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 ))}
               </div>
             </div>
-            {allTrades.length > 0 && (
+            {activeTrades.length > 0 && (
               <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
                 <span className="text-[var(--txt-muted)]">
                   Показано: <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
@@ -410,57 +467,78 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Вход</th>
-                    <th>Выход</th>
+                    <th>Время</th>
                     <th>Пара</th>
-                    <th>Direction</th>
+                    <th>Dir</th>
                     <th className="text-right">Entry</th>
-                    <th className="text-right">Exit</th>
+                    <th className="text-right">SL</th>
+                    <th className="text-right">TP1</th>
+                    <th className="text-right">Стадия</th>
+                    <th className="text-right">Размер</th>
                     <th className="text-right">PnL</th>
-                    <th className="text-right">Причина</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : allTrades).slice(0, 30).map((t, i) => {
+                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 30).map((t, i) => {
+                    const isOpen = t.type === 'open'
                     const pnlVal = parseFloat(t.pnl || 0)
-                    const reason = (t.reason || '').toLowerCase()
-                    const isOpen = reason === 'open'
-                    const reasonInfo = isOpen
-                      ? { label: 'Открыта', color: 'text-[var(--info)]' }
-                      : REASON_MAP[reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' }
+                    const stageInfo = isOpen
+                      ? (STAGE_MAP[t.stage] || { label: t.stage, color: 'text-[var(--txt-muted)]' })
+                      : (REASON_MAP[t.reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' })
                     return (
-                      <tr key={t.signal_id || i}>
-                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.entry_time)}</td>
-                        <td className="text-2xs mono text-[var(--txt-muted)]">{t.exit_time ? fmtTime(t.exit_time) : '—'}</td>
-                        <td className="text-[var(--txt)] font-medium">{t.inst_id?.replace('-USDT-SWAP', '') || '-'}</td>
+                      <tr key={`${t.type}_${t.inst_id || t.symbol}_${i}`}
+                        style={isOpen ? {
+                          background: t.side === 'buy'
+                            ? 'linear-gradient(90deg, rgba(0,255,136,0.04) 0%, transparent 40%)'
+                            : 'linear-gradient(90deg, rgba(255,51,102,0.04) 0%, transparent 40%)',
+                          boxShadow: `inset 2px 0 0 ${t.side === 'buy' ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
+                        } : undefined}>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.time)}</td>
+                        <td className="text-[var(--txt)] font-medium">{t.symbol || t.inst_id?.replace('-USDT-SWAP', '') || '-'}</td>
                         <td>
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${t.side === 'buy' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                            {t.side === 'buy' ? 'LONG' : 'SHORT'}
+                            {t.side === 'buy' ? 'L' : 'S'}
                           </span>
                         </td>
-                        <td className="text-right mono">{t.entry_px ? `$${parseFloat(t.entry_px).toLocaleString()}` : '—'}</td>
-                        <td className="text-right mono">{t.exit_px ? `$${parseFloat(t.exit_px).toLocaleString()}` : '—'}</td>
-                        <td className="text-right">
-                          {t.pnl != null ? (
-                            <div className="flex items-center justify-end gap-2">
-                              <PnlBar value={pnlVal} maxAbs={200} />
-                              <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                                {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
-                              </span>
-                            </div>
-                          ) : (
-                            <span className="text-2xs text-[var(--txt-muted)]">—</span>
-                          )}
+                        <td className="text-right mono text-2xs">{t.entry ? `$${t.entry.toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
+                        <td className="text-right mono text-2xs">
+                          {isOpen && t.stop ? (
+                            <span className="text-[var(--loss)]">${t.stop.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                          ) : (t.type === 'closed' && t.exit) ? (
+                            <span className="text-[var(--txt-muted)]">${parseFloat(t.exit).toLocaleString()}</span>
+                          ) : '—'}
+                        </td>
+                        <td className="text-right mono text-2xs">
+                          {isOpen && t.tp1 ? (
+                            <span className="text-[var(--profit)]">${t.tp1.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                          ) : '—'}
                         </td>
                         <td className="text-right">
-                          <span className={`text-2xs font-medium ${reasonInfo.color}`}>{reasonInfo.label}</span>
+                          <span className={`text-2xs font-medium ${stageInfo.color}`}>{stageInfo.label}</span>
+                          {isOpen && t.pos_mode && t.pos_mode !== 'trend' && (
+                            <span className="text-2xs text-[var(--txt-muted)] ml-1">({t.pos_mode})</span>
+                          )}
+                        </td>
+                        <td className="text-right mono text-2xs">
+                          {isOpen ? (
+                            <span>{t.size_remaining?.toFixed(2)}/{t.size?.toFixed(2)}</span>
+                          ) : '—'}
+                        </td>
+                        <td className="text-right">
+                          {t.pnl != null ? (
+                            <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
+                            </span>
+                          ) : (
+                            <span className="text-2xs text-[var(--info)]">active</span>
+                          )}
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {allTrades.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
+              {activeTrades.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
             </div>
           </div>
         </div>
@@ -529,23 +607,23 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </div>
                   </div>
 
-                  {/* Open bot positions */}
+                  {/* Open bot positions — compact summary in sidebar */}
                   {momentumStatus.open_positions?.length > 0 && (
                     <div>
-                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Активные позиции бота</div>
+                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Позиции бота</div>
                       <div className="space-y-1">
                         {momentumStatus.open_positions.map((p, i) => {
                           const isLong = p.side !== 'short'
+                          const stageInfo = STAGE_MAP[p.stage] || { label: p.stage, color: 'text-[var(--txt-muted)]' }
                           return (
                           <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
                             <div className="flex items-center gap-2">
-                              <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'LONG' : 'SHORT'}</span>
+                              <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
                               <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                              {p.pos_mode && <span className="text-[var(--txt-muted)]">({p.pos_mode})</span>}
                             </div>
-                            <div className="flex items-center gap-2 text-[var(--txt-muted)]">
-                              <span>${p.entry?.toFixed(0)}</span>
-                              <span className="text-[var(--loss)]">SL ${p.stop?.toFixed(0)}</span>
+                            <div className="flex items-center gap-2">
+                              <span className={stageInfo.color}>{stageInfo.label}</span>
+                              <span className="text-[var(--txt-muted)]">{p.size_remaining?.toFixed(1)}/{p.size?.toFixed(1)}</span>
                             </div>
                           </div>
                           )
