@@ -408,7 +408,7 @@ async def momentum_trades(limit: int = 20):
     if momentum:
         # Always merge in-memory with DB (in case of restart where DB has data but memory is empty)
         if momentum._trade_log:
-            trades = momentum._trade_log[-limit:]
+            trades = list(momentum._trade_log[-limit:])
         # If in-memory is empty, try DB fallback
         if not trades and momentum.db:
             try:
@@ -421,6 +421,7 @@ async def momentum_trades(limit: int = 20):
                         "size": float(t.get("sz", 0) or 0),
                         "pnl": float(t.get("pnl", 0) or 0),
                         "ord_id": t.get("ord_id", ""),
+                        "entry": float(t.get("px", 0) or 0),
                     }
                     for t in db_trades
                 ]
@@ -429,6 +430,26 @@ async def momentum_trades(limit: int = 20):
                     momentum._trade_log = trades
             except Exception as e:
                 print(f"[Momentum] trades DB fallback error: {e}", flush=True)
+
+        # Append current open positions as "open" trades so they appear in the trades table
+        open_symbols = set()
+        for coin, pos in momentum._positions.items():
+            open_symbols.add(pos.inst_id)
+            trades.append({
+                "time": pos.opened_at,
+                "side": "buy" if pos.side == "long" else "sell",
+                "symbol": pos.inst_id,
+                "size": pos.size,
+                "entry": pos.entry_price,
+                "stop": pos.stop_price,
+                "reason": "open",
+                "pos_side": pos.side,
+            })
+
+        # Sort by time descending, most recent first
+        trades.sort(key=lambda t: t.get("time", ""), reverse=True)
+        trades = trades[-limit:]
+
     return {"trades": trades}
 
 

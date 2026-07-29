@@ -126,15 +126,23 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const allTrades = useMemo(() => {
     // Start with paired trades from DB
     const combined = [...tradeLog]
-    // Add momentum sell trades (closed positions) — they have entry_price, exit_price, pnl
+    // Dedup keys from paired trades to avoid duplicates
     const pairedKeys = new Set(tradeLog.map(t => `${t.inst_id}_${t.entry_time}_${t.exit_time}`))
+
     for (const mt of momentumTrades) {
-      if (mt.side === 'sell' && mt.entry_price && mt.exit_price) {
+      const key = `${mt.symbol}_${mt.time}_${mt.time}`
+      if (pairedKeys.has(key)) continue
+
+      // Closed trades: have both entry_price and exit_price
+      if (mt.entry_price && mt.exit_price) {
+        const isLongClose = (mt.pos_side === 'long' && mt.side === 'sell')
+                           || (mt.pos_side === 'short' && mt.side === 'buy')
+        if (!isLongClose && mt.pos_side) continue  // skip duplicate partial closes
         combined.push({
           entry_time: mt.time,
           exit_time: mt.time,
           inst_id: mt.symbol,
-          side: 'buy',
+          side: mt.pos_side === 'short' ? 'sell' : 'buy',
           entry_px: mt.entry_price,
           exit_px: mt.exit_price,
           pnl: mt.pnl,
@@ -142,18 +150,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           signal_id: mt.ord_id,
         })
       }
-    }
-    // Add momentum buy trades without a matching sell (open bot positions)
-    const sellSymbols = new Set(
-      momentumTrades.filter(t => t.side === 'sell').map(t => t.symbol)
-    )
-    for (const mt of momentumTrades) {
-      if (mt.side === 'buy' && !sellSymbols.has(mt.symbol) && mt.entry) {
+      // Open trades: from /api/momentum/trades with reason='open' or entry without exit
+      else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
         combined.push({
           entry_time: mt.time,
           exit_time: null,
           inst_id: mt.symbol,
-          side: 'buy',
+          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
           entry_px: mt.entry,
           exit_px: null,
           pnl: null,
