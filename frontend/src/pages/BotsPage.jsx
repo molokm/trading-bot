@@ -14,18 +14,18 @@ const STRATEGIES = [
   { id: 'custom', name: 'Custom', icon: Settings2, desc: STRATEGY_DESC.custom, params: [] },
 ]
 
-const PAIRS_OPTIONS = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'BNB-USDT-SWAP']
+const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
 
 const PARAM_META = {
-  risk_per_trade:      { label: 'Риск на сделку', min: 0.5, max: 10, step: 0.5, unit: '%', div: 100, tip: 'Процент капитала, рискуемый в одной сделке. 3% = стандартный риск-менеджмент.' },
+  risk_per_trade:      { label: 'Риск на сделку', min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01, tip: 'Процент капитала, рискуемый в одной сделке. 3% = стандартный риск-менеджмент.' },
   max_positions:       { label: 'Макс. позиций', min: 1, max: 10, step: 1, unit: '', div: 1, tip: 'Максимальное количество одновременно открытых позиций.' },
   poll_interval_sec:   { label: 'Интервал опроса', min: 15, max: 300, step: 15, unit: 'с', div: 1, tip: 'Как часто бот проверяет условия входа. Меньше = быстрее реакция, но больше нагрузка.' },
-  trail_pct:           { label: 'Trailing Stop', min: 0.5, max: 10, step: 0.5, unit: '%', div: 100, tip: 'Откат от пика цены для закрытия позиции трейлинг-стопом.' },
-  breakeven_pct:       { label: 'Безубыток при', min: 0.1, max: 3, step: 0.1, unit: '%', div: 100, tip: 'При достижении этого профита стоп перемещается на уровень входа.' },
-  tp1_pct:             { label: 'TP1 уровень', min: 0.5, max: 10, step: 0.5, unit: '%', div: 100, tip: 'Уровень частичной фиксации прибыли. При достижении закрывается указанная доля.' },
-  tp1_frac:            { label: 'TP1 доля', min: 20, max: 100, step: 5, unit: '%', div: 100, tip: 'Какая часть позиции закрывается при достижении TP1.' },
-  sl1_pct:             { label: 'SL1 каскад', min: 0, max: 5, step: 0.5, unit: '%', div: 1, tip: 'При просадке на этот % закрывается указанная доля позиции.' },
-  sl1_frac:            { label: 'SL1 доля', min: 20, max: 100, step: 5, unit: '%', div: 100, tip: 'Какая часть позиции закрывается при каскадном стопе.' },
+  trail_pct:           { label: 'Trailing Stop', min: 0.5, max: 5, step: 0.1, unit: '%', div: 0.01, tip: 'Откат от пика цены для закрытия позиции трейлинг-стопом.' },
+  breakeven_pct:       { label: 'Безубыток при', min: 0.1, max: 3, step: 0.1, unit: '%', div: 0.01, tip: 'При достижении этого профита стоп перемещается на уровень входа.' },
+  tp1_pct:             { label: 'TP1 уровень', min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01, tip: 'Уровень частичной фиксации прибыли. При достижении закрывается указанная доля.' },
+  tp1_frac:            { label: 'TP1 доля', min: 20, max: 100, step: 5, unit: '%', div: 0.01, tip: 'Какая часть позиции закрывается при достижении TP1.' },
+  sl1_pct:             { label: 'SL1 каскад', min: 0, max: 5, step: 0.5, unit: '%', div: 0.01, tip: 'При просадке на этот % закрывается указанная доля позиции.' },
+  sl1_frac:            { label: 'SL1 доля', min: 20, max: 100, step: 5, unit: '%', div: 0.01, tip: 'Какая часть позиции закрывается при каскадном стопе.' },
   adx_threshold:       { label: 'ADX порог', min: 10, max: 50, step: 1, unit: '', div: 1, tip: 'Минимальное значение ADX для подтверждения тренда. > 20 = умеренный тренд.' },
   position_size:       { label: 'Размер позиции', min: 1, max: 100, step: 1, unit: 'USDT', div: 1, tip: 'Размер позиции в USDT.' },
   grid_levels:         { label: 'Уровни сетки', min: 2, max: 20, step: 1, unit: '', div: 1, tip: 'Количество ордеров, расставляемых выше и ниже текущей цены.' },
@@ -40,12 +40,12 @@ const DEFAULT_BOT = {
   id: 'mom-1',
   name: 'Momentum Bot',
   strategy: 'momentum',
-  pair: 'BTC-USDT-SWAP',
+  symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
   status: 'stopped',
   config: {
-    risk_per_trade: 3, max_positions: 4, poll_interval_sec: 60,
-    trail_pct: 0.15, breakeven_pct: 0.3, tp1_pct: 2, tp1_frac: 75,
-    sl1_pct: 0, sl1_frac: 50, adx_threshold: 20,
+    risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
+    trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
+    sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
   },
   pnl: 0, trades: 0, created: new Date().toISOString(),
 }
@@ -143,7 +143,28 @@ function RiskMeter({ value }) {
 export default function BotsPage({ connected, isGuest }) {
   const [bots, setBots] = useState(() => {
     const saved = localStorage.getItem('bots_config')
-    return saved ? JSON.parse(saved) : [DEFAULT_BOT]
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved)
+        // Migration: fix old percentage params that were stored as integers
+        let migrated = false
+        const fixed = parsed.map(b => {
+          const cfg = b.config || {}
+          const newCfg = { ...cfg }
+          // If risk_per_trade >= 1, it's in old integer-percentage format (e.g. 3 instead of 0.03)
+          if (cfg.risk_per_trade >= 1) { newCfg.risk_per_trade = cfg.risk_per_trade / 100; migrated = true }
+          if (cfg.trail_pct >= 0.1 && cfg.trail_pct < 1) { /* old format like 0.15 = 15% */ } else if (cfg.trail_pct >= 1) { newCfg.trail_pct = cfg.trail_pct / 100; migrated = true }
+          if (cfg.breakeven_pct >= 0.01) { /* already decimal */ } else if (cfg.breakeven_pct >= 1) { newCfg.breakeven_pct = cfg.breakeven_pct / 100; migrated = true }
+          if (cfg.tp1_pct >= 1) { newCfg.tp1_pct = cfg.tp1_pct / 100; migrated = true }
+          if (cfg.tp1_frac >= 1) { newCfg.tp1_frac = cfg.tp1_frac / 100; migrated = true }
+          if (cfg.sl1_frac >= 1) { newCfg.sl1_frac = cfg.sl1_frac / 100; migrated = true }
+          return { ...b, config: newCfg }
+        })
+        if (migrated) localStorage.setItem('bots_config', JSON.stringify(fixed))
+        return fixed
+      } catch { /* ignore parse error */ }
+    }
+    return [DEFAULT_BOT]
   })
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [sliderOpen, setSliderOpen] = useState(false)
@@ -157,7 +178,11 @@ export default function BotsPage({ connected, isGuest }) {
     api.momentumStatus().then(s => {
       if (s?.running) {
         setMomentumStatus(s)
-        setBots(prev => prev.map(b => b.id === 'mom-1' ? { ...b, status: 'running', startedAt: b.startedAt || Date.now() } : b))
+        // Sync real bot symbols and config from backend
+        setBots(prev => prev.map(b => b.id === 'mom-1' ? {
+          ...b, status: 'running', startedAt: b.startedAt || Date.now(),
+          symbols: s.config?.symbols || b.symbols,
+        } : b))
       }
     }).catch(() => {})
   }, [connected])
@@ -200,7 +225,9 @@ export default function BotsPage({ connected, isGuest }) {
       try { await api.momentumStop() } catch (e) { alert(e.message) }
       saveBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'stopped' } : b))
     } else {
-      try { await api.momentumStart(bot.config || {}) } catch (e) { alert(e.message) }
+      // Pass all selected symbols to backend
+      const syms = bot.symbols?.length ? bot.symbols : ['BTC', 'ETH', 'SOL', 'BNB']
+      try { await api.momentumStart({ symbols: syms, ...bot.config }) } catch (e) { alert(e.message) }
       saveBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'running', startedAt: Date.now() } : b))
     }
   }
@@ -256,8 +283,12 @@ export default function BotsPage({ connected, isGuest }) {
                   </div>
 
                   <div className="flex items-center gap-2 text-xs">
-                    <span className="text-[var(--txt-muted)]">Пара:</span>
-                    <span className="text-[var(--txt)] font-medium">{bot.pair?.replace('-USDT-SWAP', '/USDT')}</span>
+                    <span className="text-[var(--txt-muted)]">Монеты:</span>
+                    <div className="flex gap-1">
+                      {(bot.status === 'running' && momentumStatus?.config?.symbols ? momentumStatus.config.symbols : bot.symbols || []).map(s => (
+                        <span key={s} className="px-1.5 py-0.5 rounded text-2xs font-medium bg-[var(--info-dim)] text-[var(--info)]">{s}</span>
+                      ))}
+                    </div>
                   </div>
 
                   <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
@@ -349,11 +380,11 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
   const [form, setForm] = useState({
     name: bot?.name || '',
     strategy: bot?.strategy || 'momentum',
-    pair: bot?.pair || 'BTC-USDT-SWAP',
+    symbols: bot?.symbols?.length ? [...bot.symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
     config: bot?.config || {
-      risk_per_trade: 3, max_positions: 4, poll_interval_sec: 60,
-      trail_pct: 0.15, breakeven_pct: 0.3, tp1_pct: 2, tp1_frac: 75,
-      sl1_pct: 0, sl1_frac: 50, adx_threshold: 20,
+      risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
+      trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
+      sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
     },
   })
 
@@ -403,10 +434,31 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
       </div>
 
       <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Торговая пара</label>
-        <select className="w-full mt-1.5" value={form.pair} onChange={e => setForm(f => ({ ...f, pair: e.target.value }))}>
-          {PAIRS_OPTIONS.map(p => <option key={p} value={p}>{p.replace('-USDT-SWAP', '/USDT')}</option>)}
-        </select>
+        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
+          Торговые монеты <Tip text="Выберите монеты, по которым бот будет искать сигналы входа" />
+        </label>
+        <div className="flex flex-wrap gap-2 mt-2">
+          {SYMBOL_OPTIONS.map(s => {
+            const active = form.symbols.includes(s)
+            return (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setForm(f => ({
+                  ...f,
+                  symbols: active ? f.symbols.filter(x => x !== s) : [...f.symbols, s]
+                }))}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
+                  active
+                    ? 'border-[var(--info)] bg-[var(--info-dim)] text-[var(--info)]'
+                    : 'border-[var(--border)] text-[var(--txt-muted)] hover:border-[var(--border-hover)]'
+                }`}
+              >
+                {s}/USDT
+              </button>
+            )
+          })}
+        </div>
       </div>
 
       {activeParams.length > 0 && (

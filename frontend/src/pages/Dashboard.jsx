@@ -522,7 +522,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">Риск</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{((momentumStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{(momentumStatus.config?.risk_per_trade != null ? momentumStatus.config.risk_per_trade * 100 : 3).toFixed(0)}%</div>
                     </div>
                   </div>
 
@@ -531,18 +531,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     <div>
                       <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Активные позиции бота</div>
                       <div className="space-y-1">
-                        {momentumStatus.open_positions.map((p, i) => (
+                        {momentumStatus.open_positions.map((p, i) => {
+                          const isLong = p.side !== 'short'
+                          return (
                           <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
                             <div className="flex items-center gap-2">
-                              <span className="px-1.5 py-0.5 rounded font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LONG</span>
+                              <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'LONG' : 'SHORT'}</span>
                               <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
+                              {p.pos_mode && <span className="text-[var(--txt-muted)]">({p.pos_mode})</span>}
                             </div>
                             <div className="flex items-center gap-2 text-[var(--txt-muted)]">
                               <span>${p.entry?.toFixed(0)}</span>
                               <span className="text-[var(--loss)]">SL ${p.stop?.toFixed(0)}</span>
                             </div>
                           </div>
-                        ))}
+                          )
+                        })}
                       </div>
                     </div>
                   )}

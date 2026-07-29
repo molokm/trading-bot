@@ -15,11 +15,23 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
             "BNB": "BNB-USDT-SWAP", "SOL": "SOL-USDT-SWAP"}
 
 
+def get_slippage_pct(sz: float, ct_val: float, price: float) -> float:
+    """Dynamic slippage: sqrt model, base 0.05%, cap 0.15%."""
+    notional = sz * ct_val * price
+    base = 0.0005
+    slip = base * (notional / 100_000) ** 0.5
+    return min(slip, 0.0015)
+
+FUNDING_LONG_PER_DAY = 0.0003   # 0.03%/day
+FUNDING_SHORT_PER_DAY = 0.0001  # 0.01%/day
+
+
 @dataclass
 class MomentumConfig:
     symbols: list = None
     risk_per_trade: float = 0.03
     max_positions: int = 4
+    leverage: int = 3              # V6: 3x leverage
     auto_execute: bool = True
     poll_interval_sec: int = 60
     roc_fast: int = 5
@@ -27,16 +39,16 @@ class MomentumConfig:
     ema_fast: int = 15
     ema_slow: int = 30
     atr_stop_mult: float = 1.5
-    trail_pct: float = 0.015        # 1.5% trailing from peak (optimized from 3%)
+    trail_pct: float = 0.015        # 1.5% trailing from peak
     adx_threshold: float = 20.0
     mom_threshold: float = 0.0
-    breakeven_pct: float = 0.003  # 0.3% → move stop to entry (optimized from 0.5%)
-    tp1_pct: float = 0.02         # 2% → partial close
-    tp1_frac: float = 0.75        # close 75% at TP1
-    sl1_pct: float = 0.0           # 0=off (disabled — backtest showed -9831 PnL impact)
-    sl1_frac: float = 0.5         # close 50% at SL1
+    breakeven_pct: float = 0.003  # 0.3%
+    tp1_pct: float = 0.015         # V6: 1.5% TP1 (from backtest)
+    tp1_frac: float = 0.5          # V6: close 50% at TP1
+    sl1_pct: float = 0.0           # 0=off
+    sl1_frac: float = 0.5
     # Trend/Range detection
-    trend_adx_min: float = 22.0
+    trend_adx_min: float = 25.0    # V6: stricter ADX for trend
     range_adx_max: float = 18.0
     # Range mode settings
     range_bb_period: int = 20
@@ -53,10 +65,10 @@ class MomentumConfig:
 
 
 STRATEGY_DESC = (
-    "Bilateral Momentum v3: лонг+шорт с определением режима рынка. "
-    "Тренд (ADX>22): лонг при ROC>0,EMA15>EMA30,PDI>MDI; шорт при ROC<0,EMA15<EMA30,MDI>PDI. "
+    "Bilateral Momentum V6: лонг+шорт, 3x leverage, compounding, dynamic slippage. "
+    "Тренд (ADX>25): лонг при ROC>0,EMA15>EMA30,PDI>MDI; шорт при ROC<0,EMA15<EMA30,MDI>PDI. "
     "Флэт (ADX<18): бортовые позиции по Bollinger Bands+RSI. "
-    "Выход: трейлинг 1.5%, безубыток 0.3%, частичное закрытие 75% при 2%."
+    "Выход: трейлинг 1.5%, безубыток 0.3%, частичное 50% при 1.5%."
 )
 
 
@@ -516,12 +528,32 @@ class MomentumStrategy:
 
         ct_val = CT_VAL.get(coin, 0.1)
         raw_sz = risk_amount / risk_per_contract / ct_val
+
+        # V6: Apply leverage cap — max notional = leverage * equity
+        max_notional_sz = self.config.leverage * self._equity / (ct_val * price)
+        if raw_sz > max_notional_sz:
+            raw_sz = max_notional_sz
+            print(f"[Momentum] {coin}: leverage cap applied, sz={raw_sz:.2f}", flush=True)
+
         lot = LOT_SZ.get(coin, 0.01)
         sz = round(raw_sz / lot) * lot
 
         if sz < lot:
             print(f"[Momentum] {coin}: size too small {sz:.4f}", flush=True)
             return
+
+        # V6: Apply dynamic slippage to entry price
+        slip = get_slippage_pct(sz, ct_val, price)
+        if side == "long":
+            exec_price = price * (1 + slip)
+        else:
+            exec_price = price * (1 - slip)
+
+        # Recalculate stop from execution price
+        if side == "long":
+            actual_stop = exec_price - self.config.atr_stop_mult * atr if mode != "range" else exec_price - self.config.range_sl_mult * atr
+        else:
+            actual_stop = exec_price + self.config.atr_stop_mult * atr if mode != "range" else exec_price + self.config.range_sl_mult * atr
 
         # Determine order side and pos_side
         if side == "long":
@@ -547,16 +579,20 @@ class MomentumStrategy:
             now = datetime.now(timezone.utc).isoformat()
 
             self._positions[coin] = OpenPosition(
-                symbol=coin, entry_price=price, stop_price=stop_price,
-                peak_price=price, size=sz, size_remaining=sz,
+                symbol=coin, entry_price=exec_price, stop_price=actual_stop,
+                peak_price=exec_price, size=sz, size_remaining=sz,
                 stage="initial", atr=atr, opened_at=now, inst_id=inst_id,
-                side=side, pos_mode=mode, trough=price, bb_target=bb_target,
+                side=side, pos_mode=mode, trough=exec_price, bb_target=bb_target,
             )
+
+            # V6: entry fee
+            entry_fee = sz * ct_val * exec_price * 0.001
+            self._equity -= entry_fee
 
             signal_entry = {
                 "time": now, "side": order_side, "symbol": inst_id,
                 "size": sz, "ord_id": ord_id,
-                "entry": price, "stop": stop_price,
+                "entry": exec_price, "stop": actual_stop,
                 "adx": round(ind["adx"], 1),
                 "roc_f": round(ind["roc_fast"], 2),
                 "roc_s": round(ind["roc_slow"], 2),
@@ -565,8 +601,8 @@ class MomentumStrategy:
             self._signal_log.append(signal_entry)
             self._trade_log.append(signal_entry)
 
-            print(f"[Momentum] OPEN {side.upper()} {coin} @ {price:.2f} sz={sz:.2f} "
-                  f"stop={stop_price:.2f} mode={mode} ADX={ind['adx']:.1f}",
+            print(f"[Momentum] OPEN {side.upper()} {coin} @ {exec_price:.2f} (sig={price:.2f}) sz={sz:.2f} "
+                  f"stop={actual_stop:.2f} mode={mode} ADX={ind['adx']:.1f} slip={slip*100:.3f}%",
                   flush=True)
 
             await self._save_signal_db(order_side, coin, price)
