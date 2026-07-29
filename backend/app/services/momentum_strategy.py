@@ -598,6 +598,8 @@ class MomentumStrategy:
                 "roc_s": round(ind["roc_slow"], 2),
                 "pos_side": side, "mode": mode,
             }
+            sid = self._next_signal_id()
+            signal_entry["signal_id"] = sid
             self._signal_log.append(signal_entry)
             self._trade_log.append(signal_entry)
 
@@ -606,7 +608,7 @@ class MomentumStrategy:
                   flush=True)
 
             await self._save_signal_db(order_side, coin, price)
-            await self._save_trade_db(signal_entry)
+            await self._save_trade_db(signal_entry, signal_id=sid)
 
         except Exception as e:
             print(f"[Momentum] {coin}: open error: {e}", flush=True)
@@ -830,7 +832,7 @@ class MomentumStrategy:
             self._cooldowns[coin] = 3
 
             await self._save_signal_db(order_side, coin, exit_price)
-            await self._save_trade_db(trade)
+            await self._save_trade_db(trade, signal_id=None)
 
         except Exception as e:
             print(f"[Momentum] {coin}: close error: {e}", flush=True)
@@ -878,7 +880,7 @@ class MomentumStrategy:
             }
             self._trade_log.append(trade)
             await self._save_signal_db(order_side, coin, exit_price)
-            await self._save_trade_db(trade)
+            await self._save_trade_db(trade, signal_id=None)
 
         except Exception as e:
             print(f"[Momentum] {coin}: partial close error: {e}", flush=True)
@@ -896,18 +898,26 @@ class MomentumStrategy:
         except Exception as e:
             print(f"[Momentum] Save signal error: {e}", flush=True)
 
-    async def _save_trade_db(self, trade: dict):
+    _signal_counter = 0
+
+    def _next_signal_id(self):
+        self._signal_counter += 1
+        return self._signal_counter
+
+    async def _save_trade_db(self, trade: dict, signal_id: int = None):
         if not self.db:
             return
         try:
             await self.db.save_trade(
                 bot_id=MOM_BOT_ID,
                 side=trade["side"],
-                sz=f"{trade['size']:.2f}",
+                sz=f"{trade.get('size', 0):.2f}",
                 ord_id=trade.get("ord_id", ""),
                 inst_id=trade["symbol"],
+                px=f"{trade.get('entry', trade.get('exit_price', 0)):.2f}",
                 pnl=trade.get("pnl", 0),
                 state="filled",
+                signal_id=signal_id,
             )
         except Exception as e:
             print(f"[Momentum] Save trade error: {e}", flush=True)

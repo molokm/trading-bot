@@ -405,24 +405,30 @@ async def momentum_update_config(data: dict = None):
 async def momentum_trades(limit: int = 20):
     global momentum
     trades = []
-    if momentum and momentum._trade_log:
-        trades = momentum._trade_log[-limit:]
-    elif momentum and momentum.db:
-        try:
-            db_trades = await momentum.db.get_trades(bot_id=MOM_BOT_ID, limit=limit)
-            trades = [
-                {
-                    "time": t.get("timestamp", ""),
-                    "side": t.get("side", ""),
-                    "symbol": t.get("inst_id", ""),
-                    "size": float(t.get("sz", 0) or 0),
-                    "pnl": float(t.get("pnl", 0) or 0),
-                    "ord_id": t.get("ord_id", ""),
-                }
-                for t in db_trades
-            ]
-        except Exception as e:
-            print(f"[Momentum] trades DB error: {e}", flush=True)
+    if momentum:
+        # Always merge in-memory with DB (in case of restart where DB has data but memory is empty)
+        if momentum._trade_log:
+            trades = momentum._trade_log[-limit:]
+        # If in-memory is empty, try DB fallback
+        if not trades and momentum.db:
+            try:
+                db_trades = await momentum.db.get_trades(bot_id=MOM_BOT_ID, limit=limit)
+                trades = [
+                    {
+                        "time": t.get("timestamp", ""),
+                        "side": t.get("side", ""),
+                        "symbol": t.get("inst_id", ""),
+                        "size": float(t.get("sz", 0) or 0),
+                        "pnl": float(t.get("pnl", 0) or 0),
+                        "ord_id": t.get("ord_id", ""),
+                    }
+                    for t in db_trades
+                ]
+                # Restore to in-memory so next call is fast
+                if trades:
+                    momentum._trade_log = trades
+            except Exception as e:
+                print(f"[Momentum] trades DB fallback error: {e}", flush=True)
     return {"trades": trades}
 
 
