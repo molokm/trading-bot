@@ -563,39 +563,78 @@ import time as _time
 
 async def _get_okx_realized_pnl() -> dict:
     """Fetch realized PnL from OKX bills (trades only, type=2).
-    Returns dict with keys '1d', '7d', '30d' containing PnL sums."""
-    result = await _okx_call(lambda c: c.get_bills("SWAP", 100))
+    Returns dict with keys '1d', '7d', '30d' containing PnL sums.
+    Paginates up to 3 pages (300 bills) to cover 30-day windows."""
     now_ms = int(_time.time() * 1000)
     periods = {"1d": 86400_000, "7d": 604800_000, "30d": 2592000_000}
     pnl = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
 
-    if result.get("error"):
-        return pnl
+    # Paginate bills: OKX returns newest-first, max 100 per request
+    after = ""
+    earliest_needed = now_ms - periods["30d"]
+    pages = 0
+    max_pages = 3  # 3 × 100 = 300 bills max
 
-    for bill in result.get("data", []):
-        if bill.get("type") != "2":
-            continue
-        try:
-            bill_pnl = float(bill.get("pnl", 0))
-        except (ValueError, TypeError):
-            continue
-        if bill_pnl == 0:
-            continue
-        bill_ts = int(bill.get("ts", 0))
-        for key, window in periods.items():
-            if bill_ts >= now_ms - window:
-                pnl[key] += bill_pnl
+    while pages < max_pages:
+        params = {"instType": "SWAP", "limit": 100}
+        if after:
+            params["after"] = after
+
+        result = await _okx_call(lambda c: c.get_bills(**params))
+        if result.get("error"):
+            break
+
+        bills = result.get("data", [])
+        if not bills:
+            break
+
+        reached_old_enough = False
+        for bill in bills:
+            if bill.get("type") != "2":
+                continue
+            try:
+                bill_pnl = float(bill.get("pnl", 0))
+            except (ValueError, TypeError):
+                continue
+            if bill_pnl == 0:
+                continue
+            bill_ts = int(bill.get("ts", 0))
+            if bill_ts < earliest_needed:
+                reached_old_enough = True
+                break
+            for key, window in periods.items():
+                if bill_ts >= now_ms - window:
+                    pnl[key] += bill_pnl
+
+        if reached_old_enough:
+            break
+
+        # OKX pagination: use the last bill's billId as 'after'
+        last_id = bills[-1].get("billId", "")
+        if not last_id or last_id == after:
+            break
+        after = last_id
+        pages += 1
 
     return pnl
 
 
 @app.get("/api/pnl")
 async def get_pnl():
-    pnl_db_1d = await db.get_pnl_by_period(1)
-    pnl_db_7d = await db.get_pnl_by_period(7)
-    pnl_db_30d = await db.get_pnl_by_period(30)
-
+    # Use OKX bills as the single source of truth for realized PnL.
+    # DB PnL is a local estimate — NOT a separate source to add.
     okx_pnl = await _get_okx_realized_pnl()
+
+    # Fallback to DB only if OKX returned nothing (likely API error)
+    has_okx_data = any(v != 0 for v in okx_pnl.values())
+    if has_okx_data:
+        realized = okx_pnl
+    else:
+        realized = {
+            "1d": await db.get_pnl_by_period(1, bot_id=MOM_BOT_ID),
+            "7d": await db.get_pnl_by_period(7, bot_id=MOM_BOT_ID),
+            "30d": await db.get_pnl_by_period(30, bot_id=MOM_BOT_ID),
+        }
 
     unrealized = 0.0
     result = await _okx_call(lambda c: c.get_positions("SWAP"))
@@ -604,9 +643,9 @@ async def get_pnl():
             unrealized += float(p.get("upl", 0))
 
     return {
-        "1d": round(pnl_db_1d + okx_pnl["1d"], 2),
-        "7d": round(pnl_db_7d + okx_pnl["7d"], 2),
-        "30d": round(pnl_db_30d + okx_pnl["30d"], 2),
+        "1d": round(realized["1d"], 2),
+        "7d": round(realized["7d"], 2),
+        "30d": round(realized["30d"], 2),
         "unrealized": round(unrealized, 2),
     }
 

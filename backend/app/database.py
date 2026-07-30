@@ -566,21 +566,35 @@ class Database:
         result.sort(key=lambda x: (x["exit_time"] or x["entry_time"] or ""), reverse=True)
         return result[:limit]
 
-    async def get_pnl_by_period(self, days: int) -> float:
+    async def get_pnl_by_period(self, days: int, bot_id: str = None) -> float:
         import datetime
         cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
-        if self._pg_mode:
-            row = await self._fetchone(
-                "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
-                "WHERE pnl != 0 AND timestamp >= $1",
-                (cutoff,)
-            )
+        if bot_id:
+            if self._pg_mode:
+                row = await self._fetchone(
+                    "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+                    "WHERE pnl != 0 AND bot_id = $1 AND timestamp >= $2",
+                    (bot_id, cutoff)
+                )
+            else:
+                row = await self._fetchone(
+                    "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+                    "WHERE pnl != 0 AND bot_id = ? AND timestamp >= ?",
+                    (bot_id, cutoff)
+                )
         else:
-            row = await self._fetchone(
-                "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
-                "WHERE pnl != 0 AND timestamp >= ?",
-                (cutoff,)
-            )
+            if self._pg_mode:
+                row = await self._fetchone(
+                    "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+                    "WHERE pnl != 0 AND timestamp >= $1",
+                    (cutoff,)
+                )
+            else:
+                row = await self._fetchone(
+                    "SELECT COALESCE(SUM(pnl), 0) as total FROM trades "
+                    "WHERE pnl != 0 AND timestamp >= ?",
+                    (cutoff,)
+                )
         return row["total"] if row else 0.0
 
     async def get_trades_summary(self, bot_id: str) -> dict:
