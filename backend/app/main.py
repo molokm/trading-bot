@@ -625,7 +625,8 @@ def _fill_to_trade(f: dict) -> dict:
 async def _pair_fills(fills: list[dict]) -> list[dict]:
     """Pair OKX fills into entry+close trades. Returns list of trade dicts for frontend.
     Strategy: group by instId, pair buy→sell (long) or sell→buy (short) sequentially.
-    Each fill with pnl!=0 is a close. Fills with pnl=0 are entries."""
+    Each fill with pnl!=0 is a close. Fills with pnl=0 are entries.
+    Side-consistency: long close (side=sell) must match buy entry; short close (side=buy) must match sell entry."""
     # Separate entries and closes per instrument
     by_inst: dict[str, dict] = {}  # inst_id -> {entries: [], closes: []}
     for f in fills:
@@ -644,10 +645,15 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
         entries = sorted(groups["entries"], key=lambda x: x.get("ts", "0"))
         closes = sorted(groups["closes"], key=lambda x: x.get("ts", "0"))
 
-        # For each close, find the best matching entry (latest entry before the close)
+        # For each close, find the best matching entry with side-consistency
         used_entries = set()
         for close_f in closes:
             close_ts = close_f.get("ts", "0")
+            close_side = close_f.get("side", "")
+            # Long close: side=sell → expected entry side=buy
+            # Short close: side=buy → expected entry side=sell
+            expected_entry_side = "buy" if close_side == "sell" else "sell"
+
             best_entry = None
             best_idx = -1
             for i, entry_f in enumerate(entries):
@@ -656,11 +662,23 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                 if entry_f.get("ts", "0") <= close_ts:
                     best_entry = entry_f
                     best_idx = i
+            # Prefer side-consistent match: pick latest entry with matching side
+            side_match = None
+            side_match_idx = -1
+            for i, entry_f in enumerate(entries):
+                if i in used_entries:
+                    continue
+                if entry_f.get("side", "") == expected_entry_side and entry_f.get("ts", "0") <= close_ts:
+                    side_match = entry_f
+                    side_match_idx = i
+            if side_match:
+                best_entry = side_match
+                best_idx = side_match_idx
+
             if best_entry:
                 used_entries.add(best_idx)
                 entry_px = float(best_entry.get("fillPx", 0) or 0)
                 exit_px = float(close_f.get("fillPx", 0) or 0)
-                close_side = close_f.get("side", "sell")
                 pos_side = "long" if close_side == "sell" else "short"
                 paired.append({
                     "time": _ms_to_iso(close_f.get("ts", "")),
@@ -679,7 +697,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                     "source": "okx",
                 })
             else:
-                # Close without matching entry
+                # Close without matching entry — show as closed with just exit price
                 paired.append(_fill_to_trade(close_f))
 
         # Remaining unpaired entries (open positions)
@@ -693,49 +711,29 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
 # ── PnL from OKX bills ──
 
 async def _get_okx_realized_pnl() -> dict:
-    """Fetch realized PnL from OKX bills (trades only, type=2)."""
+    """Calculate realized PnL from OKX close fills (pnl != 0). More reliable than bills."""
     now_ms = int(_time.time() * 1000)
     periods = {"1d": 86400_000, "7d": 604800_000, "30d": 2592000_000}
     pnl = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
-    after = ""
-    earliest_needed = now_ms - periods["30d"]
-    pages = 0
-    max_pages = 3
 
-    while pages < max_pages:
-        params = {"instType": "SWAP", "limit": 100}
-        if after:
-            params["after"] = after
-        result = await _okx_call(lambda c: c.get_bills(**params))
-        if result.get("error"):
-            break
-        bills = result.get("data", [])
-        if not bills:
-            break
-        reached_old_enough = False
-        for bill in bills:
-            if bill.get("type") != "2":
-                continue
-            try:
-                bill_pnl = float(bill.get("pnl", 0))
-            except (ValueError, TypeError):
-                continue
-            if bill_pnl == 0:
-                continue
-            bill_ts = int(bill.get("ts", 0))
-            if bill_ts < earliest_needed:
-                reached_old_enough = True
-                break
-            for key, window in periods.items():
-                if bill_ts >= now_ms - window:
-                    pnl[key] += bill_pnl
-        if reached_old_enough:
-            break
-        last_id = bills[-1].get("billId", "")
-        if not last_id or last_id == after:
-            break
-        after = last_id
-        pages += 1
+    all_fills = await _fetch_okx_fills(limit=100)
+
+    for f in all_fills:
+        try:
+            fill_pnl = float(f.get("pnl", 0) or 0)
+        except (ValueError, TypeError):
+            continue
+        if fill_pnl == 0:
+            continue  # Skip entries (pnl=0)
+        try:
+            fill_ts = int(f.get("ts", 0))
+        except (ValueError, TypeError):
+            continue
+        if fill_ts == 0:
+            continue
+        for key, window in periods.items():
+            if fill_ts >= now_ms - window:
+                pnl[key] += fill_pnl
 
     return pnl
 

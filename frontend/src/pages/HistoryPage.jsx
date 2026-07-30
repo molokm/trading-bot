@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
-import { ScrollText, Loader2, ChevronLeft, ChevronRight, Download, TrendingUp } from 'lucide-react'
+import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp } from 'lucide-react'
 import { api } from '../services/api'
-import { Chip, PnlBar, EmptyState, Tip, Loader } from '../components/ui'
+import { EmptyState, Loader, Chip } from '../components/ui'
 
 const PAGE_SIZE = 30
 const REASON_MAP = {
+  closed: { label: 'Закрыта', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
+  open: { label: 'Открыта', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
   tp: { label: 'TP', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
   sl: { label: 'SL', color: 'text-[var(--loss)]', bg: 'bg-[var(--loss-dim)]' },
   trail: { label: 'Трейл', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
   breakeven: { label: 'BE', color: 'text-[var(--warn)]', bg: 'bg-[var(--warn-dim)]' },
-  manual: { label: 'Manual', color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
+  manual: { label: 'Ручной', color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
   roe_threshold: { label: 'ROE', color: 'text-accent-purple', bg: 'bg-accent-purple/10' },
 }
 
@@ -17,7 +19,6 @@ export default function HistoryPage() {
   const [trades, setTrades] = useState([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(0)
-  const [source, setSource] = useState('all')
   const [filterResult, setFilterResult] = useState('all')
   const [filterPair, setFilterPair] = useState('Все')
   const [dateFrom, setDateFrom] = useState('')
@@ -25,18 +26,11 @@ export default function HistoryPage() {
 
   useEffect(() => {
     setLoading(true)
-    Promise.all([
-      api.momentumTrades(500).catch(() => ({ trades: [] })),
-      api.getAllTrades(500).catch(() => ({ trades: [] })),
-    ]).then(([mom, all]) => {
-      const momTrades = (mom.trades || []).map(t => ({ ...t, source: 'momentum' }))
-      const allTrades = (all.trades || []).map(t => ({ ...t, source: 'all' }))
-      const merged = [...momTrades, ...allTrades].sort((a, b) => {
-        const ta = a.time ? new Date(a.time).getTime() : 0
-        const tb = b.time ? new Date(b.time).getTime() : 0
-        return tb - ta
-      })
-      setTrades(merged)
+    api.getPairedTrades(500).then(data => {
+      setTrades(data.trades || [])
+      setLoading(false)
+    }).catch(() => {
+      setTrades([])
       setLoading(false)
     })
   }, [])
@@ -48,7 +42,6 @@ export default function HistoryPage() {
 
   const filtered = useMemo(() => {
     return trades.filter(t => {
-      if (source !== 'all' && t.source !== source) return false
       if (filterResult !== 'all') {
         const pnl = parseFloat(t.pnl || 0)
         if (filterResult === 'win' && pnl < 0) return false
@@ -68,7 +61,7 @@ export default function HistoryPage() {
       }
       return true
     })
-  }, [trades, source, filterResult, filterPair, dateFrom, dateTo])
+  }, [trades, filterResult, filterPair, dateFrom, dateTo])
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
   const pageTrades = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
@@ -78,23 +71,22 @@ export default function HistoryPage() {
     return new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
   }
 
-  const maxAbsPnl = Math.max(...trades.map(t => Math.abs(parseFloat(t.pnl || 0))), 1)
-
   const totalPnl = filtered.reduce((s, t) => s + (parseFloat(t.pnl) || 0), 0)
   const winCount = filtered.filter(t => (parseFloat(t.pnl) || 0) >= 0).length
   const winRate = filtered.length > 0 ? ((winCount / filtered.length) * 100).toFixed(1) : '0.0'
 
   const handleExportCSV = useCallback(() => {
-    const header = 'Время,Тип,Инструмент,Размер,Цена,PnL,Причина'
+    const header = 'Время,Тип,Инструмент,Размер,Вход,Выход,PnL,Причина'
     const rows = filtered.map(t => {
       const time = t.time ? new Date(t.time).toLocaleString('ru-RU') : ''
       const type = t.side === 'buy' ? 'BUY' : 'SELL'
       const inst = t.symbol || t.inst_id || ''
       const size = t.size ? t.size.toFixed(2) : ''
-      const price = t.entry ? `$${t.entry.toFixed(2)}` : t.exit_price ? `$${t.exit_price.toFixed(2)}` : ''
+      const entry = t.entry_price ? t.entry_price.toFixed(2) : ''
+      const exit = t.exit_price ? t.exit_price.toFixed(2) : ''
       const pnl = t.pnl != null ? (parseFloat(t.pnl) >= 0 ? '+' : '') + parseFloat(t.pnl).toFixed(2) : ''
       const reason = REASON_MAP[(t.reason || '').toLowerCase()]?.label || t.reason || ''
-      return [time, type, inst, size, price, pnl, reason].map(v => `"${v}"`).join(',')
+      return [time, type, inst, size, entry, exit, pnl, reason].map(v => `"${v}"`).join(',')
     })
     const csv = [header, ...rows].join('\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
@@ -138,12 +130,6 @@ export default function HistoryPage() {
       <div className="panel flex-shrink-0">
         <div className="p-3 flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-1.5">
-            <span className="text-2xs text-[var(--txt-muted)]">Источник:</span>
-            {[{ k: 'all', l: 'Все' }, { k: 'momentum', l: 'Momentum' }].map(f => (
-              <Chip key={f.k} active={source === f.k} onClick={() => { setSource(f.k); setPage(0) }}>{f.l}</Chip>
-            ))}
-          </div>
-          <div className="flex items-center gap-1.5">
             <span className="text-2xs text-[var(--txt-muted)]">Результат:</span>
             {[{ k: 'all', l: 'Все' }, { k: 'win', l: 'Прибыль' }, { k: 'loss', l: 'Убыток' }].map(f => (
               <Chip key={f.k} active={filterResult === f.k} onClick={() => { setFilterResult(f.k); setPage(0) }} color={f.k === 'win' ? 'green' : f.k === 'loss' ? 'red' : ''}>{f.l}</Chip>
@@ -179,9 +165,9 @@ export default function HistoryPage() {
                   <th>Тип</th>
                   <th>Инструмент</th>
                   <th className="text-right">Размер</th>
-                  <th className="text-right">Цена</th>
+                  <th className="text-right">Вход</th>
+                  <th className="text-right">Выход</th>
                   <th className="text-right">PnL</th>
-                  <th className="text-right">ПnL визуал</th>
                   <th className="text-right">Причина</th>
                 </tr>
               </thead>
@@ -201,12 +187,10 @@ export default function HistoryPage() {
                       </td>
                       <td className="text-[var(--txt)] font-medium text-xs">{t.symbol || t.inst_id || '-'}</td>
                       <td className="text-right mono text-xs">{t.size ? t.size.toFixed(2) : '-'}</td>
-                      <td className="text-right mono text-xs">{t.entry ? `$${t.entry.toFixed(2)}` : t.exit_price ? `$${t.exit_price.toFixed(2)}` : '-'}</td>
+                      <td className="text-right mono text-xs">{t.entry_price ? `$${t.entry_price.toFixed(2)}` : '-'}</td>
+                      <td className="text-right mono text-xs">{t.exit_price ? `$${t.exit_price.toFixed(2)}` : '-'}</td>
                       <td className={`text-right mono text-xs font-bold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                         {t.pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-'}
-                      </td>
-                      <td className="text-right">
-                        {t.pnl != null && <PnlBar value={pnl} maxAbs={maxAbsPnl} />}
                       </td>
                       <td className="text-right">
                         <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${reasonInfo.bg} ${reasonInfo.color}`}>
