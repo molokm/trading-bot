@@ -135,37 +135,132 @@ class MomentumStrategy:
             print(f"[Momentum] DB ensure_bot error: {e}", flush=True)
 
     async def _reload_from_db(self):
-        """Restore trade_log from DB — includes entry price for open trades."""
+        """Restore trade_log from DB — includes entry price for open trades.
+        Pairs entry (pnl=0) and close (pnl!=0) rows by signal_id."
+"
         if not self.db:
             return
         try:
-            trades = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=500)
-            for t in trades:
+            rows = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=500)
+
+            # Group by signal_id for pairing
+            entry_by_sid = {}
+            close_by_sid = {}
+            unpaired = []
+            for t in rows:
+                sid = t.get("signal_id")
                 pnl_val = float(t.get("pnl", 0) or 0)
-                entry = {
-                    "time": t.get("timestamp", ""),
-                    "side": t.get("side", ""),
-                    "symbol": t.get("inst_id", ""),
-                    "size": float(t.get("sz", 0) or 0),
-                    "ord_id": t.get("ord_id", ""),
-                    "pnl": pnl_val,
-                }
-                # Entry trades (pnl=0): restore entry price from px column
-                px = t.get("px")
-                if px:
-                    entry["entry"] = float(px)
-                # Infer pos_side from side for entries
-                if pnl_val == 0 and t.get("side"):
-                    entry["pos_side"] = "long" if t["side"] == "buy" else "short"
-                    entry["reason"] = "open"
-                # Close trades (pnl!=0): add fields the frontend needs
+                if sid:
+                    if pnl_val == 0:
+                        entry_by_sid[sid] = t
+                    else:
+                        close_by_sid[sid] = t
+                else:
+                    unpaired.append(t)
+
+            all_sids = set(entry_by_sid.keys()) | set(close_by_sid.keys())
+            for sid in all_sids:
+                entry_t = entry_by_sid.get(sid)
+                close_t = close_by_sid.get(sid)
+
+                if entry_t and close_t:
+                    # Full pair — add both entry and close
+                    entry_px = float(entry_t.get("px", 0) or 0)
+                    exit_px = float(close_t.get("px", 0) or 0)
+                    self._trade_log.append({
+                        "time": entry_t.get("timestamp", ""),
+                        "side": entry_t.get("side", ""),
+                        "symbol": entry_t.get("inst_id", ""),
+                        "size": float(entry_t.get("sz", 0) or 0),
+                        "ord_id": entry_t.get("ord_id", ""),
+                        "pnl": 0,
+                        "entry": entry_px,
+                        "entry_price": entry_px,
+                        "pos_side": "long" if entry_t.get("side") == "buy" else "short",
+                        "reason": "open",
+                        "signal_id": sid,
+                    })
+                    close_side = close_t.get("side", "sell")
+                    self._trade_log.append({
+                        "time": close_t.get("timestamp", ""),
+                        "side": close_side,
+                        "symbol": close_t.get("inst_id", ""),
+                        "size": float(close_t.get("sz", 0) or 0),
+                        "ord_id": close_t.get("ord_id", ""),
+                        "pnl": float(close_t.get("pnl", 0) or 0),
+                        "entry_price": entry_px,
+                        "entry": entry_px,
+                        "exit_price": exit_px,
+                        "reason": "closed",
+                        "pos_side": "long" if close_side == "sell" else "short",
+                        "signal_id": sid,
+                    })
+                elif entry_t and not close_t:
+                    entry_px = float(entry_t.get("px", 0) or 0)
+                    self._trade_log.append({
+                        "time": entry_t.get("timestamp", ""),
+                        "side": entry_t.get("side", ""),
+                        "symbol": entry_t.get("inst_id", ""),
+                        "size": float(entry_t.get("sz", 0) or 0),
+                        "ord_id": entry_t.get("ord_id", ""),
+                        "pnl": 0,
+                        "entry": entry_px,
+                        "entry_price": entry_px,
+                        "pos_side": "long" if entry_t.get("side") == "buy" else "short",
+                        "reason": "open",
+                        "signal_id": sid,
+                    })
+                elif close_t and not entry_t:
+                    exit_px = float(close_t.get("px", 0) or 0)
+                    close_side = close_t.get("side", "sell")
+                    self._trade_log.append({
+                        "time": close_t.get("timestamp", ""),
+                        "side": close_side,
+                        "symbol": close_t.get("inst_id", ""),
+                        "size": float(close_t.get("sz", 0) or 0),
+                        "ord_id": close_t.get("ord_id", ""),
+                        "pnl": float(close_t.get("pnl", 0) or 0),
+                        "entry_price": 0,
+                        "entry": 0,
+                        "exit_price": exit_px,
+                        "reason": "closed",
+                        "pos_side": "long" if close_side == "sell" else "short",
+                        "signal_id": sid,
+                    })
+
+            # Handle unpaired rows (no signal_id)
+            for t in unpaired:
+                pnl_val = float(t.get("pnl", 0) or 0)
+                px = float(t.get("px", 0) or 0)
+                side = t.get("side", "")
+                if pnl_val == 0 and side:
+                    self._trade_log.append({
+                        "time": t.get("timestamp", ""),
+                        "side": side,
+                        "symbol": t.get("inst_id", ""),
+                        "size": float(t.get("sz", 0) or 0),
+                        "ord_id": t.get("ord_id", ""),
+                        "pnl": 0,
+                        "entry": px,
+                        "entry_price": px,
+                        "pos_side": "long" if side == "buy" else "short",
+                        "reason": "open",
+                    })
                 elif pnl_val != 0:
-                    side = t.get("side", "")
-                    entry["pos_side"] = "long" if side == "sell" else "short"
-                    entry["reason"] = "closed"
-                    if px:
-                        entry["exit_price"] = float(px)
-                self._trade_log.append(entry)
+                    self._trade_log.append({
+                        "time": t.get("timestamp", ""),
+                        "side": side,
+                        "symbol": t.get("inst_id", ""),
+                        "size": float(t.get("sz", 0) or 0),
+                        "ord_id": t.get("ord_id", ""),
+                        "pnl": pnl_val,
+                        "entry_price": 0,
+                        "entry": 0,
+                        "exit_price": px,
+                        "reason": "closed",
+                        "pos_side": "long" if side == "sell" else "short",
+                    })
+
             print(f"[Momentum] Reloaded {len(self._trade_log)} trades from DB", flush=True)
         except Exception as e:
             print(f"[Momentum] DB reload error: {e}", flush=True)
@@ -249,6 +344,74 @@ class MomentumStrategy:
         except Exception as e:
             print(f"[Momentum] Sync open positions error: {e}", flush=True)
 
+    async def _backfill_from_okx(self):
+        """If DB has no trades, fetch fills from OKX and persist them.
+        This recovers history after DB loss or first deploy."""
+        if not self.client_manager or not self.db:
+            return
+        client = self.client_manager.get_client()
+        if not client:
+            return
+
+        # Check if DB already has trades — skip backfill
+        try:
+            existing = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=1)
+            if existing:
+                print(f"[Momentum] DB has {len(existing)}+ trades, skipping OKX backfill", flush=True)
+                return
+        except Exception:
+            pass
+
+        print("[Momentum] DB empty — backfilling trades from OKX...", flush=True)
+        saved = 0
+
+        # Fetch fills for each instrument
+        for sym in self.config.symbols:
+            inst_id = SWAP_MAP.get(sym, f"{sym}-USDT-SWAP")
+            try:
+                result = await client.get_fills_history(inst_type="SWAP", instId=inst_id, limit=100)
+                if result.get("error") or not result.get("data"):
+                    # Fallback to regular fills endpoint
+                    result = await client.get_fills(inst_id=inst_id, limit=100)
+                if result.get("error") or not result.get("data"):
+                    continue
+
+                fills = result["data"]
+                fills.sort(key=lambda f: f.get("ts", "0"))
+
+                for f in fills:
+                    side = f.get("side", "")
+                    sz = float(f.get("sz", 0))
+                    px = f.get("fillPx", "")
+                    fee = f.get("fee", "0")
+                    fee_ccy = f.get("feeCcy", "")
+                    pnl = float(f.get("pnl", 0) or 0)
+                    ts_ms = f.get("ts", "")
+                    if ts_ms:
+                        try:
+                            ts_iso = datetime.fromtimestamp(int(ts_ms) / 1000, tz=timezone.utc).isoformat()
+                        except (ValueError, OSError):
+                            ts_iso = ts_ms
+                    else:
+                        ts_iso = datetime.now(timezone.utc).isoformat()
+
+                    await self.db.save_trade(
+                        bot_id=MOM_BOT_ID,
+                        side=side,
+                        sz=f"{sz:.4f}",
+                        px=px,
+                        inst_id=inst_id,
+                        fee=fee,
+                        fee_ccy=fee_ccy,
+                        pnl=pnl,
+                        signal_id=None,
+                    )
+                    saved += 1
+            except Exception as e:
+                print(f"[Momentum] Backfill error for {inst_id}: {e}", flush=True)
+
+        print(f"[Momentum] Backfilled {saved} fills from OKX", flush=True)
+
     async def start(self):
         if self._running:
             return
@@ -256,6 +419,7 @@ class MomentumStrategy:
         self._started_at = datetime.now(timezone.utc).isoformat()
         await self._ensure_bot()
         await self._reload_from_db()
+        await self._backfill_from_okx()
         await self._sync_open_positions()
         await self._load_equity()
         self._thread = threading.Thread(target=self._run_thread, daemon=True, name="momentum-strategy")

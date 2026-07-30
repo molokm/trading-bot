@@ -131,11 +131,16 @@ class OKXClient:
             params["state"] = state
         return await self._request("GET", "/api/v5/trade/orders", params=params)
 
-    async def get_fills(self, inst_id: str = None, limit: int = 20) -> dict:
-        params = {"limit": limit}
+    async def get_fills(self, inst_id: str = None, limit: int = 20, **kwargs) -> dict:
+        params = {"limit": limit, **kwargs}
         if inst_id:
             params["instId"] = inst_id
         return await self._request("GET", "/api/v5/trade/fills", params=params)
+
+    async def get_fills_history(self, inst_type: str = "SWAP", limit: int = 100, **kwargs) -> dict:
+        """OKX /api/v5/trade/fills-history — returns past 3 months of fills."""
+        params = {"instType": inst_type, "limit": limit, **kwargs}
+        return await self._request("GET", "/api/v5/trade/fills-history", params=params)
 
     async def close_position(self, inst_id: str, mgn_mode: str = "cross",
                               pos_side: str = None, auto_cxl: bool = True) -> dict:
