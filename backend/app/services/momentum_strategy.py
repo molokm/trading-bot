@@ -136,8 +136,7 @@ class MomentumStrategy:
 
     async def _reload_from_db(self):
         """Restore trade_log from DB — includes entry price for open trades.
-        Pairs entry (pnl=0) and close (pnl!=0) rows by signal_id."
-"
+        Pairs entry (pnl=0) and close (pnl!=0) rows by signal_id."""
         if not self.db:
             return
         try:
