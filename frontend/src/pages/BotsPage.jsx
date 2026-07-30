@@ -8,10 +8,10 @@ import { SliderPanel, Tip, StatusBadge, MetricCard, ConfirmDialog, STRATEGY_DESC
 
 const STRATEGIES = [
   { id: 'momentum', name: 'Momentum', icon: TrendingUp, desc: STRATEGY_DESC.momentum, params: ['risk_per_trade', 'max_positions', 'poll_interval_sec', 'trail_pct', 'breakeven_pct', 'tp1_pct', 'tp1_frac', 'sl1_pct', 'sl1_frac', 'adx_threshold'] },
-  { id: 'grid', name: 'Grid', icon: Settings2, desc: STRATEGY_DESC.grid, params: ['position_size', 'grid_levels', 'grid_step', 'max_positions', 'tp_pct', 'sl_pct'] },
+  { id: 'grid', name: 'Сетка', icon: Settings2, desc: STRATEGY_DESC.grid, params: ['position_size', 'grid_levels', 'grid_step', 'max_positions', 'tp_pct', 'sl_pct'] },
   { id: 'dca', name: 'DCA', icon: TrendingUp, desc: STRATEGY_DESC.dca, params: ['position_size', 'dca_orders', 'dca_step', 'max_positions', 'tp_pct'] },
-  { id: 'scalping', name: 'Scalping', icon: Zap, desc: STRATEGY_DESC.scalping, params: ['position_size', 'tp_pct', 'sl_pct', 'max_positions', 'poll_interval_sec'] },
-  { id: 'custom', name: 'Custom', icon: Settings2, desc: STRATEGY_DESC.custom, params: [] },
+  { id: 'scalping', name: 'Скальпинг', icon: Zap, desc: STRATEGY_DESC.scalping, params: ['position_size', 'tp_pct', 'sl_pct', 'max_positions', 'poll_interval_sec'] },
+  { id: 'custom', name: 'Своё', icon: Settings2, desc: STRATEGY_DESC.custom, params: [] },
 ]
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
@@ -20,7 +20,7 @@ const PARAM_META = {
   risk_per_trade:      { label: 'Риск на сделку', min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01, tip: 'Процент капитала, рискуемый в одной сделке. 3% = стандартный риск-менеджмент.' },
   max_positions:       { label: 'Макс. позиций', min: 1, max: 10, step: 1, unit: '', div: 1, tip: 'Максимальное количество одновременно открытых позиций.' },
   poll_interval_sec:   { label: 'Интервал опроса', min: 15, max: 300, step: 15, unit: 'с', div: 1, tip: 'Как часто бот проверяет условия входа. Меньше = быстрее реакция, но больше нагрузка.' },
-  trail_pct:           { label: 'Trailing Stop', min: 0.5, max: 5, step: 0.1, unit: '%', div: 0.01, tip: 'Откат от пика цены для закрытия позиции трейлинг-стопом.' },
+  trail_pct:           { label: 'Трейлинг-стоп', min: 0.5, max: 5, step: 0.1, unit: '%', div: 0.01, tip: 'Откат от пика цены для закрытия позиции трейлинг-стопом.' },
   breakeven_pct:       { label: 'Безубыток при', min: 0.1, max: 3, step: 0.1, unit: '%', div: 0.01, tip: 'При достижении этого профита стоп перемещается на уровень входа.' },
   tp1_pct:             { label: 'TP1 уровень', min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01, tip: 'Уровень частичной фиксации прибыли. При достижении закрывается указанная доля.' },
   tp1_frac:            { label: 'TP1 доля', min: 20, max: 100, step: 5, unit: '%', div: 0.01, tip: 'Какая часть позиции закрывается при достижении TP1.' },
@@ -30,15 +30,15 @@ const PARAM_META = {
   position_size:       { label: 'Размер позиции', min: 1, max: 100, step: 1, unit: 'USDT', div: 1, tip: 'Размер позиции в USDT.' },
   grid_levels:         { label: 'Уровни сетки', min: 2, max: 20, step: 1, unit: '', div: 1, tip: 'Количество ордеров, расставляемых выше и ниже текущей цены.' },
   grid_step:           { label: 'Шаг сетки', min: 0.1, max: 5, step: 0.1, unit: '%', div: 1, tip: 'Расстояние в % между соседними ордерами сетки.' },
-  tp_pct:              { label: 'Take Profit', min: 0.1, max: 20, step: 0.1, unit: '%', div: 1, tip: 'Целевая прибыль в % для закрытия позиции.' },
-  sl_pct:              { label: 'Stop Loss', min: 0.1, max: 20, step: 0.1, unit: '%', div: 1, tip: 'Максимальный убыток в % для принудительного закрытия.' },
+  tp_pct:              { label: 'Тейк-профит', min: 0.1, max: 20, step: 0.1, unit: '%', div: 1, tip: 'Целевая прибыль в % для закрытия позиции.' },
+  sl_pct:              { label: 'Стоп-лосс', min: 0.1, max: 20, step: 0.1, unit: '%', div: 1, tip: 'Максимальный убыток в % для принудительного закрытия.' },
   dca_orders:          { label: 'DCA ордеров', min: 1, max: 10, step: 1, unit: '', div: 1, tip: 'Количество дополнительных ордеров усреднения.' },
   dca_step:            { label: 'DCA шаг', min: 0.1, max: 10, step: 0.1, unit: '%', div: 1, tip: 'Расстояние в % между DCA ордерами.' },
 }
 
 const DEFAULT_BOT = {
   id: 'mom-1',
-  name: 'Momentum Bot',
+  name: 'Бот Momentum',
   strategy: 'momentum',
   symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
   status: 'stopped',
@@ -233,10 +233,10 @@ export default function BotsPage({ connected, isGuest }) {
   }
 
   const statusMap = {
-    running: { mode: 'live', label: 'Running' },
-    paused: { mode: 'paused', label: 'Paused' },
-    stopped: { mode: 'stopped', label: 'Stopped' },
-    error: { mode: 'error', label: 'Error' },
+    running: { mode: 'live', label: 'Работает' },
+    paused: { mode: 'paused', label: 'Пауза' },
+    stopped: { mode: 'stopped', label: 'Остановлен' },
+    error: { mode: 'error', label: 'Ошибка' },
   }
 
   return (
@@ -250,7 +250,7 @@ export default function BotsPage({ connected, isGuest }) {
           {!isGuest && (
             <>
               <button className="btn btn-ghost btn-sm" onClick={() => setConfirmStopAll(true)}>
-                <Square size={12} /> Stop All
+                <Square size={12} /> Остановить все
               </button>
               <button className="btn btn-primary btn-sm" onClick={() => { setEditingBot(null); setSliderOpen(true) }}>
                 <Plus size={12} /> Новый бот
@@ -318,7 +318,7 @@ export default function BotsPage({ connected, isGuest }) {
                   {!isGuest && (
                     <div className="flex gap-1.5 pt-1">
                       <button className={`btn btn-sm flex-1 ${bot.status === 'running' ? 'btn-danger' : 'btn-primary'}`} onClick={() => handleToggle(bot)}>
-                        {bot.status === 'running' ? <><Square size={11} /> Stop</> : <><Play size={11} /> Start</>}
+                        {bot.status === 'running' ? <><Square size={11} /> Стоп</> : <><Play size={11} /> Старт</>}
                       </button>
                       <button className="btn btn-ghost btn-sm" onClick={() => { setEditingBot(bot); setSliderOpen(true) }}><Edit3 size={12} /></button>
                       <button className="btn btn-ghost btn-sm" onClick={() => handleClone(bot)}><Copy size={12} /></button>
@@ -406,7 +406,7 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
         <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
           Название <Tip text="Произвольное имя для идентификации бота" />
         </label>
-        <input className="w-full mt-1.5" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="My Bot" autoFocus />
+        <input className="w-full mt-1.5" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder="Мой бот" autoFocus />
       </div>
 
       <div>
@@ -521,10 +521,10 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
               return (
                 <React.Fragment key={i}>
                   <div className="absolute left-3 right-3 border-t border-dashed border-[var(--profit)] opacity-40" style={{ top: `calc(50% - ${offset}px)` }}>
-                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--profit)]">Buy</span>
+                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--profit)]">Покупка</span>
                   </div>
                   <div className="absolute left-3 right-3 border-t border-dashed border-[var(--loss)] opacity-40" style={{ top: `calc(50% + ${offset}px)` }}>
-                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--loss)]">Sell</span>
+                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--loss)]">Продажа</span>
                   </div>
                 </React.Fragment>
               )

@@ -7,7 +7,7 @@ const PAGE_SIZE = 30
 const REASON_MAP = {
   tp: { label: 'TP', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
   sl: { label: 'SL', color: 'text-[var(--loss)]', bg: 'bg-[var(--loss-dim)]' },
-  trail: { label: 'Trail', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
+  trail: { label: 'Трейл', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
   breakeven: { label: 'BE', color: 'text-[var(--warn)]', bg: 'bg-[var(--warn-dim)]' },
   manual: { label: 'Manual', color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
   roe_threshold: { label: 'ROE', color: 'text-accent-purple', bg: 'bg-accent-purple/10' },

@@ -247,12 +247,12 @@ export default function ChartPage() {
           <div className="flex gap-2 flex-shrink-0 overflow-x-auto">
             {activeLines.map((p, i) => (
               <div key={i} className="panel flex items-center gap-3 px-3 py-2 flex-shrink-0">
-                <span className="text-2xs font-bold text-[var(--profit)]">▲ LONG</span>
-                <span className="text-2xs text-[var(--txt-muted)]">Entry: <span className="mono text-[var(--txt)]">${p.entry}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">SL: <span className="mono text-[var(--loss)]">${p.stop}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">BE: <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">TP1: <span className="mono text-[var(--info)]">${p.tp1}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">Stage: <span className="text-accent-purple font-semibold">{p.stage}</span></span>
+                <span className="text-2xs font-bold text-[var(--profit)]">▲ ЛОНГ</span>
+                <span className="text-2xs text-[var(--txt-muted)]">Вход: <span className="mono text-[var(--txt)]">${p.entry}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">СЛ: <span className="mono text-[var(--loss)]">${p.stop}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">БУ: <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">ТП1: <span className="mono text-[var(--info)]">${p.tp1}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">Этап: <span className="text-accent-purple font-semibold">{p.stage}</span></span>
               </div>
             ))}
           </div>

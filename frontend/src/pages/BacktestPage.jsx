@@ -17,9 +17,9 @@ const PERIODS = ['7d', '30d', '90d', '1y']
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
 const STRATEGIES = [
   { id: 'momentum', label: 'Momentum' },
-  { id: 'grid', label: 'Grid' },
+  { id: 'grid', label: 'Сетка' },
   { id: 'dca', label: 'DCA' },
-  { id: 'scalping', label: 'Scalping' },
+  { id: 'scalping', label: 'Скальпинг' },
 ]
 
 function generateMockResult(config) {
@@ -161,7 +161,7 @@ function exportPng(equityCurve) {
   ctx.fillStyle = '#9aa0a9'
   ctx.font = '11px Inter, sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText('Equity Curve — Backtest', pad.l, 18)
+  ctx.fillText('Кривая эквити — Бэктест', pad.l, 18)
   ctx.textAlign = 'right'
   ctx.fillText(`${vals.length} сделок`, w - pad.r, 18)
 
@@ -239,7 +239,7 @@ export default function BacktestPage({ connected }) {
             className={`btn btn-ghost btn-sm ${compareMode ? '!border-[var(--info)] !text-[var(--info)]' : ''}`}
             onClick={() => setCompareMode(!compareMode)}
           >
-            <GitCompare size={12} /> Compare
+            <GitCompare size={12} /> Сравнить
           </button>
           {results.length > 0 && activeResult && (
             <button className="btn btn-ghost btn-sm" onClick={() => exportPng(activeResult.equityCurve)}>
@@ -248,7 +248,7 @@ export default function BacktestPage({ connected }) {
           )}
           {results.length > 0 && (
             <button className="btn btn-ghost btn-sm" onClick={() => {
-              const csv = ['Entry,Exit,Pair,Side,EntryPx,ExitPx,PnL,PnL%,Reason', ...activeResult.tradeList.map(t =>
+              const csv = ['Вход,Выход,Пара,Направление,Цена входа,Цена выхода,PnL,PnL%,Причина', ...activeResult.tradeList.map(t =>
                 `${t.entry_time},${t.exit_time},${t.pair},${t.side},${t.entry_px.toFixed(2)},${t.exit_px.toFixed(2)},${t.pnl.toFixed(2)},${t.pnl_pct.toFixed(2)}%,${t.reason}`
               )].join('\n')
               const blob = new Blob([csv], { type: 'text/csv' })
@@ -315,12 +315,12 @@ export default function BacktestPage({ connected }) {
               <thead>
                 <tr>
                   <th>#</th>
-                  <th className="text-right">Return</th>
-                  <th className="text-right">Win Rate</th>
-                  <th className="text-right">Profit Factor</th>
-                  <th className="text-right">Sharpe</th>
-                  <th className="text-right">Max DD</th>
-                  <th className="text-right">Trades</th>
+                  <th className="text-right">Доходность</th>
+                  <th className="text-right">% сделок</th>
+                  <th className="text-right">Профит-фактор</th>
+                  <th className="text-right">Шарп</th>
+                  <th className="text-right">Макс. просадка</th>
+                  <th className="text-right">Сделки</th>
                   <th></th>
                 </tr>
               </thead>
@@ -350,17 +350,17 @@ export default function BacktestPage({ connected }) {
       {activeResult && m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 flex-shrink-0">
-            <MetricCard label="Total Return" value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip="Общая доходность за период бэктеста" />
-            <MetricCard label="Win Rate" value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip="Процент прибыльных сделок" />
-            <MetricCard label="Profit Factor" value={m.profitFactor.toFixed(2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip="Отношение валовой прибыли к валовому убытку. > 1 = прибыльная стратегия" />
-            <MetricCard label="Sharpe Ratio" value={m.sharpe.toFixed(2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip="Доходность относительно риска. > 1 — хорошо, > 2 — отлично" />
-            <MetricCard label="Max Drawdown" value={`-${m.maxDD.toFixed(1)}%`} changeType="negative" mono tip="Максимальное падение капитала от пика" />
-            <MetricCard label="Total Trades" value={m.trades} mono tip="Общее количество сделок за период" />
+            <MetricCard label="Общая доходность" value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip="Общая доходность за период бэктеста" />
+            <MetricCard label="% сделок" value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip="Процент прибыльных сделок" />
+            <MetricCard label="Профит-фактор" value={m.profitFactor.toFixed(2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip="Отношение валовой прибыли к валовому убытку. > 1 = прибыльная стратегия" />
+            <MetricCard label="Коэф. Шарпа" value={m.sharpe.toFixed(2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip="Доходность относительно риска. > 1 — хорошо, > 2 — отлично" />
+            <MetricCard label="Макс. просадка" value={`-${m.maxDD.toFixed(1)}%`} changeType="negative" mono tip="Максимальное падение капитала от пика" />
+            <MetricCard label="Всего сделок" value={m.trades} mono tip="Общее количество сделок за период" />
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3">
             <div className="panel">
-              <div className="panel-header"><TrendingUp size={13} className="text-[var(--profit)]" /> Equity Curve</div>
+              <div className="panel-header"><TrendingUp size={13} className="text-[var(--profit)]" /> Кривая эквити</div>
               <div className="p-3" id="equity-chart-container">
                 <EquityChart data={activeResult.equityCurve} />
               </div>
@@ -383,8 +383,8 @@ export default function BacktestPage({ connected }) {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Вход</th><th>Выход</th><th>Пара</th><th>Side</th>
-                    <th className="text-right">Entry</th><th className="text-right">Exit</th>
+                    <th>Вход</th><th>Выход</th><th>Пара</th><th>Сторона</th>
+                    <th className="text-right">Вход</th><th className="text-right">Выход</th>
                     <th className="text-right">PnL ($)</th><th className="text-right">PnL (%)</th><th className="text-right">Причина</th>
                   </tr>
                 </thead>

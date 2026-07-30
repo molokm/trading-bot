@@ -67,12 +67,12 @@ function AppLayout() {
   }
 
   const navItems = [
-    { to: '/', icon: LayoutDashboard, label: 'Dashboard' },
-    { to: '/bots', icon: Bot, label: 'Bots' },
-    { to: '/backtest', icon: BarChart3, label: 'Backtest' },
-    { to: '/chart', icon: BarChart3, label: 'Chart' },
-    { to: '/history', icon: ScrollText, label: 'History' },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: 'Settings' }] : []),
+    { to: '/', icon: LayoutDashboard, label: 'Панель' },
+    { to: '/bots', icon: Bot, label: 'Боты' },
+    { to: '/backtest', icon: BarChart3, label: 'Бэктест' },
+    { to: '/chart', icon: BarChart3, label: 'График' },
+    { to: '/history', icon: ScrollText, label: 'История' },
+    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: 'Настройки' }] : []),
   ]
 
   return (

@@ -11,14 +11,14 @@ const PAIRS = ['Все', 'BTC', 'ETH', 'SOL', 'BNB']
 const REASON_MAP = {
   tp: { label: 'TP', color: 'text-[var(--profit)]' },
   sl: { label: 'SL', color: 'text-[var(--loss)]' },
-  trail: { label: 'Trail', color: 'text-[var(--info)]' },
+  trail: { label: 'Трейл', color: 'text-[var(--info)]' },
   breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
-  manual: { label: 'Manual', color: 'text-[var(--txt-secondary)]' },
+  manual: { label: 'Ручной', color: 'text-[var(--txt-secondary)]' },
   roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
-  range_target: { label: 'Range', color: 'text-[var(--info)]' },
+  range_target: { label: 'Флэт', color: 'text-[var(--info)]' },
 }
 const STAGE_MAP = {
-  initial:    { label: 'Initial', color: 'text-[var(--txt-muted)]' },
+  initial:    { label: 'Начальная', color: 'text-[var(--txt-muted)]' },
   sl1_trimmed:{ label: 'SL1',    color: 'text-[var(--loss)]' },
   breakeven:  { label: 'BE',     color: 'text-[var(--warn)]' },
   trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
@@ -317,7 +317,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           sparkData={sparkData[0]}
         />
         <MetricCard
-          label="Unrealized PnL"
+          label="Нереализ. PnL"
           value={
             <AnimatedValue className={unrealizedPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
               {unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
@@ -394,8 +394,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     <tr>
                       <th>Пара</th>
                       <th className="text-right">Размер</th>
-                      <th className="text-right">Entry</th>
-                      <th className="text-right">Mark</th>
+                      <th className="text-right">Вход</th>
+                      <th className="text-right">Марка</th>
                       <th className="text-right">PnL</th>
                       <th className="text-right">ROE</th>
                       {isAdmin(isGuest) ? null : <th className="text-right"></th>}
@@ -479,8 +479,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <tr>
                     <th>Время</th>
                     <th>Пара</th>
-                    <th>Dir</th>
-                    <th className="text-right">Entry</th>
+                    <th>Напр.</th>
+                    <th className="text-right">Вход</th>
                     <th className="text-right">SL</th>
                     <th className="text-right">TP1</th>
                     <th className="text-right">Стадия</th>
@@ -540,7 +540,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
                           ) : (
-                            <span className="text-2xs text-[var(--info)]">active</span>
+                            <span className="text-2xs text-[var(--info)]">активна</span>
                           )}
                         </td>
                       </tr>
@@ -582,9 +582,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--warn)]" />
-              Momentum Bot
-              {momentumStatus?.running && <StatusBadge mode="live" label="Running" />}
-              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label="Stopped" />}
+              Бот Momentum
+              {momentumStatus?.running && <StatusBadge mode="live" label="Работает" />}
+              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label="Остановлен" />}
             </div>
             <div className="flex-1 overflow-auto p-3 space-y-3">
               {momentumStatus?.running ? (
@@ -717,11 +717,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               )}
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-2xs">
                 {ticker ? [
-                  { l: 'Last', v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
-                  { l: 'Bid', v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: 'Ask', v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                  { l: '24h High', v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: '24h Low', v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                  { l: 'Послед.', v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
+                  { l: 'Бид', v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: 'Аск', v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                  { l: 'Макс 24ч', v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: 'Мин 24ч', v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
                 ].map(item => (
                   <div key={item.l} className="flex justify-between">
                     <span className="text-[var(--txt-muted)]">{item.l}</span>
