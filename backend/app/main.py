@@ -403,62 +403,43 @@ async def momentum_update_config(data: dict = None):
 
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
-    global momentum
-    trades = []
+    """Trade history from OKX fills — source of truth is the exchange."""
+    # 1. Fetch raw fills from OKX
+    raw_fills = await _fetch_okx_fills(limit=100)
+    
+    # 2. Pair fills into entry+close trades
+    paired = await _pair_fills(raw_fills)
+    
+    # 3. Merge with live open positions from OKX (not yet in fills as close)
+    open_insts = set()
+    for t in paired:
+        if t.get("reason") == "open":
+            open_insts.add(t["inst_id"])
+    
+    # Also add open positions from momentum bot if running
     if momentum:
-        # Always merge in-memory with DB (in case of restart where DB has data but memory is empty)
-        if momentum._trade_log:
-            trades = list(momentum._trade_log[-limit:])
-        # If in-memory is empty, try DB fallback
-        if not trades and momentum.db:
-            try:
-                db_trades = await momentum.db.get_trades(bot_id=MOM_BOT_ID, limit=limit)
-                trades = [
-                    {
-                        "time": t.get("timestamp", ""),
-                        "side": t.get("side", ""),
-                        "symbol": t.get("inst_id", ""),
-                        "size": float(t.get("sz", 0) or 0),
-                        "pnl": float(t.get("pnl", 0) or 0),
-                        "ord_id": t.get("ord_id", ""),
-                        "entry": float(t.get("px", 0) or 0),
-                    }
-                    for t in db_trades
-                ]
-                # Restore to in-memory so next call is fast
-                if trades:
-                    momentum._trade_log = trades
-            except Exception as e:
-                print(f"[Momentum] trades DB fallback error: {e}", flush=True)
-
-        # Append current open positions as "open" trades ONLY if not already present in trade_log
-        # (avoids duplication: entries are already added to _trade_log on open)
-        trade_symbols = set()
-        for t in trades:
-            if t.get("pos_side") and not t.get("pnl") and float(t.get("pnl", 0) or 0) == 0:
-                sym = t["symbol"].replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-                trade_symbols.add(sym)
-            elif t.get("reason") == "open":
-                sym = t["symbol"].replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-                trade_symbols.add(sym)
         for coin, pos in momentum._positions.items():
-            if coin not in trade_symbols:
-                trades.append({
+            if pos.inst_id not in open_insts:
+                paired.append({
                     "time": pos.opened_at,
                     "side": "buy" if pos.side == "long" else "sell",
                     "symbol": pos.inst_id,
                     "size": pos.size,
                     "entry": pos.entry_price,
+                    "entry_price": pos.entry_price,
                     "stop": pos.stop_price,
                     "reason": "open",
                     "pos_side": pos.side,
+                    "inst_id": pos.inst_id,
+                    "source": "okx",
                 })
-
-        # Sort by time descending, most recent first
-        trades.sort(key=lambda t: t.get("time", ""), reverse=True)
-        trades = trades[-limit:]
-
-    return {"trades": trades}
+                open_insts.add(pos.inst_id)
+    
+    # 4. Sort and limit
+    paired.sort(key=lambda t: t.get("time", ""), reverse=True)
+    paired = paired[-limit:]
+    
+    return {"trades": paired}
 
 
 @app.get("/api/momentum/indicators")
@@ -559,35 +540,178 @@ async def momentum_chart_data():
 
 # ── PnL ──
 
+# ── OKX helpers ──
+
 import time as _time
 
+SWAP_INSTRUMENTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"]
+
+# Simple in-memory cache for OKX fills (updated on each /api/momentum/trades call)
+_fills_cache: list[dict] = []
+_fills_cache_ts: float = 0
+_FILLS_TTL = 30  # seconds
+
+
+async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
+    """Fetch fills-history from OKX for all SWAP instruments. Returns raw OKX fill dicts."""
+    global _fills_cache, _fills_cache_ts
+    now = _time.time()
+    if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL:
+        return _fills_cache
+
+    all_fills = []
+    for inst_id in SWAP_INSTRUMENTS:
+        result = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
+        if result.get("error") or not result.get("data"):
+            # Fallback to regular fills
+            result = await _okx_call(lambda c, iid=inst_id: c.get_fills(inst_id=iid, limit=limit))
+        if not result.get("error") and result.get("data"):
+            all_fills.extend(result["data"])
+
+    # Sort by timestamp descending (newest first)
+    all_fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
+    _fills_cache = all_fills
+    _fills_cache_ts = now
+    return all_fills
+
+
+def _ms_to_iso(ts_ms: str) -> str:
+    """Convert OKX millisecond timestamp to ISO string."""
+    if not ts_ms:
+        return ""
+    try:
+        return datetime.fromtimestamp(int(ts_ms) / 1000).isoformat()
+    except (ValueError, OSError, TypeError):
+        return ts_ms
+
+
+def _fill_to_trade(f: dict) -> dict:
+    """Convert a single OKX fill dict to our trade format for frontend."""
+    side = f.get("side", "")
+    pnl = float(f.get("pnl", 0) or 0)
+    px = float(f.get("fillPx", 0) or 0)
+    sz = float(f.get("sz", 0) or 0)
+    inst_id = f.get("instId", "")
+    is_close = pnl != 0
+
+    # Determine pos_side from side + close direction
+    # OKX: for long close → side=sell, pnl>0; for short close → side=buy, pnl>0
+    if is_close:
+        pos_side = "long" if side == "sell" else "short"
+        reason = "closed"
+    else:
+        pos_side = "long" if side == "buy" else "short"
+        reason = "open"
+
+    trade = {
+        "time": _ms_to_iso(f.get("ts", "")),
+        "side": side,
+        "symbol": inst_id,
+        "size": sz,
+        "pnl": pnl,
+        "ord_id": f.get("ordId", ""),
+        "fee": f.get("fee", "0"),
+        "entry": px if not is_close else 0,
+        "entry_price": px if not is_close else 0,
+        "exit_price": px if is_close else 0,
+        "reason": reason,
+        "pos_side": pos_side,
+        "inst_id": inst_id,
+        "source": "okx",
+    }
+    return trade
+
+
+async def _pair_fills(fills: list[dict]) -> list[dict]:
+    """Pair OKX fills into entry+close trades. Returns list of trade dicts for frontend.
+    Strategy: group by instId, pair buy→sell (long) or sell→buy (short) sequentially.
+    Each fill with pnl!=0 is a close. Fills with pnl=0 are entries."""
+    # Separate entries and closes per instrument
+    by_inst: dict[str, dict] = {}  # inst_id -> {entries: [], closes: []}
+    for f in fills:
+        inst = f.get("instId", "")
+        if inst not in by_inst:
+            by_inst[inst] = {"entries": [], "closes": []}
+        pnl = float(f.get("pnl", 0) or 0)
+        if pnl != 0:
+            by_inst[inst]["closes"].append(f)
+        else:
+            by_inst[inst]["entries"].append(f)
+
+    paired = []
+    for inst_id, groups in by_inst.items():
+        # Sort entries by time ascending
+        entries = sorted(groups["entries"], key=lambda x: x.get("ts", "0"))
+        closes = sorted(groups["closes"], key=lambda x: x.get("ts", "0"))
+
+        # For each close, find the best matching entry (latest entry before the close)
+        used_entries = set()
+        for close_f in closes:
+            close_ts = close_f.get("ts", "0")
+            best_entry = None
+            best_idx = -1
+            for i, entry_f in enumerate(entries):
+                if i in used_entries:
+                    continue
+                if entry_f.get("ts", "0") <= close_ts:
+                    best_entry = entry_f
+                    best_idx = i
+            if best_entry:
+                used_entries.add(best_idx)
+                entry_px = float(best_entry.get("fillPx", 0) or 0)
+                exit_px = float(close_f.get("fillPx", 0) or 0)
+                close_side = close_f.get("side", "sell")
+                pos_side = "long" if close_side == "sell" else "short"
+                paired.append({
+                    "time": _ms_to_iso(close_f.get("ts", "")),
+                    "side": close_side,
+                    "symbol": inst_id,
+                    "size": float(close_f.get("sz", 0) or 0),
+                    "pnl": float(close_f.get("pnl", 0) or 0),
+                    "ord_id": close_f.get("ordId", ""),
+                    "fee": close_f.get("fee", "0"),
+                    "entry": entry_px,
+                    "entry_price": entry_px,
+                    "exit_price": exit_px,
+                    "reason": "closed",
+                    "pos_side": pos_side,
+                    "inst_id": inst_id,
+                    "source": "okx",
+                })
+            else:
+                # Close without matching entry
+                paired.append(_fill_to_trade(close_f))
+
+        # Remaining unpaired entries (open positions)
+        for i, entry_f in enumerate(entries):
+            if i not in used_entries:
+                paired.append(_fill_to_trade(entry_f))
+
+    return paired
+
+
+# ── PnL from OKX bills ──
+
 async def _get_okx_realized_pnl() -> dict:
-    """Fetch realized PnL from OKX bills (trades only, type=2).
-    Returns dict with keys '1d', '7d', '30d' containing PnL sums.
-    Paginates up to 3 pages (300 bills) to cover 30-day windows."""
+    """Fetch realized PnL from OKX bills (trades only, type=2)."""
     now_ms = int(_time.time() * 1000)
     periods = {"1d": 86400_000, "7d": 604800_000, "30d": 2592000_000}
     pnl = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
-
-    # Paginate bills: OKX returns newest-first, max 100 per request
     after = ""
     earliest_needed = now_ms - periods["30d"]
     pages = 0
-    max_pages = 3  # 3 × 100 = 300 bills max
+    max_pages = 3
 
     while pages < max_pages:
         params = {"instType": "SWAP", "limit": 100}
         if after:
             params["after"] = after
-
         result = await _okx_call(lambda c: c.get_bills(**params))
         if result.get("error"):
             break
-
         bills = result.get("data", [])
         if not bills:
             break
-
         reached_old_enough = False
         for bill in bills:
             if bill.get("type") != "2":
@@ -605,11 +729,8 @@ async def _get_okx_realized_pnl() -> dict:
             for key, window in periods.items():
                 if bill_ts >= now_ms - window:
                     pnl[key] += bill_pnl
-
         if reached_old_enough:
             break
-
-        # OKX pagination: use the last bill's billId as 'after'
         last_id = bills[-1].get("billId", "")
         if not last_id or last_id == after:
             break
@@ -621,27 +742,13 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    # Use OKX bills as the single source of truth for realized PnL.
-    # DB PnL is a local estimate — NOT a separate source to add.
-    okx_pnl = await _get_okx_realized_pnl()
-
-    # Fallback to DB only if OKX returned nothing (likely API error)
-    has_okx_data = any(v != 0 for v in okx_pnl.values())
-    if has_okx_data:
-        realized = okx_pnl
-    else:
-        realized = {
-            "1d": await db.get_pnl_by_period(1, bot_id=MOM_BOT_ID),
-            "7d": await db.get_pnl_by_period(7, bot_id=MOM_BOT_ID),
-            "30d": await db.get_pnl_by_period(30, bot_id=MOM_BOT_ID),
-        }
-
+    """Realized PnL from OKX bills + unrealized from OKX positions. No local calculations."""
+    realized = await _get_okx_realized_pnl()
     unrealized = 0.0
     result = await _okx_call(lambda c: c.get_positions("SWAP"))
     if not result.get("error"):
         for p in result.get("data", []):
             unrealized += float(p.get("upl", 0))
-
     return {
         "1d": round(realized["1d"], 2),
         "7d": round(realized["7d"], 2),
@@ -654,13 +761,28 @@ async def get_pnl():
 
 @app.get("/api/trades")
 async def get_all_trades(limit: int = 100):
-    trades = await db.get_trades(limit=limit)
-    return {"trades": (trades or [])[:limit]}
+    """All trades from OKX fills (unpaired, raw)."""
+    raw_fills = await _fetch_okx_fills(limit=limit)
+    trades = [_fill_to_trade(f) for f in raw_fills]
+    return {"trades": trades[:limit]}
 
 
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 15, begin: str = None, end: str = None):
-    paired = await db.get_paired_trades(limit=limit, begin=begin, end=end)
+    """Paired entry+close trades from OKX fills."""
+    raw_fills = await _fetch_okx_fills(limit=200)
+    paired = await _pair_fills(raw_fills)
+    if begin or end:
+        filtered = []
+        for t in paired:
+            t_time = t.get("time", "")
+            if begin and t_time and t_time < begin:
+                continue
+            if end and t_time and t_time > end:
+                continue
+            filtered.append(t)
+        paired = filtered
+    paired = paired[:limit]
     return {"trades": paired}
 
 
