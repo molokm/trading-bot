@@ -549,29 +549,40 @@ SWAP_INSTRUMENTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT
 # Simple in-memory cache for OKX fills (updated on each /api/momentum/trades call)
 _fills_cache: list[dict] = []
 _fills_cache_ts: float = 0
+_fills_cache_limit: int = 0
 _FILLS_TTL = 30  # seconds
 
 
 async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
     """Fetch fills-history from OKX for all SWAP instruments. Returns raw OKX fill dicts."""
-    global _fills_cache, _fills_cache_ts
+    global _fills_cache, _fills_cache_ts, _fills_cache_limit
     now = _time.time()
-    if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL:
+    if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
+        print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills (requested limit={limit}, cached limit={_fills_cache_limit})", flush=True)
         return _fills_cache
 
     all_fills = []
     for inst_id in SWAP_INSTRUMENTS:
-        result = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
-        if result.get("error") or not result.get("data"):
+        r1 = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
+        print(f"[_fetch_okx_fills] {inst_id} fills-history: error={r1.get('error')}, data_len={len(r1.get('data', []))}", flush=True)
+        if r1.get("error"):
+            print(f"  fills-history error: {r1.get('message', '')}", flush=True)
+        if r1.get("error") or not r1.get("data"):
             # Fallback to regular fills
-            result = await _okx_call(lambda c, iid=inst_id: c.get_fills(inst_id=iid, limit=limit))
-        if not result.get("error") and result.get("data"):
-            all_fills.extend(result["data"])
+            r2 = await _okx_call(lambda c, iid=inst_id: c.get_fills(inst_id=iid, limit=limit))
+            print(f"[_fetch_okx_fills] {inst_id} fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
+            if r2.get("error"):
+                print(f"  fills error: {r2.get('message', '')}", flush=True)
+            r1 = r2
+        if not r1.get("error") and r1.get("data"):
+            all_fills.extend(r1["data"])
 
     # Sort by timestamp descending (newest first)
     all_fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
     _fills_cache = all_fills
     _fills_cache_ts = now
+    _fills_cache_limit = limit
+    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills from {len(SWAP_INSTRUMENTS)} instruments (limit={limit})", flush=True)
     return all_fills
 
 
@@ -785,6 +796,44 @@ async def get_paired_trades(limit: int = 15, begin: str = None, end: str = None)
 
 
 # ── DB Positions ──
+
+@app.get("/api/debug/fills")
+async def debug_fills():
+    """Diagnostic endpoint: shows raw OKX fills and pairing results."""
+    client = client_manager.get_client()
+    client_ok = client is not None
+    demo = _env_demo
+
+    # Force cache bypass
+    global _fills_cache_ts
+    _fills_cache_ts = 0
+
+    raw_fills = await _fetch_okx_fills(limit=100)
+    paired = await _pair_fills(raw_fills)
+
+    # Show first 3 raw fills for inspection
+    sample_raw = []
+    for f in raw_fills[:3]:
+        sample_raw.append({
+            "instId": f.get("instId"),
+            "side": f.get("side"),
+            "fillPx": f.get("fillPx"),
+            "sz": f.get("sz"),
+            "pnl": f.get("pnl"),
+            "fee": f.get("fee"),
+            "ts": f.get("ts"),
+            "ordId": f.get("ordId"),
+        })
+
+    return {
+        "client_ok": client_ok,
+        "demo": demo,
+        "raw_fills_count": len(raw_fills),
+        "paired_count": len(paired),
+        "sample_raw": sample_raw,
+        "sample_paired": paired[:3],
+    }
+
 
 @app.get("/api/db/positions")
 async def get_db_positions():
