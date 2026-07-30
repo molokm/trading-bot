@@ -596,22 +596,66 @@ def _ms_to_iso(ts_ms: str) -> str:
         return ts_ms
 
 
-def _fill_to_trade(f: dict) -> dict:
+def _parse_fill_pnl(f: dict):
+    """Parse pnl from OKX fill. Returns float or None if unknown."""
+    raw = f.get("pnl")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_fill_sz(f: dict) -> float:
+    """Parse fill size from OKX fill. OKX uses 'fillSz' field."""
+    return float(f.get("fillSz", 0) or 0)
+
+
+def _is_close_fill(f: dict, direction: str = None) -> bool:
+    """Determine if a fill is closing a position.
+    Priority: 1) pnl field, 2) posSide+side, 3) direction tracking."""
+    pnl = _parse_fill_pnl(f)
+    if pnl is not None and pnl != 0:
+        return True
+    if pnl == 0:
+        return False
+
+    pos_side = f.get("posSide", "")
+    side = f.get("side", "")
+
+    if pos_side and pos_side != "net":
+        if (pos_side == "long" and side == "sell") or \
+           (pos_side == "short" and side == "buy"):
+            return True
+        return False
+
+    if direction:
+        if (direction == "long" and side == "sell") or \
+           (direction == "short" and side == "buy"):
+            return True
+
+    return False
+
+
+def _fill_to_trade(f: dict, is_close: bool = False) -> dict:
     """Convert a single OKX fill dict to our trade format for frontend."""
     side = f.get("side", "")
-    pnl = float(f.get("pnl", 0) or 0)
+    pnl = _parse_fill_pnl(f)
+    if pnl is None:
+        pnl = 0.0
     px = float(f.get("fillPx", 0) or 0)
-    sz = float(f.get("sz", 0) or 0)
+    sz = _parse_fill_sz(f)
     inst_id = f.get("instId", "")
-    is_close = pnl != 0
+    pos_side = f.get("posSide", "")
 
-    # Determine pos_side from side + close direction
-    # OKX: for long close → side=sell, pnl>0; for short close → side=buy, pnl>0
     if is_close:
-        pos_side = "long" if side == "sell" else "short"
+        if not pos_side or pos_side == "net":
+            pos_side = "long" if side == "sell" else "short"
         reason = "closed"
     else:
-        pos_side = "long" if side == "buy" else "short"
+        if not pos_side or pos_side == "net":
+            pos_side = "long" if side == "buy" else "short"
         reason = "open"
 
     trade = {
@@ -634,87 +678,134 @@ def _fill_to_trade(f: dict) -> dict:
 
 
 async def _pair_fills(fills: list[dict]) -> list[dict]:
-    """Pair OKX fills into entry+close trades. Returns list of trade dicts for frontend.
-    Strategy: group by instId, pair buy→sell (long) or sell→buy (short) sequentially.
-    Each fill with pnl!=0 is a close. Fills with pnl=0 are entries.
-    Side-consistency: long close (side=sell) must match buy entry; short close (side=buy) must match sell entry."""
-    # Separate entries and closes per instrument
-    by_inst: dict[str, dict] = {}  # inst_id -> {entries: [], closes: []}
+    """Pair OKX fills into entry+close trades using sequential direction tracking.
+    Works with or without pnl field (demo accounts may return pnl=null).
+    Uses posSide+side for entry/close detection, with direction tracking as fallback.
+    Calculates PnL from entry/exit prices when OKX pnl is not available."""
+    # Group by instrument
+    by_inst: dict[str, list] = {}
     for f in fills:
         inst = f.get("instId", "")
-        if inst not in by_inst:
-            by_inst[inst] = {"entries": [], "closes": []}
-        pnl = float(f.get("pnl", 0) or 0)
-        if pnl != 0:
-            by_inst[inst]["closes"].append(f)
-        else:
-            by_inst[inst]["entries"].append(f)
+        by_inst.setdefault(inst, []).append(f)
 
     paired = []
-    for inst_id, groups in by_inst.items():
-        # Sort entries by time ascending
-        entries = sorted(groups["entries"], key=lambda x: x.get("ts", "0"))
-        closes = sorted(groups["closes"], key=lambda x: x.get("ts", "0"))
+    for inst_id, inst_fills in by_inst.items():
+        inst_fills.sort(key=lambda x: x.get("ts", "0"))
 
-        # For each close, find the best matching entry with side-consistency
-        used_entries = set()
-        for close_f in closes:
-            close_ts = close_f.get("ts", "0")
-            close_side = close_f.get("side", "")
-            # Long close: side=sell → expected entry side=buy
-            # Short close: side=buy → expected entry side=sell
-            expected_entry_side = "buy" if close_side == "sell" else "sell"
+        # Sequential state tracking
+        direction = None  # "long" or "short" or None (flat)
+        entry_size = 0.0
+        entry_cost = 0.0  # total cost for weighted average price
+        entry_time = ""
+        entry_ord_id = ""
+        entry_fees = 0.0
+        entry_side = ""
 
-            best_entry = None
-            best_idx = -1
-            for i, entry_f in enumerate(entries):
-                if i in used_entries:
-                    continue
-                if entry_f.get("ts", "0") <= close_ts:
-                    best_entry = entry_f
-                    best_idx = i
-            # Prefer side-consistent match: pick latest entry with matching side
-            side_match = None
-            side_match_idx = -1
-            for i, entry_f in enumerate(entries):
-                if i in used_entries:
-                    continue
-                if entry_f.get("side", "") == expected_entry_side and entry_f.get("ts", "0") <= close_ts:
-                    side_match = entry_f
-                    side_match_idx = i
-            if side_match:
-                best_entry = side_match
-                best_idx = side_match_idx
+        for f in inst_fills:
+            fill_sz = _parse_fill_sz(f)
+            fill_px = float(f.get("fillPx", 0) or 0)
+            fill_side = f.get("side", "")
+            fill_ts = f.get("ts", "")
+            fill_pnl = _parse_fill_pnl(f)
+            fill_fee = float(f.get("fee", 0) or 0)
 
-            if best_entry:
-                used_entries.add(best_idx)
-                entry_px = float(best_entry.get("fillPx", 0) or 0)
-                exit_px = float(close_f.get("fillPx", 0) or 0)
-                pos_side = "long" if close_side == "sell" else "short"
-                paired.append({
-                    "time": _ms_to_iso(close_f.get("ts", "")),
-                    "side": close_side,
-                    "symbol": inst_id,
-                    "size": float(close_f.get("sz", 0) or 0),
-                    "pnl": float(close_f.get("pnl", 0) or 0),
-                    "ord_id": close_f.get("ordId", ""),
-                    "fee": close_f.get("fee", "0"),
-                    "entry": entry_px,
-                    "entry_price": entry_px,
-                    "exit_price": exit_px,
-                    "reason": "closed",
-                    "pos_side": pos_side,
-                    "inst_id": inst_id,
-                    "source": "okx",
-                })
+            is_close = _is_close_fill(f, direction)
+
+            if not is_close:
+                # Entry fill — accumulate into current position
+                if direction is None:
+                    direction = "long" if fill_side == "buy" else "short"
+                    entry_side = fill_side
+                entry_size += fill_sz
+                entry_cost += fill_sz * fill_px
+                entry_fees += fill_fee
+                if not entry_time:
+                    entry_time = fill_ts
+                if not entry_ord_id:
+                    entry_ord_id = f.get("ordId", "")
             else:
-                # Close without matching entry — show as closed with just exit price
-                paired.append(_fill_to_trade(close_f))
+                # Close fill
+                if entry_size > 0:
+                    close_size = min(fill_sz, entry_size)
+                    avg_entry = entry_cost / entry_size if entry_size > 0 else 0
 
-        # Remaining unpaired entries (open positions)
-        for i, entry_f in enumerate(entries):
-            if i not in used_entries:
-                paired.append(_fill_to_trade(entry_f))
+                    # Calculate PnL from prices if OKX doesn't provide it
+                    if fill_pnl is not None and fill_pnl != 0:
+                        calc_pnl = fill_pnl
+                    elif direction == "long":
+                        calc_pnl = (fill_px - avg_entry) * close_size
+                    else:
+                        calc_pnl = (avg_entry - fill_px) * close_size
+
+                    paired.append({
+                        "time": _ms_to_iso(fill_ts),
+                        "side": fill_side,
+                        "symbol": inst_id,
+                        "size": close_size,
+                        "pnl": round(calc_pnl, 4),
+                        "ord_id": f.get("ordId", ""),
+                        "fee": str(fill_fee),
+                        "entry": round(avg_entry, 4),
+                        "entry_price": round(avg_entry, 4),
+                        "exit_price": round(fill_px, 4),
+                        "reason": "closed",
+                        "pos_side": direction,
+                        "inst_id": inst_id,
+                        "source": "okx",
+                    })
+
+                    # Reduce remaining entry by closed amount
+                    entry_size -= close_size
+                    entry_cost = avg_entry * entry_size  # remaining cost at same avg price
+                    if entry_size <= 1e-10:
+                        direction = None
+                        entry_size = 0.0
+                        entry_cost = 0.0
+                        entry_time = ""
+                        entry_ord_id = ""
+                        entry_fees = 0.0
+                        entry_side = ""
+                else:
+                    # Close without matching entry — standalone
+                    pos_out = f.get("posSide", "")
+                    if not pos_out or pos_out == "net":
+                        pos_out = "long" if fill_side == "sell" else "short"
+                    paired.append({
+                        "time": _ms_to_iso(fill_ts),
+                        "side": fill_side,
+                        "symbol": inst_id,
+                        "size": fill_sz,
+                        "pnl": fill_pnl or 0.0,
+                        "ord_id": f.get("ordId", ""),
+                        "fee": str(fill_fee),
+                        "entry": 0,
+                        "entry_price": 0,
+                        "exit_price": round(fill_px, 4),
+                        "reason": "closed",
+                        "pos_side": pos_out,
+                        "inst_id": inst_id,
+                        "source": "okx",
+                    })
+
+        # Remaining unpaired entries (currently open positions)
+        if entry_size > 1e-10:
+            avg_entry = entry_cost / entry_size if entry_size > 0 else 0
+            paired.append({
+                "time": _ms_to_iso(entry_time),
+                "side": entry_side or ("buy" if direction == "long" else "sell"),
+                "symbol": inst_id,
+                "size": round(entry_size, 4),
+                "pnl": 0.0,
+                "ord_id": entry_ord_id,
+                "fee": str(round(entry_fees, 4)),
+                "entry": round(avg_entry, 4),
+                "entry_price": round(avg_entry, 4),
+                "exit_price": 0,
+                "reason": "open",
+                "pos_side": direction or "long",
+                "inst_id": inst_id,
+                "source": "okx",
+            })
 
     return paired
 
@@ -722,29 +813,31 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
 # ── PnL from OKX bills ──
 
 async def _get_okx_realized_pnl() -> dict:
-    """Calculate realized PnL from OKX close fills (pnl != 0). More reliable than bills."""
+    """Calculate realized PnL from paired trades. Works even when OKX pnl field is null (demo accounts)."""
     now_ms = int(_time.time() * 1000)
     periods = {"1d": 86400_000, "7d": 604800_000, "30d": 2592000_000}
     pnl = {"1d": 0.0, "7d": 0.0, "30d": 0.0}
 
     all_fills = await _fetch_okx_fills(limit=100)
+    paired = await _pair_fills(all_fills)
 
-    for f in all_fills:
+    for t in paired:
+        if t.get("reason") != "closed":
+            continue
         try:
-            fill_pnl = float(f.get("pnl", 0) or 0)
+            trade_pnl = float(t.get("pnl", 0) or 0)
         except (ValueError, TypeError):
             continue
-        if fill_pnl == 0:
-            continue  # Skip entries (pnl=0)
-        try:
-            fill_ts = int(f.get("ts", 0))
-        except (ValueError, TypeError):
+        time_str = t.get("time", "")
+        if not time_str:
             continue
-        if fill_ts == 0:
+        try:
+            trade_ts = int(datetime.fromisoformat(time_str).timestamp() * 1000)
+        except (ValueError, OSError, TypeError):
             continue
         for key, window in periods.items():
-            if fill_ts >= now_ms - window:
-                pnl[key] += fill_pnl
+            if trade_ts >= now_ms - window:
+                pnl[key] += trade_pnl
 
     return pnl
 
@@ -777,9 +870,10 @@ async def get_all_trades(limit: int = 100):
 
 
 @app.get("/api/trades/paired")
-async def get_paired_trades(limit: int = 15, begin: str = None, end: str = None):
+async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
     """Paired entry+close trades from OKX fills."""
-    raw_fills = await _fetch_okx_fills(limit=200)
+    fetch_limit = max(200, limit * 2)
+    raw_fills = await _fetch_okx_fills(limit=fetch_limit)
     paired = await _pair_fills(raw_fills)
     if begin or end:
         filtered = []
@@ -799,7 +893,7 @@ async def get_paired_trades(limit: int = 15, begin: str = None, end: str = None)
 
 @app.get("/api/debug/fills")
 async def debug_fills():
-    """Diagnostic endpoint: shows raw OKX fills and pairing results."""
+    """Diagnostic endpoint: shows raw OKX fills (ALL fields) and pairing results."""
     client = client_manager.get_client()
     client_ok = client is not None
     demo = _env_demo
@@ -811,27 +905,33 @@ async def debug_fills():
     raw_fills = await _fetch_okx_fills(limit=100)
     paired = await _pair_fills(raw_fills)
 
-    # Show first 3 raw fills for inspection
-    sample_raw = []
-    for f in raw_fills[:3]:
-        sample_raw.append({
-            "instId": f.get("instId"),
-            "side": f.get("side"),
-            "fillPx": f.get("fillPx"),
-            "sz": f.get("sz"),
-            "pnl": f.get("pnl"),
-            "fee": f.get("fee"),
-            "ts": f.get("ts"),
-            "ordId": f.get("ordId"),
-        })
+    # Show first raw fill with ALL fields for inspection
+    first_fill = raw_fills[0] if raw_fills else {}
+    # Also show one that might be a close (different side or later)
+    close_candidate = None
+    for f in raw_fills:
+        ps = f.get("posSide", "")
+        s = f.get("side", "")
+        if ps and ps != "net" and ((ps == "long" and s == "sell") or (ps == "short" and s == "buy")):
+            close_candidate = f
+            break
+
+    closed_trades = [t for t in paired if t.get("reason") == "closed"]
+    open_trades = [t for t in paired if t.get("reason") == "open"]
 
     return {
         "client_ok": client_ok,
         "demo": demo,
         "raw_fills_count": len(raw_fills),
         "paired_count": len(paired),
-        "sample_raw": sample_raw,
-        "sample_paired": paired[:3],
+        "closed_count": len(closed_trades),
+        "open_count": len(open_trades),
+        "first_fill_all_fields": first_fill,
+        "close_candidate_all_fields": close_candidate,
+        "sample_raw": raw_fills[:3],
+        "sample_closed": closed_trades[:3],
+        "sample_open": open_trades[:3],
+        "field_names": list(first_fill.keys()) if first_fill else [],
     }
 
 
