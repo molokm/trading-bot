@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Lock, Eye, EyeOff, Loader2, TrendingUp, Shield, User } from 'lucide-react'
 import { api } from '../services/api'
 
 export default function LoginPage({ onLogin }) {
+  const navigate = useNavigate()
   const [password, setPassword] = useState('')
   const [showPw, setShowPw] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -21,6 +23,7 @@ export default function LoginPage({ onLogin }) {
       localStorage.setItem('auth_token', res.token)
       localStorage.setItem('auth_role', res.role)
       onLogin?.(res.token, res.role)
+      navigate('/')
     } catch (e) {
       setError(e.message)
     }
@@ -34,6 +37,7 @@ export default function LoginPage({ onLogin }) {
       localStorage.setItem('auth_token', res.token)
       localStorage.setItem('auth_role', res.role)
       onLogin?.(res.token, res.role)
+      navigate('/')
     } catch (e) {
       setError(e.message)
     }
