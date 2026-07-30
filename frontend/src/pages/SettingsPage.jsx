@@ -2,10 +2,10 @@ import React, { useState, useEffect, useRef } from 'react'
 import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
-
-const TEST_STEP_LABELS = ['Подключение...', 'Аутентификация...', 'Проверка...']
+import { useTranslation } from '../hooks/useTranslation'
 
 export default function SettingsPage({ onConnected, onDemoMode }) {
+  const { t } = useTranslation()
   const [form, setForm] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
   const [backendConfig, setBackendConfig] = useState(null)
   const [showSecret, setShowSecret] = useState(false)
@@ -21,7 +21,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         setBackendConfig(h)
         setForm(f => ({ ...f, demo: h.env_demo }))
         if (h.has_credentials) {
-          setStatus({ ok: true, message: 'Подключено через .env' })
+          setStatus({ ok: true, message: t('settings.connected_env') })
           onConnected?.(true)
           onDemoMode?.(h.env_demo)
         }
@@ -37,9 +37,9 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const handleTest = async () => {
     setTesting(true); setStatus(null); setDangerConfirm(false)
     setTestSteps([
-      { label: TEST_STEP_LABELS[0], state: 'active' },
-      { label: TEST_STEP_LABELS[1], state: 'pending' },
-      { label: TEST_STEP_LABELS[2], state: 'pending' },
+      { label: t('settings.connecting'), state: 'active' },
+      { label: t('settings.authenticating'), state: 'pending' },
+      { label: t('settings.testing'), state: 'pending' },
     ])
     const t1 = setTimeout(() => {
       setTestSteps(prev => [
@@ -68,7 +68,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       }, 400)
       const t4 = setTimeout(() => {
         setTestSteps([])
-        setStatus({ ok: true, message: 'Подключение успешно!' })
+        setStatus({ ok: true, message: t('settings.connect_success') })
         onConnected?.(true); onDemoMode?.(form.demo)
         setTesting(false)
       }, 1200)
@@ -90,7 +90,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     setTesting(true); setStatus(null)
     try {
       await api.initCredentials(form)
-      setStatus({ ok: true, message: 'Ключи сохранены и подключены.' })
+      setStatus({ ok: true, message: t('settings.keys_saved') })
       onConnected?.(true); onDemoMode?.(form.demo)
     } catch (err) { setStatus({ ok: false, message: err.message }) }
     setTesting(false)
@@ -106,7 +106,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     localStorage.removeItem('okx_passphrase')
     localStorage.removeItem('okx_demo')
     setDangerConfirm(false)
-    setStatus({ ok: false, message: 'Все сохранённые учётные данные удалены.' })
+    setStatus({ ok: false, message: t('settings.keys_deleted') })
     onConnected?.(false)
   }
 
@@ -120,8 +120,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
       <div>
-        <h2 className="text-lg font-bold text-[var(--txt)]">Настройки</h2>
-        <p className="text-xs text-[var(--txt-muted)]">Подключение к OKX API и параметры безопасности</p>
+        <h2 className="text-lg font-bold text-[var(--txt)]">{t('settings.title')}</h2>
+        <p className="text-xs text-[var(--txt-muted)]">{t('settings.subtitle')}</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4">
@@ -129,9 +129,9 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         <div className="space-y-4">
           <div className="panel">
             <div className="panel-header">
-              <Key size={13} className="text-[var(--profit)]" /> API Ключи
+              <Key size={13} className="text-[var(--profit)]" /> {t('settings.api_keys')}
               {backendConfig?.has_credentials && (
-                <span className="ml-auto status-badge status-live"><span className="dot" /> Подключено</span>
+                <span className="ml-auto status-badge status-live"><span className="dot" /> {t('settings.connected')}</span>
               )}
             </div>
             <div className="p-4 space-y-4">
@@ -139,14 +139,14 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <div className="flex items-center gap-3 p-3 rounded-lg bg-[var(--info-dim)] border border-[var(--info)]/20">
                   <CheckCircle size={16} className="text-[var(--info)] shrink-0" />
                   <div className="text-xs text-[var(--txt-secondary)]">
-                    Ключи настроены через <code className="mono text-2xs text-[var(--info)]">.env</code>
+                    {t('settings.connected_via')} <code className="mono text-2xs text-[var(--info)]">.env</code>
                   </div>
                 </div>
               )}
 
               <div>
                 <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
-                  API Key <Tip text="Получите в OKX → API → Создать API ключ" />
+                  API Key <Tip text={t('settings.get_key_tip')} />
                 </label>
                 <input className="w-full mt-1.5" placeholder="OKX API Key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
               </div>
@@ -162,26 +162,26 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               </div>
 
               <div>
-                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Парольная фраза</label>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('settings.passphrase')}</label>
                 <input className="w-full mt-1.5" placeholder="OKX Passphrase" value={form.passphrase} onChange={e => setForm({ ...form, passphrase: e.target.value })} />
               </div>
 
               <label className="flex items-center gap-3 pt-2">
                 <input type="checkbox" checked={form.demo} onChange={e => setForm({ ...form, demo: e.target.checked })} />
                 <div>
-                  <span className="text-sm text-[var(--txt)] font-medium">Демо-режим</span>
-                  <p className="text-2xs text-[var(--txt-muted)]">Тестовая среда OKX с виртуальными средствами</p>
+                  <span className="text-sm text-[var(--txt)] font-medium">{t('settings.demo_mode')}</span>
+                  <p className="text-2xs text-[var(--txt-muted)]">{t('settings.demo_tip')}</p>
                 </div>
               </label>
 
               <div className="flex gap-3 pt-2">
                 <button className="btn btn-primary flex-1" onClick={handleTest} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
-                  Проверить
+                  {t('settings.test')}
                 </button>
                 <button className="btn btn-ghost flex-1" onClick={handleSave} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
-                  Сохранить
+                  {t('settings.save')}
                 </button>
               </div>
 
@@ -214,19 +214,19 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
           {/* Danger Zone */}
           <div className="panel border-[var(--loss)]/30">
             <div className="panel-header border-b-[var(--loss)]/20">
-              <AlertTriangle size={13} className="text-[var(--loss)]" /> Опасная зона
+              <AlertTriangle size={13} className="text-[var(--loss)]" /> {t('settings.danger_zone')}
             </div>
             <div className="p-4 flex items-start justify-between gap-4">
               <div>
-                <p className="text-xs font-medium text-[var(--txt)]">Удалить сохранённые учётные данные</p>
-                <p className="text-2xs text-[var(--txt-muted)] mt-1">Очистить все API ключи из localStorage браузера. Это действие необратимо.</p>
+                <p className="text-xs font-medium text-[var(--txt)]">{t('settings.delete_keys')}</p>
+                <p className="text-2xs text-[var(--txt-muted)] mt-1">{t('settings.delete_tip')}</p>
               </div>
               <button
                 className={`btn btn-sm shrink-0 ${dangerConfirm ? 'btn-danger' : 'btn-ghost'}`}
                 onClick={handleClearCredentials}
               >
                 <Trash2 size={12} />
-                {dangerConfirm ? 'Подтвердить удаление' : 'Удалить'}
+                {dangerConfirm ? t('settings.confirm_delete') : t('settings.delete')}
               </button>
             </div>
           </div>
@@ -235,14 +235,9 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         {/* Security Info */}
         <div className="space-y-3">
           <div className="panel">
-            <div className="panel-header"><Shield size={13} className="text-[var(--warn)]" /> Безопасность</div>
+            <div className="panel-header"><Shield size={13} className="text-[var(--warn)]" /> {t('settings.security')}</div>
             <div className="p-4 space-y-3">
-              {[
-                'Ключи хранятся только в вашем браузере (localStorage)',
-                'Сначала тестируйте в демо-режиме',
-                'Ключи не логируются и не передаются третьим лицам',
-                'Регулярно обновляйте API ключи в OKX',
-              ].map((text, i) => (
+              {[t('settings.security_tip_1'), t('settings.security_tip_2'), t('settings.security_tip_3'), t('settings.security_tip_4')].map((text, i) => (
                 <div key={i} className="flex items-start gap-2 text-xs text-[var(--txt-secondary)]">
                   <CheckCircle size={12} className="text-[var(--profit)] mt-0.5 shrink-0" />
                   {text}
@@ -252,13 +247,13 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
           </div>
 
           <div className="panel">
-            <div className="panel-header">Рекомендации</div>
+            <div className="panel-header">{t('settings.recommendations')}</div>
             <div className="p-4 space-y-2 text-2xs text-[var(--txt-muted)] leading-relaxed">
-              <p>1. Создайте отдельный API ключ с минимальными правами (только торговля)</p>
-              <p>2. Ограничьте IP-адреса в настройках API на OKX</p>
-              <p>3. Используйте 2FA для аккаунта OKX</p>
-              <p>4. Начинайте с малого — тестируйте на демо-счёте</p>
-              <p>5. Не рискуйте средствами, которые не можете позволить себе потерять</p>
+              <p>1. {t('settings.recommendation_1')}</p>
+              <p>2. {t('settings.recommendation_2')}</p>
+              <p>3. {t('settings.recommendation_3')}</p>
+              <p>4. {t('settings.recommendation_4')}</p>
+              <p>5. {t('settings.recommendation_5')}</p>
             </div>
           </div>
         </div>

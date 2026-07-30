@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, useCallback, useRef } f
 import { X, Info, AlertTriangle, CheckCircle, XCircle, HelpCircle, Moon, Sun, ChevronRight, ChevronLeft, SkipForward } from 'lucide-react'
 import { useTheme } from '../context/ThemeContext'
 import { useOnboarding } from '../context/OnboardingContext'
+import { useTranslation } from '../hooks/useTranslation'
 
 /* ═══════ Tooltip ═══════ */
 export function Tip({ text, className = '' }) {
@@ -124,7 +125,8 @@ export function Modal({ open, onClose, title, children, footer, wide }) {
 }
 
 /* ═══════ Confirm Dialog ═══════ */
-export function ConfirmDialog({ open, onClose, onConfirm, title, text, confirmText = 'Подтвердить', danger }) {
+export function ConfirmDialog({ open, onClose, onConfirm, title, text, confirmText, danger }) {
+  const { t } = useTranslation()
   return (
     <Modal
       open={open}
@@ -132,8 +134,8 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, text, confirmTe
       title={title}
       footer={
         <>
-          <button className="btn btn-ghost" onClick={onClose}>Отмена</button>
-          <button className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={() => { onConfirm(); onClose(); }}>{confirmText}</button>
+          <button className="btn btn-ghost" onClick={onClose}>{t('ui.cancel')}</button>
+          <button className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={() => { onConfirm(); onClose(); }}>{confirmText || t('ui.confirm')}</button>
         </>
       }
     >
@@ -145,8 +147,9 @@ export function ConfirmDialog({ open, onClose, onConfirm, title, text, confirmTe
 /* ═══════ Theme Toggle ═══════ */
 export function ThemeToggle() {
   const { theme, toggle } = useTheme()
+  const { t } = useTranslation()
   return (
-    <button className="btn-icon" onClick={toggle} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+    <button className="btn-icon" onClick={toggle} title={theme === 'dark' ? t('nav.light_theme') : t('nav.dark_theme')}>
       {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
     </button>
   )
@@ -155,6 +158,7 @@ export function ThemeToggle() {
 /* ═══════ Onboarding Tour ═══════ */
 export function OnboardingTour() {
   const { active, step, steps, next, prev, close } = useOnboarding()
+  const { t } = useTranslation()
   const [pos, setPos] = useState({ top: 0, left: 0 })
 
   useEffect(() => {
@@ -189,7 +193,7 @@ export function OnboardingTour() {
           <div className="flex gap-2">
             <button className="btn btn-ghost btn-sm" onClick={prev} disabled={step === 0}><ChevronLeft size={12} /></button>
             <button className="btn btn-ghost btn-sm" onClick={close}><SkipForward size={12} /></button>
-            <button className="btn btn-primary btn-sm" onClick={next}>{step < steps.length - 1 ? 'Далее' : 'Готово'} <ChevronRight size={12} /></button>
+            <button className="btn btn-primary btn-sm" onClick={next}>{step < steps.length - 1 ? t('ui.next') : t('ui.done')} <ChevronRight size={12} /></button>
           </div>
         </div>
       </div>
@@ -198,33 +202,37 @@ export function OnboardingTour() {
 }
 
 /* ═══════ Glossary Modal ═══════ */
-const GLOSSARY = [
-  { term: 'PnL (Прибыль/Убыток)', desc: 'Прибыль или убыток. Positive PnL = вы заработали, Negative PnL = вы потеряли.' },
-  { term: 'ROI', desc: 'Возврат инвестиций. (Текущая стоимость − Начальные вложения) / Начальные вложения × 100%.' },
-  { term: 'Win Rate (% прибыльных)', desc: 'Процент прибыльных сделок от общего числа. Win Rate 60% означает, что 60 из 100 сделок были прибыльными.' },
-  { term: 'Профит-фактор', desc: 'Отношение валовой прибыли к валовому убытку. PF > 1 — стратегия прибыльна. PF = 2 означает $2 прибыли на каждый $1 убытка.' },
-  { term: 'Коэффициент Шарпа', desc: 'Коэффициент Шарпа — меряет доходность относительно риска. > 1 — хорошо, > 2 — отлично, < 0 — лучше не торговать.' },
-  { term: 'Максимальная просадка', desc: 'Максимальное падение капитала от пика. MDD 20% означает, что в худший момент вы потеряли 20% от максимума.' },
-  { term: 'Тейк-профит (TP)', desc: 'Ордер на закрытие позиции с прибылью при достижении целевой цены.' },
-  { term: 'Стоп-лосс (SL)', desc: 'Ордер на закрытие позиции с убытком при достижении цены стопа для ограничения потерь.' },
-  { term: 'Трейлинг-стоп', desc: 'Плавающий стоп, который следует за ценой. Фиксирует прибыль, двигая стоп-уровень вслед за растущей ценой.' },
-  { term: 'Безубыток', desc: 'Безубыток — уровень цены, при котором позиция закрывается без прибыли и убытка (комиссии не учитываются).' },
-  { term: 'Стратегия Сетка', desc: 'Сеточная стратегия — расстановка лимитных ордеров на равных интервалах. Хорошо работает в боковике (флэте).' },
-  { term: 'DCA (Усреднение)', desc: 'Усреднение долларовой стоимости — покупка дополнительного объёма при падении цены для снижения средней цены входа.' },
-  { term: 'Скальпинг', desc: 'Скальпинг — множество быстрых сделок с малым профитом. Используется на волатильных рынках.' },
-  { term: 'ROE (Доходность капитала)', desc: 'Return on Equity — доходность вложенных средств. ROE 50% означает, что на каждый $1 маржи вы заработали $0.50.' },
-]
+export function getGlossary(t) {
+  return [
+    { term: t('ui.glossary_pnl_term'), desc: t('ui.glossary_pnl_desc') },
+    { term: t('ui.glossary_roi_term'), desc: t('ui.glossary_roi_desc') },
+    { term: t('ui.glossary_winrate_term'), desc: t('ui.glossary_winrate_desc') },
+    { term: t('ui.glossary_pfactor_term'), desc: t('ui.glossary_pfactor_desc') },
+    { term: t('ui.glossary_sharpe_term'), desc: t('ui.glossary_sharpe_desc') },
+    { term: t('ui.glossary_mdd_term'), desc: t('ui.glossary_mdd_desc') },
+    { term: t('ui.glossary_tp_term'), desc: t('ui.glossary_tp_desc') },
+    { term: t('ui.glossary_sl_term'), desc: t('ui.glossary_sl_desc') },
+    { term: t('ui.glossary_trail_term'), desc: t('ui.glossary_trail_desc') },
+    { term: t('ui.glossary_be_term'), desc: t('ui.glossary_be_desc') },
+    { term: t('ui.glossary_grid_term'), desc: t('ui.glossary_grid_desc') },
+    { term: t('ui.glossary_dca_term'), desc: t('ui.glossary_dca_desc') },
+    { term: t('ui.glossary_scalp_term'), desc: t('ui.glossary_scalp_desc') },
+    { term: t('ui.glossary_roe_term'), desc: t('ui.glossary_roe_desc') },
+  ]
+}
 
 export function GlossaryModal({ open, onClose }) {
+  const { t } = useTranslation()
   const [search, setSearch] = useState('')
-  const filtered = GLOSSARY.filter(g =>
+  const glossary = getGlossary(t)
+  const filtered = glossary.filter(g =>
     g.term.toLowerCase().includes(search.toLowerCase()) ||
     g.desc.toLowerCase().includes(search.toLowerCase())
   )
   return (
-    <Modal open={open} onClose={onClose} title="Глоссарий терминов" wide>
+    <Modal open={open} onClose={onClose} title={t('ui.glossary_title')} wide>
       <input
-        placeholder="Поиск термина..."
+        placeholder={t('ui.glossary_search')}
         value={search}
         onChange={e => setSearch(e.target.value)}
         className="w-full mb-4"
@@ -236,7 +244,7 @@ export function GlossaryModal({ open, onClose }) {
             <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{g.desc}</div>
           </div>
         ))}
-        {filtered.length === 0 && <p className="text-xs text-[var(--txt-muted)] text-center py-4">Ничего не найдено</p>}
+        {filtered.length === 0 && <p className="text-xs text-[var(--txt-muted)] text-center py-4">{t('ui.nothing_found')}</p>}
       </div>
     </Modal>
   )
@@ -277,10 +285,12 @@ export function Loader() {
 }
 
 /* ═══════ Strategy Description Tip ═══════ */
-export const STRATEGY_DESC = {
-  grid: 'Сеточная стратегия. Расставляет лимитные ордера на равных интервалах. Лучше всего работает в боковом рынке (флэте).',
-  dca: 'DCA (усреднение). Покупает дополнительный объём при падении цены. Снижает среднюю цену входа. Подходит для долгосрочных позиций.',
-  scalping: 'Скальпинг. Множество быстрых сделок с малым тейк-профитом. Эффективен на волатильных рынках с частыми движениями.',
-  momentum: 'Моментум. Входит в LONG при подтверждённом тренде (ROC, EMA, ADX). Выходит по трейлингу, безубытку или TP.',
-  custom: 'Кастомная стратегия. Вы сами определяете условия входа и выхода.',
+export function getStrategyDesc(t) {
+  return {
+    grid: t('ui.strategy_desc.grid'),
+    dca: t('ui.strategy_desc.dca'),
+    scalping: t('ui.strategy_desc.scalping'),
+    momentum: t('ui.strategy_desc.momentum'),
+    custom: t('ui.strategy_desc.custom'),
+  }
 }

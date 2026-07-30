@@ -2,8 +2,10 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Lock, Eye, EyeOff, Loader2, TrendingUp, Shield, User } from 'lucide-react'
 import { api } from '../services/api'
+import { useTranslation } from '../hooks/useTranslation'
 
 export default function LoginPage({ onLogin }) {
+  const { t } = useTranslation()
   const navigate = useNavigate()
   const [password, setPassword] = useState('')
   const [showPw, setShowPw] = useState(false)
@@ -55,7 +57,7 @@ export default function LoginPage({ onLogin }) {
               <TrendingUp size={28} className="text-white" />
             </div>
             <h1 className="text-xl font-bold text-[var(--txt)]">OKX Terminal</h1>
-            <p className="text-xs text-[var(--txt-muted)]">Вход в панель управления</p>
+            <p className="text-xs text-[var(--txt-muted)]">{t('login.title')}</p>
           </div>
 
           {error && (
@@ -66,12 +68,12 @@ export default function LoginPage({ onLogin }) {
 
           {hasPassword && (
             <div className="space-y-2">
-              <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Пароль</label>
+              <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('login.password')}</label>
               <div className="relative">
                 <input
                   type={showPw ? 'text' : 'password'}
                   className="w-full pr-10"
-                  placeholder="Введите пароль"
+                  placeholder={t('login.placeholder')}
                   value={password}
                   onChange={e => setPassword(e.target.value)}
                   onKeyDown={e => e.key === 'Enter' && handleLogin()}
@@ -91,14 +93,14 @@ export default function LoginPage({ onLogin }) {
                 disabled={loading || !password}
               >
                 {loading ? <Loader2 size={14} className="animate-spin" /> : <Lock size={14} />}
-                {loading ? 'Вход...' : 'Войти'}
+                {loading ? t('login.submitting') : t('login.submit')}
               </button>
             </div>
           )}
 
           <div className="relative">
             <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-[var(--border)]" /></div>
-            <div className="relative flex justify-center"><span className="bg-[var(--surface)] px-2 text-2xs text-[var(--txt-muted)]">или</span></div>
+            <div className="relative flex justify-center"><span className="bg-[var(--surface)] px-2 text-2xs text-[var(--txt-muted)]">{t('login.or')}</span></div>
           </div>
 
           <button
@@ -107,16 +109,16 @@ export default function LoginPage({ onLogin }) {
             disabled={loading}
           >
             {loading ? <Loader2 size={14} className="animate-spin" /> : <User size={14} />}
-            Гостевой режим (только просмотр)
+            {t('login.guest')}
           </button>
 
           {!hasPassword && (
-            <p className="text-2xs text-center text-[var(--txt-muted)]">Пароль не установлен — вход без авторизации</p>
+            <p className="text-2xs text-center text-[var(--txt-muted)]">{t('login.no_password')}</p>
           )}
 
           <div className="flex items-center justify-center gap-2 text-2xs text-[var(--txt-muted)] pt-2">
             <Shield size={12} />
-            <span>Все данные передаются по HTTPS</span>
+            <span>{t('login.https_note')}</span>
           </div>
         </div>
       </div>

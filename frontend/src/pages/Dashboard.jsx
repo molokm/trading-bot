@@ -6,23 +6,9 @@ import {
 } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
+import { useTranslation } from '../hooks/useTranslation'
 
 const PAIRS = ['Все', 'BTC', 'ETH', 'SOL', 'BNB']
-const REASON_MAP = {
-  tp: { label: 'TP', color: 'text-[var(--profit)]' },
-  sl: { label: 'SL', color: 'text-[var(--loss)]' },
-  trail: { label: 'Трейл', color: 'text-[var(--info)]' },
-  breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
-  manual: { label: 'Ручной', color: 'text-[var(--txt-secondary)]' },
-  roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
-  range_target: { label: 'Флэт', color: 'text-[var(--info)]' },
-}
-const STAGE_MAP = {
-  initial:    { label: 'Начальная', color: 'text-[var(--txt-muted)]' },
-  sl1_trimmed:{ label: 'SL1',    color: 'text-[var(--loss)]' },
-  breakeven:  { label: 'BE',     color: 'text-[var(--warn)]' },
-  trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
-}
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
 function AnimatedValue({ children, className = '' }) {
@@ -79,6 +65,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   // Persisted uptime — calculated from server-side started_at
   const [uptimeSec, setUptimeSec] = useState(0)
   const uptimeRef = useRef(null)
+
+  const { t, locale } = useTranslation()
+
+  const REASON_MAP = {
+    tp: { label: 'TP', color: 'text-[var(--profit)]' },
+    sl: { label: 'SL', color: 'text-[var(--loss)]' },
+    trail: { label: t('reason.trail'), color: 'text-[var(--info)]' },
+    breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
+    manual: { label: t('reason.manual'), color: 'text-[var(--txt-secondary)]' },
+    roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
+    range_target: { label: t('reason.range_target'), color: 'text-[var(--info)]' },
+  }
+  const STAGE_MAP = {
+    initial:    { label: t('stage.initial'), color: 'text-[var(--txt-muted)]' },
+    sl1_trimmed:{ label: 'SL1',    color: 'text-[var(--loss)]' },
+    breakeven:  { label: 'BE',     color: 'text-[var(--warn)]' },
+    trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
+  }
 
   useEffect(() => {
     const started = momentumStatus?.started_at
@@ -296,13 +300,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     try {
       await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross')
       loadData()
-    } catch (e) { alert('Ошибка: ' + e.message) }
+    } catch (e) { alert(t('dash.error') + e.message) }
     finally { setClosing(null) }
   }
 
   const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
-  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '---'
+  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '---'
 
   return (
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
@@ -310,14 +314,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
       <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 lg:grid-cols-6 gap-3">
         <MetricCard
-          label="Баланс"
+          label={t('dash.balance')}
           value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
           mono
-          tip="Общая стоимость портфеля по рыночным ценам"
+          tip={t('dash.balance_tip')}
           sparkData={sparkData[0]}
         />
         <MetricCard
-          label="Нереализ. PnL"
+          label={t('dash.unrealized')}
           value={
             <AnimatedValue className={unrealizedPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
               {unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
@@ -325,11 +329,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
           changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
           mono
-          tip="Нереализованная прибыль/убыток по открытым позициям"
+          tip={t('dash.unrealized_tip')}
           sparkData={sparkData[1]}
         />
         <MetricCard
-          label="PnL сегодня"
+          label={t('dash.pnl_day')}
           value={
             <AnimatedValue className={pnlDay >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
               {pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
@@ -337,11 +341,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
           mono
-          tip="Реализованная прибыль/убыток за последние 24 часа"
+          tip={t('dash.pnl_day_tip')}
           sparkData={sparkData[2]}
         />
         <MetricCard
-          label="PnL неделя"
+          label={t('dash.pnl_week')}
           value={
             <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
               {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
@@ -349,14 +353,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
           changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
           mono
-          tip="Реализованная прибыль/убыток за 7 дней"
+          tip={t('dash.pnl_week_tip')}
           sparkData={sparkData[3]}
         />
         <MetricCard
-          label="Позиций"
+          label={t('dash.positions_count')}
           value={<AnimatedValue>{positions.length}</AnimatedValue>}
           mono
-          tip="Количество открытых позиций"
+          tip={t('dash.positions_count_tip')}
           sparkData={sparkData[4]}
         />
         <MetricCard
@@ -365,7 +369,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           change={`${btcChange}%`}
           changeType={parseFloat(btcChange) >= 0 ? 'positive' : 'negative'}
           mono
-          tip="Текущая цена Bitcoin-USDT Perpetual Swap"
+          tip={t('dash.btc_tip')}
           sparkData={sparkData[5]}
         />
       </div>
@@ -380,22 +384,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
-              Открытые позиции
+              {t('dash.open_positions')}
               <span className="ml-auto text-[var(--txt-muted)]">{positions.length}</span>
             </div>
             <div className="flex-1 overflow-auto">
               {loading ? (
                 <div className="flex items-center justify-center py-12"><Loader /></div>
               ) : positions.length === 0 ? (
-                <EmptyState icon={Zap} text="Нет открытых позиций" sub="Позиции появятся после запуска бота" />
+                <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Пара</th>
-                      <th className="text-right">Размер</th>
-                      <th className="text-right">Вход</th>
-                      <th className="text-right">Марка</th>
+                      <th>{t('dash.pair')}</th>
+                      <th className="text-right">{t('dash.size')}</th>
+                      <th className="text-right">{t('dash.entry')}</th>
+                      <th className="text-right">{t('dash.mark')}</th>
                       <th className="text-right">PnL</th>
                       <th className="text-right">ROE</th>
                       {isAdmin(isGuest) ? null : <th className="text-right"></th>}
@@ -431,7 +435,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                                 disabled={closing === posId}
                               >
                                 {closing === posId ? <Loader /> : <XCircle size={11} />}
-                                Закрыть
+                                {t('dash.close')}
                               </button>
                             </td>
                           )}
@@ -448,11 +452,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
-              Сделки
+              {t('dash.trades')}
               <div className="ml-auto flex gap-1">
                 {['all', 'win', 'loss'].map(f => (
                   <Chip key={f} active={filterResult === f} onClick={() => setFilterResult(f)}>
-                    {f === 'all' ? 'Все' : f === 'win' ? 'Прибыль' : 'Убыток'}
+                    {f === 'all' ? t('dash.all') : f === 'win' ? t('dash.profit') : t('dash.loss')}
                   </Chip>
                 ))}
               </div>
@@ -460,16 +464,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             {activeTrades.length > 0 && (
               <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
                 <span className="text-[var(--txt-muted)]">
-                  Показано: <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
+                  {t('dash.shown')} <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
                 </span>
                 <span className="text-[var(--txt-muted)]">
-                  Сумма PnL: <span className={`mono font-bold ${tradesSummary.totalPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tradesSummary.totalPnl >= 0 ? '+' : ''}{tradesSummary.totalPnl.toFixed(2)}</span>
+                  {t('dash.total_pnl')} <span className={`mono font-bold ${tradesSummary.totalPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tradesSummary.totalPnl >= 0 ? '+' : ''}{tradesSummary.totalPnl.toFixed(2)}</span>
                 </span>
                 <span className="text-[var(--txt-muted)]">
-                  Прибыльных: <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
+                  {t('dash.win_count')} <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
                 </span>
                 <span className="text-[var(--txt-muted)]">
-                  Убыточных: <span className="mono text-[var(--loss)] font-medium">{tradesSummary.losses}</span>
+                  {t('dash.loss_count')} <span className="mono text-[var(--loss)] font-medium">{tradesSummary.losses}</span>
                 </span>
               </div>
             )}
@@ -477,70 +481,70 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Время</th>
-                    <th>Пара</th>
-                    <th>Напр.</th>
-                    <th className="text-right">Вход</th>
+                    <th>{t('dash.time')}</th>
+                    <th>{t('dash.pair')}</th>
+                    <th>{t('dash.direction')}</th>
+                    <th className="text-right">{t('dash.entry')}</th>
                     <th className="text-right">SL</th>
                     <th className="text-right">TP1</th>
-                    <th className="text-right">Стадия</th>
-                    <th className="text-right">Размер</th>
+                    <th className="text-right">{t('dash.stage')}</th>
+                    <th className="text-right">{t('dash.size')}</th>
                     <th className="text-right">PnL</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 30).map((t, i) => {
-                    const isOpen = t.type === 'open'
-                    const pnlVal = parseFloat(t.pnl || 0)
+                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 30).map((tr, i) => {
+                    const isOpen = tr.type === 'open'
+                    const pnlVal = parseFloat(tr.pnl || 0)
                     const stageInfo = isOpen
-                      ? (STAGE_MAP[t.stage] || { label: t.stage, color: 'text-[var(--txt-muted)]' })
-                      : (REASON_MAP[t.reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]' })
+                      ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
+                      : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
                     return (
-                      <tr key={`${t.type}_${t.inst_id || t.symbol}_${i}`}
+                      <tr key={`${tr.type}_${tr.inst_id || tr.symbol}_${i}`}
                         style={isOpen ? {
-                          background: t.side === 'buy'
+                          background: tr.side === 'buy'
                             ? 'linear-gradient(90deg, rgba(0,255,136,0.04) 0%, transparent 40%)'
                             : 'linear-gradient(90deg, rgba(255,51,102,0.04) 0%, transparent 40%)',
-                          boxShadow: `inset 2px 0 0 ${t.side === 'buy' ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
+                          boxShadow: `inset 2px 0 0 ${tr.side === 'buy' ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
                         } : undefined}>
-                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.time)}</td>
-                        <td className="text-[var(--txt)] font-medium">{t.symbol || t.inst_id?.replace('-USDT-SWAP', '') || '-'}</td>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.time)}</td>
+                        <td className="text-[var(--txt)] font-medium">{tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}</td>
                         <td>
-                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${t.side === 'buy' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                            {t.side === 'buy' ? 'L' : 'S'}
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${tr.side === 'buy' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                            {tr.side === 'buy' ? 'L' : 'S'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">{t.entry ? `$${t.entry.toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
+                        <td className="text-right mono text-2xs">{tr.entry ? `$${tr.entry.toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
                         <td className="text-right mono text-2xs">
-                          {isOpen && t.stop ? (
-                            <span className="text-[var(--loss)]">${t.stop.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
-                          ) : (t.type === 'closed' && t.exit) ? (
-                            <span className="text-[var(--txt-muted)]">${parseFloat(t.exit).toLocaleString()}</span>
+                          {isOpen && tr.stop ? (
+                            <span className="text-[var(--loss)]">${tr.stop.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                          ) : (tr.type === 'closed' && tr.exit) ? (
+                            <span className="text-[var(--txt-muted)]">${parseFloat(tr.exit).toLocaleString()}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right mono text-2xs">
-                          {isOpen && t.tp1 ? (
-                            <span className="text-[var(--profit)]">${t.tp1.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                          {isOpen && tr.tp1 ? (
+                            <span className="text-[var(--profit)]">${tr.tp1.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right">
                           <span className={`text-2xs font-medium ${stageInfo.color}`}>{stageInfo.label}</span>
-                          {isOpen && t.pos_mode && t.pos_mode !== 'trend' && (
-                            <span className="text-2xs text-[var(--txt-muted)] ml-1">({t.pos_mode})</span>
+                          {isOpen && tr.pos_mode && tr.pos_mode !== 'trend' && (
+                            <span className="text-2xs text-[var(--txt-muted)] ml-1">({tr.pos_mode})</span>
                           )}
                         </td>
                         <td className="text-right mono text-2xs">
                           {isOpen ? (
-                            <span>{t.size_remaining?.toFixed(2)}/{t.size?.toFixed(2)}</span>
+                            <span>{tr.size_remaining?.toFixed(2)}/{tr.size?.toFixed(2)}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right">
-                          {t.pnl != null ? (
+                          {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
                           ) : (
-                            <span className="text-2xs text-[var(--info)]">активна</span>
+                            <span className="text-2xs text-[var(--info)]">{t('dash.active')}</span>
                           )}
                         </td>
                       </tr>
@@ -548,7 +552,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   })}
                 </tbody>
               </table>
-              {activeTrades.length === 0 && <EmptyState icon={ScrollText} text="Сделок пока нет" />}
+              {activeTrades.length === 0 && <EmptyState icon={ScrollText} text={t('dash.no_trades')} />}
             </div>
           </div>
         </div>
@@ -560,18 +564,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Filter size={13} className="text-[var(--info)]" />
-              Фильтры
+              {t('dash.filters')}
             </div>
             <div className="p-3 space-y-2">
-              <div className="text-2xs text-[var(--txt-muted)] mb-1">Инструмент</div>
+              <div className="text-2xs text-[var(--txt-muted)] mb-1">{t('dash.instrument')}</div>
               <div className="flex flex-wrap gap-1">
                 {PAIRS.map(p => (
-                  <Chip key={p} active={filterPair === p} onClick={() => setFilterPair(p)}>{p}</Chip>
+                  <Chip key={p} active={filterPair === p} onClick={() => setFilterPair(p)}>{p === 'Все' ? t('dash.all') : p}</Chip>
                 ))}
               </div>
-              <div className="text-2xs text-[var(--txt-muted)] mb-1 mt-3">Причина выхода</div>
+              <div className="text-2xs text-[var(--txt-muted)] mb-1 mt-3">{t('dash.exit_reason')}</div>
               <div className="flex flex-wrap gap-1">
-                {[{ k: 'all', l: 'Все' }, { k: 'tp', l: 'TP' }, { k: 'sl', l: 'SL' }, { k: 'trail', l: 'Trail' }, { k: 'breakeven', l: 'BE' }, { k: 'manual', l: 'Manual' }].map(r => (
+                {[{ k: 'all', l: t('dash.all') }, { k: 'tp', l: 'TP' }, { k: 'sl', l: 'SL' }, { k: 'trail', l: 'Trail' }, { k: 'breakeven', l: 'BE' }, { k: 'manual', l: 'Manual' }].map(r => (
                   <Chip key={r.k} active={filterReason === r.k} onClick={() => setFilterReason(r.k)}>{r.l}</Chip>
                 ))}
               </div>
@@ -582,9 +586,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--warn)]" />
-              Бот Momentum
-              {momentumStatus?.running && <StatusBadge mode="live" label="Работает" />}
-              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label="Остановлен" />}
+              {t('dash.momentum_bot')}
+              {momentumStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
             <div className="flex-1 overflow-auto p-3 space-y-3">
               {momentumStatus?.running ? (
@@ -593,26 +597,26 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <div className="flex items-center justify-between px-3 py-2 rounded-md bg-[var(--bg)] border border-[var(--border)]">
                     <div className="flex items-center gap-1.5">
                       <Clock size={12} className="text-[var(--profit)]" />
-                      <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">Время работы</span>
+                      <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">{t('dash.uptime')}</span>
                     </div>
                     <span className="mono text-sm font-bold text-[var(--profit)]">{formatUptime(uptimeSec)}</span>
                   </div>
 
                   <div className="grid grid-cols-2 gap-2">
                     <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Капитал</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.capital')}</div>
                       <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">${momentumStatus.equity?.toLocaleString() || '---'}</div>
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Позиций</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
                       <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 4}</div>
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Сделок</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.trades_count')}</div>
                       <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.total_trades || 0}</div>
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Риск</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.risk')}</div>
                       <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{(momentumStatus.config?.risk_per_trade != null ? momentumStatus.config.risk_per_trade * 100 : 3).toFixed(0)}%</div>
                     </div>
                   </div>
@@ -620,7 +624,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   {/* Open bot positions — compact summary in sidebar */}
                   {momentumStatus.open_positions?.length > 0 && (
                     <div>
-                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Позиции бота</div>
+                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">{t('dash.bot_positions')}</div>
                       <div className="space-y-1">
                         {momentumStatus.open_positions.map((p, i) => {
                           const isLong = p.side !== 'short'
@@ -645,7 +649,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   {/* Recent bot trades */}
                   {momentumTrades.length > 0 && (
                     <div>
-                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">Лог бота</div>
+                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">{t('dash.bot_log')}</div>
                       <div className="space-y-1">
                         {momentumTrades.slice(0, 15).map((tr, i) => {
                           const isBuy = tr.side === 'buy'
@@ -660,7 +664,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                                   {tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}
                                 </span>
                               )}
-                              <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                              <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
                             </div>
                           )
                         })}
@@ -673,19 +677,19 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       className="btn btn-danger btn-sm w-full"
                       onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}
                     >
-                      <Square size={12} /> Остановить бота
+                      <Square size={12} /> {t('dash.stop_bot')}
                     </button>
                   )}
                 </>
               ) : (
                 <div className="text-center py-6">
-                  <p className="text-xs text-[var(--txt-muted)] mb-3">Бот не запущен</p>
+                  <p className="text-xs text-[var(--txt-muted)] mb-3">{t('dash.bot_not_running')}</p>
                   {!isGuest && (
                     <button
                       className="btn btn-primary btn-sm"
                       onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}
                     >
-                      <Play size={12} /> Запустить
+                      <Play size={12} /> {t('dash.start')}
                     </button>
                   )}
                 </div>
@@ -711,24 +715,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             <div className="p-3">
               {ticker && (
                 <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-[var(--border)]">
-                  <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">Тренд</span>
+                  <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">{t('dash.trend')}</span>
                   <Sparkline data={btcSparkData} />
                 </div>
               )}
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-2xs">
                 {ticker ? [
-                  { l: 'Послед.', v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
-                  { l: 'Бид', v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: 'Аск', v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                  { l: 'Макс 24ч', v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: 'Мин 24ч', v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                  { l: t('dash.last'), v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
+                  { l: t('dash.bid'), v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: t('dash.ask'), v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
+                  { l: t('dash.high_24h'), v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
+                  { l: t('dash.low_24h'), v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
                 ].map(item => (
                   <div key={item.l} className="flex justify-between">
                     <span className="text-[var(--txt-muted)]">{item.l}</span>
                     <span className={`mono font-medium ${item.c}`}>{item.v}</span>
                   </div>
                 )) : (
-                  <span className="text-[var(--txt-muted)] col-span-2 text-center py-2">Нет данных</span>
+                  <span className="text-[var(--txt-muted)] col-span-2 text-center py-2">{t('dash.no_data')}</span>
                 )}
               </div>
             </div>

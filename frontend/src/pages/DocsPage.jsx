@@ -1,55 +1,61 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react'
 import { BookOpen, ChevronRight, Bot, BarChart3, TrendingUp, Settings2, Zap, AlertTriangle, Search } from 'lucide-react'
-import { STRATEGY_DESC } from '../components/ui'
+import { useTranslation } from '../hooks/useTranslation'
+import { getStrategyDesc } from '../components/ui'
 
-const SECTIONS = [
-  {
-    id: 'getting-started',
-    title: 'Начало работы',
-    icon: BookOpen,
-    items: [
-      { title: 'Подключение к OKX', text: 'Перейдите в раздел Settings и введите API ключи. Рекомендуется начать с демо-режима. API ключи создаются в OKX → API → Создать API ключ. Для бота достаточно прав «Торговля».' },
-      { title: 'Запуск первого бота', text: 'На странице Bots нажмите «Новый бот». Выберите стратегию Momentum, настройте параметры риска и нажмите «Сохранить». Затем нажмите «Start» на карточке бота.' },
-      { title: 'Мониторинг', text: 'На Dashboard отображаются все открытые позиции, PnL в реальном времени и лог бота. Используйте фильтры для быстрого поиска по сделкам.' },
-    ],
-  },
-  {
-    id: 'strategies',
-    title: 'Стратегии',
-    icon: Bot,
-    items: [
-      { title: 'Momentum', text: STRATEGY_DESC.momentum + '\n\nПараметры: риск на сделку, макс. позиций, трейлинг стоп, безубыток, TP1, каскадный SL, ADX порог.' },
-      { title: 'Grid', text: STRATEGY_DESC.grid + '\n\nПараметры: размер позиции, уровни сетки, шаг сетки, макс. позиций, TP, SL.' },
-      { title: 'DCA', text: STRATEGY_DESC.dca + '\n\nПараметры: размер позиции, количество DCA ордеров, шаг DCA, TP.' },
-      { title: 'Scalping', text: STRATEGY_DESC.scalping + '\n\nПараметры: размер позиции, TP, SL, макс. позиций, интервал опроса.' },
-    ],
-  },
-  {
-    id: 'backtesting',
-    title: 'Бэктестинг',
-    icon: BarChart3,
-    items: [
-      { title: 'Запуск бэктеста', text: 'На странице Backtest выберите инструменты, период и таймфрейм. Нажмите «Запустить» — через несколько секунд появятся результаты.' },
-      { title: 'Чтение метрик', text: 'Total Return — общая доходность. Win Rate — % прибыльных сделок. Profit Factor — отношение прибыли к убытку (> 1 = хорошо). Sharpe Ratio — доходность относительно риска (> 1 = хорошо). Max Drawdown — максимальное падение капитала.' },
-      { title: 'Сравнение стратегий', text: 'Активируйте режим Compare и запустите несколько бэктестов с разными параметрами. Лучшая стратегия отмечена звёздочкой.' },
-      { title: 'Экспорт', text: 'Результаты бэктеста можно экспортировать в CSV для дальнейшего анализа в Excel или Python.' },
-    ],
-  },
-  {
-    id: 'risk',
-    title: 'Управление рисками',
-    icon: AlertTriangle,
-    items: [
-      { title: 'Риск-менеджмент', text: 'Никогда не рискуйте более 2-3% капитала на одну сделку. Используйте Stop Loss на каждой позиции. Начинайте с демо-режима.' },
-      { title: 'Проскальзывание', text: 'На волатильных рынках фактическая цена исполнения может отличаться от ожидаемой. Учитывайте это при установке tight стопов.' },
-    ],
-  },
-]
+function getSections(t) {
+  return [
+    {
+      id: 'getting-started',
+      title: t('docs.sec_getting_started'),
+      icon: BookOpen,
+      items: [
+        { title: t('docs.getting_connected_title'), text: t('docs.getting_connected_text') },
+        { title: t('docs.first_bot_title'), text: t('docs.first_bot_text') },
+        { title: t('docs.monitoring_title'), text: t('docs.monitoring_text') },
+      ],
+    },
+    {
+      id: 'strategies',
+      title: t('docs.sec_strategies'),
+      icon: Bot,
+      items: [
+        { title: t('docs.strat_momentum_title'), text: getStrategyDesc(t).momentum + '\n\n' + t('docs.strat_params') + t('docs.strat_momentum_params') },
+        { title: t('docs.strat_grid_title'), text: getStrategyDesc(t).grid + '\n\n' + t('docs.strat_params') + t('docs.strat_grid_params') },
+        { title: t('docs.strat_dca_title'), text: getStrategyDesc(t).dca + '\n\n' + t('docs.strat_params') + t('docs.strat_dca_params') },
+        { title: t('docs.strat_scalping_title'), text: getStrategyDesc(t).scalping + '\n\n' + t('docs.strat_params') + t('docs.strat_scalping_params') },
+      ],
+    },
+    {
+      id: 'backtesting',
+      title: t('docs.sec_backtesting'),
+      icon: BarChart3,
+      items: [
+        { title: t('docs.bt_run_title'), text: t('docs.bt_run_text') },
+        { title: t('docs.bt_metrics_title'), text: t('docs.bt_metrics_text') },
+        { title: t('docs.bt_compare_title'), text: t('docs.bt_compare_text') },
+        { title: t('docs.bt_export_title'), text: t('docs.bt_export_text') },
+      ],
+    },
+    {
+      id: 'risk',
+      title: t('docs.sec_risk'),
+      icon: AlertTriangle,
+      items: [
+        { title: t('docs.risk_mgmt_title'), text: t('docs.risk_mgmt_text') },
+        { title: t('docs.slippage_title'), text: t('docs.slippage_text') },
+      ],
+    },
+  ]
+}
 
 export default function DocsPage() {
+  const { t } = useTranslation()
   const [active, setActive] = useState(0)
   const [search, setSearch] = useState('')
   const breadcrumbRef = useRef(null)
+
+  const SECTIONS = useMemo(() => getSections(t), [t])
   const section = SECTIONS[active]
 
   const filteredSections = useMemo(() => {
@@ -64,7 +70,7 @@ export default function DocsPage() {
         ),
       }))
       .filter(s => s.items.length > 0)
-  }, [search])
+  }, [search, SECTIONS])
 
   const displaySections = search.trim() ? filteredSections : [section]
 
@@ -123,7 +129,7 @@ export default function DocsPage() {
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-[var(--txt-muted)]" />
               <input
                 className="w-full pl-9 !py-2 !text-xs"
-                placeholder="Поиск по документации..."
+                placeholder={t('docs.search')}
                 value={search}
                 onChange={e => setSearch(e.target.value)}
               />
@@ -131,7 +137,7 @@ export default function DocsPage() {
 
             {search.trim() && (
               <p className="text-2xs text-[var(--txt-muted)]">
-                Найдено {filteredSections.reduce((acc, s) => acc + s.items.length, 0)} результатов
+                {t('docs.results', { count: filteredSections.reduce((acc, s) => acc + s.items.length, 0) })}
               </p>
             )}
 
@@ -161,8 +167,8 @@ export default function DocsPage() {
             {search.trim() && filteredSections.length === 0 && (
               <div className="text-center py-12">
                 <Search size={32} className="text-[var(--txt-muted)] mx-auto mb-3" />
-                <p className="text-sm text-[var(--txt-muted)]">Ничего не найдено</p>
-                <p className="text-2xs text-[var(--txt-muted)] mt-1">Попробуйте изменить запрос</p>
+                <p className="text-sm text-[var(--txt-muted)]">{t('docs.no_results')}</p>
+                <p className="text-2xs text-[var(--txt-muted)] mt-1">{t('docs.no_results_hint')}</p>
               </div>
             )}
           </div>

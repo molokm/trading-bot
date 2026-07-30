@@ -2,7 +2,7 @@ import React, { useState, useEffect, createContext, useContext, lazy, Suspense }
 import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, Bot, BarChart3, ScrollText, Settings, BookOpen,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, ChevronDown, X
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, ChevronDown, X, Globe
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
 import { Loader } from './components/ui'
@@ -17,6 +17,7 @@ const DocsPage = lazy(() => import('./pages/DocsPage'))
 import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
+import { TranslationProvider, useTranslation } from './hooks/useTranslation'
 import { GlossaryModal, OnboardingTour } from './components/ui'
 
 const AuthContext = createContext()
@@ -31,6 +32,7 @@ function AppRouter() {
 function AppLayout() {
   const { auth, setAuth } = useAuth()
   const { theme, toggle } = useTheme()
+  const { t, lang, setLang } = useTranslation()
   const navigate = useNavigate()
   const location = useLocation()
   const [connected, setConnected] = useState(false)
@@ -67,12 +69,12 @@ function AppLayout() {
   }
 
   const navItems = [
-    { to: '/', icon: LayoutDashboard, label: 'Панель' },
-    { to: '/bots', icon: Bot, label: 'Боты' },
-    { to: '/backtest', icon: BarChart3, label: 'Бэктест' },
-    { to: '/chart', icon: BarChart3, label: 'График' },
-    { to: '/history', icon: ScrollText, label: 'История' },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: 'Настройки' }] : []),
+    { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
+    { to: '/bots', icon: Bot, label: t('nav.bots') },
+    { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
+    { to: '/chart', icon: BarChart3, label: t('nav.chart') },
+    { to: '/history', icon: ScrollText, label: t('nav.history') },
+    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
   ]
 
   return (
@@ -122,21 +124,27 @@ function AppLayout() {
           {/* User role */}
           <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[var(--bg)] border border-[var(--border)]">
             {isGuest ? <User size={12} className="text-[var(--info)]" /> : <Shield size={12} className="text-[var(--profit)]" />}
-            <span className="text-2xs font-medium text-[var(--txt-secondary)]">{isGuest ? 'Гость' : 'Админ'}</span>
+            <span className="text-2xs font-medium text-[var(--txt-secondary)]">{isGuest ? t('nav.guest') : t('nav.admin')}</span>
           </div>
 
           {/* Glossary */}
-          <button className="btn-icon" onClick={() => setGlossaryOpen(true)} title="Глоссарий">
+          <button className="btn-icon" onClick={() => setGlossaryOpen(true)} title={t('nav.glossary')}>
             <HelpCircle size={15} />
           </button>
 
+          {/* Language toggle */}
+          <button className="btn-icon" onClick={() => setLang(lang === 'ru' ? 'en' : 'ru')} title={lang === 'ru' ? 'English' : 'Русский'}>
+            <Globe size={15} />
+            <span className="text-[10px] font-bold ml-0.5">{lang.toUpperCase()}</span>
+          </button>
+
           {/* Theme toggle */}
-          <button className="btn-icon" onClick={toggle} title={theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}>
+          <button className="btn-icon" onClick={toggle} title={theme === 'dark' ? t('nav.light_theme') : t('nav.dark_theme')}>
             {theme === 'dark' ? <Sun size={15} /> : <Moon size={15} />}
           </button>
 
           {/* Logout */}
-          <button className="btn-icon" onClick={handleLogout} title="Выйти">
+          <button className="btn-icon" onClick={handleLogout} title={t('nav.logout')}>
             <LogOut size={15} />
           </button>
         </div>
@@ -173,14 +181,16 @@ export default function App() {
 
   return (
     <ThemeProvider>
-      <OnboardingProvider>
-        <AuthContext.Provider value={{ auth, setAuth }}>
-          <Routes>
-            <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
-            <Route path="/*" element={<AppRouter />} />
-          </Routes>
-        </AuthContext.Provider>
-      </OnboardingProvider>
+      <TranslationProvider>
+        <OnboardingProvider>
+          <AuthContext.Provider value={{ auth, setAuth }}>
+            <Routes>
+              <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
+              <Route path="/*" element={<AppRouter />} />
+            </Routes>
+          </AuthContext.Provider>
+        </OnboardingProvider>
+      </TranslationProvider>
     </ThemeProvider>
   )
 }

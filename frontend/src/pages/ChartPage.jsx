@@ -3,6 +3,7 @@ import { createChart, ColorType, CandlestickSeries, LineSeries, createSeriesMark
 import { BarChart3, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import { Tip, Chip, Loader } from '../components/ui'
+import { useTranslation } from '../hooks/useTranslation'
 
 const PAIRS = [
   { id: 'BTC-USDT-SWAP', label: 'BTC/USDT' },
@@ -12,11 +13,12 @@ const PAIRS = [
 ]
 const INTERVALS = ['5m', '15m', '1H', '4H', '1D']
 const INDICATORS = [
-  { id: 'sma', label: 'SMA 20', color: '#4a9eff', tip: 'Simple Moving Average — средняя цена за 20 периодов. Помогает определить тренд.' },
-  { id: 'ema', label: 'EMA 50', color: '#ff9500', tip: 'Exponential Moving Average — придает больший вес последним ценам. Быстрее реагирует.' },
+  { id: 'sma', label: 'SMA 20', color: '#4a9eff' },
+  { id: 'ema', label: 'EMA 50', color: '#ff9500' },
 ]
 
 export default function ChartPage() {
+  const { t } = useTranslation()
   const [selectedPair, setSelectedPair] = useState('BTC-USDT-SWAP')
   const [chartData, setChartData] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -210,7 +212,7 @@ export default function ChartPage() {
       <div className="flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
           <BarChart3 size={18} className="text-[var(--info)]" />
-          <h2 className="text-lg font-bold text-[var(--txt)]">График</h2>
+          <h2 className="text-lg font-bold text-[var(--txt)]">{t('chart.title')}</h2>
         </div>
         <div className="flex items-center gap-4 flex-wrap">
           <select className="!py-1.5 !px-3 !text-xs" value={selectedPair} onChange={e => setSelectedPair(e.target.value)}>
@@ -230,11 +232,11 @@ export default function ChartPage() {
                 style={activeIndicators.includes(ind.id) ? { borderColor: ind.color, color: ind.color, background: ind.color + '15' } : {}}
               >
                 {ind.label}
-                <Tip text={ind.tip} />
+                <Tip text={ind.id === 'sma' ? t('chart.sma_tip') : t('chart.ema_tip')} />
               </button>
             ))}
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => { loadCandles(); loadChartData() }}><RefreshCw size={12} /> Обновить</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { loadCandles(); loadChartData() }}><RefreshCw size={12} /> {t('chart.refresh')}</button>
         </div>
       </div>
 
@@ -247,12 +249,12 @@ export default function ChartPage() {
           <div className="flex gap-2 flex-shrink-0 overflow-x-auto">
             {activeLines.map((p, i) => (
               <div key={i} className="panel flex items-center gap-3 px-3 py-2 flex-shrink-0">
-                <span className="text-2xs font-bold text-[var(--profit)]">▲ ЛОНГ</span>
-                <span className="text-2xs text-[var(--txt-muted)]">Вход: <span className="mono text-[var(--txt)]">${p.entry}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">СЛ: <span className="mono text-[var(--loss)]">${p.stop}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">БУ: <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">ТП1: <span className="mono text-[var(--info)]">${p.tp1}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">Этап: <span className="text-accent-purple font-semibold">{p.stage}</span></span>
+                <span className="text-2xs font-bold text-[var(--profit)]">▲ {t('chart.long')}</span>
+                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.entry')} <span className="mono text-[var(--txt)]">${p.entry}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.sl')} <span className="mono text-[var(--loss)]">${p.stop}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.be')} <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.tp1')} <span className="mono text-[var(--info)]">${p.tp1}</span></span>
+                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.stage')} <span className="text-accent-purple font-semibold">{p.stage}</span></span>
               </div>
             ))}
           </div>
@@ -269,7 +271,7 @@ export default function ChartPage() {
         )}
         {!loading && chartData?.length === 0 && (
           <div className="flex items-center justify-center h-full">
-            <span className="text-sm text-[var(--txt-muted)]">Нет данных</span>
+            <span className="text-sm text-[var(--txt-muted)]">{t('chart.no_data')}</span>
           </div>
         )}
       </div>

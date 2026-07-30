@@ -2,25 +2,29 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react'
 import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp } from 'lucide-react'
 import { api } from '../services/api'
 import { EmptyState, Loader, Chip } from '../components/ui'
+import { useTranslation } from '../hooks/useTranslation'
 
 const PAGE_SIZE = 30
-const REASON_MAP = {
-  closed: { label: 'Закрыта', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
-  open: { label: 'Открыта', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
-  tp: { label: 'TP', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
-  sl: { label: 'SL', color: 'text-[var(--loss)]', bg: 'bg-[var(--loss-dim)]' },
-  trail: { label: 'Трейл', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
-  breakeven: { label: 'BE', color: 'text-[var(--warn)]', bg: 'bg-[var(--warn-dim)]' },
-  manual: { label: 'Ручной', color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
-  roe_threshold: { label: 'ROE', color: 'text-accent-purple', bg: 'bg-accent-purple/10' },
-}
+const ALL_PAIRS_KEY = '__all__'
 
 export default function HistoryPage() {
+  const { t, locale } = useTranslation()
+  const REASON_MAP = {
+    closed: { label: t('reason.closed'), color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
+    open: { label: t('reason.open'), color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
+    tp: { label: t('reason.tp'), color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
+    sl: { label: t('reason.sl'), color: 'text-[var(--loss)]', bg: 'bg-[var(--loss-dim)]' },
+    trail: { label: t('reason.trail'), color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
+    breakeven: { label: t('reason.breakeven'), color: 'text-[var(--warn)]', bg: 'bg-[var(--warn-dim)]' },
+    manual: { label: t('reason.manual'), color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
+    roe_threshold: { label: 'ROE', color: 'text-accent-purple', bg: 'bg-accent-purple/10' },
+  }
+
   const [trades, setTrades] = useState([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(0)
   const [filterResult, setFilterResult] = useState('all')
-  const [filterPair, setFilterPair] = useState('Все')
+  const [filterPair, setFilterPair] = useState(ALL_PAIRS_KEY)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
@@ -37,7 +41,7 @@ export default function HistoryPage() {
 
   const allPairs = useMemo(() => {
     const pairs = new Set(trades.map(t => (t.symbol || t.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')))
-    return ['Все', ...Array.from(pairs).filter(Boolean).sort()]
+    return [ALL_PAIRS_KEY, ...Array.from(pairs).filter(Boolean).sort()]
   }, [trades])
 
   const filtered = useMemo(() => {
@@ -47,7 +51,7 @@ export default function HistoryPage() {
         if (filterResult === 'win' && pnl < 0) return false
         if (filterResult === 'loss' && pnl >= 0) return false
       }
-      if (filterPair !== 'Все') {
+      if (filterPair !== ALL_PAIRS_KEY) {
         const pair = (t.symbol || t.inst_id || '').toUpperCase()
         if (!pair.includes(filterPair.toUpperCase())) return false
       }
@@ -68,7 +72,7 @@ export default function HistoryPage() {
 
   const fmtTime = (ts) => {
     if (!ts) return '---'
-    return new Date(ts).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
+    return new Date(ts).toLocaleString(locale, { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
   }
 
   const totalPnl = filtered.reduce((s, t) => s + (parseFloat(t.pnl) || 0), 0)
@@ -76,16 +80,16 @@ export default function HistoryPage() {
   const winRate = filtered.length > 0 ? ((winCount / filtered.length) * 100).toFixed(1) : '0.0'
 
   const handleExportCSV = useCallback(() => {
-    const header = 'Время,Тип,Инструмент,Размер,Вход,Выход,PnL,Причина'
-    const rows = filtered.map(t => {
-      const time = t.time ? new Date(t.time).toLocaleString('ru-RU') : ''
-      const type = t.side === 'buy' ? 'BUY' : 'SELL'
-      const inst = t.symbol || t.inst_id || ''
-      const size = t.size ? t.size.toFixed(2) : ''
-      const entry = t.entry_price ? t.entry_price.toFixed(2) : ''
-      const exit = t.exit_price ? t.exit_price.toFixed(2) : ''
-      const pnl = t.pnl != null ? (parseFloat(t.pnl) >= 0 ? '+' : '') + parseFloat(t.pnl).toFixed(2) : ''
-      const reason = REASON_MAP[(t.reason || '').toLowerCase()]?.label || t.reason || ''
+    const header = [t('history.time'), t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), t('history.pnl'), t('history.reason')].join(',')
+    const rows = filtered.map(tr => {
+      const time = tr.time ? new Date(tr.time).toLocaleString(locale) : ''
+      const type = tr.side === 'buy' ? 'BUY' : 'SELL'
+      const inst = tr.symbol || tr.inst_id || ''
+      const size = tr.size ? tr.size.toFixed(2) : ''
+      const entry = tr.entry_price ? tr.entry_price.toFixed(2) : ''
+      const exit = tr.exit_price ? tr.exit_price.toFixed(2) : ''
+      const pnl = tr.pnl != null ? (parseFloat(tr.pnl) >= 0 ? '+' : '') + parseFloat(tr.pnl).toFixed(2) : ''
+      const reason = REASON_MAP[(tr.reason || '').toLowerCase()]?.label || tr.reason || ''
       return [time, type, inst, size, entry, exit, pnl, reason].map(v => `"${v}"`).join(',')
     })
     const csv = [header, ...rows].join('\n')
@@ -96,7 +100,7 @@ export default function HistoryPage() {
     a.download = `trades_${new Date().toISOString().slice(0,10)}.csv`
     a.click()
     URL.revokeObjectURL(url)
-  }, [filtered])
+  }, [filtered, t, locale])
 
   return (
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
@@ -104,8 +108,8 @@ export default function HistoryPage() {
       <div className="flex items-center justify-between flex-shrink-0">
         <div className="flex items-center gap-2">
           <ScrollText size={18} className="text-accent-purple" />
-          <h2 className="text-lg font-bold text-[var(--txt)]">История сделок</h2>
-          <span className="text-2xs text-[var(--txt-muted)]">{filtered.length} записей</span>
+          <h2 className="text-lg font-bold text-[var(--txt)]">{t('history.title')}</h2>
+          <span className="text-2xs text-[var(--txt-muted)]">{filtered.length} {t('history.records')}</span>
         </div>
         <div className="flex items-center gap-3">
           <span className={`text-2xs font-semibold px-2 py-0.5 rounded-full ${parseFloat(winRate) >= 50 ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
@@ -115,13 +119,13 @@ export default function HistoryPage() {
             className="btn btn-ghost btn-sm"
             onClick={handleExportCSV}
             disabled={filtered.length === 0}
-            title="Экспорт CSV"
+            title={t('history.export_csv')}
           >
             <Download size={13} />
             CSV
           </button>
           <span className={`text-xs mono font-semibold ${totalPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-            Итого: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USDT
+            {t('history.total')} {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(2)} USDT
           </span>
         </div>
       </div>
@@ -130,21 +134,21 @@ export default function HistoryPage() {
       <div className="panel flex-shrink-0">
         <div className="p-3 flex flex-wrap items-center gap-4">
           <div className="flex items-center gap-1.5">
-            <span className="text-2xs text-[var(--txt-muted)]">Результат:</span>
-            {[{ k: 'all', l: 'Все' }, { k: 'win', l: 'Прибыль' }, { k: 'loss', l: 'Убыток' }].map(f => (
+            <span className="text-2xs text-[var(--txt-muted)]">{t('history.result')}</span>
+            {[{ k: 'all', l: t('history.all') }, { k: 'win', l: t('history.profit') }, { k: 'loss', l: t('history.loss') }].map(f => (
               <Chip key={f.k} active={filterResult === f.k} onClick={() => { setFilterResult(f.k); setPage(0) }} color={f.k === 'win' ? 'green' : f.k === 'loss' ? 'red' : ''}>{f.l}</Chip>
             ))}
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-2xs text-[var(--txt-muted)]">Пара:</span>
+            <span className="text-2xs text-[var(--txt-muted)]">{t('history.pair')}</span>
             <select className="!py-1 !px-2 !text-2xs" value={filterPair} onChange={e => { setFilterPair(e.target.value); setPage(0) }}>
-              {allPairs.map(p => <option key={p} value={p}>{p}</option>)}
+              {allPairs.map(p => <option key={p} value={p}>{p === ALL_PAIRS_KEY ? t('history.all') : p}</option>)}
             </select>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-2xs text-[var(--txt-muted)]">С:</span>
+            <span className="text-2xs text-[var(--txt-muted)]">{t('history.from')}</span>
             <input type="date" className="!py-1 !px-2 !text-2xs" value={dateFrom} onChange={e => { setDateFrom(e.target.value); setPage(0) }} />
-            <span className="text-2xs text-[var(--txt-muted)]">По:</span>
+            <span className="text-2xs text-[var(--txt-muted)]">{t('history.to')}</span>
             <input type="date" className="!py-1 !px-2 !text-2xs" value={dateTo} onChange={e => { setDateTo(e.target.value); setPage(0) }} />
           </div>
         </div>
@@ -156,19 +160,19 @@ export default function HistoryPage() {
           {loading ? (
             <div className="flex items-center justify-center py-16"><Loader /></div>
           ) : pageTrades.length === 0 ? (
-            <EmptyState icon={ScrollText} text="Сделок не найдено" sub="Попробуйте изменить фильтры" />
+            <EmptyState icon={ScrollText} text={t('history.empty')} sub={t('history.empty_hint')} />
           ) : (
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>Время</th>
-                  <th>Тип</th>
-                  <th>Инструмент</th>
-                  <th className="text-right">Размер</th>
-                  <th className="text-right">Вход</th>
-                  <th className="text-right">Выход</th>
-                  <th className="text-right">PnL</th>
-                  <th className="text-right">Причина</th>
+                  <th>{t('history.time')}</th>
+                  <th>{t('history.type')}</th>
+                  <th>{t('history.instrument')}</th>
+                  <th className="text-right">{t('history.size')}</th>
+                  <th className="text-right">{t('history.entry')}</th>
+                  <th className="text-right">{t('history.exit')}</th>
+                  <th className="text-right">{t('history.pnl')}</th>
+                  <th className="text-right">{t('history.reason')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -209,7 +213,7 @@ export default function HistoryPage() {
         {totalPages > 1 && (
           <div className="flex items-center justify-between px-4 py-3 border-t border-[var(--border)]">
             <span className="text-2xs text-[var(--txt-muted)]">
-              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} из {filtered.length}
+              {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, filtered.length)} {t('history.of')} {filtered.length}
             </span>
             <div className="flex items-center gap-2">
               <button className="btn btn-ghost btn-sm" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}>

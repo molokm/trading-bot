@@ -1,28 +1,34 @@
 import { createContext, useContext, useState, useEffect } from 'react'
+import { useTranslation } from '../hooks/useTranslation'
 
 const OnboardingContext = createContext()
 
-const TOUR_STEPS = [
-  {
-    target: '[data-tour="status"]',
-    title: 'Статус подключения',
-    text: 'Здесь отображается текущий режим — LIVE (реальные средства) или DEMO (тестовые). Зелёный индикатор означает активное подключение к OKX.',
-  },
-  {
-    target: '[data-tour="metrics"]',
-    title: 'Ключевые метрики',
-    text: '«Золотая зона» — основные показатели вашего портфеля. Баланс, открытые позиции и PnL обновляются в реальном времени.',
-  },
-  {
-    target: '[data-tour="chart"]',
-    title: 'График и фильтры',
-    text: 'Свечной график с наложением сделок бота. Используйте фильтры-чипсы для быстрого поиска по инструменту, времени и результату.',
-  },
-]
+function getTourSteps(t) {
+  return [
+    {
+      target: '[data-tour="status"]',
+      title: t('onboarding.connection_status'),
+      text: t('onboarding.connection_desc'),
+    },
+    {
+      target: '[data-tour="metrics"]',
+      title: t('onboarding.key_metrics'),
+      text: t('onboarding.metrics_desc'),
+    },
+    {
+      target: '[data-tour="chart"]',
+      title: t('onboarding.chart_filters'),
+      text: t('onboarding.chart_desc'),
+    },
+  ]
+}
 
 export function OnboardingProvider({ children }) {
+  const { t } = useTranslation()
   const [active, setActive] = useState(false)
   const [step, setStep] = useState(0)
+
+  const steps = getTourSteps(t)
 
   useEffect(() => {
     const seen = localStorage.getItem('onboarding_seen')
@@ -33,7 +39,7 @@ export function OnboardingProvider({ children }) {
   }, [])
 
   const next = () => {
-    if (step < TOUR_STEPS.length - 1) {
+    if (step < steps.length - 1) {
       setStep(s => s + 1)
     } else {
       close()
@@ -49,7 +55,7 @@ export function OnboardingProvider({ children }) {
   }
 
   return (
-    <OnboardingContext.Provider value={{ active, step, steps: TOUR_STEPS, next, prev, close, setActive }}>
+    <OnboardingContext.Provider value={{ active, step, steps, next, prev, close, setActive }}>
       {children}
     </OnboardingContext.Provider>
   )

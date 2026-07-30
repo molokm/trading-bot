@@ -6,6 +6,7 @@ import {
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../services/api'
 import { MetricCard, Tip, Chip, EmptyState, Loader } from '../components/ui'
+import { useTranslation } from '../hooks/useTranslation'
 
 const PAIRS = [
   { id: 'BTC-USDT-SWAP', label: 'BTC/USDT' },
@@ -15,12 +16,8 @@ const PAIRS = [
 ]
 const PERIODS = ['7d', '30d', '90d', '1y']
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
-const STRATEGIES = [
-  { id: 'momentum', label: 'Momentum' },
-  { id: 'grid', label: 'Сетка' },
-  { id: 'dca', label: 'DCA' },
-  { id: 'scalping', label: 'Скальпинг' },
-]
+const STRATEGY_IDS = ['momentum', 'grid', 'dca', 'scalping']
+
 
 function generateMockResult(config) {
   const trades = Math.floor(Math.random() * 80) + 20
@@ -74,6 +71,7 @@ function generateMockResult(config) {
 
 /* Custom Recharts tooltip for dark theme */
 function EquityTooltip({ active, payload, label }) {
+  const { t } = useTranslation()
   if (!active || !payload?.length) return null
   return (
     <div style={{
@@ -84,7 +82,7 @@ function EquityTooltip({ active, payload, label }) {
       fontSize: '0.7rem',
       boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
     }}>
-      <div style={{ color: 'var(--txt-muted)', marginBottom: 4 }}>Сделка #{label}</div>
+      <div style={{ color: 'var(--txt-muted)', marginBottom: 4 }}>{t('backtest.trade_tooltip')}{label}</div>
       <div className="mono" style={{ color: 'var(--txt)', fontWeight: 600 }}>
         {payload[0].value >= 1000 ? `$${(payload[0].value / 1000).toFixed(2)}k` : `$${payload[0].value.toFixed(2)}`}
       </div>
@@ -93,7 +91,7 @@ function EquityTooltip({ active, payload, label }) {
 }
 
 /* PNG export using canvas */
-function exportPng(equityCurve) {
+function exportPng(equityCurve, t) {
   const canvas = document.createElement('canvas')
   const w = 800, h = 300
   canvas.width = w
@@ -161,9 +159,9 @@ function exportPng(equityCurve) {
   ctx.fillStyle = '#9aa0a9'
   ctx.font = '11px Inter, sans-serif'
   ctx.textAlign = 'left'
-  ctx.fillText('Кривая эквити — Бэктест', pad.l, 18)
+  ctx.fillText(t('backtest.equity_title'), pad.l, 18)
   ctx.textAlign = 'right'
-  ctx.fillText(`${vals.length} сделок`, w - pad.r, 18)
+  ctx.fillText(`${vals.length} ${t('backtest.trades_word')}`, w - pad.r, 18)
 
   const link = document.createElement('a')
   link.download = 'equity-curve.png'
@@ -172,6 +170,7 @@ function exportPng(equityCurve) {
 }
 
 export default function BacktestPage({ connected }) {
+  const { t, locale } = useTranslation()
   const [config, setConfig] = useState({
     pairs: ['BTC-USDT-SWAP'],
     period: '30d',
@@ -232,24 +231,24 @@ export default function BacktestPage({ connected }) {
       <div className="flex items-center justify-between flex-shrink-0">
         <div>
           <h2 className="text-lg font-bold text-[var(--txt)]">Backtest</h2>
-          <p className="text-xs text-[var(--txt-muted)]">Тестирование стратегий на исторических данных</p>
+          <p className="text-xs text-[var(--txt-muted)]">{t('backtest.subtitle')}</p>
         </div>
         <div className="flex gap-2">
           <button
             className={`btn btn-ghost btn-sm ${compareMode ? '!border-[var(--info)] !text-[var(--info)]' : ''}`}
             onClick={() => setCompareMode(!compareMode)}
           >
-            <GitCompare size={12} /> Сравнить
+            <GitCompare size={12} /> {t('backtest.compare')}
           </button>
           {results.length > 0 && activeResult && (
-            <button className="btn btn-ghost btn-sm" onClick={() => exportPng(activeResult.equityCurve)}>
+            <button className="btn btn-ghost btn-sm" onClick={() => exportPng(activeResult.equityCurve, t)}>
               <Image size={12} /> PNG
             </button>
           )}
           {results.length > 0 && (
             <button className="btn btn-ghost btn-sm" onClick={() => {
-              const csv = ['Вход,Выход,Пара,Направление,Цена входа,Цена выхода,PnL,PnL%,Причина', ...activeResult.tradeList.map(t =>
-                `${t.entry_time},${t.exit_time},${t.pair},${t.side},${t.entry_px.toFixed(2)},${t.exit_px.toFixed(2)},${t.pnl.toFixed(2)},${t.pnl_pct.toFixed(2)}%,${t.reason}`
+              const csv = [t('backtest.csv_header'), ...activeResult.tradeList.map(tr =>
+                `${tr.entry_time},${tr.exit_time},${tr.pair},${tr.side},${tr.entry_px.toFixed(2)},${tr.exit_px.toFixed(2)},${tr.pnl.toFixed(2)},${tr.pnl_pct.toFixed(2)}%,${tr.reason}`
               )].join('\n')
               const blob = new Blob([csv], { type: 'text/csv' })
               const url = URL.createObjectURL(blob)
@@ -264,11 +263,11 @@ export default function BacktestPage({ connected }) {
       </div>
 
       <div className="panel flex-shrink-0">
-        <div className="panel-header"><BarChart3 size={13} className="text-[var(--info)]" /> Настройки бэктеста</div>
+        <div className="panel-header"><BarChart3 size={13} className="text-[var(--info)]" /> {t('backtest.config')}</div>
         <div className="p-4 flex flex-wrap items-end gap-6">
           <div className="flex-1 min-w-[200px]">
             <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
-              Инструменты <Tip text="Выберите один или несколько инструментов для тестирования" />
+              {t('backtest.instruments')} <Tip text={t('backtest.instruments_tip')} />
             </label>
             <div className="flex flex-wrap gap-1.5 mt-1.5">
               {PAIRS.map(p => (
@@ -277,15 +276,15 @@ export default function BacktestPage({ connected }) {
             </div>
           </div>
           <div>
-            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Стратегия</label>
+            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.strategy')}</label>
             <div className="flex gap-1 mt-1.5">
-              {STRATEGIES.map(s => (
-                <Chip key={s.id} active={config.strategy === s.id} onClick={() => setConfig(c => ({ ...c, strategy: s.id }))}>{s.label}</Chip>
+              {STRATEGY_IDS.map(id => (
+                <Chip key={id} active={config.strategy === id} onClick={() => setConfig(c => ({ ...c, strategy: id }))}>{id === 'grid' ? t('backtest.grid') : id === 'scalping' ? t('backtest.scalping') : id.charAt(0).toUpperCase() + id.slice(1)}</Chip>
               ))}
             </div>
           </div>
           <div>
-            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Период</label>
+            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.period')}</label>
             <div className="flex gap-1 mt-1.5">
               {PERIODS.map(p => (
                 <Chip key={p} active={config.period === p} onClick={() => setConfig(c => ({ ...c, period: p }))}>{p}</Chip>
@@ -293,7 +292,7 @@ export default function BacktestPage({ connected }) {
             </div>
           </div>
           <div>
-            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Таймфрейм</label>
+            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.timeframe')}</label>
             <div className="flex gap-1 mt-1.5">
               {TIMEFRAMES.map(tf => (
                 <Chip key={tf} active={config.timeframe === tf} onClick={() => setConfig(c => ({ ...c, timeframe: tf }))}>{tf}</Chip>
@@ -301,7 +300,7 @@ export default function BacktestPage({ connected }) {
             </div>
           </div>
           <button className="btn btn-primary" onClick={runBacktest} disabled={running || config.pairs.length === 0}>
-            {running ? <><Loader /> Выполнение...</> : <><Play size={13} /> Запустить</>}
+            {running ? <><Loader /> {t('backtest.running')}</> : <><Play size={13} /> {t('backtest.run')}</>}
           </button>
         </div>
       </div>
@@ -309,18 +308,18 @@ export default function BacktestPage({ connected }) {
       {/* Compare Mode */}
       {compareMode && results.length > 1 && (
         <div className="panel flex-shrink-0">
-          <div className="panel-header"><GitCompare size={13} /> Сравнение стратегий</div>
+          <div className="panel-header"><GitCompare size={13} /> {t('backtest.comparison')}</div>
           <div className="overflow-x-auto">
             <table className="data-table">
               <thead>
                 <tr>
                   <th>#</th>
-                  <th className="text-right">Доходность</th>
-                  <th className="text-right">% сделок</th>
-                  <th className="text-right">Профит-фактор</th>
-                  <th className="text-right">Шарп</th>
-                  <th className="text-right">Макс. просадка</th>
-                  <th className="text-right">Сделки</th>
+                  <th className="text-right">{t('backtest.return')}</th>
+                  <th className="text-right">{t('backtest.trades_pct')}</th>
+                  <th className="text-right">{t('backtest.profit_factor')}</th>
+                  <th className="text-right">{t('backtest.sharpe')}</th>
+                  <th className="text-right">{t('backtest.max_drawdown')}</th>
+                  <th className="text-right">{t('backtest.trades')}</th>
                   <th></th>
                 </tr>
               </thead>
@@ -336,7 +335,7 @@ export default function BacktestPage({ connected }) {
                       <td className={`text-right mono ${rm.sharpe === bestMetrics.sharpe ? '!bg-[var(--profit-dim)]' : ''}`}>{rm.sharpe.toFixed(2)}</td>
                       <td className={`text-right mono text-[var(--loss)] ${rm.maxDD === bestMetrics.maxDD ? '!bg-[var(--profit-dim)]' : ''}`}>-{rm.maxDD.toFixed(1)}%</td>
                       <td className="text-right mono">{rm.trades}</td>
-                      <td className="text-right"><button className="btn btn-ghost btn-sm" onClick={() => setActiveResult(r)}>Посмотр.</button></td>
+                      <td className="text-right"><button className="btn btn-ghost btn-sm" onClick={() => setActiveResult(r)}>{t('backtest.view')}</button></td>
                     </tr>
                   )
                 })}
@@ -350,24 +349,24 @@ export default function BacktestPage({ connected }) {
       {activeResult && m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 flex-shrink-0">
-            <MetricCard label="Общая доходность" value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip="Общая доходность за период бэктеста" />
-            <MetricCard label="% сделок" value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip="Процент прибыльных сделок" />
-            <MetricCard label="Профит-фактор" value={m.profitFactor.toFixed(2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip="Отношение валовой прибыли к валовому убытку. > 1 = прибыльная стратегия" />
-            <MetricCard label="Коэф. Шарпа" value={m.sharpe.toFixed(2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip="Доходность относительно риска. > 1 — хорошо, > 2 — отлично" />
-            <MetricCard label="Макс. просадка" value={`-${m.maxDD.toFixed(1)}%`} changeType="negative" mono tip="Максимальное падение капитала от пика" />
-            <MetricCard label="Всего сделок" value={m.trades} mono tip="Общее количество сделок за период" />
+            <MetricCard label={t('backtest.total_return')} value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip={t('backtest.total_return_tip')} />
+            <MetricCard label={t('backtest.trades_pct_full')} value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip={t('backtest.trades_pct_tip')} />
+            <MetricCard label={t('backtest.profit_factor_full')} value={m.profitFactor.toFixed(2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.profit_factor_tip')} />
+            <MetricCard label={t('backtest.sharpe_full')} value={m.sharpe.toFixed(2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.sharpe_tip')} />
+            <MetricCard label={t('backtest.max_drawdown_full')} value={`-${m.maxDD.toFixed(1)}%`} changeType="negative" mono tip={t('backtest.max_drawdown_tip')} />
+            <MetricCard label={t('backtest.total_trades')} value={m.trades} mono tip={t('backtest.total_trades_tip')} />
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3">
             <div className="panel">
-              <div className="panel-header"><TrendingUp size={13} className="text-[var(--profit)]" /> Кривая эквити</div>
+              <div className="panel-header"><TrendingUp size={13} className="text-[var(--profit)]" /> {t('backtest.equity_curve')}</div>
               <div className="p-3" id="equity-chart-container">
                 <EquityChart data={activeResult.equityCurve} />
               </div>
             </div>
 
             <div className="panel">
-              <div className="panel-header"><BarChart3 size={13} className="text-[var(--warn)]" /> Heatmap — доходность по дням/часам</div>
+              <div className="panel-header"><BarChart3 size={13} className="text-[var(--warn)]" /> {t('backtest.heatmap')}</div>
               <div className="p-3">
                 <HeatmapChart data={activeResult.heatmap} />
               </div>
@@ -377,31 +376,31 @@ export default function BacktestPage({ connected }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <BarChart3 size={13} className="text-[var(--info)]" />
-              Все сделки ({activeResult.tradeList.length})
+              {t('backtest.all_trades')} ({activeResult.tradeList.length})
             </div>
             <div className="flex-1 overflow-auto">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Вход</th><th>Выход</th><th>Пара</th><th>Сторона</th>
-                    <th className="text-right">Вход</th><th className="text-right">Выход</th>
-                    <th className="text-right">PnL ($)</th><th className="text-right">PnL (%)</th><th className="text-right">Причина</th>
+                    <th>{t('backtest.entry_col')}</th><th>{t('backtest.exit_col')}</th><th>{t('backtest.pair_col')}</th><th>{t('backtest.side_col')}</th>
+                    <th className="text-right">{t('backtest.entry_col')}</th><th className="text-right">{t('backtest.exit_col')}</th>
+                    <th className="text-right">PnL ($)</th><th className="text-right">PnL (%)</th><th className="text-right">{t('backtest.reason_col')}</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {activeResult.tradeList.map((t, i) => {
+                  {activeResult.tradeList.map((tr, i) => {
                     const reasonColors = { tp: 'text-[var(--profit)]', sl: 'text-[var(--loss)]', trail: 'text-[var(--info)]', breakeven: 'text-[var(--warn)]' }
                     return (
                       <tr key={i}>
-                        <td className="text-2xs mono">{new Date(t.entry_time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
-                        <td className="text-2xs mono">{new Date(t.exit_time).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
-                        <td className="text-[var(--txt)] font-medium">{t.pair}</td>
-                        <td><span className={`text-2xs font-bold ${t.side === 'LONG' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{t.side}</span></td>
-                        <td className="text-right mono">${t.entry_px.toFixed(2)}</td>
-                        <td className="text-right mono">${t.exit_px.toFixed(2)}</td>
-                        <td className={`text-right mono font-semibold ${t.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{t.pnl >= 0 ? '+' : ''}{t.pnl.toFixed(2)}</td>
-                        <td className={`text-right mono ${t.pnl_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{t.pnl_pct >= 0 ? '+' : ''}{t.pnl_pct.toFixed(2)}%</td>
-                        <td className={`text-right text-2xs font-medium uppercase ${reasonColors[t.reason] || 'text-[var(--txt-muted)]'}`}>{t.reason}</td>
+                        <td className="text-2xs mono">{new Date(tr.entry_time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                        <td className="text-2xs mono">{new Date(tr.exit_time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
+                        <td className="text-[var(--txt)] font-medium">{tr.pair}</td>
+                        <td><span className={`text-2xs font-bold ${tr.side === 'LONG' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.side}</span></td>
+                        <td className="text-right mono">${tr.entry_px.toFixed(2)}</td>
+                        <td className="text-right mono">${tr.exit_px.toFixed(2)}</td>
+                        <td className={`text-right mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}</td>
+                        <td className={`text-right mono ${tr.pnl_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl_pct >= 0 ? '+' : ''}{tr.pnl_pct.toFixed(2)}%</td>
+                        <td className={`text-right text-2xs font-medium uppercase ${reasonColors[tr.reason] || 'text-[var(--txt-muted)]'}`}>{tr.reason}</td>
                       </tr>
                     )
                   })}
@@ -413,7 +412,7 @@ export default function BacktestPage({ connected }) {
       )}
 
       {!activeResult && !running && (
-        <EmptyState icon={BarChart3} text="Запустите бэктест" sub="Настройте параметры и нажмите «Запустить»" />
+        <EmptyState icon={BarChart3} text={t('backtest.no_results')} sub={t('backtest.no_results_hint')} />
       )}
     </div>
   )
@@ -468,8 +467,10 @@ function EquityChart({ data }) {
 }
 
 /* Heatmap with CSS tooltip */
-const DAYS = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+const DAY_KEYS = ['day.mon', 'day.tue', 'day.wed', 'day.thu', 'day.fri', 'day.sat', 'day.sun']
 function HeatmapChart({ data }) {
+  const { t } = useTranslation()
+  const DAYS = DAY_KEYS.map(k => t(k))
   if (!data || data.length === 0) return null
   const maxAbs = Math.max(...data.map(d => Math.abs(d.value)), 0.1)
   const getColor = (v) => {
@@ -511,10 +512,10 @@ function HeatmapChart({ data }) {
       })}
       <div className="flex items-center justify-center gap-3 mt-2">
         <div className="flex items-center gap-1 text-2xs text-[var(--txt-muted)]">
-          <div className="w-3 h-3 rounded-sm" style={{ background: 'rgba(255,51,102,0.6)' }} /> Убыток
+          <div className="w-3 h-3 rounded-sm" style={{ background: 'rgba(255,51,102,0.6)' }} /> {t('backtest.loss_label')}
         </div>
         <div className="flex items-center gap-1 text-2xs text-[var(--txt-muted)]">
-          <div className="w-3 h-3 rounded-sm" style={{ background: 'rgba(0,255,136,0.6)' }} /> Прибыль
+          <div className="w-3 h-3 rounded-sm" style={{ background: 'rgba(0,255,136,0.6)' }} /> {t('backtest.profit_label')}
         </div>
       </div>
     </div>
