@@ -136,6 +136,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const mt of momentumTrades) {
       const key = `${mt.symbol}_${mt.time}_${mt.time}`
       if (pairedKeys.has(key)) continue
+      // Full close trade with both prices (in-memory)
       if (mt.entry_price && mt.exit_price) {
         const isLongClose = (mt.pos_side === 'long' && mt.side === 'sell')
                            || (mt.pos_side === 'short' && mt.side === 'buy')
@@ -146,6 +147,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           entry_px: mt.entry_price, exit_px: mt.exit_price,
           pnl: mt.pnl, reason: mt.reason || '', signal_id: mt.ord_id,
         })
+      // DB-restored close trade (pnl!=0 but may lack entry_price)
+      } else if (mt.pnl != null && parseFloat(mt.pnl) !== 0 && !mt.entry) {
+        combined.push({
+          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
+          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
+          entry_px: mt.entry || null, exit_px: mt.exit_price || null,
+          pnl: mt.pnl, reason: mt.reason || 'closed', signal_id: mt.ord_id,
+        })
+      // Entry / open trade
       } else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
         combined.push({
           entry_time: mt.time, exit_time: null, inst_id: mt.symbol,

@@ -539,29 +539,41 @@ class Database:
         return self._pair_manual(result, all_manual, limit)
 
     def _pair_manual(self, result, all_manual, limit):
-        i = 0
-        while i < len(all_manual):
-            t = all_manual[i]
-            if t["state"] == "filled" and t["pnl"] == 0 and i + 1 < len(all_manual):
-                nxt = all_manual[i + 1]
-                if nxt["inst_id"] == t["inst_id"] and nxt["state"] == "filled" and nxt["pnl"] != 0:
-                    result.append({
-                        "signal_id": None,
-                        "bot_id": t["bot_id"],
-                        "inst_id": t["inst_id"],
-                        "side": t["side"],
-                        "entry_time": t["timestamp"],
-                        "entry_px": t["px"],
-                        "entry_sz": t["sz"],
-                        "entry_fee": t["fee"],
-                        "exit_time": nxt["timestamp"],
-                        "exit_px": nxt["px"],
-                        "exit_fee": nxt["fee"],
-                        "pnl": nxt["pnl"],
-                    })
-                    i += 2
-                    continue
-            i += 1
+        # Group by inst_id, then pair entries (pnl=0) with closes (pnl!=0)
+        from collections import defaultdict
+        by_inst = defaultdict(list)
+        for t in all_manual:
+            by_inst[t["inst_id"]].append(t)
+
+        for inst_id, trades in by_inst.items():
+            i = 0
+            while i < len(trades):
+                t = trades[i]
+                if t["state"] == "filled" and t["pnl"] == 0:
+                    # Look for next close for this instrument
+                    for j in range(i + 1, len(trades)):
+                        nxt = trades[j]
+                        if nxt["inst_id"] == inst_id and nxt["state"] == "filled" and nxt["pnl"] != 0:
+                            result.append({
+                                "signal_id": None,
+                                "bot_id": t["bot_id"],
+                                "inst_id": inst_id,
+                                "side": t["side"],
+                                "entry_time": t["timestamp"],
+                                "entry_px": t["px"],
+                                "entry_sz": t["sz"],
+                                "entry_fee": t["fee"],
+                                "exit_time": nxt["timestamp"],
+                                "exit_px": nxt["px"],
+                                "exit_fee": nxt["fee"],
+                                "pnl": nxt["pnl"],
+                            })
+                            i = j + 1
+                            break
+                    else:
+                        i += 1
+                else:
+                    i += 1
 
         result.sort(key=lambda x: (x["exit_time"] or x["entry_time"] or ""), reverse=True)
         return result[:limit]

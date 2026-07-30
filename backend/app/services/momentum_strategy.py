@@ -88,6 +88,7 @@ class OpenPosition:
     pos_mode: str = "trend"       # "trend" or "range"
     trough: float = 0.0           # for shorts: lowest price seen
     bb_target: float = 0.0        # for range mode: target price (BB mean)
+    signal_id: int = 0            # link entry ↔ close in DB
 
 
 class MomentumStrategy:
@@ -138,23 +139,32 @@ class MomentumStrategy:
         if not self.db:
             return
         try:
-            trades = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=200)
+            trades = await self.db.get_trades(bot_id=MOM_BOT_ID, limit=500)
             for t in trades:
+                pnl_val = float(t.get("pnl", 0) or 0)
                 entry = {
                     "time": t.get("timestamp", ""),
                     "side": t.get("side", ""),
                     "symbol": t.get("inst_id", ""),
                     "size": float(t.get("sz", 0) or 0),
                     "ord_id": t.get("ord_id", ""),
-                    "pnl": float(t.get("pnl", 0) or 0),
+                    "pnl": pnl_val,
                 }
                 # Entry trades (pnl=0): restore entry price from px column
                 px = t.get("px")
                 if px:
                     entry["entry"] = float(px)
                 # Infer pos_side from side for entries
-                if float(t.get("pnl", 0) or 0) == 0 and t.get("side"):
+                if pnl_val == 0 and t.get("side"):
                     entry["pos_side"] = "long" if t["side"] == "buy" else "short"
+                    entry["reason"] = "open"
+                # Close trades (pnl!=0): add fields the frontend needs
+                elif pnl_val != 0:
+                    side = t.get("side", "")
+                    entry["pos_side"] = "long" if side == "sell" else "short"
+                    entry["reason"] = "closed"
+                    if px:
+                        entry["exit_price"] = float(px)
                 self._trade_log.append(entry)
             print(f"[Momentum] Reloaded {len(self._trade_log)} trades from DB", flush=True)
         except Exception as e:
@@ -672,6 +682,7 @@ class MomentumStrategy:
                 peak_price=exec_price, size=sz, size_remaining=sz,
                 stage="initial", atr=atr, opened_at=now, inst_id=inst_id,
                 side=side, pos_mode=mode, trough=exec_price, bb_target=bb_target,
+                signal_id=sid,
             )
 
             # V6: entry fee
@@ -921,7 +932,7 @@ class MomentumStrategy:
             self._cooldowns[coin] = 3
 
             await self._save_signal_db(order_side, coin, exit_price)
-            await self._save_trade_db(trade, signal_id=None)
+            await self._save_trade_db(trade, signal_id=pos.signal_id or None)
 
         except Exception as e:
             print(f"[Momentum] {coin}: close error: {e}", flush=True)
@@ -969,7 +980,7 @@ class MomentumStrategy:
             }
             self._trade_log.append(trade)
             await self._save_signal_db(order_side, coin, exit_price)
-            await self._save_trade_db(trade, signal_id=None)
+            await self._save_trade_db(trade, signal_id=pos.signal_id or None)
 
         except Exception as e:
             print(f"[Momentum] {coin}: partial close error: {e}", flush=True)
