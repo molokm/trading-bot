@@ -9,12 +9,20 @@ from typing import Optional
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 
+def _is_pg_url(url: str) -> bool:
+    """Return True only for real PostgreSQL connection strings."""
+    return bool(url) and url.startswith(("postgres://", "postgresql://"))
+
+
 class Database:
     def __init__(self, db_path: str = None):
         self.db_path = db_path or str(Path(__file__).parent.parent / "data" / "trading.db")
         self._conn: Optional = None
         self._pool: Optional = None
-        self._pg_mode = bool(DATABASE_URL)
+        # If DATABASE_URL is a file: path, extract it as SQLite path
+        if DATABASE_URL and DATABASE_URL.startswith("file:"):
+            self.db_path = DATABASE_URL.replace("file:", "")
+        self._pg_mode = _is_pg_url(DATABASE_URL)
 
     async def init(self):
         if self._pg_mode:
