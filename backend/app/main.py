@@ -638,6 +638,8 @@ async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
     """Fetch fills from OKX for all SWAP instruments. Returns raw OKX fill dicts.
     Tries fills-history (3 months) first, then falls back to fills (7 days)."""
     global _fills_cache, _fills_cache_ts, _fills_cache_limit, _fills_errors
+    # OKX max limit is 100 for fills-history and fills endpoints
+    limit = min(limit, 100)
     now = _time.time()
     if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
         print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills", flush=True)
