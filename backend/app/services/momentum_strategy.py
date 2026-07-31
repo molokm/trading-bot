@@ -58,6 +58,9 @@ class MomentumConfig:
     range_rsi_overbought: float = 65.0
     range_risk_divisor: float = 2.0
     range_sl_mult: float = 1.0
+    # V7: Position sizing caps (based on $10,000 total deposit)
+    max_notional_per_position: float = 2500.0   # max $2,500 notional per coin (25% of deposit)
+    max_total_notional_pct: float = 0.80         # max 80% of equity across all positions
 
     def __post_init__(self):
         if self.symbols is None:
@@ -65,10 +68,11 @@ class MomentumConfig:
 
 
 STRATEGY_DESC = (
-    "Bilateral Momentum V6: лонг+шорт, 3x leverage, compounding, dynamic slippage. "
+    "Bilateral Momentum V7: лонг+шорт, 3x leverage, compounding, dynamic slippage. "
     "Тренд (ADX>25): лонг при ROC>0,EMA15>EMA30,PDI>MDI; шорт при ROC<0,EMA15<EMA30,MDI>PDI. "
     "Флэт (ADX<18): бортовые позиции по Bollinger Bands+RSI. "
-    "Выход: трейлинг 1.5%, безубыток 0.3%, частичное 50% при 1.5%."
+    "Выход: трейлинг 1.5%, безубыток 0.3%, частичное 50% при 1.5%. "
+    "V7: max $2,500 notional/position, max 80% total notional."
 )
 
 
@@ -791,11 +795,28 @@ class MomentumStrategy:
         ct_val = CT_VAL.get(coin, 0.1)
         raw_sz = risk_amount / risk_per_contract / ct_val
 
-        # V6: Apply leverage cap — max notional = leverage * equity
-        max_notional_sz = self.config.leverage * self._equity / (ct_val * price)
-        if raw_sz > max_notional_sz:
-            raw_sz = max_notional_sz
-            print(f"[Momentum] {coin}: leverage cap applied, sz={raw_sz:.2f}", flush=True)
+        # V7: Per-position notional cap (max $2,500 per coin)
+        max_per_pos_sz = self.config.max_notional_per_position / (ct_val * price)
+        if raw_sz > max_per_pos_sz:
+            raw_sz = max_per_pos_sz
+            print(f"[Momentum] {coin}: per-position notional cap applied, sz={raw_sz:.2f}", flush=True)
+
+        # V7: Total notional cap — check already-open positions
+        total_notional_limit = self._equity * self.config.max_total_notional_pct
+        used_notional = sum(
+            p.size * CT_VAL.get(p.symbol, 0.1) * p.entry_price
+            for p in self._positions.values()
+            if p.size_remaining > 0
+        )
+        available_notional = total_notional_limit - used_notional
+        if available_notional <= 0:
+            print(f"[Momentum] {coin}: total notional limit reached ({used_notional:.0f}/{total_notional_limit:.0f})", flush=True)
+            return
+        max_total_sz = available_notional / (ct_val * price)
+        if raw_sz > max_total_sz:
+            raw_sz = max_total_sz
+            print(f"[Momentum] {coin}: total notional cap applied, sz={raw_sz:.2f} "
+                  f"(used={used_notional:.0f}, limit={total_notional_limit:.0f})", flush=True)
 
         lot = LOT_SZ.get(coin, 0.01)
         sz = round(raw_sz / lot) * lot
