@@ -544,7 +544,7 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
     Closed trades: entry (green) + exit (red/green) markers.
     Open positions: entry marker (blue) + TP/SL price lines from algo orders."""
     try:
-        raw_fills = await _fetch_okx_fills(limit=300)
+        raw_fills = await _fetch_okx_fills(limit=300, inst_id=inst_id)
     except Exception as e:
         print(f"[chart_trades] _fetch_okx_fills error: {e}", flush=True)
         return {"markers": [], "tp_sl_lines": [], "debug": {"error": str(e), "raw_fills": 0, "paired": 0}}
@@ -675,50 +675,70 @@ _FILLS_TTL = 30  # seconds
 _fills_errors: list[str] = []
 
 
-async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
-    """Fetch fills from OKX for all SWAP instruments with pagination.
-    Tries fills-history (3 months) first, then falls back to fills (7 days).
-    Supports up to 300 fills via pagination (3 pages of 100)."""
+async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
+    """Fetch fills from OKX. If inst_id given, fetch only for that instrument (up to 300).
+    Otherwise fetch all SWAP fills (up to 300 total with pagination)."""
     global _fills_cache, _fills_cache_ts, _fills_cache_limit, _fills_errors
+    # Cache key includes inst_id
+    cache_key = inst_id or "__all__"
     now = _time.time()
-    if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
-        print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills", flush=True)
+    if (_fills_cache and (now - _fills_cache_ts) < _FILLS_TTL
+            and _fills_cache_limit >= limit and getattr(_fetch_okx_fills, '_cache_key', '') == cache_key):
+        print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills (key={cache_key})", flush=True)
         return _fills_cache
 
     all_fills = []
     errors = []
-    pages = max(1, (limit + 99) // 100)  # How many pages needed
-    effective_limit = min(limit, 300)  # Max 3 pages
+    effective_limit = min(limit, 300)
     pages = max(1, (effective_limit + 99) // 100)
 
-    # Strategy 1: fills-history with pagination (no instId filter)
-    after_ts = ""
-    for page in range(pages):
-        params = {"inst_type": "SWAP", "limit": 100}
-        if after_ts:
-            params["after"] = after_ts
-        r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
-        data = r1.get("data", [])
-        print(f"[_fetch_okx_fills] fills-history page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
-        if r1.get("error"):
-            errors.append(f"fills-history p{page+1}: {r1.get('message', '')}")
-            break
-        if not data:
-            break
-        all_fills.extend(data)
-        if len(data) < 100:
-            break  # No more pages
-        # Use oldest fill's ts as 'after' for next page
-        after_ts = data[-1].get("ts", "")
+    if inst_id:
+        # Per-instrument fetch with pagination — up to 300 fills for this instrument
+        after_ts = ""
+        for page in range(pages):
+            params = {"inst_type": "SWAP", "instId": inst_id, "limit": 100}
+            if after_ts:
+                params["after"] = after_ts
+            r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
+            data = r1.get("data", [])
+            print(f"[_fetch_okx_fills] {inst_id} page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
+            if r1.get("error"):
+                errors.append(f"{inst_id} p{page+1}: {r1.get('message', '')}")
+                break
+            if not data:
+                break
+            all_fills.extend(data)
+            if len(data) < 100:
+                break
+            after_ts = data[-1].get("ts", "")
+    else:
+        # All SWAP instruments with pagination
+        after_ts = ""
+        for page in range(pages):
+            params = {"inst_type": "SWAP", "limit": 100}
+            if after_ts:
+                params["after"] = after_ts
+            r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
+            data = r1.get("data", [])
+            print(f"[_fetch_okx_fills] all-SWAP page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
+            if r1.get("error"):
+                errors.append(f"all-SWAP p{page+1}: {r1.get('message', '')}")
+                break
+            if not data:
+                break
+            all_fills.extend(data)
+            if len(data) < 100:
+                break
+            after_ts = data[-1].get("ts", "")
 
-    # Strategy 2: fallback to regular fills if no results
-    if not all_fills:
-        r2 = await _okx_call(lambda c: c.get_fills(limit=100))
-        print(f"[_fetch_okx_fills] fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
-        if r2.get("error"):
-            errors.append(f"fills: {r2.get('message', '')}")
-        if not r2.get("error") and r2.get("data"):
-            all_fills.extend(r2["data"])
+        # Fallback to regular fills if no results
+        if not all_fills:
+            r2 = await _okx_call(lambda c: c.get_fills(limit=100))
+            print(f"[_fetch_okx_fills] fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
+            if r2.get("error"):
+                errors.append(f"fills: {r2.get('message', '')}")
+            if not r2.get("error") and r2.get("data"):
+                all_fills.extend(r2["data"])
 
     # Sort by timestamp ascending (oldest first — needed for _pair_fills)
     all_fills.sort(key=lambda f: f.get("ts", "0"))
@@ -726,7 +746,8 @@ async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
     _fills_cache_ts = now
     _fills_cache_limit = effective_limit
     _fills_errors = errors
-    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills ({pages} pages), errors={errors}", flush=True)
+    _fetch_okx_fills._cache_key = cache_key
+    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills for {cache_key}, errors={errors}", flush=True)
     return all_fills
 
 
