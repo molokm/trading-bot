@@ -1103,6 +1103,106 @@ async def debug_fills():
     }
 
 
+@app.get("/api/analysis")
+async def trade_analysis():
+    """Detailed trade analysis: PnL breakdown, last ETH trades, stop-loss detection."""
+    # Force cache bypass
+    global _fills_cache_ts
+    _fills_cache_ts = 0
+
+    # Fetch ETH fills specifically
+    eth_fills = await _fetch_okx_fills(limit=300, inst_id="ETH-USDT-SWAP")
+    eth_paired = await _pair_fills(eth_fills)
+
+    # Also get all fills for total PnL
+    _fills_cache_ts = 0  # reset cache for all-instruments fetch
+    all_fills = await _fetch_okx_fills(limit=300)
+    all_paired = await _pair_fills(all_fills)
+
+    # Current positions
+    pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
+    positions = []
+    if not pos_result.get("error"):
+        for p in pos_result.get("data", []):
+            positions.append({
+                "inst_id": p.get("instId"),
+                "pos_side": p.get("posSide", "net"),
+                "size": float(p.get("pos", 0)),
+                "avg_entry": float(p.get("avgPx", 0)),
+                "upl": float(p.get("upl", 0)),
+                "upl_ratio": float(p.get("uplRatio", 0)),
+                "liq_price": float(p.get("liqPx", 0)) if p.get("liqPx") else None,
+            })
+
+    # Analyze ETH trades
+    eth_closed = [t for t in eth_paired if t.get("reason") == "closed"]
+    eth_open = [t for t in eth_paired if t.get("reason") == "open"]
+
+    # Cumulative PnL
+    cumulative = 0.0
+    eth_trade_details = []
+    for t in eth_closed:
+        pnl = float(t.get("pnl", 0) or 0)
+        cumulative += pnl
+        entry_px = t.get("entry", 0)
+        exit_px = t.get("exit_price", 0)
+        # Detect if SL was hit (loss > 1% of entry)
+        sl_hit = False
+        if pnl < 0 and entry_px > 0:
+            loss_pct = abs(pnl / (entry_px * t.get("size", 1))) * 100
+            if loss_pct > 1.0:
+                sl_hit = True
+        eth_trade_details.append({
+            "entry_time": t.get("entry_time", ""),
+            "close_time": t.get("time", ""),
+            "entry": entry_px,
+            "exit": exit_px,
+            "size": t.get("size", 0),
+            "pnl": round(pnl, 4),
+            "cumulative_pnl": round(cumulative, 4),
+            "pos_side": t.get("pos_side", ""),
+            "sl_hit": sl_hit,
+            "price_change_pct": round((exit_px - entry_px) / entry_px * 100, 2) if entry_px > 0 else 0,
+        })
+
+    # Total PnL across all instruments
+    total_pnl = sum(float(t.get("pnl", 0) or 0) for t in all_paired if t.get("reason") == "closed")
+    total_trades = sum(1 for t in all_paired if t.get("reason") == "closed")
+    win_trades = sum(1 for t in all_paired if t.get("reason") == "closed" and float(t.get("pnl", 0) or 0) > 0)
+    loss_trades = total_trades - win_trades
+
+    return {
+        "summary": {
+            "total_pnl": round(total_pnl, 2),
+            "total_trades": total_trades,
+            "win": win_trades,
+            "loss": loss_trades,
+            "win_rate": round(win_trades / total_trades * 100, 1) if total_trades > 0 else 0,
+        },
+        "eth": {
+            "total_fills": len(eth_fills),
+            "closed_trades": len(eth_closed),
+            "open_trades": len(eth_open),
+            "total_eth_pnl": round(sum(float(t.get("pnl", 0) or 0) for t in eth_closed), 4),
+            "last_10_trades": eth_trade_details[-10:],
+            "open_positions": [{
+                "entry": t.get("entry", 0),
+                "size": t.get("size", 0),
+                "entry_time": t.get("entry_time", ""),
+                "pos_side": t.get("pos_side", ""),
+            } for t in eth_open],
+        },
+        "current_positions": positions,
+        "by_instrument": {
+            inst: {
+                "trades": sum(1 for t in all_paired if t.get("inst_id") == inst and t.get("reason") == "closed"),
+                "pnl": round(sum(float(t.get("pnl", 0) or 0) for t in all_paired if t.get("inst_id") == inst and t.get("reason") == "closed"), 4),
+            }
+            for inst in set(t.get("inst_id", "") for t in all_paired)
+        },
+    }
+
+
 @app.get("/api/db/positions")
 async def get_db_positions():
     positions = await db.get_all_positions()
