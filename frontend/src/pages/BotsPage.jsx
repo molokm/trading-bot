@@ -8,7 +8,12 @@ import { SliderPanel, Tip, StatusBadge, MetricCard, ConfirmDialog, getStrategyDe
 import { useTranslation } from '../hooks/useTranslation'
 
 const STRATEGIES_BASE = [
-  { id: 'momentum', nameKey: null, name: 'Momentum', icon: TrendingUp, descKey: 'momentum', params: ['risk_per_trade', 'max_positions', 'poll_interval_sec', 'trail_pct', 'breakeven_pct', 'tp1_pct', 'tp1_frac', 'sl1_pct', 'sl1_frac', 'adx_threshold'] },
+  { id: 'momentum', nameKey: null, name: 'Momentum', icon: TrendingUp, descKey: 'momentum', params: [
+    'max_budget', 'max_notional_per_position_pct', 'max_total_notional_pct',
+    'signal_risk_min', 'signal_risk_max', 'signal_adx_weak', 'signal_adx_strong',
+    'risk_per_trade', 'max_positions', 'poll_interval_sec', 'trail_pct', 'breakeven_pct',
+    'tp1_pct', 'tp1_frac', 'sl1_pct', 'sl1_frac', 'adx_threshold'
+  ] },
   { id: 'grid', nameKey: 'bots.grid', name: 'Grid', icon: Settings2, descKey: 'grid', params: ['position_size', 'grid_levels', 'grid_step', 'max_positions', 'tp_pct', 'sl_pct'] },
   { id: 'dca', nameKey: null, name: 'DCA', icon: TrendingUp, descKey: 'dca', params: ['position_size', 'dca_orders', 'dca_step', 'max_positions', 'tp_pct'] },
   { id: 'scalping', nameKey: 'bots.scalping', name: 'Scalping', icon: Zap, descKey: 'scalping', params: ['position_size', 'tp_pct', 'sl_pct', 'max_positions', 'poll_interval_sec'] },
@@ -27,8 +32,15 @@ function getStrategies(t) {
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
 
 const PARAM_BASE = {
-  risk_per_trade:      { min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01 },
-  max_positions:       { min: 1, max: 10, step: 1, unit: '', div: 1 },
+  max_budget:                     { min: 500, max: 100000, step: 500, unit: '$', div: 1 },
+  max_notional_per_position_pct:   { min: 5, max: 50, step: 5, unit: '%', div: 0.01 },
+  max_total_notional_pct:          { min: 30, max: 100, step: 5, unit: '%', div: 0.01 },
+  signal_risk_min:                { min: 0.5, max: 3, step: 0.5, unit: '%', div: 0.01 },
+  signal_risk_max:                { min: 2, max: 10, step: 0.5, unit: '%', div: 0.01 },
+  signal_adx_weak:                { min: 15, max: 35, step: 1, unit: '', div: 1 },
+  signal_adx_strong:              { min: 30, max: 60, step: 1, unit: '', div: 1 },
+  risk_per_trade:                 { min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01 },
+  max_positions:                  { min: 1, max: 10, step: 1, unit: '', div: 1 },
   poll_interval_sec:   { min: 15, max: 300, step: 15, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's', div: 1 },
   trail_pct:           { min: 0.5, max: 5, step: 0.1, unit: '%', div: 0.01 },
   breakeven_pct:       { min: 0.1, max: 3, step: 0.1, unit: '%', div: 0.01 },
@@ -71,6 +83,8 @@ function getDefaultBot(t) {
       risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
       trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
       sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
+      max_budget: 10000, max_notional_per_position_pct: 0.25, max_total_notional_pct: 0.80,
+      signal_risk_min: 0.01, signal_risk_max: 0.05, signal_adx_weak: 25, signal_adx_strong: 45,
     },
     pnl: 0, trades: 0, created: new Date().toISOString(),
   }
@@ -417,6 +431,8 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
       risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
       trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
       sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
+      max_budget: 10000, max_notional_per_position_pct: 0.25, max_total_notional_pct: 0.80,
+      signal_risk_min: 0.01, signal_risk_max: 0.05, signal_adx_weak: 25, signal_adx_strong: 45,
     },
   })
 

@@ -395,7 +395,9 @@ async def momentum_update_config(data: dict = None):
                 "trail_pct", "adx_threshold", "mom_threshold",
                 "breakeven_pct", "tp1_pct", "tp1_frac",
                 "sl1_pct", "sl1_frac",
-                "trend_adx_min", "range_adx_max", "range_sl_mult"):
+                "trend_adx_min", "range_adx_max", "range_sl_mult",
+                "max_budget", "max_notional_per_position_pct", "max_total_notional_pct",
+                "signal_risk_min", "signal_risk_max", "signal_adx_weak", "signal_adx_strong"):
         if key in data:
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": cfg}

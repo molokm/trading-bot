@@ -58,9 +58,15 @@ class MomentumConfig:
     range_rsi_overbought: float = 65.0
     range_risk_divisor: float = 2.0
     range_sl_mult: float = 1.0
-    # V7: Position sizing caps (based on $10,000 total deposit)
-    max_notional_per_position: float = 2500.0   # max $2,500 notional per coin (25% of deposit)
-    max_total_notional_pct: float = 0.80         # max 80% of equity across all positions
+    # V7: Budget & position sizing
+    max_budget: float = 10000.0                  # total budget allocated to the bot
+    max_notional_per_position_pct: float = 0.25  # 25% of budget per single position
+    max_total_notional_pct: float = 0.80         # 80% of budget across all positions
+    # V7: Signal-strength risk scaling
+    signal_risk_min: float = 0.01                # 1% risk for weak signals
+    signal_risk_max: float = 0.05                # 5% risk for strong signals
+    signal_adx_weak: float = 25.0                # ADX below this = weak signal
+    signal_adx_strong: float = 45.0              # ADX above this = strong signal
 
     def __post_init__(self):
         if self.symbols is None:
@@ -68,11 +74,11 @@ class MomentumConfig:
 
 
 STRATEGY_DESC = (
-    "Bilateral Momentum V7: лонг+шорт, 3x leverage, compounding, dynamic slippage. "
+    "Bilateral Momentum V7: лонг+шорт, 3x leverage, signal-strength sizing, budget caps. "
     "Тренд (ADX>25): лонг при ROC>0,EMA15>EMA30,PDI>MDI; шорт при ROC<0,EMA15<EMA30,MDI>PDI. "
     "Флэт (ADX<18): бортовые позиции по Bollinger Bands+RSI. "
     "Выход: трейлинг 1.5%, безубыток 0.3%, частичное 50% при 1.5%. "
-    "V7: max $2,500 notional/position, max 80% total notional."
+    "V7: budget cap, 25%/position, signal-strength risk 1-5%."
 )
 
 
@@ -786,23 +792,42 @@ class MomentumStrategy:
         if risk_per_contract <= 0:
             return
 
-        # Risk sizing — range mode uses reduced risk
+        # V7: Use budget instead of equity for sizing
+        budget = self.config.max_budget
+
+        # V7: Signal-strength risk scaling (ADX-based)
+        adx = ind.get("adx", 0)
+        roc_abs = abs(ind.get("roc_fast", 0) or 0)
+        cfg = self.config
         if mode == "range":
-            risk_amount = self._equity * self.config.risk_per_trade / self.config.range_risk_divisor
+            # Range mode: fixed reduced risk
+            scaled_risk = cfg.signal_risk_min / cfg.range_risk_divisor
         else:
-            risk_amount = self._equity * self.config.risk_per_trade
+            # Scale risk between signal_risk_min and signal_risk_max based on ADX
+            adx_range = cfg.signal_adx_strong - cfg.signal_adx_weak
+            if adx_range > 0 and adx >= cfg.signal_adx_weak:
+                adx_frac = min((adx - cfg.signal_adx_weak) / adx_range, 1.0)
+            else:
+                adx_frac = 0.0
+            # ROC bonus: strong momentum adds up to 1% extra
+            roc_bonus = min(roc_abs / 5.0, 1.0) * 0.01
+            scaled_risk = cfg.signal_risk_min + (cfg.signal_risk_max - cfg.signal_risk_min) * adx_frac + roc_bonus
+            scaled_risk = min(scaled_risk, cfg.signal_risk_max)
+
+        risk_amount = budget * scaled_risk
 
         ct_val = CT_VAL.get(coin, 0.1)
         raw_sz = risk_amount / risk_per_contract / ct_val
 
-        # V7: Per-position notional cap (max $2,500 per coin)
-        max_per_pos_sz = self.config.max_notional_per_position / (ct_val * price)
+        # V7: Per-position notional cap (X% of budget)
+        max_per_pos_notional = budget * cfg.max_notional_per_position_pct
+        max_per_pos_sz = max_per_pos_notional / (ct_val * price)
         if raw_sz > max_per_pos_sz:
             raw_sz = max_per_pos_sz
-            print(f"[Momentum] {coin}: per-position notional cap applied, sz={raw_sz:.2f}", flush=True)
+            print(f"[Momentum] {coin}: per-position cap ${max_per_pos_notional:.0f}, sz={raw_sz:.2f}", flush=True)
 
         # V7: Total notional cap — check already-open positions
-        total_notional_limit = self._equity * self.config.max_total_notional_pct
+        total_notional_limit = budget * cfg.max_total_notional_pct
         used_notional = sum(
             p.size * CT_VAL.get(p.symbol, 0.1) * p.entry_price
             for p in self._positions.values()
@@ -815,8 +840,8 @@ class MomentumStrategy:
         max_total_sz = available_notional / (ct_val * price)
         if raw_sz > max_total_sz:
             raw_sz = max_total_sz
-            print(f"[Momentum] {coin}: total notional cap applied, sz={raw_sz:.2f} "
-                  f"(used={used_notional:.0f}, limit={total_notional_limit:.0f})", flush=True)
+            print(f"[Momentum] {coin}: total notional cap, sz={raw_sz:.2f} "
+                  f"(used={used_notional:.0f}/{total_notional_limit:.0f})", flush=True)
 
         lot = LOT_SZ.get(coin, 0.01)
         sz = round(raw_sz / lot) * lot
@@ -888,7 +913,8 @@ class MomentumStrategy:
             self._trade_log.append(signal_entry)
 
             print(f"[Momentum] OPEN {side.upper()} {coin} @ {exec_price:.2f} (sig={price:.2f}) sz={sz:.2f} "
-                  f"stop={actual_stop:.2f} mode={mode} ADX={ind['adx']:.1f} slip={slip*100:.3f}%",
+                  f"stop={actual_stop:.2f} mode={mode} ADX={ind['adx']:.1f} "
+                  f"risk={scaled_risk*100:.1f}% notional=${sz*ct_val*exec_price:.0f} slip={slip*100:.3f}%",
                   flush=True)
 
             await self._save_signal_db(order_side, coin, price)
