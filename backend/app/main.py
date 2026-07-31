@@ -616,6 +616,7 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
             "client_ok": client_manager.get_client() is not None,
             "env_keys_set": bool(_env_key and _env_secret and _env_pass),
             "demo": _env_demo,
+            "okx_errors": _fills_errors,
         }
     }
 
@@ -630,10 +631,13 @@ _fills_cache_limit: int = 0
 _FILLS_TTL = 30  # seconds
 
 
+_fills_errors: list[str] = []
+
+
 async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
     """Fetch fills from OKX for all SWAP instruments. Returns raw OKX fill dicts.
     Tries fills-history (3 months) first, then falls back to fills (7 days)."""
-    global _fills_cache, _fills_cache_ts, _fills_cache_limit
+    global _fills_cache, _fills_cache_ts, _fills_cache_limit, _fills_errors
     now = _time.time()
     if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
         print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills", flush=True)
@@ -674,6 +678,7 @@ async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
     _fills_cache = all_fills
     _fills_cache_ts = now
     _fills_cache_limit = limit
+    _fills_errors = errors
     print(f"[_fetch_okx_fills] total: {len(all_fills)} fills, errors={errors}", flush=True)
     return all_fills
 
