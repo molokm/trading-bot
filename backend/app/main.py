@@ -540,34 +540,32 @@ async def momentum_chart_data():
 
 @app.get("/api/chart/trades")
 async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
-    """Return real trade markers for a specific instrument from OKX paired fills.
-    Each closed trade produces two markers: entry (green arrow) and exit (red arrow).
-    Open trades produce only entry markers."""
+    """Return real trade markers + TP/SL lines for a specific instrument.
+    Closed trades: entry (green) + exit (red/green) markers.
+    Open positions: entry marker (blue) + TP/SL price lines from algo orders."""
     try:
-        raw_fills = await _fetch_okx_fills(limit=200)
+        raw_fills = await _fetch_okx_fills(limit=300)
     except Exception as e:
         print(f"[chart_trades] _fetch_okx_fills error: {e}", flush=True)
-        return {"markers": [], "debug": {"error": str(e), "raw_fills": 0, "paired": 0, "inst_ids": []}}
+        return {"markers": [], "tp_sl_lines": [], "debug": {"error": str(e), "raw_fills": 0, "paired": 0}}
 
     paired = await _pair_fills(raw_fills)
-    inst_ids_in_data = list(set(t.get("inst_id", "") for t in paired))
-    print(f"[chart_trades] raw={len(raw_fills)} paired={len(paired)} inst_ids={inst_ids_in_data} requested={inst_id}", flush=True)
+    inst_paired = [t for t in paired if t.get("inst_id") == inst_id]
+    closed_count = sum(1 for t in inst_paired if t.get("reason") == "closed")
+    open_count = sum(1 for t in inst_paired if t.get("reason") == "open")
+    print(f"[chart_trades] raw={len(raw_fills)} paired={len(paired)} inst={inst_id} closed={closed_count} open={open_count}", flush=True)
+
+    def _to_ts(time_str):
+        if not time_str:
+            return None
+        try:
+            return int(datetime.fromisoformat(time_str).timestamp())
+        except (ValueError, OSError, TypeError):
+            return None
 
     markers = []
-    for t in paired:
-        if t.get("inst_id") != inst_id:
-            continue
-
-        def _to_ts(time_str):
-            if not time_str:
-                return None
-            try:
-                return int(datetime.fromisoformat(time_str).timestamp())
-            except (ValueError, OSError, TypeError):
-                return None
-
+    for t in inst_paired:
         if t.get("reason") == "closed":
-            # Entry marker at entry_time
             entry_ts = _to_ts(t.get("entry_time"))
             entry_px = t.get("entry", 0)
             if entry_ts and entry_px and entry_px > 0:
@@ -577,22 +575,21 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
                     "position": "belowBar" if pos_side == "long" else "aboveBar",
                     "color": "#00ff88",
                     "shape": "arrowUp" if pos_side == "long" else "arrowDown",
-                    "text": f"{entry_px:.2f}",
+                    "text": f"IN {entry_px:.2f}",
                 })
-            # Exit marker at close time
             close_ts = _to_ts(t.get("time"))
             exit_px = t.get("exit_price", 0)
             if close_ts and exit_px and exit_px > 0:
                 pnl = t.get("pnl", 0) or 0
+                pos_side = t.get("pos_side", "long")
                 markers.append({
                     "time": close_ts,
-                    "position": "aboveBar" if t.get("pos_side") == "long" else "belowBar",
+                    "position": "aboveBar" if pos_side == "long" else "belowBar",
                     "color": "#00ff88" if pnl >= 0 else "#ff4757",
-                    "shape": "arrowDown" if t.get("pos_side") == "long" else "arrowUp",
+                    "shape": "arrowDown" if pos_side == "long" else "arrowUp",
                     "text": f"{pnl:+.2f}",
                 })
         else:
-            # Open position — entry marker only
             open_ts = _to_ts(t.get("entry_time") or t.get("time"))
             entry_px = t.get("entry", 0)
             if open_ts and entry_px and entry_px > 0:
@@ -605,16 +602,51 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
                     "text": f"OPEN {entry_px:.2f}",
                 })
 
+    # Fetch TP/SL from algo orders for open positions
+    tp_sl_lines = []
+    try:
+        algo_r = await _okx_call(lambda c: c.get_algo_orders(ord_type="conditional"))
+        if not algo_r.get("error") and algo_r.get("data"):
+            for order in algo_r["data"]:
+                if order.get("instId") != inst_id:
+                    continue
+                # OKX algo order fields: tpTriggerPxPx, slTriggerPxPx (or tpTriggerPx, slTriggerPx)
+                tp_price = order.get("tpTriggerPxPx") or order.get("tpTriggerPx")
+                sl_price = order.get("slTriggerPxPx") or order.get("slTriggerPx")
+                pos_side = order.get("posSide", "net")
+                sz = float(order.get("sz", 0) or 0)
+                if tp_price and float(tp_price) > 0:
+                    tp_sl_lines.append({
+                        "price": float(tp_price),
+                        "type": "tp",
+                        "pos_side": pos_side,
+                        "size": sz,
+                        "label": f"TP {float(tp_price):.2f}",
+                    })
+                if sl_price and float(sl_price) > 0:
+                    tp_sl_lines.append({
+                        "price": float(sl_price),
+                        "type": "sl",
+                        "pos_side": pos_side,
+                        "size": sz,
+                        "label": f"SL {float(sl_price):.2f}",
+                    })
+        print(f"[chart_trades] algo orders for {inst_id}: {len(tp_sl_lines)} TP/SL lines", flush=True)
+    except Exception as e:
+        print(f"[chart_trades] algo orders error: {e}", flush=True)
+
     markers.sort(key=lambda m: m["time"])
     return {
         "markers": markers,
+        "tp_sl_lines": tp_sl_lines,
         "debug": {
             "raw_fills": len(raw_fills),
             "paired": len(paired),
-            "matched": len([t for t in paired if t.get("inst_id") == inst_id]),
-            "inst_ids": inst_ids_in_data,
+            "matched": len(inst_paired),
+            "closed": closed_count,
+            "open": open_count,
+            "inst_ids": list(set(t.get("inst_id", "") for t in paired)),
             "client_ok": client_manager.get_client() is not None,
-            "env_keys_set": bool(_env_key and _env_secret and _env_pass),
             "demo": _env_demo,
             "okx_errors": _fills_errors,
         }
@@ -635,11 +667,10 @@ _fills_errors: list[str] = []
 
 
 async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
-    """Fetch fills from OKX for all SWAP instruments. Returns raw OKX fill dicts.
-    Tries fills-history (3 months) first, then falls back to fills (7 days)."""
+    """Fetch fills from OKX for all SWAP instruments with pagination.
+    Tries fills-history (3 months) first, then falls back to fills (7 days).
+    Supports up to 300 fills via pagination (3 pages of 100)."""
     global _fills_cache, _fills_cache_ts, _fills_cache_limit, _fills_errors
-    # OKX max limit is 100 for fills-history and fills endpoints
-    limit = min(limit, 100)
     now = _time.time()
     if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
         print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills", flush=True)
@@ -647,41 +678,46 @@ async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
 
     all_fills = []
     errors = []
+    pages = max(1, (limit + 99) // 100)  # How many pages needed
+    effective_limit = min(limit, 300)  # Max 3 pages
+    pages = max(1, (effective_limit + 99) // 100)
 
-    # Strategy 1: Single fills-history call without instId filter (gets all SWAP fills)
-    r1 = await _okx_call(lambda c: c.get_fills_history(inst_type="SWAP", limit=limit))
-    print(f"[_fetch_okx_fills] fills-history (no instId): error={r1.get('error')}, data_len={len(r1.get('data', []))}, msg={r1.get('message', '')}", flush=True)
-    if r1.get("error"):
-        errors.append(f"fills-history: {r1.get('message', '')}")
-    if not r1.get("error") and r1.get("data"):
-        all_fills.extend(r1["data"])
+    # Strategy 1: fills-history with pagination (no instId filter)
+    after_ts = ""
+    for page in range(pages):
+        params = {"inst_type": "SWAP", "limit": 100}
+        if after_ts:
+            params["after"] = after_ts
+        r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
+        data = r1.get("data", [])
+        print(f"[_fetch_okx_fills] fills-history page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
+        if r1.get("error"):
+            errors.append(f"fills-history p{page+1}: {r1.get('message', '')}")
+            break
+        if not data:
+            break
+        all_fills.extend(data)
+        if len(data) < 100:
+            break  # No more pages
+        # Use oldest fill's ts as 'after' for next page
+        after_ts = data[-1].get("ts", "")
 
-    # Strategy 2: If fills-history empty, try regular fills endpoint (last 7 days)
+    # Strategy 2: fallback to regular fills if no results
     if not all_fills:
-        r2 = await _okx_call(lambda c: c.get_fills(limit=limit))
-        print(f"[_fetch_okx_fills] fills (fallback, no instId): error={r2.get('error')}, data_len={len(r2.get('data', []))}, msg={r2.get('message', '')}", flush=True)
+        r2 = await _okx_call(lambda c: c.get_fills(limit=100))
+        print(f"[_fetch_okx_fills] fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
         if r2.get("error"):
             errors.append(f"fills: {r2.get('message', '')}")
         if not r2.get("error") and r2.get("data"):
             all_fills.extend(r2["data"])
 
-    # Strategy 3: If still empty, try per-instrument fills-history (some demo accounts need this)
-    if not all_fills:
-        for inst_id in SWAP_INSTRUMENTS:
-            r3 = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
-            print(f"[_fetch_okx_fills] {inst_id} fills-history (per-inst): error={r3.get('error')}, data_len={len(r3.get('data', []))}", flush=True)
-            if r3.get("error"):
-                errors.append(f"{inst_id} fills-history: {r3.get('message', '')}")
-            if not r3.get("error") and r3.get("data"):
-                all_fills.extend(r3["data"])
-
-    # Sort by timestamp ascending (oldest first — needed for _pair_fills sequential state machine)
+    # Sort by timestamp ascending (oldest first — needed for _pair_fills)
     all_fills.sort(key=lambda f: f.get("ts", "0"))
     _fills_cache = all_fills
     _fills_cache_ts = now
-    _fills_cache_limit = limit
+    _fills_cache_limit = effective_limit
     _fills_errors = errors
-    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills, errors={errors}", flush=True)
+    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills ({pages} pages), errors={errors}", flush=True)
     return all_fills
 
 

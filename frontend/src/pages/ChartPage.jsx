@@ -24,23 +24,29 @@ export default function ChartPage() {
   const [loading, setLoading] = useState(false)
   const [tf, setTf] = useState('1D')
   const [markers, setMarkers] = useState([])
+  const [tpSlLines, setTpSlLines] = useState([])
   const [markersStatus, setMarkersStatus] = useState('')
   const [activeIndicators, setActiveIndicators] = useState(['sma'])
   const chartRef = useRef(null)
   const containerRef = useRef(null)
   const markersRef = useRef(null)
   const indicatorSeriesRef = useRef({})
+  const tpSlRef = useRef([])
 
   const loadTradeMarkers = useCallback(async (instId) => {
     try {
       const data = await api.chartTrades(instId)
       const m = data.markers || []
+      const lines = data.tp_sl_lines || []
       setMarkers(m)
-      setMarkersStatus(`${m.length}`)
-      console.log(`[chart] ${instId}: ${m.length} markers, debug:`, data.debug)
+      setTpSlLines(lines)
+      const d = data.debug || {}
+      setMarkersStatus(`${d.matched || 0}`)
+      console.log(`[chart] ${instId}: ${m.length} markers, ${lines.length} TP/SL lines, debug:`, d)
     } catch (err) {
       console.error('[chart] failed to load markers:', err)
       setMarkers([])
+      setTpSlLines([])
       setMarkersStatus('err')
     }
   }, [])
@@ -75,7 +81,6 @@ export default function ChartPage() {
     setLoading(false)
   }
 
-  // Compute SMA/EMA
   function computeSMA(data, period) {
     const result = []
     for (let i = period - 1; i < data.length; i++) {
@@ -106,6 +111,7 @@ export default function ChartPage() {
     }
     markersRef.current = {}
     indicatorSeriesRef.current = {}
+    tpSlRef.current = []
 
     const container = containerRef.current
     if (!container) return
@@ -128,7 +134,6 @@ export default function ChartPage() {
       height: container.clientHeight || 500,
     })
 
-    // Candlestick series
     const isBtc = selectedPair.includes('BTC')
     const candleSeries = chart.addSeries(CandlestickSeries, {
       upColor: '#00ff88', downColor: '#ff4757',
@@ -138,18 +143,12 @@ export default function ChartPage() {
     })
     candleSeries.setData(chartData)
 
-    // Volume series
+    // Volume
     const volumeSeries = chart.addSeries(LineSeries, {
-      color: 'rgba(74,158,255,0.15)',
-      lineWidth: 1,
-      lineStyle: 0,
-      priceScaleId: 'volume',
-      lastValueVisible: false,
-      priceLineVisible: false,
+      color: 'rgba(74,158,255,0.15)', lineWidth: 1, lineStyle: 0,
+      priceScaleId: 'volume', lastValueVisible: false, priceLineVisible: false,
     })
-    chart.priceScale('volume').applyOptions({
-      scaleMargins: { top: 0.85, bottom: 0 },
-    })
+    chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } })
     volumeSeries.setData(chartData.map(c => ({ time: c.time, value: c.volume })))
 
     // Indicators
@@ -168,18 +167,41 @@ export default function ChartPage() {
       indicatorSeriesRef.current[ind.id] = s
     })
 
-    // Trade markers from OKX — setMarkers directly, no time filtering
+    // Trade markers
     if (markers.length > 0) {
       try {
         const sorted = [...markers].sort((a, b) => a.time - b.time)
         markersRef.current.main = createSeriesMarkers(candleSeries, sorted)
-        console.log(`[chart] applied ${sorted.length} markers to chart`)
+        console.log(`[chart] applied ${sorted.length} markers`)
       } catch (err) {
         console.error('[chart] failed to create markers:', err)
       }
     }
 
-    // Fit chart to show all data
+    // TP/SL price lines for open positions
+    if (tpSlLines.length > 0) {
+      tpSlLines.forEach(line => {
+        const isTp = line.type === 'tp'
+        const color = isTp ? '#00ff88' : '#ff4757'
+        const lineWidth = 2
+        const lineStyle = isTp ? 2 : 0 // dashed for TP, solid for SL
+        try {
+          candleSeries.createPriceLine({
+            price: line.price,
+            color,
+            lineWidth,
+            lineStyle,
+            axisLabelVisible: true,
+            title: line.label,
+          })
+          tpSlRef.current.push(line)
+        } catch (err) {
+          console.error(`[chart] failed to create ${line.type} line:`, err)
+        }
+      })
+      console.log(`[chart] applied ${tpSlLines.length} TP/SL lines`)
+    }
+
     chart.timeScale().fitContent()
     chartRef.current = chart
 
@@ -190,7 +212,7 @@ export default function ChartPage() {
     const ro = new ResizeObserver(handleResize)
     ro.observe(container)
     return () => { ro.disconnect(); window.removeEventListener('resize', handleResize); chart.remove(); chartRef.current = null }
-  }, [chartData, selectedPair, markers, activeIndicators])
+  }, [chartData, selectedPair, markers, tpSlLines, activeIndicators])
 
   const toggleIndicator = (id) => {
     setActiveIndicators(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
