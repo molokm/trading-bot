@@ -597,8 +597,8 @@ def _ms_to_iso(ts_ms: str) -> str:
 
 
 def _parse_fill_pnl(f: dict):
-    """Parse pnl from OKX fill. Returns float or None if unknown."""
-    raw = f.get("pnl")
+    """Parse pnl from OKX fill. OKX uses 'fillPnl' field. Returns float or None if unknown."""
+    raw = f.get("fillPnl") or f.get("pnl")  # fillPnl for v5, pnl as fallback
     if raw is None or raw == "":
         return None
     try:
