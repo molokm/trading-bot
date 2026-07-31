@@ -631,9 +631,17 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
                         "size": sz,
                         "label": f"SL {float(sl_price):.2f}",
                     })
-        print(f"[chart_trades] algo orders for {inst_id}: {len(tp_sl_lines)} TP/SL lines", flush=True)
+        print(f"[chart_trades] algo orders for {inst_id}: {len(tp_sl_lines)} TP/SL lines, algo_error={algo_r.get('error')}, algo_msg={algo_r.get('message', '')}", flush=True)
     except Exception as e:
         print(f"[chart_trades] algo orders error: {e}", flush=True)
+
+    # Log marker creation details
+    for t in inst_paired:
+        entry_ts = _to_ts(t.get("entry_time"))
+        close_ts = _to_ts(t.get("time"))
+        entry_px = t.get("entry", 0)
+        exit_px = t.get("exit_price", 0)
+        print(f"[chart_trades] trade: reason={t.get('reason')} entry_ts={entry_ts} close_ts={close_ts} entry={entry_px} exit={exit_px}", flush=True)
 
     markers.sort(key=lambda m: m["time"])
     return {
@@ -649,6 +657,7 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
             "client_ok": client_manager.get_client() is not None,
             "demo": _env_demo,
             "okx_errors": _fills_errors,
+            "sample": [{"entry_time": t.get("entry_time", ""), "time": t.get("time", ""), "entry": t.get("entry", 0), "exit_price": t.get("exit_price", 0), "pnl": t.get("pnl", 0), "reason": t.get("reason", ""), "pos_side": t.get("pos_side", "")} for t in inst_paired[:3]],
         }
     }
 
