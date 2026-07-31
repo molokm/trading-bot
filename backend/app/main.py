@@ -613,6 +613,9 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
             "paired": len(paired),
             "matched": len([t for t in paired if t.get("inst_id") == inst_id]),
             "inst_ids": inst_ids_in_data,
+            "client_ok": client_manager.get_client() is not None,
+            "env_keys_set": bool(_env_key and _env_secret and _env_pass),
+            "demo": _env_demo,
         }
     }
 
@@ -628,35 +631,50 @@ _FILLS_TTL = 30  # seconds
 
 
 async def _fetch_okx_fills(limit: int = 100) -> list[dict]:
-    """Fetch fills-history from OKX for all SWAP instruments. Returns raw OKX fill dicts."""
+    """Fetch fills from OKX for all SWAP instruments. Returns raw OKX fill dicts.
+    Tries fills-history (3 months) first, then falls back to fills (7 days)."""
     global _fills_cache, _fills_cache_ts, _fills_cache_limit
     now = _time.time()
     if _fills_cache and (now - _fills_cache_ts) < _FILLS_TTL and _fills_cache_limit >= limit:
-        print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills (requested limit={limit}, cached limit={_fills_cache_limit})", flush=True)
+        print(f"[_fetch_okx_fills] cache hit, {len(_fills_cache)} fills", flush=True)
         return _fills_cache
 
     all_fills = []
-    for inst_id in SWAP_INSTRUMENTS:
-        r1 = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
-        print(f"[_fetch_okx_fills] {inst_id} fills-history: error={r1.get('error')}, data_len={len(r1.get('data', []))}", flush=True)
-        if r1.get("error"):
-            print(f"  fills-history error: {r1.get('message', '')}", flush=True)
-        if r1.get("error") or not r1.get("data"):
-            # Fallback to regular fills
-            r2 = await _okx_call(lambda c, iid=inst_id: c.get_fills(inst_id=iid, limit=limit))
-            print(f"[_fetch_okx_fills] {inst_id} fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
-            if r2.get("error"):
-                print(f"  fills error: {r2.get('message', '')}", flush=True)
-            r1 = r2
-        if not r1.get("error") and r1.get("data"):
-            all_fills.extend(r1["data"])
+    errors = []
 
-    # Sort by timestamp descending (newest first)
-    all_fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
+    # Strategy 1: Single fills-history call without instId filter (gets all SWAP fills)
+    r1 = await _okx_call(lambda c: c.get_fills_history(inst_type="SWAP", limit=limit))
+    print(f"[_fetch_okx_fills] fills-history (no instId): error={r1.get('error')}, data_len={len(r1.get('data', []))}, msg={r1.get('message', '')}", flush=True)
+    if r1.get("error"):
+        errors.append(f"fills-history: {r1.get('message', '')}")
+    if not r1.get("error") and r1.get("data"):
+        all_fills.extend(r1["data"])
+
+    # Strategy 2: If fills-history empty, try regular fills endpoint (last 7 days)
+    if not all_fills:
+        r2 = await _okx_call(lambda c: c.get_fills(limit=limit))
+        print(f"[_fetch_okx_fills] fills (fallback, no instId): error={r2.get('error')}, data_len={len(r2.get('data', []))}, msg={r2.get('message', '')}", flush=True)
+        if r2.get("error"):
+            errors.append(f"fills: {r2.get('message', '')}")
+        if not r2.get("error") and r2.get("data"):
+            all_fills.extend(r2["data"])
+
+    # Strategy 3: If still empty, try per-instrument fills-history (some demo accounts need this)
+    if not all_fills:
+        for inst_id in SWAP_INSTRUMENTS:
+            r3 = await _okx_call(lambda c, iid=inst_id: c.get_fills_history(inst_type="SWAP", instId=iid, limit=limit))
+            print(f"[_fetch_okx_fills] {inst_id} fills-history (per-inst): error={r3.get('error')}, data_len={len(r3.get('data', []))}", flush=True)
+            if r3.get("error"):
+                errors.append(f"{inst_id} fills-history: {r3.get('message', '')}")
+            if not r3.get("error") and r3.get("data"):
+                all_fills.extend(r3["data"])
+
+    # Sort by timestamp ascending (oldest first — needed for _pair_fills sequential state machine)
+    all_fills.sort(key=lambda f: f.get("ts", "0"))
     _fills_cache = all_fills
     _fills_cache_ts = now
     _fills_cache_limit = limit
-    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills from {len(SWAP_INSTRUMENTS)} instruments (limit={limit})", flush=True)
+    print(f"[_fetch_okx_fills] total: {len(all_fills)} fills, errors={errors}", flush=True)
     return all_fills
 
 
