@@ -547,8 +547,11 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
         raw_fills = await _fetch_okx_fills(limit=200)
     except Exception as e:
         print(f"[chart_trades] _fetch_okx_fills error: {e}", flush=True)
-        return {"markers": [], "error": str(e)}
+        return {"markers": [], "debug": {"error": str(e), "raw_fills": 0, "paired": 0, "inst_ids": []}}
+
     paired = await _pair_fills(raw_fills)
+    inst_ids_in_data = list(set(t.get("inst_id", "") for t in paired))
+    print(f"[chart_trades] raw={len(raw_fills)} paired={len(paired)} inst_ids={inst_ids_in_data} requested={inst_id}", flush=True)
 
     markers = []
     for t in paired:
@@ -603,8 +606,15 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
                 })
 
     markers.sort(key=lambda m: m["time"])
-    print(f"[chart_trades] {inst_id}: {len(paired)} total trades, {len(markers)} markers for chart", flush=True)
-    return {"markers": markers}
+    return {
+        "markers": markers,
+        "debug": {
+            "raw_fills": len(raw_fills),
+            "paired": len(paired),
+            "matched": len([t for t in paired if t.get("inst_id") == inst_id]),
+            "inst_ids": inst_ids_in_data,
+        }
+    }
 
 
 import time as _time

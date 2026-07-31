@@ -37,7 +37,7 @@ export default function ChartPage() {
       const m = data.markers || []
       setMarkers(m)
       setMarkersStatus(`${m.length}`)
-      console.log(`[chart] loaded ${m.length} markers for ${instId}`, m.slice(0, 3))
+      console.log(`[chart] ${instId}: ${m.length} markers, debug:`, data.debug)
     } catch (err) {
       console.error('[chart] failed to load markers:', err)
       setMarkers([])
