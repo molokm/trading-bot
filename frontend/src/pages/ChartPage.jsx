@@ -24,6 +24,7 @@ export default function ChartPage() {
   const [loading, setLoading] = useState(false)
   const [tf, setTf] = useState('1D')
   const [markers, setMarkers] = useState([])
+  const [markersStatus, setMarkersStatus] = useState('')
   const [activeIndicators, setActiveIndicators] = useState(['sma'])
   const chartRef = useRef(null)
   const containerRef = useRef(null)
@@ -33,9 +34,14 @@ export default function ChartPage() {
   const loadTradeMarkers = useCallback(async (instId) => {
     try {
       const data = await api.chartTrades(instId)
-      setMarkers(data.markers || [])
-    } catch {
+      const m = data.markers || []
+      setMarkers(m)
+      setMarkersStatus(`${m.length}`)
+      console.log(`[chart] loaded ${m.length} markers for ${instId}`, m.slice(0, 3))
+    } catch (err) {
+      console.error('[chart] failed to load markers:', err)
       setMarkers([])
+      setMarkersStatus('err')
     }
   }, [])
 
@@ -117,7 +123,7 @@ export default function ChartPage() {
         horzLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#1e2028' },
       },
       timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
-      rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.05, bottom: 0.05 } },
+      rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.05, bottom: 0.2 } },
       width: container.clientWidth,
       height: container.clientHeight || 500,
     })
@@ -162,23 +168,14 @@ export default function ChartPage() {
       indicatorSeriesRef.current[ind.id] = s
     })
 
-    // Trade markers from OKX paired fills — filter only markers within visible time range
+    // Trade markers from OKX — setMarkers directly, no time filtering
     if (markers.length > 0) {
-      const firstCandleTime = chartData[0].time
-      const lastCandleTime = chartData[chartData.length - 1].time
-      const filteredMarkers = markers
-        .filter(m => m.time >= firstCandleTime && m.time <= lastCandleTime)
-        .map(m => ({
-          time: m.time,
-          position: m.position,
-          color: m.color,
-          shape: m.shape,
-          text: m.text,
-        }))
-        .sort((a, b) => a.time - b.time)
-
-      if (filteredMarkers.length > 0) {
-        markersRef.current.main = createSeriesMarkers(candleSeries, filteredMarkers)
+      try {
+        const sorted = [...markers].sort((a, b) => a.time - b.time)
+        markersRef.current.main = createSeriesMarkers(candleSeries, sorted)
+        console.log(`[chart] applied ${sorted.length} markers to chart`)
+      } catch (err) {
+        console.error('[chart] failed to create markers:', err)
       }
     }
 
@@ -206,6 +203,11 @@ export default function ChartPage() {
         <div className="flex items-center gap-2">
           <BarChart3 size={18} className="text-[var(--info)]" />
           <h2 className="text-lg font-bold text-[var(--txt)]">{t('chart.title')}</h2>
+          {markersStatus && markersStatus !== '0' && (
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--info)]/20 text-[var(--info)]">
+              {markersStatus === 'err' ? '!' : `${markersStatus} ${t('chart.trades_from_exchange')}`}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-4 flex-wrap">
           <select className="!py-1.5 !px-3 !text-xs" value={selectedPair} onChange={e => setSelectedPair(e.target.value)}>

@@ -541,61 +541,69 @@ async def momentum_chart_data():
 @app.get("/api/chart/trades")
 async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
     """Return real trade markers for a specific instrument from OKX paired fills.
-    Each closed trade produces two markers: entry (green arrow) and exit (red/blue arrow).
+    Each closed trade produces two markers: entry (green arrow) and exit (red arrow).
     Open trades produce only entry markers."""
-    raw_fills = await _fetch_okx_fills(limit=200)
+    try:
+        raw_fills = await _fetch_okx_fills(limit=200)
+    except Exception as e:
+        print(f"[chart_trades] _fetch_okx_fills error: {e}", flush=True)
+        return {"markers": [], "error": str(e)}
     paired = await _pair_fills(raw_fills)
 
     markers = []
     for t in paired:
         if t.get("inst_id") != inst_id:
             continue
-        time_str = t.get("time", "")
-        if not time_str:
-            continue
-        try:
-            ts = int(datetime.fromisoformat(time_str).timestamp())
-        except (ValueError, OSError, TypeError):
-            continue
+
+        def _to_ts(time_str):
+            if not time_str:
+                return None
+            try:
+                return int(datetime.fromisoformat(time_str).timestamp())
+            except (ValueError, OSError, TypeError):
+                return None
 
         if t.get("reason") == "closed":
-            # Entry marker
+            # Entry marker at entry_time
+            entry_ts = _to_ts(t.get("entry_time"))
             entry_px = t.get("entry", 0)
-            if entry_px and entry_px > 0:
+            if entry_ts and entry_px and entry_px > 0:
                 pos_side = t.get("pos_side", "long")
                 markers.append({
-                    "time": ts,
+                    "time": entry_ts,
                     "position": "belowBar" if pos_side == "long" else "aboveBar",
                     "color": "#00ff88",
                     "shape": "arrowUp" if pos_side == "long" else "arrowDown",
-                    "text": f"{t.get('side', '').upper()} {entry_px:.2f}",
+                    "text": f"{entry_px:.2f}",
                 })
-            # Exit marker
+            # Exit marker at close time
+            close_ts = _to_ts(t.get("time"))
             exit_px = t.get("exit_price", 0)
-            if exit_px and exit_px > 0:
+            if close_ts and exit_px and exit_px > 0:
                 pnl = t.get("pnl", 0) or 0
                 markers.append({
-                    "time": ts,
+                    "time": close_ts,
                     "position": "aboveBar" if t.get("pos_side") == "long" else "belowBar",
-                    "color": "#ff4757" if pnl >= 0 else "#ff4757",
+                    "color": "#00ff88" if pnl >= 0 else "#ff4757",
                     "shape": "arrowDown" if t.get("pos_side") == "long" else "arrowUp",
-                    "text": f"{pnl:+.2f} USDT",
+                    "text": f"{pnl:+.2f}",
                 })
         else:
             # Open position — entry marker only
+            open_ts = _to_ts(t.get("entry_time") or t.get("time"))
             entry_px = t.get("entry", 0)
-            if entry_px and entry_px > 0:
+            if open_ts and entry_px and entry_px > 0:
                 pos_side = t.get("pos_side", "long")
                 markers.append({
-                    "time": ts,
+                    "time": open_ts,
                     "position": "belowBar" if pos_side == "long" else "aboveBar",
                     "color": "#4a9eff",
                     "shape": "arrowUp" if pos_side == "long" else "arrowDown",
                     "text": f"OPEN {entry_px:.2f}",
                 })
 
-    # Sort by time
     markers.sort(key=lambda m: m["time"])
+    print(f"[chart_trades] {inst_id}: {len(paired)} total trades, {len(markers)} markers for chart", flush=True)
     return {"markers": markers}
 
 
@@ -795,6 +803,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
 
                     paired.append({
                         "time": _ms_to_iso(fill_ts),
+                        "entry_time": _ms_to_iso(entry_time),
                         "side": fill_side,
                         "symbol": inst_id,
                         "size": close_size,
@@ -828,6 +837,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                         pos_out = "long" if fill_side == "sell" else "short"
                     paired.append({
                         "time": _ms_to_iso(fill_ts),
+                        "entry_time": "",
                         "side": fill_side,
                         "symbol": inst_id,
                         "size": fill_sz,
@@ -848,6 +858,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
             avg_entry = entry_cost / entry_size if entry_size > 0 else 0
             paired.append({
                 "time": _ms_to_iso(entry_time),
+                "entry_time": _ms_to_iso(entry_time),
                 "side": entry_side or ("buy" if direction == "long" else "sell"),
                 "symbol": inst_id,
                 "size": round(entry_size, 4),
