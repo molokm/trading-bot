@@ -98,5 +98,5 @@ export const api = {
 
   momentumTrades: (limit = 20) => request(`/momentum/trades?limit=${limit}`),
 
-  momentumChartData: () => request('/momentum/chart-data'),
+  chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 };

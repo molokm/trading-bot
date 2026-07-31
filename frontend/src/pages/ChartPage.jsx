@@ -23,31 +23,31 @@ export default function ChartPage() {
   const [chartData, setChartData] = useState(null)
   const [loading, setLoading] = useState(false)
   const [tf, setTf] = useState('1D')
-  const [chartTrades, setChartTrades] = useState({ markers: [], trade_lines: [] })
+  const [markers, setMarkers] = useState([])
   const [activeIndicators, setActiveIndicators] = useState(['sma'])
   const chartRef = useRef(null)
   const containerRef = useRef(null)
   const markersRef = useRef(null)
   const indicatorSeriesRef = useRef({})
 
-  const loadChartData = useCallback(async () => {
+  const loadTradeMarkers = useCallback(async (instId) => {
     try {
-      const data = await api.momentumChartData()
-      setChartTrades(data)
+      const data = await api.chartTrades(instId)
+      setMarkers(data.markers || [])
     } catch {
-      setChartTrades({ markers: [], trade_lines: [] })
+      setMarkers([])
     }
   }, [])
 
   useEffect(() => {
     loadCandles()
-    loadChartData()
+    loadTradeMarkers(selectedPair)
   }, [selectedPair, tf])
 
   useEffect(() => {
-    const interval = setInterval(loadChartData, 30000)
+    const interval = setInterval(() => loadTradeMarkers(selectedPair), 30000)
     return () => clearInterval(interval)
-  }, [loadChartData])
+  }, [selectedPair, loadTradeMarkers])
 
   async function loadCandles() {
     setLoading(true)
@@ -113,35 +113,38 @@ export default function ChartPage() {
       grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
       crosshair: {
         mode: 0,
-        vertLine: { color: 'var(--border-hover)', width: 1, style: 3, labelBackgroundColor: bgColor },
-        horzLine: { color: 'var(--border-hover)', width: 1, style: 3, labelBackgroundColor: bgColor },
+        vertLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#1e2028' },
+        horzLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#1e2028' },
       },
       timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
-      rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.1, bottom: 0.1 } },
+      rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.05, bottom: 0.05 } },
       width: container.clientWidth,
       height: container.clientHeight || 500,
     })
 
     // Candlestick series
+    const isBtc = selectedPair.includes('BTC')
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: 'var(--profit)', downColor: 'var(--loss)',
-      borderUpColor: 'var(--profit)', borderDownColor: 'var(--loss)',
-      wickUpColor: 'var(--profit)', wickDownColor: 'var(--loss)',
-      priceFormat: { type: 'price', precision: selectedPair.includes('BTC') ? 0 : 2, minMove: selectedPair.includes('BTC') ? 1 : 0.01 },
+      upColor: '#00ff88', downColor: '#ff4757',
+      borderUpColor: '#00ff88', borderDownColor: '#ff4757',
+      wickUpColor: '#00ff88', wickDownColor: '#ff4757',
+      priceFormat: { type: 'price', precision: isBtc ? 0 : 2, minMove: isBtc ? 1 : 0.01 },
     })
     candleSeries.setData(chartData)
 
-    // Price lines
-    const lastClose = chartData[chartData.length - 1].close
-    const step = selectedPair.includes('BTC') ? 500 : 10
-    const center = Math.round(lastClose / step) * step
-    for (let i = -4; i <= 4; i++) {
-      candleSeries.createPriceLine({
-        price: center + i * step,
-        color: i === 0 ? 'rgba(74,158,255,0.3)' : 'rgba(255,255,255,0.04)',
-        lineWidth: 1, lineStyle: i === 0 ? 1 : 2, axisLabelVisible: true, title: '',
-      })
-    }
+    // Volume series
+    const volumeSeries = chart.addSeries(LineSeries, {
+      color: 'rgba(74,158,255,0.15)',
+      lineWidth: 1,
+      lineStyle: 0,
+      priceScaleId: 'volume',
+      lastValueVisible: false,
+      priceLineVisible: false,
+    })
+    chart.priceScale('volume').applyOptions({
+      scaleMargins: { top: 0.85, bottom: 0 },
+    })
+    volumeSeries.setData(chartData.map(c => ({ time: c.time, value: c.volume })))
 
     // Indicators
     INDICATORS.forEach(ind => {
@@ -159,48 +162,38 @@ export default function ChartPage() {
       indicatorSeriesRef.current[ind.id] = s
     })
 
-    // Trade markers
-    const pairName = selectedPair.replace('-USDT-SWAP', '')
-    const filteredMarkers = chartTrades.markers
-      .filter(m => m.symbol === selectedPair || m.symbol === pairName || m.symbol?.includes(pairName))
-      .map(m => {
-        if (m.side === 'buy') return { time: m.time, position: 'belowBar', color: 'var(--profit)', shape: 'arrowUp', text: `$${m.entry?.toFixed?.(0) || m.entry}` }
-        const pnl = m.pnl || 0
-        return { time: m.time, position: 'aboveBar', color: pnl >= 0 ? 'var(--profit)' : 'var(--loss)', shape: 'arrowDown', text: `$${m.exit_price?.toFixed?.(0) || m.exit_price} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}` }
-      }).sort((a, b) => a.time - b.time)
-    if (filteredMarkers.length > 0) markersRef.current.main = createSeriesMarkers(candleSeries, filteredMarkers)
+    // Trade markers from OKX paired fills — filter only markers within visible time range
+    if (markers.length > 0) {
+      const firstCandleTime = chartData[0].time
+      const lastCandleTime = chartData[chartData.length - 1].time
+      const filteredMarkers = markers
+        .filter(m => m.time >= firstCandleTime && m.time <= lastCandleTime)
+        .map(m => ({
+          time: m.time,
+          position: m.position,
+          color: m.color,
+          shape: m.shape,
+          text: m.text,
+        }))
+        .sort((a, b) => a.time - b.time)
 
-    // Trade lines (TP/SL/BE)
-    chartTrades.trade_lines
-      .filter(p => p.inst_id === selectedPair || p.symbol === pairName || p.symbol?.includes(pairName))
-      .forEach(pos => {
-        if (chartData.length === 0) return
-        const endTime = chartData[chartData.length - 1].time
-        const makeLine = (value, color, width, style) => {
-          if (value == null || value <= 0) return
-          const s = chart.addSeries(LineSeries, { color, lineWidth: width, lineStyle: style, priceScaleId: 'right', lastValueVisible: true, priceLineVisible: false })
-          s.setData([{ time: chartData[0].time, value }, { time: endTime, value }])
-        }
-        makeLine(pos.stop, 'var(--loss)', 2, 2)
-        makeLine(pos.entry, 'rgba(0,255,136,0.5)', 1, 1)
-        makeLine(pos.breakeven, 'rgba(255,215,0,0.5)', 1, 2)
-        makeLine(pos.tp1, 'rgba(74,158,255,0.5)', 1, 2)
-      })
+      if (filteredMarkers.length > 0) {
+        markersRef.current.main = createSeriesMarkers(candleSeries, filteredMarkers)
+      }
+    }
 
-    // Visible range
-    const lastTime = chartData[chartData.length - 1].time
-    const firstTime = chartData[0].time
-    const range = lastTime - firstTime
-    const visibleSecs = Math.max(Math.floor(range * 0.3), 3600)
-    chart.timeScale().setVisibleRange({ from: lastTime - visibleSecs, to: lastTime + 60 })
+    // Fit chart to show all data
+    chart.timeScale().fitContent()
     chartRef.current = chart
 
-    const handleResize = () => { if (container) chart.applyOptions({ width: container.clientWidth, height: container.clientHeight }) }
+    const handleResize = () => {
+      if (container) chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
+    }
     window.addEventListener('resize', handleResize)
     const ro = new ResizeObserver(handleResize)
     ro.observe(container)
     return () => { ro.disconnect(); window.removeEventListener('resize', handleResize); chart.remove(); chartRef.current = null }
-  }, [chartData, selectedPair, chartTrades, activeIndicators])
+  }, [chartData, selectedPair, markers, activeIndicators])
 
   const toggleIndicator = (id) => {
     setActiveIndicators(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
@@ -236,30 +229,9 @@ export default function ChartPage() {
               </button>
             ))}
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => { loadCandles(); loadChartData() }}><RefreshCw size={12} /> {t('chart.refresh')}</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { loadCandles(); loadTradeMarkers(selectedPair) }}><RefreshCw size={12} /> {t('chart.refresh')}</button>
         </div>
       </div>
-
-      {/* Active position info bar */}
-      {(() => {
-        const pairLines = chartTrades.trade_lines.filter(p => p.inst_id === selectedPair || p.symbol === selectedPair.replace('-USDT-SWAP', '') || p.symbol?.includes(selectedPair.replace('-USDT-SWAP', '')))
-        const activeLines = pairLines.filter(p => p.stage !== 'closed')
-        if (activeLines.length === 0) return null
-        return (
-          <div className="flex gap-2 flex-shrink-0 overflow-x-auto">
-            {activeLines.map((p, i) => (
-              <div key={i} className="panel flex items-center gap-3 px-3 py-2 flex-shrink-0">
-                <span className="text-2xs font-bold text-[var(--profit)]">▲ {t('chart.long')}</span>
-                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.entry')} <span className="mono text-[var(--txt)]">${p.entry}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.sl')} <span className="mono text-[var(--loss)]">${p.stop}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.be')} <span className="mono text-[var(--warn)]">${p.breakeven}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.tp1')} <span className="mono text-[var(--info)]">${p.tp1}</span></span>
-                <span className="text-2xs text-[var(--txt-muted)]">{t('chart.stage')} <span className="text-accent-purple font-semibold">{p.stage}</span></span>
-              </div>
-            ))}
-          </div>
-        )
-      })()}
 
       {/* Chart */}
       <div className="panel flex-1 min-h-0">

@@ -170,12 +170,7 @@ const en = {
   'chart.title': 'Chart',
   'chart.refresh': 'Refresh',
   'chart.no_data': 'No data',
-  'chart.long': 'LONG',
-  'chart.entry': 'Entry:',
-  'chart.sl': 'SL:',
-  'chart.be': 'BE:',
-  'chart.tp1': 'TP1:',
-  'chart.stage': 'Stage:',
+  'chart.trades_from_exchange': 'Trades from exchange',
   'chart.sma_tip': 'Simple Moving Average — average price over 20 periods. Helps identify the trend.',
   'chart.ema_tip': 'Exponential Moving Average — gives more weight to recent prices. Reacts faster.',
 

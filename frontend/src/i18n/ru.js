@@ -171,12 +171,7 @@ const ru = {
   'chart.title': 'График',
   'chart.refresh': 'Обновить',
   'chart.no_data': 'Нет данных',
-  'chart.long': 'ЛОНГ',
-  'chart.entry': 'Вход:',
-  'chart.sl': 'СЛ:',
-  'chart.be': 'БУ:',
-  'chart.tp1': 'ТП1:',
-  'chart.stage': 'Этап:',
+  'chart.trades_from_exchange': 'Сделки с биржи',
   'chart.sma_tip': 'Simple Moving Average — средняя цена за 20 периодов. Помогает определить тренд.',
   'chart.ema_tip': 'Exponential Moving Average — придает больший вес последним ценам. Быстрее реагирует.',
 

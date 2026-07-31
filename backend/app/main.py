@@ -538,15 +538,71 @@ async def momentum_chart_data():
     return {"markers": markers, "trade_lines": trade_lines}
 
 
-# ── PnL ──
+@app.get("/api/chart/trades")
+async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
+    """Return real trade markers for a specific instrument from OKX paired fills.
+    Each closed trade produces two markers: entry (green arrow) and exit (red/blue arrow).
+    Open trades produce only entry markers."""
+    raw_fills = await _fetch_okx_fills(limit=200)
+    paired = await _pair_fills(raw_fills)
 
-# ── OKX helpers ──
+    markers = []
+    for t in paired:
+        if t.get("inst_id") != inst_id:
+            continue
+        time_str = t.get("time", "")
+        if not time_str:
+            continue
+        try:
+            ts = int(datetime.fromisoformat(time_str).timestamp())
+        except (ValueError, OSError, TypeError):
+            continue
+
+        if t.get("reason") == "closed":
+            # Entry marker
+            entry_px = t.get("entry", 0)
+            if entry_px and entry_px > 0:
+                pos_side = t.get("pos_side", "long")
+                markers.append({
+                    "time": ts,
+                    "position": "belowBar" if pos_side == "long" else "aboveBar",
+                    "color": "#00ff88",
+                    "shape": "arrowUp" if pos_side == "long" else "arrowDown",
+                    "text": f"{t.get('side', '').upper()} {entry_px:.2f}",
+                })
+            # Exit marker
+            exit_px = t.get("exit_price", 0)
+            if exit_px and exit_px > 0:
+                pnl = t.get("pnl", 0) or 0
+                markers.append({
+                    "time": ts,
+                    "position": "aboveBar" if t.get("pos_side") == "long" else "belowBar",
+                    "color": "#ff4757" if pnl >= 0 else "#ff4757",
+                    "shape": "arrowDown" if t.get("pos_side") == "long" else "arrowUp",
+                    "text": f"{pnl:+.2f} USDT",
+                })
+        else:
+            # Open position — entry marker only
+            entry_px = t.get("entry", 0)
+            if entry_px and entry_px > 0:
+                pos_side = t.get("pos_side", "long")
+                markers.append({
+                    "time": ts,
+                    "position": "belowBar" if pos_side == "long" else "aboveBar",
+                    "color": "#4a9eff",
+                    "shape": "arrowUp" if pos_side == "long" else "arrowDown",
+                    "text": f"OPEN {entry_px:.2f}",
+                })
+
+    # Sort by time
+    markers.sort(key=lambda m: m["time"])
+    return {"markers": markers}
+
 
 import time as _time
 
 SWAP_INSTRUMENTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"]
 
-# Simple in-memory cache for OKX fills (updated on each /api/momentum/trades call)
 _fills_cache: list[dict] = []
 _fills_cache_ts: float = 0
 _fills_cache_limit: int = 0
