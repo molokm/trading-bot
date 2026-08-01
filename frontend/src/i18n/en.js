@@ -72,6 +72,7 @@ const en = {
   'dash.stopped': 'Stopped',
   'dash.uptime': 'Uptime',
   'dash.capital': 'Capital',
+  'dash.equity': 'Equity',
   'dash.positions': 'Positions',
   'dash.trades_count': 'Trades',
   'dash.risk': 'Risk',

@@ -129,6 +129,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
   const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
   const unrealizedPnl = pnl?.unrealized || 0
+  const pnlTotal = pnl?.total || 0
   const pnlDay = pnl?.['1d'] || 0
   const pnlWeek = pnl?.['7d'] || 0
   const pnlMonth = pnl?.['30d'] || 0
@@ -345,13 +346,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           sparkData={sparkData[2]}
         />
         <MetricCard
-          label={t('dash.pnl_week')}
+          label={t('dash.total_pnl')}
           value={
-            <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
+            <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
             </AnimatedValue>
           }
-          changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
+          changeType={pnlTotal >= 0 ? 'positive' : 'negative'}
           mono
           tip={t('dash.pnl_week_tip')}
           sparkData={sparkData[3]}
@@ -467,7 +468,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   {t('dash.shown')} <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
                 </span>
                 <span className="text-[var(--txt-muted)]">
-                  {t('dash.total_pnl')} <span className={`mono font-bold ${tradesSummary.totalPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tradesSummary.totalPnl >= 0 ? '+' : ''}{tradesSummary.totalPnl.toFixed(2)}</span>
+                  {t('dash.total_pnl')} <span className={`mono font-bold ${pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{pnlTotal >= 0 ? '+' : ''}{pnlTotal.toFixed(2)}</span>
                 </span>
                 <span className="text-[var(--txt-muted)]">
                   {t('dash.win_count')} <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
@@ -605,19 +606,19 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <div className="grid grid-cols-2 gap-2">
                     <div className="p-2 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">{t('dash.capital')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">${momentumStatus.equity?.toLocaleString() || '---'}</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">${(momentumStatus.capital || 10000).toLocaleString()}</div>
+                    </div>
+                    <div className="p-2 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.equity')}</div>
+                      <div className={`mono text-sm font-semibold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>${momentumStatus.equity?.toLocaleString() || '---'}</div>
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 4}</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 2}</div>
                     </div>
                     <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.trades_count')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.total_trades || 0}</div>
-                    </div>
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.risk')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{(momentumStatus.config?.risk_per_trade != null ? momentumStatus.config.risk_per_trade * 100 : 3).toFixed(0)}%</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">Leverage</div>
+                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.config?.leverage || 3}x</div>
                     </div>
                   </div>
 
@@ -637,7 +638,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                             </div>
                             <div className="flex items-center gap-2">
                               <span className={stageInfo.color}>{stageInfo.label}</span>
-                              <span className="text-[var(--txt-muted)]">{p.size_remaining?.toFixed(1)}/{p.size?.toFixed(1)}</span>
+                              <span className="text-[var(--txt-muted)]">${p.notional?.toLocaleString() || '---'}</span>
+                              <span className="text-[var(--txt-muted)]">{p.leverage?.toFixed(0) || '3'}x</span>
                             </div>
                           </div>
                           )

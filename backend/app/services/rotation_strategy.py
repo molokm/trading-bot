@@ -583,18 +583,39 @@ class RotationStrategy:
         print("[Rotation] Stopped", flush=True)
 
     def get_status(self) -> dict:
-        """Return current status dict."""
+        """Return current status dict.
+
+        PNL accounting:
+          - realized_pnl = self._equity - self._capital  (includes ALL fees: open + close)
+          - unrealized_pnl = sum of live position mark-to-market
+          - total_pnl = realized + unrealized (full picture)
+          - equity = capital + total_pnl
+        """
         trades = self._trade_log
         closed = [t for t in trades if t.get("pnl", 0) != 0]
         wins = [t for t in closed if t.get("pnl", 0) > 0]
         losses = [t for t in closed if t.get("pnl", 0) <= 0]
-        total_pnl = sum(t.get("pnl", 0) for t in closed)
+
+        # Realized PNL = what equity changed by vs initial capital (includes all fees)
+        realized_pnl = self._equity - self._capital
+
+        # Unrealized PNL from all open positions
+        unrealized_total = 0.0
+        for coin in self._positions:
+            unrealized_total += self._calc_unrealized(coin)
+
+        # Full equity = capital + realized + unrealized
+        full_equity = self._capital + realized_pnl + unrealized_total
+
         win_rate = len(wins) / len(closed) * 100 if closed else 0
 
         # Build open_positions as a LIST (not dict) with fields the Dashboard expects
         open_positions_list = []
         for coin, pos in self._positions.items():
             stage = "trailing" if pos.breakeven else "initial"
+            ct = CT_VAL.get(coin, 0.01)
+            notional = pos.size * ct * pos.entry_price
+            margin = notional / self.config.leverage if self.config.leverage > 0 else notional
             open_positions_list.append({
                 "coin": pos.coin,
                 "symbol": pos.inst_id,
@@ -612,6 +633,9 @@ class RotationStrategy:
                 "unrealized_pnl": self._calc_unrealized(coin),
                 "stage": stage,
                 "pos_mode": "cross",
+                "notional": round(notional, 2),
+                "margin": round(margin, 2),
+                "leverage": self.config.leverage,
             })
 
         # Config dict with fallback fields the Dashboard reads
@@ -624,9 +648,10 @@ class RotationStrategy:
             "running": self._running,
             "strategy": "momentum_rotation",
             "config": cfg,
-            "equity": round(self._equity, 2),
+            "equity": round(full_equity, 2),
             "capital": self._capital,
-            "total_pnl": round(total_pnl, 2),
+            "total_pnl": round(realized_pnl, 2),
+            "unrealized_pnl": round(unrealized_total, 2),
             "open_positions": open_positions_list,
             "total_trades": len(closed),
             "wins": len(wins), "losses": len(losses),

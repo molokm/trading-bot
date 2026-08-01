@@ -1159,11 +1159,18 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PnL from Rotation strategy (local DB), + unrealized from OKX positions."""
+    """Single source of truth for ALL PNL on the Dashboard.
+
+    Uses rotation._equity - rotation._capital as the authoritative total realized PNL
+    (includes all fees: open + close).  Time windows are subsets of _trade_log.
+    """
     realized_1d = 0.0
     realized_7d = 0.0
     realized_30d = 0.0
-    if rotation and rotation._trade_log:
+    total_realized = 0.0
+    if rotation:
+        # Authoritative realized PNL = equity - capital (accounts for ALL fees)
+        total_realized = rotation._equity - rotation._capital
         from datetime import datetime as dt, timezone as tz
         now = dt.now(tz.utc)
         for t in rotation._trade_log:
@@ -1183,9 +1190,10 @@ async def get_pnl():
                 realized_30d += pnl
     unrealized = 0.0
     if rotation:
-        for coin, pos in rotation._positions.items():
+        for coin in rotation._positions:
             unrealized += rotation._calc_unrealized(coin)
     return {
+        "total": round(total_realized, 2),
         "1d": round(realized_1d, 2),
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),

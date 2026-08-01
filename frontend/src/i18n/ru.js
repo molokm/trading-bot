@@ -73,6 +73,7 @@ const ru = {
   'dash.stopped': 'Остановлен',
   'dash.uptime': 'Время работы',
   'dash.capital': 'Капитал',
+  'dash.equity': 'Эквити',
   'dash.positions': 'Позиций',
   'dash.trades_count': 'Сделок',
   'dash.risk': 'Риск',
