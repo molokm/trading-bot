@@ -56,22 +56,36 @@ async def startup():
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
         print("[startup] 3/4 Migration check ...", flush=True)
-        # One-time cleanup: if no rotation bot yet, wipe any leftover old data
-        # After first run, rotation bot row exists and this skip
-        if db._conn:
-            rot_exists = await db._fetchone("SELECT id FROM bots WHERE id = ?", (ROT_BOT_ID,))
-            if not rot_exists:
-                print("[startup]   Fresh start - clearing any old data ...", flush=True)
-                for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
-                    await db._execute(f"DELETE FROM {table}")
-        elif db._pool:
-            import asyncpg
-            async with db._pool.acquire() as conn:
-                rot_exists = await conn.fetchrow("SELECT id FROM bots WHERE id = $1", ROT_BOT_ID)
-                if not rot_exists:
-                    print("[startup]   Fresh start - clearing any old data ...", flush=True)
-                    for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
-                        await conn.execute(f"DELETE FROM {table}")
+        # One-time cleanup: check if any old momentum data exists, wipe it all.
+        # Checks trades table for old bot_id - most reliable signal.
+        needs_cleanup = False
+        try:
+            if db._conn:
+                row = await db._fetchone(
+                    "SELECT 1 FROM trades WHERE bot_id = ? LIMIT 1", (MOM_BOT_ID,))
+                if row:
+                    needs_cleanup = True
+            elif db._pool:
+                import asyncpg
+                async with db._pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT 1 FROM trades WHERE bot_id = $1 LIMIT 1", MOM_BOT_ID)
+                    if row:
+                        needs_cleanup = True
+        except Exception:
+            pass  # table might not exist yet on very first run
+        if needs_cleanup:
+            print("[startup]   Old momentum data found - one-time cleanup ...", flush=True)
+            for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
+                try:
+                    if db._conn:
+                        await db._execute(f"DELETE FROM {table}")
+                    elif db._pool:
+                        async with db._pool.acquire() as conn:
+                            await conn.execute(f"DELETE FROM {table}")
+                except Exception as e:
+                    print(f"[startup]   clear {table}: {e}", flush=True)
+            print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/4 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
@@ -1162,17 +1176,36 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """Realized PnL from OKX bills + unrealized from OKX positions. No local calculations."""
-    realized = await _get_okx_realized_pnl()
+    """PnL from Rotation strategy (local DB), + unrealized from OKX positions."""
+    realized_1d = 0.0
+    realized_7d = 0.0
+    realized_30d = 0.0
+    if rotation and rotation._trade_log:
+        from datetime import datetime as dt, timezone as tz
+        now = dt.now(tz.utc)
+        for t in rotation._trade_log:
+            pnl = t.get("pnl", 0)
+            if not pnl:
+                continue
+            try:
+                t_time = dt.fromisoformat(t["time"])
+                age = (now - t_time).total_seconds()
+                if age <= 86400:
+                    realized_1d += pnl
+                if age <= 604800:
+                    realized_7d += pnl
+                if age <= 2592000:
+                    realized_30d += pnl
+            except Exception:
+                realized_30d += pnl
     unrealized = 0.0
-    result = await _okx_call(lambda c: c.get_positions("SWAP"))
-    if not result.get("error"):
-        for p in result.get("data", []):
-            unrealized += float(p.get("upl", 0))
+    if rotation:
+        for coin, pos in rotation._positions.items():
+            unrealized += rotation._calc_unrealized(coin)
     return {
-        "1d": round(realized["1d"], 2),
-        "7d": round(realized["7d"], 2),
-        "30d": round(realized["30d"], 2),
+        "1d": round(realized_1d, 2),
+        "7d": round(realized_7d, 2),
+        "30d": round(realized_30d, 2),
         "unrealized": round(unrealized, 2),
     }
 
@@ -1181,29 +1214,40 @@ async def get_pnl():
 
 @app.get("/api/trades")
 async def get_all_trades(limit: int = 100):
-    """All trades from OKX fills (unpaired, raw)."""
-    raw_fills = await _fetch_okx_fills(limit=limit)
-    trades = [_fill_to_trade(f) for f in raw_fills]
-    return {"trades": trades[:limit]}
+    """Trades from Rotation strategy (not OKX fills)."""
+    if rotation:
+        return {"trades": rotation._trade_log[-limit:]}
+    return {"trades": []}
 
 
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
-    """Paired entry+close trades from OKX fills."""
-    fetch_limit = max(200, limit * 2)
-    raw_fills = await _fetch_okx_fills(limit=fetch_limit)
-    paired = await _pair_fills(raw_fills)
-    if begin or end:
-        filtered = []
-        for t in paired:
-            t_time = t.get("time", "")
-            if begin and t_time and t_time < begin:
-                continue
-            if end and t_time and t_time > end:
-                continue
-            filtered.append(t)
-        paired = filtered
-    paired = paired[:limit]
+    """Paired entry+exit trades from Rotation strategy."""
+    if not rotation:
+        return {"trades": []}
+    trades = rotation._trade_log
+    # Pair entry (pnl=0) with next exit for same coin
+    paired = []
+    entry_map = {}
+    for t in trades:
+        coin = t.get("coin", "")
+        if t.get("reason") == "open" or t.get("pnl", 0) == 0:
+            entry_map[coin] = t
+        elif t.get("pnl", 0) != 0:
+            entry = entry_map.pop(coin, None)
+            if entry:
+                paired.append({
+                    "time": t.get("time", ""),
+                    "side": "buy" if t.get("pos_side") == "long" else "sell",
+                    "symbol": t.get("symbol", ""),
+                    "entry": entry.get("entry_price", 0),
+                    "exit_price": t.get("exit_price", 0),
+                    "pnl": t.get("pnl", 0),
+                    "reason": t.get("reason", ""),
+                    "pos_side": t.get("pos_side", ""),
+                    "inst_id": t.get("symbol", ""),
+                })
+    paired = paired[-limit:]
     return {"trades": paired}
 
 
