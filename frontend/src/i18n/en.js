@@ -67,7 +67,7 @@ const en = {
   'dash.no_data': 'No data',
   'dash.active': 'active',
 
-  'dash.momentum_bot': 'Momentum Bot',
+  'dash.momentum_bot': 'Momentum Rotation',
   'dash.running': 'Running',
   'dash.stopped': 'Stopped',
   'dash.uptime': 'Uptime',
@@ -92,7 +92,8 @@ const en = {
   // Reason labels
   'reason.tp': 'TP',
   'reason.sl': 'SL',
-  'reason.trail': 'Trail',
+  'reason.rotation_exit': 'Rotation',
+  'reason.trail_stop': 'Trail',
   'reason.breakeven': 'BE',
   'reason.manual': 'Manual',
   'reason.roe_threshold': 'ROE',
@@ -220,7 +221,7 @@ const en = {
   'bots.status_paused': 'Paused',
   'bots.status_stopped': 'Stopped',
   'bots.status_error': 'Error',
-  'bots.default_bot_name': 'Momentum Bot',
+  'bots.default_bot_name': 'Momentum Rotation',
 
   // Bots — PARAM_META labels
   'bots.param.risk_per_trade.label': 'Risk per trade',

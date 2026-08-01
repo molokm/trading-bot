@@ -570,24 +570,43 @@ class RotationStrategy:
         total_pnl = sum(t.get("pnl", 0) for t in closed)
         win_rate = len(wins) / len(closed) * 100 if closed else 0
 
+        # Build open_positions as a LIST (not dict) with fields the Dashboard expects
+        open_positions_list = []
+        for coin, pos in self._positions.items():
+            stage = "trailing" if pos.breakeven else "initial"
+            open_positions_list.append({
+                "coin": pos.coin,
+                "symbol": pos.inst_id,
+                "inst_id": pos.inst_id,
+                "side": pos.side,
+                "size": pos.size,
+                "size_remaining": pos.size,
+                "entry": pos.entry_price,
+                "entry_price": pos.entry_price,
+                "stop": round(pos.stop_price, 2),
+                "stop_price": round(pos.stop_price, 2),
+                "peak_price": round(pos.peak_price, 2),
+                "breakeven": pos.breakeven,
+                "opened_at": pos.opened_at,
+                "unrealized_pnl": self._calc_unrealized(coin),
+                "stage": stage,
+                "pos_mode": "cross",
+            })
+
+        # Config dict with fallback fields the Dashboard reads
+        cfg = asdict(self.config)
+        cfg.setdefault("max_positions", self.config.top_k)
+        cfg.setdefault("risk_per_trade", 0.0)
+        cfg.setdefault("tp1_pct", 0.0)
+
         return {
             "running": self._running,
             "strategy": "momentum_rotation",
-            "config": asdict(self.config),
+            "config": cfg,
             "equity": round(self._equity, 2),
             "capital": self._capital,
             "total_pnl": round(total_pnl, 2),
-            "open_positions": {
-                coin: {
-                    "coin": pos.coin, "symbol": pos.inst_id,
-                    "side": pos.side, "size": pos.size,
-                    "entry_price": pos.entry_price, "stop_price": round(pos.stop_price, 2),
-                    "peak_price": round(pos.peak_price, 2),
-                    "breakeven": pos.breakeven, "opened_at": pos.opened_at,
-                    "unrealized_pnl": self._calc_unrealized(coin),
-                }
-                for coin, pos in self._positions.items()
-            },
+            "open_positions": open_positions_list,
             "total_trades": len(closed),
             "wins": len(wins), "losses": len(losses),
             "win_rate": round(win_rate, 1),

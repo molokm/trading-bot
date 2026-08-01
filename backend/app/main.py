@@ -362,53 +362,41 @@ async def get_trade_log():
 async def momentum_status():
     # Redirect to rotation strategy
     if not rotation:
-        return {"running": False, "config": None, "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0, "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC}
+        return {
+            "running": False, "config": {"max_positions": 2, "risk_per_trade": 0, "tp1_pct": 0},
+            "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0,
+            "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC,
+        }
     return rotation.get_status()
 
 
 @app.post("/api/momentum/start")
 async def momentum_start(data: dict = None):
-    global momentum
-    if momentum and momentum._running:
-        return {"message": "Momentum already running"}
-
+    """Start Rotation strategy (Dashboard calls this endpoint)."""
+    global rotation
+    if rotation and rotation._running:
+        return {"message": "Rotation already running"}
     d = data or {}
-    config = MomentumConfig(
+    config = RotationConfig(
         symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
-        risk_per_trade=d.get("risk_per_trade", 0.03),
-        max_positions=d.get("max_positions", 4),
-        leverage=d.get("leverage", 3),
+        capital=d.get("capital", 10000.0),
+        top_k=d.get("top_k", 2),
         auto_execute=d.get("auto_execute", True),
-        poll_interval_sec=d.get("poll_interval_sec", 60),
-        roc_fast=d.get("roc_fast", 5),
-        roc_slow=d.get("roc_slow", 50),
-        ema_fast=d.get("ema_fast", 15),
-        ema_slow=d.get("ema_slow", 30),
-        atr_stop_mult=d.get("atr_stop_mult", 1.5),
-        trail_pct=d.get("trail_pct", 0.015),
-        adx_threshold=d.get("adx_threshold", 20.0),
-        mom_threshold=d.get("mom_threshold", 0.0),
-        breakeven_pct=d.get("breakeven_pct", 0.003),
-        tp1_pct=d.get("tp1_pct", 0.015),
-        tp1_frac=d.get("tp1_frac", 0.5),
-        sl1_pct=d.get("sl1_pct", 0.0),
-        sl1_frac=d.get("sl1_frac", 0.5),
-        trend_adx_min=d.get("trend_adx_min", 25.0),
-        range_adx_max=d.get("range_adx_max", 18.0),
-        range_sl_mult=d.get("range_sl_mult", 1.0),
+        poll_interval_sec=d.get("poll_interval_sec", 300),
     )
-    momentum = MomentumStrategy(config=config, client_manager=client_manager, db=db)
-    await momentum.start()
-    return {"message": "Momentum started", "config": asdict(config)}
+    rotation = RotationStrategy(config=config, client_manager=client_manager, db=db)
+    await rotation.start()
+    return {"message": "Momentum Rotation started", "config": asdict(config)}
 
 
 @app.post("/api/momentum/stop")
 async def momentum_stop():
-    global momentum
-    if not momentum:
-        return {"message": "Momentum not running"}
-    await momentum.stop()
-    return {"message": "Momentum stopped"}
+    """Stop Rotation strategy (Dashboard calls this endpoint)."""
+    global rotation
+    if not rotation:
+        return {"message": "Bot not running"}
+    await rotation.stop()
+    return {"message": "Bot stopped"}
 
 
 @app.post("/api/momentum/config")
@@ -436,10 +424,34 @@ async def momentum_update_config(data: dict = None):
 
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
-    """Trade history from Rotation strategy."""
-    if rotation:
-        return {"trades": rotation._trade_log[-limit:]}
-    return {"trades": []}
+    """Trade history from Rotation strategy, formatted for Dashboard."""
+    if not rotation:
+        return {"trades": []}
+    # Transform rotation trade_log entries to match Dashboard's expected format
+    trades = []
+    for t in reversed(rotation._trade_log):
+        if len(trades) >= limit:
+            break
+        is_open = t.get("reason") == "open" or t.get("pnl", 0) == 0
+        trades.append({
+            "time": t.get("time", ""),
+            "symbol": t.get("symbol", ""),
+            "side": t.get("side", ""),
+            "pos_side": t.get("pos_side", ""),
+            "size": t.get("size", 0),
+            "pnl": t.get("pnl", 0),
+            "entry": t.get("entry_price") or t.get("entry", 0),
+            "entry_price": t.get("entry_price") or t.get("entry", 0),
+            "exit_price": t.get("exit_price", 0),
+            "stop": t.get("stop", 0),
+            "reason": t.get("reason", ""),
+            "ord_id": t.get("signal_id", ""),
+            "inst_id": t.get("symbol", ""),
+            # For open trades — fields the allTrades useMemo checks
+            "entry_time": t.get("time", ""),
+            "exit_time": t.get("time", "") if not is_open else None,
+        })
+    return {"trades": trades}
 
 
 @app.get("/api/momentum/indicators")
@@ -1191,11 +1203,11 @@ async def get_all_trades(limit: int = 100):
 
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
-    """Paired entry+exit trades from Rotation strategy."""
+    """Paired entry+exit trades from Rotation strategy, formatted for Dashboard."""
     if not rotation:
         return {"trades": []}
     trades = rotation._trade_log
-    # Pair entry (pnl=0) with next exit for same coin
+    # Pair entry (pnl=0 or reason=open) with next exit for same coin
     paired = []
     entry_map = {}
     for t in trades:
@@ -1204,18 +1216,40 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
             entry_map[coin] = t
         elif t.get("pnl", 0) != 0:
             entry = entry_map.pop(coin, None)
-            if entry:
-                paired.append({
-                    "time": t.get("time", ""),
-                    "side": "buy" if t.get("pos_side") == "long" else "sell",
-                    "symbol": t.get("symbol", ""),
-                    "entry": entry.get("entry_price", 0),
-                    "exit_price": t.get("exit_price", 0),
-                    "pnl": t.get("pnl", 0),
-                    "reason": t.get("reason", ""),
-                    "pos_side": t.get("pos_side", ""),
-                    "inst_id": t.get("symbol", ""),
-                })
+            paired.append({
+                "time": t.get("time", ""),
+                "entry_time": entry.get("time", "") if entry else t.get("time", ""),
+                "exit_time": t.get("time", ""),
+                "side": "buy" if t.get("pos_side") == "long" else "sell",
+                "symbol": t.get("symbol", ""),
+                "inst_id": t.get("symbol", ""),
+                "entry": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
+                "entry_px": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
+                "exit_price": t.get("exit_price", 0),
+                "exit_px": t.get("exit_price", 0),
+                "pnl": t.get("pnl", 0),
+                "reason": t.get("reason", ""),
+                "pos_side": t.get("pos_side", ""),
+                "signal_id": t.get("signal_id", ""),
+            })
+    # Also include unmatched entries as open trades
+    for coin, entry in entry_map.items():
+        paired.append({
+            "time": entry.get("time", ""),
+            "entry_time": entry.get("time", ""),
+            "exit_time": None,
+            "side": "buy" if entry.get("pos_side") == "long" else "sell",
+            "symbol": entry.get("symbol", ""),
+            "inst_id": entry.get("symbol", ""),
+            "entry": entry.get("entry_price") or entry.get("entry", 0),
+            "entry_px": entry.get("entry_price") or entry.get("entry", 0),
+            "exit_price": None,
+            "exit_px": None,
+            "pnl": None,
+            "reason": "open",
+            "pos_side": entry.get("pos_side", ""),
+            "signal_id": entry.get("signal_id", ""),
+        })
     paired = paired[-limit:]
     return {"trades": paired}
 

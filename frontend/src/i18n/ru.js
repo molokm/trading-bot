@@ -68,7 +68,7 @@ const ru = {
   'dash.active': 'активна',
 
 
-  'dash.momentum_bot': 'Бот Momentum',
+  'dash.momentum_bot': 'Momentum Rotation',
   'dash.running': 'Работает',
   'dash.stopped': 'Остановлен',
   'dash.uptime': 'Время работы',
@@ -93,7 +93,8 @@ const ru = {
   // Reason labels
   'reason.tp': 'TP',
   'reason.sl': 'SL',
-  'reason.trail': 'Трейл',
+  'reason.rotation_exit': 'Ротация',
+  'reason.trail_stop': 'Трейл',
   'reason.breakeven': 'BE',
   'reason.manual': 'Ручной',
   'reason.roe_threshold': 'ROE',
@@ -221,7 +222,7 @@ const ru = {
   'bots.status_paused': 'Пауза',
   'bots.status_stopped': 'Остановлен',
   'bots.status_error': 'Ошибка',
-  'bots.default_bot_name': 'Бот Momentum',
+  'bots.default_bot_name': 'Momentum Rotation',
 
   // Bots — PARAM_META labels
   'bots.param.risk_per_trade.label': 'Риск на сделку',
