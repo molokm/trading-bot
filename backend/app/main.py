@@ -50,12 +50,37 @@ rotation: Optional[RotationStrategy] = None
 @app.on_event("startup")
 async def startup():
     try:
-        print("[startup] 1/3 DB init ...", flush=True)
+        print("[startup] 1/5 DB init ...", flush=True)
         await db.init()
-        print("[startup] 2/3 OKX client init ...", flush=True)
+        print("[startup] 2/5 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        print("[startup] 3/3 Rotation auto-start ...", flush=True)
+        print("[startup] 3/5 Clean slate - resetting all old data ...", flush=True)
+        # Nuclear reset: wipe ALL old trades/signals/positions so PNL starts at 0
+        for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
+            try:
+                if db._conn:
+                    await db._execute(f"DELETE FROM {table}")
+                elif db._pool:
+                    import asyncpg
+                    async with db._pool.acquire() as conn:
+                        await conn.execute(f"DELETE FROM {table}")
+            except Exception as e:
+                print(f"[startup]   clear {table}: {e}", flush=True)
+        # Close any open positions on OKX exchange (both long + short, isolated)
+        if _env_key and _env_secret and _env_pass:
+            client = client_manager.get_client()
+            if client:
+                for inst_id in ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"]:
+                    for side in ["long", "short", None]:
+                        try:
+                            resp = await client.close_position(inst_id=inst_id, mgn_mode="isolated",
+                                                                pos_side=side, auto_cxl=True)
+                            if not resp.get("error") and resp.get("data"):
+                                print(f"[startup]   closed {inst_id} {side or 'net'}", flush=True)
+                        except Exception as e:
+                            print(f"[startup]   close {inst_id} {side}: {e}", flush=True)
+        print("[startup] 4/5 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "SOL"],
@@ -78,7 +103,7 @@ async def startup():
             global rotation
             rotation = r
             await rotation.start()
-        print("[startup] Done — server ready", flush=True)
+        print("[startup] 5/5 Done - server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
         raise
