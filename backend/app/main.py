@@ -17,7 +17,7 @@ from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
-from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID
+from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 
 load_dotenv()
 
@@ -360,9 +360,10 @@ async def get_trade_log():
 
 @app.get("/api/momentum/status")
 async def momentum_status():
-    if not momentum:
-        return {"running": False, "config": None, "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0, "recent_signals": [], "recent_trades": []}
-    return momentum.get_status()
+    # Redirect to rotation strategy
+    if not rotation:
+        return {"running": False, "config": None, "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0, "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC}
+    return rotation.get_status()
 
 
 @app.post("/api/momentum/start")
@@ -435,49 +436,17 @@ async def momentum_update_config(data: dict = None):
 
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
-    """Trade history from OKX fills — source of truth is the exchange."""
-    # 1. Fetch raw fills from OKX
-    raw_fills = await _fetch_okx_fills(limit=100)
-    
-    # 2. Pair fills into entry+close trades
-    paired = await _pair_fills(raw_fills)
-    
-    # 3. Merge with live open positions from OKX (not yet in fills as close)
-    open_insts = set()
-    for t in paired:
-        if t.get("reason") == "open":
-            open_insts.add(t["inst_id"])
-    
-    # Also add open positions from momentum bot if running
-    if momentum:
-        for coin, pos in momentum._positions.items():
-            if pos.inst_id not in open_insts:
-                paired.append({
-                    "time": pos.opened_at,
-                    "side": "buy" if pos.side == "long" else "sell",
-                    "symbol": pos.inst_id,
-                    "size": pos.size,
-                    "entry": pos.entry_price,
-                    "entry_price": pos.entry_price,
-                    "stop": pos.stop_price,
-                    "reason": "open",
-                    "pos_side": pos.side,
-                    "inst_id": pos.inst_id,
-                    "source": "okx",
-                })
-                open_insts.add(pos.inst_id)
-    
-    # 4. Sort and limit
-    paired.sort(key=lambda t: t.get("time", ""), reverse=True)
-    paired = paired[-limit:]
-    
-    return {"trades": paired}
+    """Trade history from Rotation strategy."""
+    if rotation:
+        return {"trades": rotation._trade_log[-limit:]}
+    return {"trades": []}
 
 
 @app.get("/api/momentum/indicators")
 async def momentum_indicators():
     """Return latest computed indicators per coin (debug)."""
-    global momentum
+    if rotation:
+        return {"indicators": rotation._latest_indicators}
     if not momentum:
         return {"indicators": {}}
     return {"indicators": getattr(momentum, "_latest_indicators", {})}
