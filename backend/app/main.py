@@ -18,6 +18,7 @@ from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
+from app.services.alpha_strategy import AlphaStrategy, AlphaConfig, ALPHA_BOT_ID, STRATEGY_DESC as ALPHA_DESC
 
 load_dotenv()
 
@@ -45,6 +46,7 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 trade_log: list = []
 momentum: Optional[MomentumStrategy] = None
 rotation: Optional[RotationStrategy] = None
+alpha: Optional[AlphaStrategy] = None
 
 
 @app.on_event("startup")
@@ -86,7 +88,7 @@ async def startup():
                 except Exception as e:
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
-        print("[startup] 4/4 Rotation auto-start ...", flush=True)
+        print("[startup] 4/5 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "SOL"],
@@ -108,6 +110,28 @@ async def startup():
             global rotation
             rotation = r
             await rotation.start()
+        print("[startup] 5/5 Alpha auto-start ...", flush=True)
+        if _env_key and _env_secret and _env_pass:
+            alpha_config = AlphaConfig(
+                symbols=["BTC", "ETH", "BNB", "SOL"],
+                capital=10000.0,
+                top_k=2,
+                roc_period=14,
+                ema_fast=20,
+                ema_slow=50,
+                atr_period=14,
+                breakeven_pct=0.02,
+                adx_min=22.0,
+                min_hold_days=5,
+                max_leverage=3.0,
+                risk_per_trade=0.03,
+                poll_interval_sec=300,
+                auto_execute=True,
+            )
+            a = AlphaStrategy(config=alpha_config, client_manager=client_manager, db=db)
+            global alpha
+            alpha = a
+            await alpha.start()
         print("[startup] Done - server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -118,6 +142,8 @@ async def startup():
 async def shutdown():
     if rotation and rotation._running:
         await rotation.stop()
+    if alpha and alpha._running:
+        await alpha.stop()
     if momentum and momentum._running:
         await momentum.stop()
     await db.close()
@@ -632,12 +658,15 @@ async def rotation_reset():
 @app.post("/api/db/reset-all")
 async def db_reset_all():
     """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
-    global rotation, momentum
+    global rotation, momentum, alpha
     if rotation and rotation._running:
         await rotation.stop()
+    if alpha and alpha._running:
+        await alpha.stop()
     if momentum and momentum._running:
         await momentum.stop()
     rotation = None
+    alpha = None
     momentum = None
     for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
         try:
@@ -680,6 +709,92 @@ async def rotation_update_config(data: dict = None):
         if key in data:
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": asdict(cfg)}
+
+
+# ── Alpha Strategy ──
+
+@app.get("/api/alpha/status")
+async def alpha_status():
+    if not alpha:
+        return {"running": False, "strategy": "alpha_strategy", "equity": 0,
+                "open_positions": {}, "total_trades": 0, "total_pnl": 0,
+                "config": None, "description": ""}
+    return alpha.get_status()
+
+
+@app.post("/api/alpha/start")
+async def alpha_start(data: dict = None):
+    global alpha
+    if alpha and alpha._running:
+        return {"message": "Alpha already running"}
+    d = data or {}
+    cfg = AlphaConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        capital=d.get("capital", 10000.0),
+        top_k=d.get("top_k", 2),
+        roc_period=d.get("roc_period", 14),
+        ema_fast=d.get("ema_fast", 20),
+        ema_slow=d.get("ema_slow", 50),
+        atr_period=d.get("atr_period", 14),
+        breakeven_pct=d.get("breakeven_pct", 0.02),
+        adx_min=d.get("adx_min", 22.0),
+        min_hold_days=d.get("min_hold_days", 5),
+        max_leverage=d.get("leverage", 3.0),
+        risk_per_trade=d.get("risk_per_trade", 0.03),
+        poll_interval_sec=d.get("poll_interval_sec", 300),
+        auto_execute=d.get("auto_execute", True),
+    )
+    alpha = AlphaStrategy(config=cfg, client_manager=client_manager, db=db)
+    await alpha.start()
+    return {"message": "Alpha started", "config": asdict(cfg)}
+
+
+@app.post("/api/alpha/stop")
+async def alpha_stop():
+    global alpha
+    if not alpha:
+        return {"message": "Alpha not running"}
+    await alpha.stop()
+    return {"message": "Alpha stopped"}
+
+
+@app.post("/api/alpha/reset")
+async def alpha_reset():
+    global alpha
+    if alpha and alpha._running:
+        await alpha.stop()
+    if db._conn:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (ALPHA_BOT_ID,))
+            except Exception as e:
+                print(f"[alpha reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = ?", (ALPHA_BOT_ID,))
+        except Exception as e:
+            print(f"[alpha reset] Error clearing bots: {e}", flush=True)
+    elif db._pool:
+        import asyncpg
+        async with db._pool.acquire() as conn:
+            for table in ["trades", "signals", "positions", "performance_metrics"]:
+                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", ALPHA_BOT_ID)
+            await conn.execute("DELETE FROM bots WHERE id = $1", ALPHA_BOT_ID)
+    alpha = None
+    return {"message": "Alpha reset complete"}
+
+
+@app.get("/api/alpha/trades")
+async def alpha_trades(limit: int = 50):
+    if not alpha:
+        return {"trades": []}
+    return {"trades": alpha._trade_log[-limit:]}
+
+
+@app.get("/api/alpha/indicators")
+async def alpha_indicators():
+    if not alpha:
+        return {"indicators": {}}
+    return {"indicators": alpha._latest_indicators}
 
 
 @app.get("/api/chart/trades")

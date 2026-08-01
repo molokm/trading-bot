@@ -52,6 +52,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [ticker, setTicker] = useState(null)
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
+  const [alphaStatus, setAlphaStatus] = useState(null)
+  const [alphaTrades, setAlphaTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -104,7 +106,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, trades, pnlData] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, trades, pnlData, aStatus, aTrades] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
@@ -112,6 +114,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.momentumTrades(30).catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
+        api.alphaStatus().catch(() => null),
+        api.alphaTrades(15).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
@@ -120,6 +124,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
+      if (aStatus) setAlphaStatus(aStatus)
+      if (aTrades) setAlphaTrades(aTrades.trades || [])
     } catch {}
     setLoading(false)
   }
@@ -695,6 +701,87 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </button>
                   )}
                 </div>
+              )}
+            </div>
+          </div>
+
+          {/* Alpha Bot Card */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <Zap size={13} className="text-[var(--warn)]" />
+              Alpha Bot
+              {alphaStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!alphaStatus?.running && alphaStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+            </div>
+            <div className="p-3 space-y-2">
+              {alphaStatus ? (
+                <>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                      <div className={`mono text-xs font-bold mt-0.5 ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        ${alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
+                      </div>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${alphaStatus.equity?.toLocaleString?.() || (alphaStatus.equity || 0).toFixed(0)}</div>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">WR</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.win_rate || 0}%</div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Trades</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.total_trades || 0}</div>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Positions</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.open_positions?.length || 0}</div>
+                    </div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Risk</div>
+                      <div className="mono text-xs font-semibold text-[var(--warn)] mt-0.5">{((alphaStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
+                    </div>
+                  </div>
+                  {/* Alpha positions */}
+                  {alphaStatus.open_positions?.length > 0 && (
+                    <div className="space-y-1">
+                      {alphaStatus.open_positions.map((p, i) => {
+                        const isLong = p.side !== 'short'
+                        return (
+                          <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                              <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                            </div>
+                            <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                            </span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                  {/* Alpha recent trades */}
+                  {alphaTrades.length > 0 && (
+                    <div className="space-y-0.5">
+                      {alphaTrades.slice(0, 5).map((tr, i) => (
+                        <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
+                          <span className="text-[var(--txt)]">{tr.coin}</span>
+                          <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
+                          </span>
+                          <span className="text-[var(--txt-muted)]">{tr.reason}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="text-center py-3"><span className="text-xs text-[var(--txt-muted)]">Loading...</span></div>
               )}
             </div>
           </div>

@@ -98,5 +98,21 @@ export const api = {
 
   momentumTrades: (limit = 20) => request(`/momentum/trades?limit=${limit}`),
 
+  // ── Alpha Strategy ──
+  alphaStatus: () => request('/alpha/status'),
+
+  alphaStart: (config = {}) =>
+    request('/alpha/start', { method: 'POST', body: JSON.stringify(config) }),
+
+  alphaStop: () =>
+    request('/alpha/stop', { method: 'POST' }),
+
+  alphaReset: () =>
+    request('/alpha/reset', { method: 'POST' }),
+
+  alphaTrades: (limit = 20) => request(`/alpha/trades?limit=${limit}`),
+
+  alphaIndicators: () => request('/alpha/indicators'),
+
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 };
