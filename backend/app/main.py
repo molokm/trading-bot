@@ -1159,24 +1159,19 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """Single source of truth for ALL PNL on the Dashboard.
-
-    Uses rotation._equity - rotation._capital as the authoritative total realized PNL
-    (includes all fees: open + close).  Time windows are subsets of _trade_log.
-    """
+    """PNL for Dashboard metric cards. Sums directly from _trade_log — same source as trades table."""
+    total_realized = 0.0
     realized_1d = 0.0
     realized_7d = 0.0
     realized_30d = 0.0
-    total_realized = 0.0
-    if rotation:
-        # Authoritative realized PNL = equity - capital (accounts for ALL fees)
-        total_realized = rotation._equity - rotation._capital
+    if rotation and rotation._trade_log:
         from datetime import datetime as dt, timezone as tz
         now = dt.now(tz.utc)
         for t in rotation._trade_log:
             pnl = t.get("pnl", 0)
             if not pnl:
                 continue
+            total_realized += pnl
             try:
                 t_time = dt.fromisoformat(t["time"])
                 age = (now - t_time).total_seconds()
