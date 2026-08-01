@@ -200,7 +200,13 @@ export default function BotsPage({ connected, isGuest }) {
           if (cfg.tp1_pct >= 1) { newCfg.tp1_pct = cfg.tp1_pct / 100; migrated = true }
           if (cfg.tp1_frac >= 1) { newCfg.tp1_frac = cfg.tp1_frac / 100; migrated = true }
           if (cfg.sl1_frac >= 1) { newCfg.sl1_frac = cfg.sl1_frac / 100; migrated = true }
-          return { ...b, config: newCfg }
+          // Migration: rename old bot names to Momentum Rotation
+          let name = b.name || ''
+          if (name === 'Бот Momentum' || name === 'Momentum Bot' || name === 'Momentum') {
+            name = 'Momentum Rotation'
+            migrated = true
+          }
+          return { ...b, config: newCfg, name }
         })
         if (migrated) localStorage.setItem('bots_config', JSON.stringify(fixed))
         return fixed
