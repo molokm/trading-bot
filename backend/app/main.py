@@ -17,6 +17,7 @@ from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
+from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID
 
 load_dotenv()
 
@@ -43,6 +44,7 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
 momentum: Optional[MomentumStrategy] = None
+rotation: Optional[RotationStrategy] = None
 
 
 @app.on_event("startup")
@@ -53,34 +55,29 @@ async def startup():
         print("[startup] 2/3 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        print("[startup] 3/3 Momentum auto-start ...", flush=True)
+        print("[startup] 3/3 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
-            config = MomentumConfig(
+            rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "SOL"],
-                risk_per_trade=0.03,
-                max_positions=4,
-                leverage=3,
+                capital=10000.0,
+                top_k=2,
+                roc_period=14,
+                ema_fast=20,
+                ema_slow=50,
+                atr_period=14,
+                atr_stop_mult=2.0,
+                trail_pct=0.02,
+                breakeven_pct=0.03,
+                adx_min=18.0,
+                min_hold_days=3,
+                max_pos_pct=0.40,
+                poll_interval_sec=300,
                 auto_execute=True,
-                poll_interval_sec=60,
-                trail_pct=0.015,
-                adx_threshold=20.0,
-                breakeven_pct=0.003,
-                tp1_pct=0.015,
-                tp1_frac=0.5,
-                trend_adx_min=25.0,
-                range_adx_max=18.0,
-                range_bb_period=20,
-                range_bb_mult=2.0,
-                range_rsi_period=14,
-                range_rsi_oversold=35.0,
-                range_rsi_overbought=65.0,
-                range_risk_divisor=2.0,
-                range_sl_mult=1.0,
             )
-            m = MomentumStrategy(config=config, client_manager=client_manager, db=db)
-            global momentum
-            momentum = m
-            await momentum.start()
+            r = RotationStrategy(config=rot_config, client_manager=client_manager, db=db)
+            global rotation
+            rotation = r
+            await rotation.start()
         print("[startup] Done — server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -89,6 +86,8 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    if rotation and rotation._running:
+        await rotation.stop()
     if momentum and momentum._running:
         await momentum.stop()
     await db.close()
@@ -538,6 +537,138 @@ async def momentum_chart_data():
                 })
 
     return {"markers": markers, "trade_lines": trade_lines}
+
+
+# ══════════════════════════════════════════════════════════════
+# ROTATION STRATEGY ENDPOINTS
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/rotation/status")
+async def rotation_status():
+    if not rotation:
+        return {"running": False, "strategy": "momentum_rotation", "equity": 0,
+                "open_positions": {}, "total_trades": 0, "total_pnl": 0,
+                "config": None, "description": ""}
+    return rotation.get_status()
+
+
+@app.post("/api/rotation/start")
+async def rotation_start(data: dict = None):
+    global rotation
+    if rotation and rotation._running:
+        return {"message": "Rotation already running"}
+    d = data or {}
+    cfg = RotationConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        capital=d.get("capital", 10000.0),
+        top_k=d.get("top_k", 2),
+        roc_period=d.get("roc_period", 14),
+        ema_fast=d.get("ema_fast", 20),
+        ema_slow=d.get("ema_slow", 50),
+        atr_period=d.get("atr_period", 14),
+        atr_stop_mult=d.get("atr_stop_mult", 2.0),
+        trail_pct=d.get("trail_pct", 0.02),
+        breakeven_pct=d.get("breakeven_pct", 0.03),
+        adx_min=d.get("adx_min", 18.0),
+        min_hold_days=d.get("min_hold_days", 3),
+        max_pos_pct=d.get("max_pos_pct", 0.40),
+        poll_interval_sec=d.get("poll_interval_sec", 300),
+        auto_execute=d.get("auto_execute", True),
+    )
+    rotation = RotationStrategy(config=cfg, client_manager=client_manager, db=db)
+    await rotation.start()
+    return {"message": "Rotation started", "config": asdict(cfg)}
+
+
+@app.post("/api/rotation/stop")
+async def rotation_stop():
+    global rotation
+    if not rotation:
+        return {"message": "Rotation not running"}
+    await rotation.stop()
+    return {"message": "Rotation stopped"}
+
+
+@app.post("/api/rotation/reset")
+async def rotation_reset():
+    """Reset all trades, signals, positions, PNL for rotation strategy."""
+    global rotation
+    # Stop if running
+    if rotation and rotation._running:
+        await rotation.stop()
+    # Delete all data for rotation bot
+    if db._conn:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (ROT_BOT_ID,))
+            except Exception as e:
+                print(f"[reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = ?", (ROT_BOT_ID,))
+        except Exception as e:
+            print(f"[reset] Error clearing bots: {e}", flush=True)
+    elif db._pool:
+        import asyncpg
+        async with db._pool.acquire() as conn:
+            for table in ["trades", "signals", "positions", "performance_metrics"]:
+                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", ROT_BOT_ID)
+            await conn.execute("DELETE FROM bots WHERE id = $1", ROT_BOT_ID)
+    # Reset in-memory
+    rotation = None
+    return {"message": "Rotation reset complete - PNL = 0"}
+
+
+@app.post("/api/db/reset-all")
+async def db_reset_all():
+    """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
+    global rotation, momentum
+    if rotation and rotation._running:
+        await rotation.stop()
+    if momentum and momentum._running:
+        await momentum.stop()
+    rotation = None
+    momentum = None
+    for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
+        try:
+            if db._conn:
+                await db._execute(f"DELETE FROM {table}")
+            elif db._pool:
+                async with db._pool.acquire() as conn:
+                    await conn.execute(f"DELETE FROM {table}")
+        except Exception as e:
+            print(f"[reset-all] Error clearing {table}: {e}", flush=True)
+    return {"message": "All data reset - clean slate"}
+
+
+@app.get("/api/rotation/trades")
+async def rotation_trades(limit: int = 50):
+    if not rotation:
+        return {"trades": []}
+    return {"trades": rotation._trade_log[-limit:]}
+
+
+@app.get("/api/rotation/indicators")
+async def rotation_indicators():
+    if not rotation:
+        return {"indicators": {}}
+    return {"indicators": rotation._latest_indicators}
+
+
+@app.post("/api/rotation/config")
+async def rotation_update_config(data: dict = None):
+    global rotation
+    if not rotation:
+        return {"message": "Rotation not running"}
+    if not data:
+        return {"message": "No config provided"}
+    cfg = rotation.config
+    for key in ("symbols", "top_k", "roc_period", "ema_fast", "ema_slow",
+                "atr_period", "atr_stop_mult", "trail_pct", "breakeven_pct",
+                "adx_min", "min_hold_days", "max_pos_pct", "poll_interval_sec",
+                "auto_execute", "capital"):
+        if key in data:
+            setattr(cfg, key, data[key])
+    return {"message": "Config updated", "config": asdict(cfg)}
 
 
 @app.get("/api/chart/trades")
