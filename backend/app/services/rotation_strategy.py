@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy - ROC ranking, top-K, no leverage, trailing stop.
+"""Momentum Rotation Strategy - ROC ranking, top-K, 3x leverage, trailing stop.
 Backtested: ~90% CAGR, -16% max DD over 3 years (BTC/ETH/BNB/SOL daily).
 
 Logic:
@@ -9,7 +9,7 @@ Logic:
   4. Close positions not in target, open new ones at market
   5. Manage positions: ATR trailing stop, breakeven after 3% move
   6. Min hold: 3 days between rotations
-  7. NO leverage, 0.1% commission, 0.05% slippage per side
+  7. Leverage 3x, capital $10,000, 0.1% commission, 0.05% slippage per side
 """
 
 import asyncio
@@ -29,7 +29,7 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "SOL"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation: daily ROC ranking, top-2 long/short, no leverage. "
+    "Momentum Rotation: daily ROC ranking, top-2 long/short, 3x leverage, $10,000. "
     "ROC(14)>0 + EMA20>EMA50 + ADX>=18 = long; ROC<0 + EMA20<EMA50 + ADX>=18 = short. "
     "Trailing stop 2% from peak, breakeven after 3%, ATR initial stop 2x, min hold 3 days."
 )
@@ -50,6 +50,7 @@ class RotationConfig:
     adx_min: float = 18.0
     min_hold_days: int = 3
     max_pos_pct: float = 0.40
+    leverage: float = 3.0
     poll_interval_sec: int = 300       # check every 5 min (but only trade once per day)
     auto_execute: bool = True
 
@@ -219,14 +220,21 @@ class RotationStrategy:
     # ─── Position sizing ───
 
     def _calc_size(self, coin: str, price: float) -> float:
-        """Calculate position size (no leverage)."""
+        """Calculate position size with leverage.
+        
+        With leverage, the notional per position = margin * leverage.
+        Margin = equity * alloc_pct (e.g. 40% of $10,000 = $4,000).
+        Notional = $4,000 * 3 = $12,000 per position.
+        """
         ct_val = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         cfg = self.config
+        lev = cfg.leverage
         alloc_pct = min(1.0 / cfg.top_k, cfg.max_pos_pct)
-        notional = self._equity * alloc_pct
-        max_notional = self._capital * cfg.max_pos_pct
-        notional = min(notional, max_notional)
+        margin = self._equity * alloc_pct
+        max_margin = self._capital * cfg.max_pos_pct
+        margin = min(margin, max_margin)
+        notional = margin * lev  # leverage amplifies the position
         raw_sz = notional / (ct_val * price)
         sz = round(raw_sz / lot) * lot
         return max(sz, lot)
@@ -311,6 +319,17 @@ class RotationStrategy:
         atr_val = ind["atr"]
         if atr_val <= 0 or price <= 0:
             return
+
+        # Set leverage on the instrument before placing order
+        if self.config.leverage != 1.0:
+            lev_resp = await client.set_leverage(
+                inst_id=inst_id,
+                leverage=self.config.leverage,
+                mgn_mode="cross",
+                pos_side=side,
+            )
+            if lev_resp.get("error"):
+                print(f"[Rotation] Set leverage error {coin}: {lev_resp.get('message', '')}", flush=True)
 
         sz = self._calc_size(coin, price)
         order_side = "buy" if side == "long" else "sell"

@@ -142,6 +142,17 @@ class OKXClient:
         params = {"instType": inst_type, "limit": limit, **kwargs}
         return await self._request("GET", "/api/v5/trade/fills-history", params=params)
 
+    async def set_leverage(self, inst_id: str, leverage: float, mgn_mode: str = "cross", pos_side: str = "net") -> dict:
+        """Set leverage for an instrument. OKX /api/v5/account/set-leverage."""
+        body = {
+            "instId": inst_id,
+            "lever": str(leverage),
+            "mgnMode": mgn_mode,
+        }
+        if pos_side:
+            body["posSide"] = pos_side
+        return await self._request("POST", "/api/v5/account/set-leverage", body=body)
+
     async def close_position(self, inst_id: str, mgn_mode: str = "cross",
                               pos_side: str = None, auto_cxl: bool = True) -> dict:
         body = {"instId": inst_id, "mgnMode": mgn_mode}

@@ -102,6 +102,7 @@ async def startup():
                 adx_min=18.0,
                 min_hold_days=3,
                 max_pos_pct=0.40,
+                leverage=3.0,
                 poll_interval_sec=300,
                 auto_execute=True,
             )
@@ -381,6 +382,7 @@ async def momentum_start(data: dict = None):
         symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
         capital=d.get("capital", 10000.0),
         top_k=d.get("top_k", 2),
+        leverage=d.get("leverage", 3.0),
         auto_execute=d.get("auto_execute", True),
         poll_interval_sec=d.get("poll_interval_sec", 300),
     )
