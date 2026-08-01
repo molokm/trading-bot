@@ -1,15 +1,17 @@
-"""Momentum Rotation Strategy - ROC ranking, top-K, 3x leverage, trailing stop.
-Backtested: ~100-120% realistic CAGR (H/L variant ~142%, close-only fails - see scripts/honest_backtest.py)
+"""Momentum Rotation Strategy v2 — Adaptive multi-factor with risk management.
 
-Logic:
-  1. Every day: compute 14d ROC, EMA20/50 trend, ADX, ATR for each coin
-  2. Rank by ROC descending
-  3. Pick top-2 coins with ROC>0 + EMA20>EMA50 + ADX>=18 (long)
-     or ROC<0 + EMA20<EMA50 + ADX>=18 (short)
-  4. Close positions not in target, open new ones at market
-  5. Manage positions: ATR trailing stop, breakeven after 3% move
-  6. Min hold: 3 days between rotations
-  7. Leverage 3x, capital $10,000, 0.1% commission, 0.05% slippage per side
+Improvements over v1:
+  - Hourly ATR(24) for initial stop (1.5x for 3x leverage)
+  - Dynamic leverage: min(3, 1/(ATR% x 2))
+  - Risk-based sizing: 2% of equity per trade
+  - Volatility filter: skip if ATR > 1.5x avg 30d
+  - RSI(14) filter: no long if RSI>75, no short if RSI<25
+  - Correlation filter: max 1 pair with corr > 0.7
+  - Weighted ranking: ROC*0.5 + trend*0.3 + ADX/50*0.2
+  - Dynamic trailing: ATR(opening) x 0.5
+  - Partial profit: close 50% at +5%
+  - Limit orders with 5-min market fallback
+  - Long-only mode when BTC < 200d MA
 """
 
 import asyncio
@@ -29,9 +31,8 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "SOL"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation: daily ROC ranking, top-2 long/short, 3x leverage, $10,000. "
-    "ROC(14)>0 + EMA20>EMA50 + ADX>=18 = long; ROC<0 + EMA20<EMA50 + ADX>=18 = short. "
-    "Trailing stop 2% from peak, breakeven after 3%, ATR initial stop 2x, min hold 3 days."
+    "Rotation v2: adaptive leverage, hourly ATR stops, RSI+volatility+correlation filters, "
+    "weighted ranking, dynamic trailing, partial TP at +5%. Risk 2% per trade."
 )
 
 
@@ -44,14 +45,24 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    atr_stop_mult: float = 2.0
-    trail_pct: float = 0.02
-    breakeven_pct: float = 0.03
     adx_min: float = 18.0
     min_hold_days: int = 3
-    max_pos_pct: float = 0.40
-    leverage: float = 3.0
-    poll_interval_sec: int = 300       # check every 5 min (but only trade once per day)
+    max_leverage: float = 3.0
+    risk_per_trade: float = 0.02       # 2% risk per trade
+    trail_atr_mult: float = 0.5       # trailing = ATR x 0.5
+    breakeven_pct: float = 0.03       # move to BE after 3%
+    partial_tp_pct: float = 0.05      # close 50% at +5%
+    partial_tp_ratio: float = 0.5     # fraction to close
+    rsi_period: int = 14
+    rsi_long_max: float = 75.0       # no long if RSI > 75
+    rsi_short_min: float = 25.0      # no short if RSI < 25
+    vol_mult: float = 1.5            # skip if ATR > avg * 1.5
+    corr_threshold: float = 0.7      # max correlation between held pairs
+    hourly_atr_period: int = 24      # hourly ATR bars for initial stop
+    hourly_atr_stop_mult: float = 1.5  # initial stop = hourly_atr * 1.5
+    limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
+    limit_wait_sec: int = 300        # 5 min fallback to market
+    poll_interval_sec: int = 300
     auto_execute: bool = True
 
     def __post_init__(self):
@@ -67,15 +78,19 @@ class RotPosition:
     inst_id: str
     side: str               # "long" or "short"
     size: float
+    size_original: float    # original full size (before partial TP)
     entry_price: float
     stop_price: float
-    peak_price: float       # for long: highest seen; for short: lowest seen
+    peak_price: float
     breakeven: bool = False
+    partial_done: bool = False   # 50% already closed at TP1
     opened_at: str = ""
-    entry_bar_ts: int = 0   # timestamp ms of entry bar (to track min hold)
-    atr: float = 0.0
+    entry_bar_ts: int = 0
+    atr: float = 0.0             # ATR at entry (for dynamic trailing)
+    atr_hourly: float = 0.0      # hourly ATR at entry
+    leverage: float = 3.0
     signal_id: int = 0
-    raw_entry: float = 0.0  # price before slippage
+    raw_entry: float = 0.0
 
 
 class RotationStrategy:
@@ -93,11 +108,12 @@ class RotationStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
-        self._last_rotate_ts: int = 0      # last rotation timestamp ms
-        self._last_daily_check: str = ""   # date string of last check
-        self._daily_cache: dict = {}       # per-coin daily candle cache
+        self._last_rotate_ts: int = 0
+        self._last_daily_check: str = ""
+        self._hourly_atr_cache: dict = {}   # per-coin hourly ATR
+        self._btc_200ma: float = 0.0        # BTC 200-day MA (for long-only filter)
 
-    # ─── Indicators (no look-ahead, point-in-time) ───
+    # ─── Indicators (no look-ahead) ───
 
     @staticmethod
     def ema(data, period):
@@ -107,6 +123,19 @@ class RotationStrategy:
         result = [data[0]]
         for v in data[1:]:
             result.append(v * k + result[-1] * (1 - k))
+        return result
+
+    @staticmethod
+    def sma(data, period):
+        """Simple moving average."""
+        if len(data) < period:
+            return [0.0] * len(data)
+        result = [0.0] * len(data)
+        s = sum(data[:period])
+        result[period - 1] = s / period
+        for i in range(period, len(data)):
+            s += data[i] - data[i - period]
+            result[i] = s / period
         return result
 
     @staticmethod
@@ -166,14 +195,66 @@ class RotationStrategy:
             result[i] = (closes[i] / closes[i - period] - 1) * 100
         return result
 
+    @staticmethod
+    def rsi(closes, period=14):
+        """RSI indicator. Returns array same length as closes."""
+        n = len(closes)
+        if n < period + 1:
+            return [50.0] * n
+        gains = [0.0] * n
+        losses = [0.0] * n
+        for i in range(1, n):
+            delta = closes[i] - closes[i - 1]
+            if delta > 0:
+                gains[i] = delta
+                losses[i] = 0.0
+            else:
+                gains[i] = 0.0
+                losses[i] = abs(delta)
+        # Initial average
+        avg_gain = sum(gains[1:period + 1]) / period
+        avg_loss = sum(losses[1:period + 1]) / period
+        result = [50.0] * n
+        if avg_loss == 0:
+            result[period] = 100.0
+        else:
+            rs = avg_gain / avg_loss
+            result[period] = 100 - 100 / (1 + rs)
+        for i in range(period + 1, n):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+            if avg_loss == 0:
+                result[i] = 100.0
+            else:
+                rs = avg_gain / avg_loss
+                result[i] = 100 - 100 / (1 + rs)
+        return result
+
+    @staticmethod
+    def correlation(x, y, period=30):
+        """Rolling Pearson correlation of two arrays over last `period` values."""
+        if len(x) < period or len(y) < period:
+            return 0.0
+        x = x[-period:]
+        y = y[-period:]
+        n = len(x)
+        mx = sum(x) / n
+        my = sum(y) / n
+        cov = sum((x[i] - mx) * (y[i] - my) for i in range(n))
+        sx = math.sqrt(sum((x[i] - mx) ** 2 for i in range(n)))
+        sy = math.sqrt(sum((y[i] - my) ** 2 for i in range(n)))
+        if sx == 0 or sy == 0:
+            return 0.0
+        return cov / (sx * sy)
+
     # ─── Data fetching ───
 
-    async def _fetch_daily(self, client, coin: str, limit: int = 100) -> list:
-        """Fetch daily candles from OKX."""
+    async def _fetch_candles(self, client, coin: str, bar: str = "1D", limit: int = 100) -> list:
+        """Fetch candles from OKX."""
         inst_id = SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
-        resp = await client.get_candles(inst_id, bar="1D", limit=limit)
+        resp = await client.get_candles(inst_id, bar=bar, limit=limit)
         if resp.get("error"):
-            print(f"[Rotation] {coin} candles error: {resp.get('message', '')}", flush=True)
+            print(f"[Rotation] {coin} {bar} candles error: {resp.get('message', '')}", flush=True)
             return []
         data = resp.get("data", [])
         candles = []
@@ -188,56 +269,142 @@ class RotationStrategy:
         candles.sort(key=lambda x: x["ts"])
         return candles
 
-    def _compute_indicators(self, candles: list) -> dict:
-        """Compute all indicators from candle list."""
+    async def _fetch_daily(self, client, coin: str, limit: int = 200) -> list:
+        """Fetch daily candles (200 bars for 200d MA)."""
+        return await self._fetch_candles(client, coin, bar="1D", limit=limit)
+
+    async def _fetch_hourly(self, client, coin: str, limit: int = 48) -> list:
+        """Fetch hourly candles (48 bars = 2 days for ATR(24))."""
+        return await self._fetch_candles(client, coin, bar="1H", limit=limit)
+
+    def _compute_daily_indicators(self, candles: list) -> dict:
+        """Compute all daily indicators. Signal bar = second to last (yesterday)."""
         if len(candles) < 70:
             return None
         closes = [c["C"] for c in candles]
         highs = [c["H"] for c in candles]
         lows = [c["L"] for c in candles]
         cfg = self.config
-        roc = self.roc(closes, cfg.roc_period)
+        roc_arr = self.roc(closes, cfg.roc_period)
         ema_f = self.ema(closes, cfg.ema_fast)
         ema_s = self.ema(closes, cfg.ema_slow)
         atr_arr = self.atr(highs, lows, closes, cfg.atr_period)
         adx_arr = self.adx(highs, lows, closes, 14)
-        i = len(candles) - 2  # signal bar = second to last (yesterday)
+        rsi_arr = self.rsi(closes, cfg.rsi_period)
+
+        i = len(candles) - 2  # signal bar = yesterday
         if i < cfg.ema_slow + 10:
             return None
+
+        # Average ATR over last 30 days (for volatility filter)
+        atr_30_start = max(0, i - 30)
+        atr_values = [atr_arr[j] for j in range(atr_30_start, i + 1) if atr_arr[j] > 0]
+        avg_atr_30 = sum(atr_values) / len(atr_values) if atr_values else 0.0
+
+        # Daily returns for correlation
+        daily_returns = []
+        for j in range(1, i + 1):
+            if closes[j - 1] > 0:
+                daily_returns.append((closes[j] / closes[j - 1]) - 1)
+
         return {
-            "roc": roc[i],
+            "roc": roc_arr[i],
             "ema_fast": ema_f[i],
             "ema_slow": ema_s[i],
             "ema_trend": ema_f[i] > ema_s[i],
             "atr": atr_arr[i],
+            "avg_atr_30": avg_atr_30,
             "adx": adx_arr[i],
+            "rsi": rsi_arr[i],
             "price": closes[i],
-            "close_today": closes[-1],  # current (today's) close
+            "close_today": closes[-1],
+            "daily_returns": daily_returns,
             "date": candles[i]["datetime"].strftime("%Y-%m-%d"),
             "date_today": candles[-1]["datetime"].strftime("%Y-%m-%d"),
         }
 
-    # ─── Position sizing ───
+    def _compute_hourly_atr(self, candles: list) -> float:
+        """Compute ATR from hourly candles."""
+        if len(candles) < self.config.hourly_atr_period + 2:
+            return 0.0
+        highs = [c["H"] for c in candles]
+        lows = [c["L"] for c in candles]
+        closes = [c["C"] for c in candles]
+        atr_arr = self.atr(highs, lows, closes, self.config.hourly_atr_period)
+        return atr_arr[-2] if atr_arr[-2] > 0 else atr_arr[-1]
 
-    def _calc_size(self, coin: str, price: float) -> float:
-        """Calculate position size with leverage.
-        
-        With leverage, the notional per position = margin * leverage.
-        Margin = equity * alloc_pct (e.g. 40% of $10,000 = $4,000).
-        Notional = $4,000 * 3 = $12,000 per position.
-        """
+    def _compute_btc_200ma(self, candles: list) -> float:
+        """Compute BTC 200-day SMA for long-only filter."""
+        if len(candles) < 200:
+            return 0.0
+        closes = [c["C"] for c in candles]
+        sma200 = self.sma(closes, 200)
+        return sma200[-1]
+
+    # ─── Dynamic leverage & sizing ───
+
+    def _calc_dynamic_leverage(self, atr_hourly: float, price: float) -> float:
+        """Dynamic leverage: min(max_leverage, 1 / (ATR% x 2))."""
+        if atr_hourly <= 0 or price <= 0:
+            return 1.0
+        atr_pct = atr_hourly / price
+        lev = 1.0 / (atr_pct * 2)
+        lev = max(1.0, min(lev, self.config.max_leverage))
+        return round(lev, 1)
+
+    def _calc_size(self, coin: str, price: float, stop_distance: float, leverage: float) -> float:
+        """Risk-based position sizing: risk_per_trade / (stop_pct x leverage)."""
         ct_val = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         cfg = self.config
-        lev = cfg.leverage
-        alloc_pct = min(1.0 / cfg.top_k, cfg.max_pos_pct)
-        margin = self._equity * alloc_pct
-        max_margin = self._capital * cfg.max_pos_pct
-        margin = min(margin, max_margin)
-        notional = margin * lev  # leverage amplifies the position
+
+        if stop_distance <= 0 or price <= 0:
+            stop_pct = 0.03  # fallback 3%
+        else:
+            stop_pct = stop_distance / price
+
+        # Risk amount in USD
+        risk_usd = self._equity * cfg.risk_per_trade
+        # Notional = risk / stop_pct (how much we can expose per 1% move)
+        notional = risk_usd / stop_pct
+        # Margin = notional / leverage
+        margin = notional / leverage if leverage > 0 else notional
+        # Cap margin at 40% of equity
+        max_margin = self._equity * 0.40
+        if margin > max_margin:
+            margin = max_margin
+            notional = margin * leverage
+
         raw_sz = notional / (ct_val * price)
         sz = round(raw_sz / lot) * lot
         return max(sz, lot)
+
+    # ─── Correlation filter ───
+
+    def _check_correlation(self, candidate_coin: str, all_indicators: dict) -> bool:
+        """Check if adding candidate_coin would violate correlation constraint.
+        Returns True if OK to add (no violation)."""
+        candidate_returns = all_indicators.get(candidate_coin, {}).get("daily_returns", [])
+        if not candidate_returns:
+            return True
+
+        for held_coin in self._positions:
+            held_returns = all_indicators.get(held_coin, {}).get("daily_returns", [])
+            if not held_returns:
+                continue
+            # Align lengths
+            min_len = min(len(candidate_returns), len(held_returns))
+            if min_len < 15:
+                continue
+            corr = self.correlation(
+                candidate_returns[-min_len:],
+                held_returns[-min_len:]
+            )
+            if abs(corr) > self.config.corr_threshold:
+                print(f"[Rotation] Correlation filter: {candidate_coin} corr with {held_coin} = {corr:.2f} > {self.config.corr_threshold} -> SKIP",
+                      flush=True)
+                return False
+        return True
 
     # ─── Trading ───
 
@@ -247,22 +414,59 @@ class RotationStrategy:
         return self.client_manager.get_client()
 
     async def _place_order(self, client, inst_id: str, side: str, sz: float,
-                                      pos_side: str = None) -> dict:
-        """Place market order. side='buy' or 'sell'. pos_side='long' or 'short'."""
-        resp = await client.place_order(
-            inst_id=inst_id,
-            side=side,
-            ord_type="market",
-            sz=str(sz),
-            td_mode="cross",
-            pos_side=pos_side,
-        )
+                                      pos_side: str = None, ord_type: str = "market",
+                                      px: float = None) -> dict:
+        """Place order. side='buy'/'sell', pos_side='long'/'short'."""
+        params = {
+            "inst_id": inst_id, "side": side, "ord_type": ord_type,
+            "sz": str(sz), "td_mode": "cross", "pos_side": pos_side,
+        }
+        if px and ord_type == "limit":
+            params["px"] = str(round(px, 2))
+        resp = await client.place_order(**params)
         return resp
 
-    async def _close_position(self, client, inst_id: str, pos: RotPosition, reason: str):
-        """Close position at market."""
+    async def _close_partial(self, client, inst_id: str, pos: RotPosition, close_ratio: float) -> dict:
+        """Close portion of position."""
+        close_sz = round(pos.size * close_ratio / LOT_SZ.get(pos.coin, 0.01)) * LOT_SZ.get(pos.coin, 0.01)
+        if close_sz <= 0 or close_sz >= pos.size:
+            return {}
         close_side = "sell" if pos.side == "long" else "buy"
-        # Close: sell long position, buy short position. pos_side = the position side.
+        resp = await self._place_order(client, inst_id, close_side, close_sz,
+                                          pos_side=pos.side)
+        if resp.get("error"):
+            print(f"[Rotation] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
+            return {}
+        fills = resp.get("data", [])
+        fill_px = pos.entry_price
+        fee = 0.0
+        if fills:
+            fill_px = float(fills[0].get("fillPx", pos.entry_price))
+            fee = float(fills[0].get("fee", 0))
+        if pos.side == "long":
+            pnl = close_sz * CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
+        else:
+            pnl = close_sz * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        self._equity += pnl
+        now = datetime.now(timezone.utc).isoformat()
+        self._trade_log.append({
+            "time": now, "side": close_side,
+            "symbol": inst_id, "size": close_sz,
+            "pnl": round(pnl, 2),
+            "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
+            "reason": "partial_tp", "pos_side": pos.side, "coin": pos.coin,
+            "signal_id": pos.signal_id,
+        })
+        pos.size -= close_sz
+        pos.partial_done = True
+        print(f"[Rotation] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
+              f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
+              f"pnl={pnl:+.2f}", flush=True)
+        return {"fill_px": fill_px, "fee": fee, "pnl": pnl, "close_sz": close_sz}
+
+    async def _close_position(self, client, inst_id: str, pos: RotPosition, reason: str):
+        """Close full position at market."""
+        close_side = "sell" if pos.side == "long" else "buy"
         resp = await self._place_order(client, inst_id, close_side, pos.size,
                                           pos_side=pos.side)
         if resp.get("error"):
@@ -284,57 +488,66 @@ class RotationStrategy:
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         trade_entry = {
-            "time": now, "side": "sell" if pos.side == "long" else "buy",
-            "symbol": inst_id, "size": pos.size, "pnl": round(pnl, 2),
+            "time": now, "side": close_side,
+            "symbol": inst_id, "size": pos.size,
+            "pnl": round(pnl, 2),
             "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
             "reason": reason, "pos_side": pos.side, "coin": pos.coin,
             "signal_id": pos.signal_id,
         }
         self._trade_log.append(trade_entry)
 
-        # Save to DB
         if self.db:
             try:
                 await self.db.save_trade(
                     bot_id=ROT_BOT_ID, side=close_side, sz=pos.size,
-                    px=round(fill_px, 2), ord_id=fills[0].get("ordId", "") if fills else "",
+                    px=round(fill_px, 2),
+                    ord_id=fills[0].get("ordId", "") if fills else "",
                     inst_id=inst_id, ord_type="market",
                     fee=round(fee, 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
-                # Sync remaining positions to DB (don't delete all)
                 await self._sync_positions_db()
             except Exception as e:
                 print(f"[Rotation] DB save trade error: {e}", flush=True)
 
-        print(f"[Rotation] CLOSE {now[:19]} {pos.coin:4} {pos.side:5} "
+        print(f"[Rotation] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
               f"pnl={pnl:+.2f} ({reason})", flush=True)
 
-    async def _open_position(self, client, coin: str, side: str, ind: dict):
-        """Open a new position."""
+    async def _open_position(self, client, coin: str, side: str, ind: dict,
+                              atr_h: float, lev: float):
+        """Open a new position with limit order + market fallback."""
         inst_id = SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
-        price = ind["close_today"]  # use current price
+        price = ind["close_today"]
         atr_val = ind["atr"]
         if atr_val <= 0 or price <= 0:
             return
 
-        # Set leverage on the instrument before placing order
-        if self.config.leverage != 1.0:
+        # Set leverage
+        if lev != 1.0:
             lev_resp = await client.set_leverage(
-                inst_id=inst_id,
-                leverage=self.config.leverage,
-                mgn_mode="cross",
-                pos_side=side,
+                inst_id=inst_id, leverage=lev, mgn_mode="cross", pos_side=side,
             )
             if lev_resp.get("error"):
                 print(f"[Rotation] Set leverage error {coin}: {lev_resp.get('message', '')}", flush=True)
 
-        sz = self._calc_size(coin, price)
+        # Initial stop = price - hourly_atr * 1.5 (for long)
+        if atr_h > 0:
+            stop_dist = atr_h * self.config.hourly_atr_stop_mult
+        else:
+            stop_dist = atr_val * 2.0  # fallback to daily ATR
+        if side == "long":
+            stop = price - stop_dist
+        else:
+            stop = price + stop_dist
+
+        # Size based on risk
+        sz = self._calc_size(coin, price, stop_dist, lev)
         order_side = "buy" if side == "long" else "sell"
 
-        # Save signal to DB first
+        # Save signal to DB
         signal_id = 0
         if self.db:
             try:
@@ -342,17 +555,42 @@ class RotationStrategy:
                     bot_id=ROT_BOT_ID,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     side=order_side, price=price, size=sz,
-                    ord_type="market", status="pending",
+                    ord_type="limit", status="pending",
                 )
             except Exception as e:
                 print(f"[Rotation] DB save signal error: {e}", flush=True)
 
         if not self.config.auto_execute:
-            print(f"[Rotation] SIGNAL (no execute) {coin} {side} @ {price:.1f}", flush=True)
+            print(f"[Rotation] SIGNAL (no execute) {coin} {side} @ {price:.1f} lev={lev}", flush=True)
             return
 
+        # Try limit order first (0.1% better price)
+        limit_px = price * (1 - self.config.limit_offset_pct) if side == "long" else price * (1 + self.config.limit_offset_pct)
         resp = await self._place_order(client, inst_id, order_side, sz,
-                                          pos_side=side)
+                                          pos_side=side, ord_type="limit", px=limit_px)
+
+        # Check if filled immediately
+        fills = resp.get("data", [])
+        if not resp.get("error") and fills:
+            fill_state = fills[0].get("state", "")
+            if fill_state == "fill":
+                # Limit filled immediately
+                pass
+            else:
+                # Wait for fill, then cancel and use market if needed
+                await asyncio.sleep(self.config.limit_wait_sec)
+                # Check order status
+                if fills[0].get("ordId"):
+                    await client.cancel_order(inst_id, fills[0]["ordId"])
+                resp = await self._place_order(client, inst_id, order_side, sz,
+                                                  pos_side=side, ord_type="market")
+                fills = resp.get("data", [])
+        elif resp.get("error") or not fills:
+            # Limit failed, use market
+            resp = await self._place_order(client, inst_id, order_side, sz,
+                                              pos_side=side, ord_type="market")
+            fills = resp.get("data", [])
+
         if resp.get("error"):
             print(f"[Rotation] Open error {coin}: {resp.get('message', '')}", flush=True)
             if self.db and signal_id:
@@ -360,7 +598,6 @@ class RotationStrategy:
                                                      resp.get("message", ""))
             return
 
-        fills = resp.get("data", [])
         fill_px = price
         fee = 0.0
         ord_id = ""
@@ -369,19 +606,14 @@ class RotationStrategy:
             fee = float(fills[0].get("fee", 0))
             ord_id = fills[0].get("ordId", "")
 
-        # Initial stop = entry - atr_stop_mult * ATR
-        if side == "long":
-            stop = fill_px - self.config.atr_stop_mult * atr_val
-        else:
-            stop = fill_px + self.config.atr_stop_mult * atr_val
-
         now = datetime.now(timezone.utc).isoformat()
         pos = RotPosition(
             symbol=inst_id, coin=coin, inst_id=inst_id,
-            side=side, size=sz, entry_price=fill_px,
+            side=side, size=sz, size_original=sz,
+            entry_price=fill_px,
             stop_price=stop, peak_price=fill_px,
-            opened_at=now, atr=atr_val,
-            signal_id=signal_id, raw_entry=price,
+            opened_at=now, atr=atr_val, atr_hourly=atr_h,
+            leverage=lev, signal_id=signal_id, raw_entry=price,
         )
         self._positions[coin] = pos
 
@@ -389,10 +621,9 @@ class RotationStrategy:
             "time": now, "side": order_side, "symbol": inst_id,
             "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
-            "coin": coin, "signal_id": signal_id,
+            "coin": coin, "signal_id": signal_id, "leverage": lev,
         })
 
-        # Save to DB
         if self.db:
             try:
                 if signal_id:
@@ -404,7 +635,6 @@ class RotationStrategy:
                     fee=round(fee, 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
-                # Sync ALL positions (save_position overwrites by bot_id)
                 await self._sync_positions_db()
             except Exception as e:
                 print(f"[Rotation] DB save error: {e}", flush=True)
@@ -412,12 +642,12 @@ class RotationStrategy:
         self._equity -= fee
         print(f"[Rotation] OPEN  {now[:19]} {coin:4} {side:5} "
               f"price={fill_px:.1f} stop={stop:.1f} sz={sz} "
-              f"atr={atr_val:.1f} fee={fee:.2f}", flush=True)
+              f"lev={lev} atr_h={atr_h:.1f} fee={fee:.2f}", flush=True)
 
     # ─── Core logic ───
 
     async def _check_and_trade(self):
-        """Main logic: check signals, rotate positions, manage stops."""
+        """Main logic: indicators, filters, ranking, rotate, manage stops."""
         client = await self._get_client()
         if not client:
             print("[Rotation] No OKX client available", flush=True)
@@ -425,25 +655,38 @@ class RotationStrategy:
 
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        # 1. Fetch daily candles and compute indicators for each coin
+        # 1. Fetch data and compute indicators
         indicators = {}
-        for coin in self.config.symbols:
+        hourly_atrs = {}
+        cfg = self.config
+
+        for coin in cfg.symbols:
             try:
-                candles = await self._fetch_daily(client, coin, limit=100)
-                if not candles:
+                candles_d = await self._fetch_daily(client, coin, limit=200)
+                if not candles_d:
                     continue
-                ind = self._compute_indicators(candles)
+                ind = self._compute_daily_indicators(candles_d)
                 if ind:
                     indicators[coin] = ind
+
+                # Hourly ATR for initial stop
+                candles_h = await self._fetch_hourly(client, coin, limit=48)
+                if candles_h:
+                    hourly_atrs[coin] = self._compute_hourly_atr(candles_h)
+
+                # BTC 200-day MA (for long-only filter)
+                if coin == "BTC":
+                    self._btc_200ma = self._compute_btc_200ma(candles_d)
             except Exception as e:
                 print(f"[Rotation] Error fetching {coin}: {e}", flush=True)
 
         self._latest_indicators = indicators
+        self._hourly_atr_cache = hourly_atrs
 
         if not indicators:
             return
 
-        # 2. Manage existing positions: check trailing stops
+        # 2. Manage existing positions: trailing stops + partial TP
         for coin in list(self._positions.keys()):
             pos = self._positions[coin]
             ind = indicators.get(coin)
@@ -454,26 +697,37 @@ class RotationStrategy:
             hit_stop = False
             reason = "trail_stop"
 
+            # Dynamic trailing = entry ATR x trail_atr_mult
+            trail_step = pos.atr * cfg.trail_atr_mult
+            if trail_step <= 0:
+                trail_step = pos.entry_price * 0.02  # fallback 2%
+
             if pos.side == "long":
                 if current_price > pos.peak_price:
                     pos.peak_price = current_price
-                new_stop = pos.peak_price * (1 - self.config.trail_pct)
+                new_stop = pos.peak_price - trail_step
                 if new_stop > pos.stop_price:
                     pos.stop_price = new_stop
-                if not pos.breakeven and current_price >= pos.entry_price * (1 + self.config.breakeven_pct):
+                # Breakeven after 3%
+                if not pos.breakeven and current_price >= pos.entry_price * (1 + cfg.breakeven_pct):
                     pos.stop_price = max(pos.stop_price, pos.entry_price * 0.999)
                     pos.breakeven = True
+                # Partial TP at +5%
+                if not pos.partial_done and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
                 if current_price <= pos.stop_price:
                     hit_stop = True
             else:  # short
                 if current_price < pos.peak_price:
                     pos.peak_price = current_price
-                new_stop = pos.peak_price * (1 + self.config.trail_pct)
+                new_stop = pos.peak_price + trail_step
                 if new_stop < pos.stop_price:
                     pos.stop_price = new_stop
-                if not pos.breakeven and current_price <= pos.entry_price * (1 - self.config.breakeven_pct):
+                if not pos.breakeven and current_price <= pos.entry_price * (1 - cfg.breakeven_pct):
                     pos.stop_price = min(pos.stop_price, pos.entry_price * 1.001)
                     pos.breakeven = True
+                if not pos.partial_done and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
                 if current_price >= pos.stop_price:
                     hit_stop = True
 
@@ -483,37 +737,82 @@ class RotationStrategy:
 
         # 3. Check if we should rotate (once per day, respect min_hold)
         if self._last_daily_check == today_str:
-            return  # already checked today
+            return
 
-        # Min hold check
         now_ts = int(time.time() * 1000)
         if self._last_rotate_ts > 0 and self._positions:
-            hold_ms = (now_ts - self._last_rotate_ts)
-            hold_days = hold_ms / (86400 * 1000)
-            if hold_days < self.config.min_hold_days:
+            hold_days = (now_ts - self._last_rotate_ts) / (86400 * 1000)
+            if hold_days < cfg.min_hold_days:
                 return
 
-        # 4. Rank by ROC
-        rankings = []
+        # 4. Weighted ranking with filters
+        ranked = []
+        btc_trend_bull = self._btc_200ma > 0
+        btc_above_200ma = False
+        btc_ind = indicators.get("BTC")
+        if btc_ind and btc_trend_bull:
+            btc_above_200ma = btc_ind["close_today"] > self._btc_200ma
+
         for coin, ind in indicators.items():
             if ind["atr"] <= 0:
                 continue
-            rankings.append((coin, ind["roc"], ind["ema_trend"], ind["adx"], ind["atr"]))
 
-        if not rankings:
+            # ── FILTER: Volatility ──
+            if ind["avg_atr_30"] > 0:
+                if ind["atr"] > ind["avg_atr_30"] * cfg.vol_mult:
+                    print(f"[Rotation] Vol filter: {coin} ATR={ind['atr']:.1f} > "
+                          f"avg30*{cfg.vol_mult}={ind['avg_atr_30'] * cfg.vol_mult:.1f} -> SKIP",
+                          flush=True)
+                    continue
+
+            # ── FILTER: RSI ──
+            if ind["rsi"] > cfg.rsi_long_max and ind["ema_trend"]:
+                print(f"[Rotation] RSI filter: {coin} RSI={ind['rsi']:.1f} > {cfg.rsi_long_max} -> no long", flush=True)
+                continue
+            if ind["rsi"] < cfg.rsi_short_min and not ind["ema_trend"]:
+                print(f"[Rotation] RSI filter: {coin} RSI={ind['rsi']:.1f} < {cfg.rsi_short_min} -> no short", flush=True)
+                continue
+
+            # ── FILTER: Long-only in bear market ──
+            if btc_trend_bull and not btc_above_200ma:
+                # BTC below 200MA -> only allow shorts (or skip longs)
+                if ind["roc"] > 0 and ind["ema_trend"]:
+                    print(f"[Rotation] Bear filter: {coin} -> skip long (BTC < 200MA)", flush=True)
+                    continue
+
+            # ── Weighted score ──
+            roc_val = ind["roc"]
+            trend_val = (ind["ema_fast"] - ind["ema_slow"]) / ind["ema_slow"] * 100 if ind["ema_slow"] > 0 else 0
+            adx_val = ind["adx"]
+            score = roc_val * 0.5 + trend_val * 0.3 + (adx_val / 50) * 0.2
+
+            ranked.append((coin, score, ind["roc"], ind["ema_trend"], ind["adx"], ind["atr"]))
+
+        if not ranked:
             return
 
-        rankings.sort(key=lambda x: x[1], reverse=True)
+        # Sort by weighted score descending
+        ranked.sort(key=lambda x: x[1], reverse=True)
 
-        # 5. Determine target coins
+        # 5. Determine target coins (with correlation filter)
         target_coins = set()
-        for coin, roc_val, ema_trend, adx_val, atr_val in rankings:
-            if len(target_coins) >= self.config.top_k:
+        for coin, score, roc_val, ema_trend, adx_val, atr_val in ranked:
+            if len(target_coins) >= cfg.top_k:
                 break
-            if roc_val > 0 and ema_trend and adx_val >= self.config.adx_min:
-                target_coins.add((coin, "long"))
-            elif roc_val < 0 and not ema_trend and adx_val >= self.config.adx_min:
-                target_coins.add((coin, "short"))
+
+            # Direction: based on trend + ROC
+            if roc_val > 0 and ema_trend and adx_val >= cfg.adx_min:
+                side = "long"
+            elif roc_val < 0 and not ema_trend and adx_val >= cfg.adx_min:
+                side = "short"
+            else:
+                continue
+
+            # ── FILTER: Correlation ──
+            if not self._check_correlation(coin, indicators):
+                continue
+
+            target_coins.add((coin, side))
 
         # 6. Close positions not in target
         for coin in list(self._positions.keys()):
@@ -527,8 +826,11 @@ class RotationStrategy:
             if coin in self._positions:
                 continue
             ind = indicators.get(coin)
-            if ind:
-                await self._open_position(client, coin, side, ind)
+            if not ind:
+                continue
+            atr_h = hourly_atrs.get(coin, 0.0)
+            lev = self._calc_dynamic_leverage(atr_h, ind["close_today"])
+            await self._open_position(client, coin, side, ind, atr_h, lev)
 
         self._last_daily_check = today_str
         self._last_rotate_ts = now_ts
@@ -545,30 +847,24 @@ class RotationStrategy:
             await asyncio.sleep(self.config.poll_interval_sec)
 
     def _thread_target(self):
-        """Target for daemon thread."""
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._loop.run_until_complete(self._poll_loop())
 
     async def start(self):
-        """Start the strategy."""
         if self._running:
             return
         self._running = True
         self._started_at = datetime.now(timezone.utc).isoformat()
-
-        # Ensure bot in DB
         if self.db:
             await self._ensure_bot()
             await self._reload_equity()
-
-        # Start daemon thread
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
-        print(f"[Rotation] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)", flush=True)
+        print(f"[Rotation v2] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
+              flush=True)
 
     async def stop(self):
-        """Stop the strategy."""
         self._running = False
         if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -580,73 +876,62 @@ class RotationStrategy:
                 await self.db.update_bot_stopped(ROT_BOT_ID)
             except Exception:
                 pass
-        print("[Rotation] Stopped", flush=True)
+        print("[Rotation v2] Stopped", flush=True)
 
     def get_status(self) -> dict:
-        """Return current status dict.
-
-        PNL accounting:
-          - realized_pnl = self._equity - self._capital  (includes ALL fees: open + close)
-          - unrealized_pnl = sum of live position mark-to-market
-          - total_pnl = realized + unrealized (full picture)
-          - equity = capital + total_pnl
-        """
+        """Return current status dict."""
         trades = self._trade_log
         closed = [t for t in trades if t.get("pnl", 0) != 0]
         wins = [t for t in closed if t.get("pnl", 0) > 0]
         losses = [t for t in closed if t.get("pnl", 0) <= 0]
 
-        # Realized PNL = what equity changed by vs initial capital (includes all fees)
         realized_pnl = self._equity - self._capital
 
-        # Unrealized PNL from all open positions
         unrealized_total = 0.0
         for coin in self._positions:
             unrealized_total += self._calc_unrealized(coin)
 
-        # Full equity = capital + realized + unrealized
         full_equity = self._capital + realized_pnl + unrealized_total
 
         win_rate = len(wins) / len(closed) * 100 if closed else 0
 
-        # Build open_positions as a LIST (not dict) with fields the Dashboard expects
         open_positions_list = []
         for coin, pos in self._positions.items():
-            stage = "trailing" if pos.breakeven else "initial"
+            stage = "trailing" if pos.breakeven else ("partial" if pos.partial_done else "initial")
             ct = CT_VAL.get(coin, 0.01)
             notional = pos.size * ct * pos.entry_price
-            margin = notional / self.config.leverage if self.config.leverage > 0 else notional
+            margin = notional / pos.leverage if pos.leverage > 0 else notional
             open_positions_list.append({
-                "coin": pos.coin,
-                "symbol": pos.inst_id,
-                "inst_id": pos.inst_id,
-                "side": pos.side,
-                "size": pos.size,
-                "size_remaining": pos.size,
-                "entry": pos.entry_price,
-                "entry_price": pos.entry_price,
-                "stop": round(pos.stop_price, 2),
-                "stop_price": round(pos.stop_price, 2),
+                "coin": pos.coin, "symbol": pos.inst_id, "inst_id": pos.inst_id,
+                "side": pos.side, "size": pos.size, "size_remaining": pos.size,
+                "size_original": pos.size_original,
+                "entry": pos.entry_price, "entry_price": pos.entry_price,
+                "stop": round(pos.stop_price, 2), "stop_price": round(pos.stop_price, 2),
                 "peak_price": round(pos.peak_price, 2),
-                "breakeven": pos.breakeven,
+                "breakeven": pos.breakeven, "partial_done": pos.partial_done,
                 "opened_at": pos.opened_at,
                 "unrealized_pnl": self._calc_unrealized(coin),
-                "stage": stage,
-                "pos_mode": "cross",
-                "notional": round(notional, 2),
-                "margin": round(margin, 2),
-                "leverage": self.config.leverage,
+                "stage": stage, "pos_mode": "cross",
+                "notional": round(notional, 2), "margin": round(margin, 2),
+                "leverage": pos.leverage,
             })
 
-        # Config dict with fallback fields the Dashboard reads
         cfg = asdict(self.config)
         cfg.setdefault("max_positions", self.config.top_k)
-        cfg.setdefault("risk_per_trade", 0.0)
+        cfg.setdefault("risk_per_trade_old", 0.0)
         cfg.setdefault("tp1_pct", 0.0)
+
+        # Filter info for dashboard
+        filters_active = []
+        if self._btc_200ma > 0:
+            btc_ind = self._latest_indicators.get("BTC")
+            if btc_ind:
+                btc_above = btc_ind["close_today"] > self._btc_200ma
+                filters_active.append(f"BTC {'>' if btc_above else '<'} 200MA: {'longs OK' if btc_above else 'longs blocked'}")
 
         return {
             "running": self._running,
-            "strategy": "momentum_rotation",
+            "strategy": "momentum_rotation_v2",
             "config": cfg,
             "equity": round(full_equity, 2),
             "capital": self._capital,
@@ -659,6 +944,8 @@ class RotationStrategy:
             "recent_trades": trades[-20:],
             "recent_signals": self._signal_log[-10:],
             "indicators": self._latest_indicators,
+            "filters": filters_active,
+            "btc_200ma": round(self._btc_200ma, 2) if self._btc_200ma else None,
             "started_at": self._started_at,
             "description": STRATEGY_DESC,
         }
@@ -678,11 +965,9 @@ class RotationStrategy:
     # ─── DB helpers ───
 
     async def _sync_positions_db(self):
-        """Sync current in-memory positions to DB. Replaces old approach of delete all."""
         if not self.db:
             return
         try:
-            # Delete all positions for this bot, then re-save current ones
             if self.db._pg_mode:
                 await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (ROT_BOT_ID,))
             else:
@@ -707,8 +992,8 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES ($1, 'rotation', 'momentum_rotation', 'MULTI', '1D', "
-                    "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation') "
+                    "VALUES ($1, 'rotation', 'momentum_rotation_v2', 'MULTI', '1D', "
+                    "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v2') "
                     "ON CONFLICT (id) DO NOTHING",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )
@@ -716,32 +1001,14 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES (?, 'rotation', 'momentum_rotation', 'MULTI', '1D', "
-                    "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation')",
+                    "VALUES (?, 'rotation', 'momentum_rotation_v2', 'MULTI', '1D', "
+                    "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v2')",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )
         except Exception as e:
             print(f"[Rotation] DB ensure_bot error: {e}", flush=True)
 
     async def _reload_equity(self):
-        """Reload equity from DB trade history.
-        
-        PNL accounting:
-          - Close trades in DB: pnl = trade_pnl - close_fee (already net)
-          - Open trades in DB: pnl = 0, but fee > 0 (the opening commission)
-          - We reconstruct: for each trade, effective_pnl = db_pnl - db_fee
-            (close trades: trade_pnl - close_fee - close_fee... wait no)
-        
-        Actually simpler: the in-memory trade_log has:
-          - Open entries: pnl = -open_fee
-          - Close entries: pnl = trade_pnl - close_fee
-          Sum = total realized PNL including ALL fees.
-        
-        From DB we need to reconstruct the same. DB stores:
-          - Open trades: pnl=0, fee=open_fee
-          - Close trades: pnl=trade_pnl-close_fee, fee=close_fee
-        So for each DB row: effective_pnl = db_pnl - db_fee (for opens: 0 - open_fee = -open_fee)
-        """
         if not self.db:
             return
         try:
@@ -749,11 +1016,9 @@ class RotationStrategy:
             for t in rows:
                 db_pnl = float(t.get("pnl", 0) or 0)
                 db_fee = float(t.get("fee", 0) or 0)
-                # For open trades (pnl=0 in DB), the fee is the cost
-                # For close trades, pnl already includes -fee, so don't double-count
-                effective_pnl = db_pnl  # close trades: already net of fee
+                effective_pnl = db_pnl
                 if db_pnl == 0 and db_fee > 0:
-                    effective_pnl = -db_fee  # open trades: fee is a cost
+                    effective_pnl = -db_fee
                 self._trade_log.append({
                     "time": t.get("timestamp", ""),
                     "side": t.get("side", ""),
