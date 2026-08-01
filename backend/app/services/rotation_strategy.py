@@ -1,5 +1,5 @@
 """Momentum Rotation Strategy - ROC ranking, top-K, 3x leverage, trailing stop.
-Backtested: ~90% CAGR, -16% max DD over 3 years (BTC/ETH/BNB/SOL daily).
+Backtested: ~100-120% realistic CAGR (H/L variant ~142%, close-only fails - see scripts/honest_backtest.py)
 
 Logic:
   1. Every day: compute 14d ROC, EMA20/50 trend, ADX, ATR for each coin
@@ -387,7 +387,7 @@ class RotationStrategy:
 
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": sz, "pnl": 0, "entry": fill_px, "entry_price": fill_px,
+            "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
             "coin": coin, "signal_id": signal_id,
         })
@@ -724,25 +724,47 @@ class RotationStrategy:
             print(f"[Rotation] DB ensure_bot error: {e}", flush=True)
 
     async def _reload_equity(self):
-        """Reload equity from DB trade history."""
+        """Reload equity from DB trade history.
+        
+        PNL accounting:
+          - Close trades in DB: pnl = trade_pnl - close_fee (already net)
+          - Open trades in DB: pnl = 0, but fee > 0 (the opening commission)
+          - We reconstruct: for each trade, effective_pnl = db_pnl - db_fee
+            (close trades: trade_pnl - close_fee - close_fee... wait no)
+        
+        Actually simpler: the in-memory trade_log has:
+          - Open entries: pnl = -open_fee
+          - Close entries: pnl = trade_pnl - close_fee
+          Sum = total realized PNL including ALL fees.
+        
+        From DB we need to reconstruct the same. DB stores:
+          - Open trades: pnl=0, fee=open_fee
+          - Close trades: pnl=trade_pnl-close_fee, fee=close_fee
+        So for each DB row: effective_pnl = db_pnl - db_fee (for opens: 0 - open_fee = -open_fee)
+        """
         if not self.db:
             return
         try:
             rows = await self.db.get_trades(bot_id=ROT_BOT_ID, limit=500)
             for t in rows:
-                pnl = float(t.get("pnl", 0) or 0)
-                if pnl != 0:
-                    self._trade_log.append({
-                        "time": t.get("timestamp", ""),
-                        "side": t.get("side", ""),
-                        "symbol": t.get("inst_id", ""),
-                        "size": float(t.get("sz", 0) or 0),
-                        "pnl": pnl,
-                        "entry_price": float(t.get("px", 0) or 0),
-                        "reason": "closed",
-                        "coin": t.get("inst_id", "").replace("-USDT-SWAP", "").replace("-USD-SWAP", ""),
-                        "signal_id": t.get("signal_id", 0),
-                    })
+                db_pnl = float(t.get("pnl", 0) or 0)
+                db_fee = float(t.get("fee", 0) or 0)
+                # For open trades (pnl=0 in DB), the fee is the cost
+                # For close trades, pnl already includes -fee, so don't double-count
+                effective_pnl = db_pnl  # close trades: already net of fee
+                if db_pnl == 0 and db_fee > 0:
+                    effective_pnl = -db_fee  # open trades: fee is a cost
+                self._trade_log.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "pnl": effective_pnl,
+                    "entry_price": float(t.get("px", 0) or 0),
+                    "reason": "closed",
+                    "coin": t.get("inst_id", "").replace("-USDT-SWAP", "").replace("-USD-SWAP", ""),
+                    "signal_id": t.get("signal_id", 0),
+                })
             total_pnl = sum(t.get("pnl", 0) for t in self._trade_log)
             self._equity = self._capital + total_pnl
         except Exception as e:

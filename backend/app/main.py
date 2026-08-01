@@ -1159,7 +1159,7 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Sums directly from _trade_log — same source as trades table."""
+    """PNL for Dashboard metric cards. Realized from _trade_log, unrealized from OKX."""
     total_realized = 0.0
     realized_1d = 0.0
     realized_7d = 0.0
@@ -1183,10 +1183,15 @@ async def get_pnl():
                     realized_30d += pnl
             except Exception:
                 realized_30d += pnl
+    # Unrealized PNL — from OKX positions (same source as positions table)
     unrealized = 0.0
-    if rotation:
-        for coin in rotation._positions:
-            unrealized += rotation._calc_unrealized(coin)
+    try:
+        pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
+        if not pos_result.get("error"):
+            for p in pos_result.get("data", []):
+                unrealized += float(p.get("upl", 0) or 0)
+    except Exception:
+        pass
     return {
         "total": round(total_realized, 2),
         "1d": round(realized_1d, 2),
