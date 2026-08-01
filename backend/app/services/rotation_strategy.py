@@ -238,21 +238,25 @@ class RotationStrategy:
             return None
         return self.client_manager.get_client()
 
-    async def _place_order(self, client, inst_id: str, side: str, sz: float) -> dict:
-        """Place market order. side='buy' or 'sell'."""
+    async def _place_order(self, client, inst_id: str, side: str, sz: float,
+                                      pos_side: str = None) -> dict:
+        """Place market order. side='buy' or 'sell'. pos_side='long' or 'short'."""
         resp = await client.place_order(
             inst_id=inst_id,
             side=side,
             ord_type="market",
             sz=str(sz),
-            td_mode="isolated",
+            td_mode="cross",
+            pos_side=pos_side,
         )
         return resp
 
     async def _close_position(self, client, inst_id: str, pos: RotPosition, reason: str):
         """Close position at market."""
         close_side = "sell" if pos.side == "long" else "buy"
-        resp = await self._place_order(client, inst_id, close_side, pos.size)
+        # Close: sell long position, buy short position. pos_side = the position side.
+        resp = await self._place_order(client, inst_id, close_side, pos.size,
+                                          pos_side=pos.side)
         if resp.get("error"):
             print(f"[Rotation] Close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
@@ -291,7 +295,8 @@ class RotationStrategy:
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
-                await self.db.delete_position(ROT_BOT_ID)
+                # Sync remaining positions to DB (don't delete all)
+                await self._sync_positions_db()
             except Exception as e:
                 print(f"[Rotation] DB save trade error: {e}", flush=True)
 
@@ -327,7 +332,8 @@ class RotationStrategy:
             print(f"[Rotation] SIGNAL (no execute) {coin} {side} @ {price:.1f}", flush=True)
             return
 
-        resp = await self._place_order(client, inst_id, order_side, sz)
+        resp = await self._place_order(client, inst_id, order_side, sz,
+                                          pos_side=side)
         if resp.get("error"):
             print(f"[Rotation] Open error {coin}: {resp.get('message', '')}", flush=True)
             if self.db and signal_id:
@@ -379,12 +385,8 @@ class RotationStrategy:
                     fee=round(fee, 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
-                await self.db.save_position(
-                    bot_id=ROT_BOT_ID, inst_id=inst_id,
-                    side=side, size=sz,
-                    entry_price=round(fill_px, 2),
-                    current_price=round(fill_px, 2),
-                )
+                # Sync ALL positions (save_position overwrites by bot_id)
+                await self._sync_positions_db()
             except Exception as e:
                 print(f"[Rotation] DB save error: {e}", flush=True)
 
@@ -630,6 +632,26 @@ class RotationStrategy:
             return round(pos.size * ct * (pos.entry_price - current), 2)
 
     # ─── DB helpers ───
+
+    async def _sync_positions_db(self):
+        """Sync current in-memory positions to DB. Replaces old approach of delete all."""
+        if not self.db:
+            return
+        try:
+            # Delete all positions for this bot, then re-save current ones
+            if self.db._pg_mode:
+                await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (ROT_BOT_ID,))
+            else:
+                await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (ROT_BOT_ID,))
+            for coin, pos in self._positions.items():
+                await self.db.save_position(
+                    bot_id=ROT_BOT_ID, inst_id=pos.inst_id,
+                    side=pos.side, size=pos.size,
+                    entry_price=round(pos.entry_price, 2),
+                    current_price=pos.peak_price,
+                )
+        except Exception as e:
+            print(f"[Rotation] DB sync positions error: {e}", flush=True)
 
     async def _ensure_bot(self):
         if not self.db:
