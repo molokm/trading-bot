@@ -346,6 +346,26 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in rotation._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "Momentum"
+    # Fallback: match by symbol+side (works when entry_time is unknown)
+    side = trade.get("side", "")
+    if alpha and alpha._trade_log:
+        for t in alpha._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "Alpha"
+    if rotation and rotation._trade_log:
+        for t in rotation._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "Momentum"
+    # Fallback: DB bot_id stored for this trade
+    return _db_bot_name(trade.get("bot_id", ""))
+
+
+def _db_bot_name(bot_id: str) -> str:
+    """Map DB bot_id -> UI bot name."""
+    if bot_id in ("alpha_strategy", ALPHA_BOT_ID):
+        return "Alpha"
+    if bot_id in ("momentum_strategy", "rotation_strategy", MOM_BOT_ID, ROT_BOT_ID):
+        return "Momentum"
     return ""
 
 
@@ -541,6 +561,7 @@ async def momentum_trades(limit: int = 20):
                 "inst_id": t.get("symbol", ""),
                 "entry_time": t.get("time", ""),
                 "exit_time": t.get("time", "") if not is_open else None,
+                "bot": "Momentum",
             })
         return {"trades": trades}
 
@@ -589,8 +610,8 @@ async def momentum_trades(limit: int = 20):
                     "reason": t.get("reason", ""),
                     "ord_id": t.get("ord_id", ""),
                     "source": "okx",
-                    "bot": _tag_trade_bot(trade),
                 }
+                trade["bot"] = _tag_trade_bot(trade)
                 if is_open and inst_id in algo_map:
                     for ao in algo_map[inst_id]:
                         sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
@@ -639,6 +660,7 @@ async def momentum_trades(limit: int = 20):
                 "inst_id": t.get("inst_id", ""),
                 "entry_time": t.get("entry_time", ""),
                 "exit_time": t.get("exit_time", ""),
+                "bot": _db_bot_name(t.get("bot_id", "")),
             })
         print(f"[momentum/trades] DB fallback returned {len(result)} trades", flush=True)
         return {"trades": result}
@@ -853,7 +875,10 @@ async def db_reset_all():
 async def rotation_trades(limit: int = 50):
     if not rotation:
         return {"trades": []}
-    return {"trades": rotation._trade_log[-limit:]}
+    trades = [dict(t) for t in rotation._trade_log[-limit:]]
+    for t in trades:
+        t.setdefault("bot", "Momentum")
+    return {"trades": trades}
 
 
 @app.get("/api/rotation/indicators")
@@ -957,7 +982,10 @@ async def alpha_trades(limit: int = 50):
     """Alpha trades — in-memory first, fallback to OKX fills."""
     # 1. In-memory from running alpha bot
     if alpha and len(alpha._trade_log) > 0:
-        return {"trades": alpha._trade_log[-limit:]}
+        trades = [dict(t) for t in alpha._trade_log[-limit:]]
+        for t in trades:
+            t.setdefault("bot", "Alpha")
+        return {"trades": trades}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
@@ -1003,8 +1031,8 @@ async def alpha_trades(limit: int = 50):
                 "reason": t.get("reason", ""),
                 "ord_id": t.get("ord_id", ""),
                 "source": "okx",
-                "bot": _tag_trade_bot(trade),
             }
+            trade["bot"] = _tag_trade_bot(trade)
             # Add TP/SL from algo orders for open positions
             if is_open and inst_id in algo_map:
                 for ao in algo_map[inst_id]:
@@ -1678,6 +1706,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "reason": t.get("reason", ""),
                     "pos_side": t.get("pos_side", ""),
                     "signal_id": t.get("signal_id", ""),
+                    "bot": "Momentum",
                 })
         for coin, entry in entry_map.items():
             paired.append({
@@ -1695,6 +1724,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "reason": "open",
                 "pos_side": entry.get("pos_side", ""),
                 "signal_id": entry.get("signal_id", ""),
+                "bot": "Momentum",
             })
         paired = paired[-limit:]
         return {"trades": paired}
@@ -1766,6 +1796,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "reason": "closed",
                 "pos_side": "long" if entry_side == "buy" else "short",
                 "signal_id": t.get("signal_id", ""),
+                "bot": _db_bot_name(t.get("bot_id", "")),
             })
         return {"trades": result}
     except Exception as e:

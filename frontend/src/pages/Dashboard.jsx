@@ -157,6 +157,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           side: mt.pos_side === 'short' ? 'sell' : 'buy',
           entry_px: mt.entry_price, exit_px: mt.exit_price,
           pnl: mt.pnl, reason: mt.reason || '', signal_id: mt.ord_id,
+          bot: mt.bot,
         })
       // DB-restored close trade (pnl!=0 but may lack entry_price)
       } else if (mt.pnl != null && parseFloat(mt.pnl) !== 0 && !mt.entry) {
@@ -165,6 +166,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
           entry_px: mt.entry || null, exit_px: mt.exit_price || null,
           pnl: mt.pnl, reason: mt.reason || 'closed', signal_id: mt.ord_id,
+          bot: mt.bot,
         })
       // Entry / open trade
       } else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
@@ -172,6 +174,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           entry_time: mt.time, exit_time: null, inst_id: mt.symbol,
           side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
           entry_px: mt.entry, exit_px: null, pnl: null, reason: 'open', signal_id: mt.ord_id,
+          bot: mt.bot,
         })
       }
     }
