@@ -521,17 +521,17 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                             {tr.side === 'buy' ? 'L' : 'S'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">{tr.entry ? `$${tr.entry.toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
+                        <td className="text-right mono text-2xs">{tr.entry ? `$${Number(tr.entry).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
                         <td className="text-right mono text-2xs">
                           {isOpen && tr.stop ? (
-                            <span className="text-[var(--loss)]">${tr.stop.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                            <span className="text-[var(--loss)]">${Number(tr.stop).toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
                           ) : (tr.type === 'closed' && tr.exit) ? (
                             <span className="text-[var(--txt-muted)]">${parseFloat(tr.exit).toLocaleString()}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right mono text-2xs">
                           {isOpen && tr.tp1 ? (
-                            <span className="text-[var(--profit)]">${tr.tp1.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                            <span className="text-[var(--profit)]">${Number(tr.tp1).toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right">
@@ -686,25 +686,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${alphaStatus.equity?.toLocaleString?.() || (alphaStatus.equity || 0).toFixed(0)}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">WR</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.win_rate || 0}%</div>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Trades</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.total_trades || 0}</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${alphaStatus.equity?.toLocaleString?.() || '---'}</div>
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">Pos</div>
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.open_positions?.length || 0}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Risk</div>
-                      <div className="mono text-xs font-semibold text-[var(--warn)] mt-0.5">{((alphaStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
                     </div>
                   </div>
                   {alphaStatus.open_positions?.length > 0 && (

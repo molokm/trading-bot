@@ -1379,6 +1379,17 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         result = []
         for t in db_trades:
             entry_side = t.get("entry_side", "buy")
+            # px columns are TEXT in DB — convert to float
+            entry_px = t.get("entry_px", 0)
+            exit_px = t.get("exit_px", 0)
+            try:
+                entry_px = float(entry_px) if entry_px else 0
+            except (TypeError, ValueError):
+                entry_px = 0
+            try:
+                exit_px = float(exit_px) if exit_px else 0
+            except (TypeError, ValueError):
+                exit_px = 0
             result.append({
                 "time": t.get("exit_time") or t.get("entry_time", ""),
                 "entry_time": t.get("entry_time", ""),
@@ -1386,18 +1397,20 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "side": entry_side,
                 "symbol": t.get("inst_id", ""),
                 "inst_id": t.get("inst_id", ""),
-                "entry": t.get("entry_px", 0) or 0,
-                "entry_px": t.get("entry_px", 0) or 0,
-                "exit_price": t.get("exit_px", 0) or 0,
-                "exit_px": t.get("exit_px", 0) or 0,
-                "pnl": t.get("pnl", 0) or 0,
+                "entry": entry_px,
+                "entry_px": entry_px,
+                "exit_price": exit_px,
+                "exit_px": exit_px,
+                "pnl": float(t.get("pnl", 0) or 0),
                 "reason": "closed",
                 "pos_side": "long" if entry_side == "buy" else "short",
                 "signal_id": t.get("signal_id", ""),
             })
         return {"trades": result}
     except Exception as e:
+        import traceback
         print(f"[trades/paired] DB fallback error: {e}", flush=True)
+        traceback.print_exc()
         return {"trades": []}
 
 

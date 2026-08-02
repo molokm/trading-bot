@@ -365,20 +365,20 @@ export default function BotsPage({ connected, isGuest }) {
           </div>
 
           {alphaStatus && (
-            <div className="grid grid-cols-3 gap-2">
-              <div className="p-2 rounded-md bg-[var(--bg)]">
+            <div className="grid grid-cols-3 gap-1.5">
+              <div className="p-1.5 rounded-md bg-[var(--bg)]">
                 <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                <div className={`mono text-sm font-bold ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                  {alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
+                <div className={`mono text-xs font-bold ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  ${alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
                 </div>
               </div>
-              <div className="p-2 rounded-md bg-[var(--bg)]">
+              <div className="p-1.5 rounded-md bg-[var(--bg)]">
                 <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
-                <div className="mono text-sm font-bold text-[var(--txt)]">{alphaStatus.total_trades || 0}</div>
+                <div className="mono text-xs font-bold text-[var(--txt)]">{alphaStatus.total_trades || 0}</div>
               </div>
-              <div className="p-2 rounded-md bg-[var(--bg)]">
+              <div className="p-1.5 rounded-md bg-[var(--bg)]">
                 <div className="text-2xs text-[var(--txt-muted)]">Win Rate</div>
-                <div className="mono text-sm font-bold text-[var(--txt)]">{alphaStatus.win_rate || 0}%</div>
+                <div className="mono text-xs font-bold text-[var(--txt)]">{alphaStatus.win_rate || 0}%</div>
               </div>
             </div>
           )}
@@ -389,9 +389,9 @@ export default function BotsPage({ connected, isGuest }) {
               {alphaStatus.open_positions.map((p, i) => {
                 const isLong = p.side !== 'short'
                 return (
-                  <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
-                    <div className="flex items-center gap-2">
-                      <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                  <div className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                    <div className="flex items-center gap-1.5">
+                      <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
                       <span className="text-[var(--txt)] font-medium">{p.coin}</span>
                     </div>
                     <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
