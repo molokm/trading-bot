@@ -798,13 +798,13 @@ class AlphaStrategy:
             elif pos.algo_id:
                 await self._update_exchange_stop(client, pos)
 
-        # 3. Check if we should rotate (once per day, respect min_hold)
-        #    Exception: if no positions (e.g. manual close), always re-evaluate
-        if self._positions and self._last_daily_check == today_str:
-            return
+        # 3. Check if we should rotate
+        slots_full = len(self._positions) >= cfg.top_k
+        if slots_full and self._last_daily_check == today_str:
+            return  # all slots full, already checked today
 
         now_ts = int(time.time() * 1000)
-        if self._last_rotate_ts > 0 and self._positions:
+        if slots_full and self._last_rotate_ts > 0:
             hold_days = (now_ts - self._last_rotate_ts) / (86400 * 1000)
             if hold_days < cfg.min_hold_days:
                 return
@@ -878,14 +878,16 @@ class AlphaStrategy:
 
             target_coins.add((coin, side))
 
-        # 6. Close positions not in target
-        for coin in list(self._positions.keys()):
-            pos = self._positions[coin]
-            if (coin, pos.side) not in target_coins:
-                await self._close_position(client, pos.inst_id, pos, "rotation_exit")
-                del self._positions[coin]
+        # 6. Full rotation: close positions not in target (only on daily check, not when filling slots)
+        if slots_full:
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                if (coin, pos.side) not in target_coins:
+                    await self._close_position(client, pos.inst_id, pos, "rotation_exit")
+                    del self._positions[coin]
 
-        # 7. Open new positions
+        # 7. Open new positions (fill empty slots)
+        opened_any = False
         for coin, side in target_coins:
             if coin in self._positions:
                 continue
@@ -895,9 +897,13 @@ class AlphaStrategy:
             atr_h = hourly_atrs.get(coin, 0.0)
             lev = self._calc_dynamic_leverage(atr_h, ind["close_today"])
             await self._open_position(client, coin, side, ind, atr_h, lev)
+            opened_any = True
 
-        self._last_daily_check = today_str
-        self._last_rotate_ts = now_ts
+        # Update daily check only when doing a full rotation or opening a trade
+        if slots_full or opened_any:
+            self._last_daily_check = today_str
+        if slots_full or opened_any:
+            self._last_rotate_ts = now_ts
 
     # ─── Lifecycle ───
 
