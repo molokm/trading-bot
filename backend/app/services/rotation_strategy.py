@@ -971,12 +971,19 @@ class RotationStrategy:
             ct = CT_VAL.get(coin, 0.01)
             notional = pos.size * ct * pos.entry_price
             margin = notional / pos.leverage if pos.leverage > 0 else notional
+            if pos.side == "long":
+                tp1_price = pos.entry_price * (1 + self.config.partial_tp_pct)
+                be_price = pos.entry_price * 0.999
+            else:
+                tp1_price = pos.entry_price * (1 - self.config.partial_tp_pct)
+                be_price = pos.entry_price * 1.001
             open_positions_list.append({
                 "coin": pos.coin, "symbol": pos.inst_id, "inst_id": pos.inst_id,
                 "side": pos.side, "size": pos.size, "size_remaining": pos.size,
                 "size_original": pos.size_original,
                 "entry": pos.entry_price, "entry_price": pos.entry_price,
                 "stop": round(pos.stop_price, 2), "stop_price": round(pos.stop_price, 2),
+                "tp1": round(tp1_price, 2), "be_price": round(be_price, 2),
                 "peak_price": round(pos.peak_price, 2),
                 "breakeven": pos.breakeven, "partial_done": pos.partial_done,
                 "opened_at": pos.opened_at,
