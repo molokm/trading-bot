@@ -450,34 +450,73 @@ async def momentum_update_config(data: dict = None):
 
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
-    """Trade history from Rotation strategy, formatted for Dashboard."""
-    if not rotation:
+    """Trade history — in-memory from running bot, fallback to DB paired trades."""
+    # 1. In-memory from running rotation bot
+    if rotation and len(rotation._trade_log) > 0:
+        trades = []
+        for t in reversed(rotation._trade_log):
+            if len(trades) >= limit:
+                break
+            is_open = t.get("reason") == "open" or t.get("pnl", 0) == 0
+            trades.append({
+                "time": t.get("time", ""),
+                "symbol": t.get("symbol", ""),
+                "side": t.get("side", ""),
+                "pos_side": t.get("pos_side", ""),
+                "size": t.get("size", 0),
+                "pnl": t.get("pnl", 0),
+                "entry": t.get("entry_price") or t.get("entry", 0),
+                "entry_price": t.get("entry_price") or t.get("entry", 0),
+                "exit_price": t.get("exit_price", 0),
+                "stop": t.get("stop", 0),
+                "reason": t.get("reason", ""),
+                "ord_id": t.get("signal_id", ""),
+                "inst_id": t.get("symbol", ""),
+                "entry_time": t.get("time", ""),
+                "exit_time": t.get("time", "") if not is_open else None,
+            })
+        return {"trades": trades}
+
+    # 2. Fallback: load paired trades from DB
+    try:
+        db_trades = await db.get_paired_trades(limit=limit)
+        result = []
+        for t in db_trades:
+            entry_side = t.get("entry_side", "buy")
+            entry_px = t.get("entry_px", 0)
+            exit_px = t.get("exit_px", 0)
+            try:
+                entry_px = float(entry_px) if entry_px else 0
+            except (TypeError, ValueError):
+                entry_px = 0
+            try:
+                exit_px = float(exit_px) if exit_px else 0
+            except (TypeError, ValueError):
+                exit_px = 0
+            result.append({
+                "time": t.get("exit_time") or t.get("entry_time", ""),
+                "symbol": t.get("inst_id", ""),
+                "side": "buy" if entry_side == "buy" else "sell",
+                "pos_side": "long" if entry_side == "buy" else "short",
+                "size": 0,
+                "pnl": float(t.get("pnl", 0) or 0),
+                "entry": entry_px,
+                "entry_price": entry_px,
+                "exit_price": exit_px,
+                "stop": 0,
+                "reason": "closed",
+                "ord_id": str(t.get("signal_id", "")),
+                "inst_id": t.get("inst_id", ""),
+                "entry_time": t.get("entry_time", ""),
+                "exit_time": t.get("exit_time", ""),
+            })
+        print(f"[momentum/trades] DB fallback returned {len(result)} trades", flush=True)
+        return {"trades": result}
+    except Exception as e:
+        import traceback
+        print(f"[momentum/trades] DB fallback error: {e}", flush=True)
+        traceback.print_exc()
         return {"trades": []}
-    # Transform rotation trade_log entries to match Dashboard's expected format
-    trades = []
-    for t in reversed(rotation._trade_log):
-        if len(trades) >= limit:
-            break
-        is_open = t.get("reason") == "open" or t.get("pnl", 0) == 0
-        trades.append({
-            "time": t.get("time", ""),
-            "symbol": t.get("symbol", ""),
-            "side": t.get("side", ""),
-            "pos_side": t.get("pos_side", ""),
-            "size": t.get("size", 0),
-            "pnl": t.get("pnl", 0),
-            "entry": t.get("entry_price") or t.get("entry", 0),
-            "entry_price": t.get("entry_price") or t.get("entry", 0),
-            "exit_price": t.get("exit_price", 0),
-            "stop": t.get("stop", 0),
-            "reason": t.get("reason", ""),
-            "ord_id": t.get("signal_id", ""),
-            "inst_id": t.get("symbol", ""),
-            # For open trades — fields the allTrades useMemo checks
-            "entry_time": t.get("time", ""),
-            "exit_time": t.get("time", "") if not is_open else None,
-        })
-    return {"trades": trades}
 
 
 @app.get("/api/momentum/indicators")
@@ -1412,6 +1451,35 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         print(f"[trades/paired] DB fallback error: {e}", flush=True)
         traceback.print_exc()
         return {"trades": []}
+
+
+@app.get("/api/debug/trades-db")
+async def debug_trades_db():
+    """Diagnostic: check what's in the DB trades table."""
+    try:
+        count = await db._fetchone("SELECT count(*) as c FROM trades")
+        total = count["c"] if count else 0
+
+        with_signal = await db._fetchone("SELECT count(*) as c FROM trades WHERE signal_id IS NOT NULL")
+        paired_count = with_signal["c"] if with_signal else 0
+
+        # Get last 5 trades
+        recent = await db._fetchall("SELECT id, bot_id, inst_id, side, px, pnl, state, timestamp, signal_id FROM trades ORDER BY timestamp DESC LIMIT 5")
+        for r in recent:
+            r["px"] = str(r.get("px", ""))
+
+        # Try paired trades query
+        paired = await db.get_paired_trades(limit=5)
+
+        return {
+            "total_trades": total,
+            "with_signal_id": paired_count,
+            "recent_trades": recent,
+            "paired_trades": paired,
+        }
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 # ── DB Positions ──
