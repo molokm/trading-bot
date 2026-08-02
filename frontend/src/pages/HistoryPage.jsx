@@ -219,6 +219,7 @@ export default function HistoryPage() {
               <thead>
                 <tr>
                   <th>{t('history.time')}</th>
+                  <th>Bot</th>
                   <th>{t('history.type')}</th>
                   <th>{t('history.instrument')}</th>
                   <th className="text-right">{t('history.entry')}</th>
@@ -240,6 +241,7 @@ export default function HistoryPage() {
                   return (
                     <tr key={i}>
                       <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tradeTime)}</td>
+                      <td className={`text-2xs font-bold ${tr.bot === 'Alpha' ? 'text-[var(--warn)]' : tr.bot === 'Momentum' ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'}`}>{tr.bot || '—'}</td>
                       <td>
                         <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                           {isLong ? 'LONG' : 'SHORT'}

@@ -302,12 +302,64 @@ async def get_portfolio():
 
 # ── Positions ──
 
+def _tag_position_bot(inst_id: str, pos_side: str) -> str:
+    """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
+    # Normalize pos_side for matching
+    norm_side = pos_side.lower() if pos_side else ""
+    # Check Alpha bot positions
+    if alpha and alpha._running and alpha._positions:
+        for coin, pos in alpha._positions.items():
+            if pos.inst_id == inst_id and pos.side == norm_side:
+                return "Alpha"
+    # Check Rotation (Momentum) bot positions
+    if rotation and rotation._running and rotation._positions:
+        for coin, pos in rotation._positions.items():
+            if pos.inst_id == inst_id and pos.side == norm_side:
+                return "Momentum"
+    # Fallback: check trade logs for recent open entry of this instrument
+    if alpha and alpha._trade_log:
+        for t in reversed(alpha._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "Alpha"
+    if rotation and rotation._trade_log:
+        for t in reversed(rotation._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "Momentum"
+    return ""
+
+
+def _tag_trade_bot(trade: dict) -> str:
+    """Tag a paired trade with bot name. Works for both open and closed trades."""
+    inst_id = trade.get("inst_id", "") or trade.get("symbol", "")
+    pos_side = trade.get("pos_side", "")
+    if trade.get("reason") == "open":
+        return _tag_position_bot(inst_id, pos_side)
+    # For closed trades, check trade logs for matching entry+exit
+    entry_time = trade.get("entry_time", "")
+    if alpha and alpha._trade_log:
+        for t in alpha._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "Alpha"
+    if rotation and rotation._trade_log:
+        for t in rotation._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "Momentum"
+    return ""
+
+
 @app.get("/api/positions")
 async def get_positions(inst_type: str = "SWAP"):
     result = await _okx_call(lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
-    return {"positions": result.get("data", [])}
+    # Tag each position with bot name
+    tagged = []
+    for p in result.get("data", []):
+        p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"))
+        tagged.append(p)
+    return {"positions": tagged}
 
 
 @app.post("/api/positions/close")
@@ -522,6 +574,7 @@ async def momentum_trades(limit: int = 20):
                     "reason": t.get("reason", ""),
                     "ord_id": t.get("ord_id", ""),
                     "source": "okx",
+                    "bot": _tag_trade_bot(trade),
                 }
                 if is_open and inst_id in algo_map:
                     for ao in algo_map[inst_id]:
@@ -935,6 +988,7 @@ async def alpha_trades(limit: int = 50):
                 "reason": t.get("reason", ""),
                 "ord_id": t.get("ord_id", ""),
                 "source": "okx",
+                "bot": _tag_trade_bot(trade),
             }
             # Add TP/SL from algo orders for open positions
             if is_open and inst_id in algo_map:
@@ -1637,6 +1691,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "reason": t.get("reason", ""),
                     "pos_side": t.get("pos_side", "long"),
                     "signal_id": t.get("ord_id", ""),
+                    "bot": _tag_trade_bot(t),
                 })
             print(f"[trades/paired] OKX fallback: {len(result)} trades from exchange", flush=True)
             return {"trades": result}

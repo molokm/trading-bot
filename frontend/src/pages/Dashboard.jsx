@@ -404,6 +404,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <thead>
                     <tr>
                       <th>{t('dash.pair')}</th>
+                      <th>Bot</th>
                       <th className="text-right">{t('dash.size')}</th>
                       <th className="text-right">{t('dash.entry')}</th>
                       <th className="text-right">{t('dash.mark')}</th>
@@ -417,6 +418,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const upl = parseFloat(p.upl || 0)
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
+                      const botName = p.bot || ''
+                      const botColor = botName === 'Alpha' ? 'text-[var(--warn)]' : botName === 'Momentum' ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'
                       return (
                         <tr key={i} style={{
                           background: upl >= 0
@@ -425,6 +428,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
                         }}>
                           <td className="text-[var(--txt)] font-medium">{p.instId?.replace('-USDT-SWAP', '')}</td>
+                          <td className={`text-2xs font-bold ${botColor}`}>{botName || '—'}</td>
                           <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
                           <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
                           <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
