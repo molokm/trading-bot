@@ -172,6 +172,44 @@ class OKXClient:
         params = {"ordType": ord_type, "instType": inst_type, "state": state, "limit": limit, **kwargs}
         return await self._request("GET", "/api/v5/trade/orders-algo-pending", params=params)
 
+    async def place_algo_order(self, inst_id: str, side: str, sz: str,
+                               td_mode: str = "cross", pos_side: str = None,
+                               reduce_only: bool = False,
+                               sl_trigger_px: str = None, sl_ord_px: str = "-1",
+                               tp_trigger_px: str = None, tp_ord_px: str = "-1",
+                               cxl_on_close_pos: bool = False) -> dict:
+        """Place a conditional (TP/SL) algo order. OKX /api/v5/trade/order-algo."""
+        body = {
+            "instId": inst_id,
+            "tdMode": td_mode,
+            "side": side,
+            "ordType": "conditional",
+            "sz": sz,
+        }
+        if pos_side:
+            body["posSide"] = pos_side
+        if reduce_only:
+            body["reduceOnly"] = "true"
+        if cxl_on_close_pos:
+            body["cxlOnClosePos"] = "true"
+        if sl_trigger_px:
+            body["slTriggerPx"] = sl_trigger_px
+            body["slOrdPx"] = sl_ord_px or "-1"
+        if tp_trigger_px:
+            body["tpTriggerPx"] = tp_trigger_px
+            body["tpOrdPx"] = tp_ord_px or "-1"
+        return await self._request("POST", "/api/v5/trade/order-algo", body=body)
+
+    async def cancel_algo_order(self, inst_id: str, algo_id: str,
+                                ord_type: str = "conditional") -> dict:
+        """Cancel a single algo order. OKX /api/v5/trade/cancel-algos."""
+        body = {
+            "algoId": [algo_id],
+            "instId": [inst_id],
+            "ordType": ord_type,
+        }
+        return await self._request("POST", "/api/v5/trade/cancel-algos", body=body)
+
     async def close(self):
         await self._client.aclose()
         if self._ws:

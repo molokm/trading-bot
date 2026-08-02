@@ -369,11 +369,23 @@ async def close_position(data: dict):
         raise HTTPException(status_code=400, detail="API not configured")
 
     inst_id = data.get("instId")
-    pos_side = data.get("posSide", "net")
+    pos_side = data.get("posSide") or "net"
     mgn_mode = data.get("mgnMode", "cross")
 
     if not inst_id:
         raise HTTPException(status_code=400, detail="instId required")
+
+    # Auto-detect posSide from the open position if not provided explicitly.
+    if pos_side == "net" and "posSide" not in data:
+        try:
+            positions_resp = await client.get_positions("SWAP")
+            if not positions_resp.get("error") and positions_resp.get("data"):
+                for p in positions_resp["data"]:
+                    if p.get("instId") == inst_id:
+                        pos_side = p.get("posSide", "net")
+                        break
+        except Exception as e:
+            print(f"[positions/close] posSide auto-detect error: {e}", flush=True)
 
     result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
     if result.get("error"):
@@ -414,6 +426,9 @@ async def place_order(data: dict):
         sz=str(data["sz"]),
         td_mode=data.get("tdMode", "cash"),
         px=data.get("px"),
+        pos_side=data.get("posSide"),
+        reduce_only=data.get("reduceOnly", False),
+        tgt_ccy=data.get("tgtCcy"),
     )
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
@@ -1014,6 +1029,26 @@ async def alpha_indicators():
     if not alpha:
         return {"indicators": {}}
     return {"indicators": alpha._latest_indicators}
+
+
+@app.post("/api/alpha/config")
+async def alpha_update_config(data: dict = None):
+    global alpha
+    if not alpha:
+        return {"message": "Alpha not running"}
+    if not data:
+        return {"message": "No config provided"}
+    cfg = alpha.config
+    for key in ("symbols", "top_k", "roc_period", "ema_fast", "ema_slow",
+                "atr_period", "adx_min", "min_hold_days", "max_leverage",
+                "risk_per_trade", "trail_atr_mult", "breakeven_pct",
+                "partial_tp_pct", "partial_tp_ratio", "rsi_period",
+                "rsi_long_max", "rsi_short_min", "vol_mult", "corr_threshold",
+                "hourly_atr_period", "hourly_atr_stop_mult", "limit_offset_pct",
+                "limit_wait_sec", "poll_interval_sec", "auto_execute", "capital"):
+        if key in data:
+            setattr(cfg, key, data[key])
+    return {"message": "Config updated", "config": asdict(cfg)}
 
 
 @app.get("/api/chart/trades")

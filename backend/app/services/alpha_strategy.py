@@ -86,6 +86,7 @@ class AlphaPosition:
     leverage: float = 3.0
     signal_id: int = 0
     raw_entry: float = 0.0
+    algo_id: str = ""            # exchange-side conditional SL algo order
 
 
 class AlphaStrategy:
@@ -421,6 +422,67 @@ class AlphaStrategy:
         resp = await client.place_order(**params)
         return resp
 
+    # ─── Exchange-side stop orders ───
+
+    async def _place_exchange_stop(self, client, pos: AlphaPosition) -> str:
+        """Place a conditional SL on the exchange for a position. Returns algoId or ''."""
+        if not self.config.auto_execute:
+            return ""
+        close_side = "sell" if pos.side == "long" else "buy"
+        resp = await client.place_algo_order(
+            inst_id=pos.inst_id, side=close_side,
+            sz=str(pos.size), td_mode="cross", pos_side=pos.side,
+            reduce_only=True, sl_trigger_px=str(round(pos.stop_price, 2)),
+            cxl_on_close_pos=True,
+        )
+        if resp.get("error"):
+            print(f"[Alpha] Place stop error {pos.coin}: {resp.get('message', '')}", flush=True)
+            return ""
+        algo_id = ""
+        if resp.get("data"):
+            algo_id = resp["data"][0].get("algoId", "")
+        pos.algo_id = algo_id
+        print(f"[Alpha] Stop placed {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
+              f"sz={pos.size} algoId={algo_id}", flush=True)
+        return algo_id
+
+    async def _cancel_exchange_stop(self, client, pos: AlphaPosition):
+        """Cancel the exchange-side SL for a position (if any)."""
+        if not pos.algo_id:
+            return
+        resp = await client.cancel_algo_order(pos.inst_id, pos.algo_id)
+        if resp.get("error"):
+            print(f"[Alpha] Cancel stop error {pos.coin}: {resp.get('message', '')}", flush=True)
+        else:
+            print(f"[Alpha] Stop cancelled {pos.coin} algoId={pos.algo_id}", flush=True)
+        pos.algo_id = ""
+
+    async def _update_exchange_stop(self, client, pos: AlphaPosition):
+        """Re-place the exchange SL when trailing stop moved or size changed.
+        New stop is placed BEFORE the old one is cancelled (no unprotected window)."""
+        if not pos.algo_id:
+            await self._place_exchange_stop(client, pos)
+            return
+        new_algo_id = ""
+        close_side = "sell" if pos.side == "long" else "buy"
+        resp = await client.place_algo_order(
+            inst_id=pos.inst_id, side=close_side,
+            sz=str(pos.size), td_mode="cross", pos_side=pos.side,
+            reduce_only=True, sl_trigger_px=str(round(pos.stop_price, 2)),
+            cxl_on_close_pos=True,
+        )
+        if resp.get("error"):
+            print(f"[Alpha] Update stop place error {pos.coin}: {resp.get('message', '')} "
+                  f"— keeping old stop", flush=True)
+            return
+        if resp.get("data"):
+            new_algo_id = resp["data"][0].get("algoId", "")
+        if new_algo_id:
+            await self._cancel_exchange_stop(client, pos)
+            pos.algo_id = new_algo_id
+            print(f"[Alpha] Stop updated {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
+                  f"sz={pos.size} algoId={new_algo_id}", flush=True)
+
     async def _close_partial(self, client, inst_id: str, pos: AlphaPosition, close_ratio: float) -> dict:
         """Close portion of position."""
         close_sz = round(pos.size * close_ratio / LOT_SZ.get(pos.coin, 0.01)) * LOT_SZ.get(pos.coin, 0.01)
@@ -461,6 +523,7 @@ class AlphaStrategy:
 
     async def _close_position(self, client, inst_id: str, pos: AlphaPosition, reason: str):
         """Close full position at market."""
+        await self._cancel_exchange_stop(client, pos)
         close_side = "sell" if pos.side == "long" else "buy"
         resp = await self._place_order(client, inst_id, close_side, pos.size,
                                           pos_side=pos.side)
@@ -612,6 +675,8 @@ class AlphaStrategy:
         )
         self._positions[coin] = pos
 
+        await self._place_exchange_stop(client, pos)
+
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
             "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
@@ -727,8 +792,11 @@ class AlphaStrategy:
                     hit_stop = True
 
             if hit_stop:
+                await self._cancel_exchange_stop(client, pos)
                 await self._close_position(client, pos.inst_id, pos, reason)
                 del self._positions[coin]
+            elif pos.algo_id:
+                await self._update_exchange_stop(client, pos)
 
         # 3. Check if we should rotate (once per day, respect min_hold)
         if self._last_daily_check == today_str:
@@ -854,6 +922,7 @@ class AlphaStrategy:
         if self.db:
             await self._ensure_bot()
             await self._reload_equity()
+        await self._sync_open_positions()
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
         print(f"[Rotation v2] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
@@ -1029,3 +1098,49 @@ class AlphaStrategy:
             self._equity = self._capital + total_pnl
         except Exception as e:
             print(f"[Alpha] DB reload error: {e}", flush=True)
+
+    async def _sync_open_positions(self):
+        """After restart, detect open positions from OKX and restore _positions +
+        re-place exchange-side stops so they survive a process crash."""
+        client = await self._get_client()
+        if not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+            for p in result.get("data", []):
+                inst_id = p.get("instId", "")
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in self.config.symbols:
+                    continue
+                pos_side = p.get("posSide", "net")
+                is_long = pos_side != "short"
+                entry_px = float(p.get("avgPx", 0) or 0)
+                sz = float(p.get("pos", 0) or 0)
+                if entry_px <= 0 or sz <= 0:
+                    continue
+                if coin in self._positions:
+                    continue
+
+                side = "long" if is_long else "short"
+                estimated_atr = entry_px * 0.015
+                if is_long:
+                    stop_price = entry_px * 0.985
+                else:
+                    stop_price = entry_px * 1.015
+
+                pos = AlphaPosition(
+                    symbol=inst_id, coin=coin, inst_id=inst_id,
+                    side=side, size=sz, size_original=sz,
+                    entry_price=entry_px, stop_price=stop_price,
+                    peak_price=entry_px, opened_at=datetime.now(timezone.utc).isoformat(),
+                    atr=estimated_atr, atr_hourly=estimated_atr,
+                    leverage=self.config.max_leverage,
+                )
+                self._positions[coin] = pos
+                await self._place_exchange_stop(client, pos)
+                print(f"[Alpha] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
+                      f"stop={stop_price:.2f}", flush=True)
+        except Exception as e:
+            print(f"[Alpha] Sync open positions error: {e}", flush=True)
