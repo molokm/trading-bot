@@ -63,10 +63,14 @@ class OKXClient:
         headers = self._headers(method, sign_path, body_str)
 
         try:
-            if method == "GET":
-                resp = await self._client.get(url, headers=headers)
-            else:
-                resp = await self._client.post(url, headers=headers, content=body_str)
+            # Fresh client per request: the shared instance gets bound to a single
+            # event loop, but strategies run in their own threads/loops, which
+            # caused "Event is bound to a different event loop" errors.
+            async with httpx.AsyncClient(timeout=30.0) as _client:
+                if method == "GET":
+                    resp = await _client.get(url, headers=headers)
+                else:
+                    resp = await _client.post(url, headers=headers, content=body_str)
             data = resp.json()
             if data.get("code") != "0":
                 return {"error": True, "message": data.get("msg", "Unknown error")}
@@ -211,7 +215,6 @@ class OKXClient:
         return await self._request("POST", "/api/v5/trade/cancel-algos", body=body)
 
     async def close(self):
-        await self._client.aclose()
         if self._ws:
             await self._ws.close()
         if self._ws_private:
