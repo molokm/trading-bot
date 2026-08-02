@@ -450,7 +450,7 @@ async def momentum_update_config(data: dict = None):
 
 @app.get("/api/momentum/trades")
 async def momentum_trades(limit: int = 20):
-    """Trade history — in-memory from running bot, fallback to DB paired trades."""
+    """Trade history — in-memory from running bot, fallback to OKX fills, then DB."""
     # 1. In-memory from running rotation bot
     if rotation and len(rotation._trade_log) > 0:
         trades = []
@@ -477,7 +477,69 @@ async def momentum_trades(limit: int = 20):
             })
         return {"trades": trades}
 
-    # 2. Fallback: load paired trades from DB
+    # 2. Fallback: fetch real fills from OKX exchange
+    try:
+        global _fills_cache_ts
+        _fills_cache_ts = 0  # bypass cache
+        raw_fills = await _fetch_okx_fills(limit=300)
+        paired = await _pair_fills(raw_fills)
+        if paired:
+            # Enrich with algo orders (TP/SL) for open positions
+            try:
+                algo_r = await _okx_call(lambda c: c.get_algo_orders(ord_type="conditional"))
+                algo_map = {}
+                if not algo_r.get("error") and algo_r.get("data"):
+                    for o in algo_r["data"]:
+                        iid = o.get("instId", "")
+                        algo_map.setdefault(iid, []).append(o)
+            except Exception:
+                algo_map = {}
+
+            trades = []
+            for t in reversed(paired):
+                if len(trades) >= limit:
+                    break
+                entry = t.get("entry", 0) or t.get("entry_price", 0)
+                exit_px = t.get("exit_price", 0)
+                is_open = t.get("reason") == "open"
+                inst_id = t.get("inst_id", "") or t.get("symbol", "")
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                trade = {
+                    "time": t.get("time", ""),
+                    "entry_time": t.get("entry_time", ""),
+                    "exit_time": t.get("time", "") if not is_open else None,
+                    "symbol": inst_id,
+                    "inst_id": inst_id,
+                    "coin": coin,
+                    "side": t.get("side", ""),
+                    "pos_side": t.get("pos_side", "long"),
+                    "size": t.get("size", 0),
+                    "pnl": t.get("pnl", 0),
+                    "entry": entry,
+                    "entry_price": entry,
+                    "exit_price": exit_px,
+                    "stop": 0,
+                    "reason": t.get("reason", ""),
+                    "ord_id": t.get("ord_id", ""),
+                    "source": "okx",
+                }
+                if is_open and inst_id in algo_map:
+                    for ao in algo_map[inst_id]:
+                        sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
+                        tp = ao.get("tpTriggerPxPx") or ao.get("tpTriggerPx")
+                        if sl:
+                            trade["stop"] = float(sl)
+                        if tp:
+                            trade["tp"] = float(tp)
+                trades.append(trade)
+            print(f"[momentum/trades] OKX fallback: {len(trades)} trades from exchange", flush=True)
+            return {"trades": trades}
+    except Exception as e:
+        import traceback
+        print(f"[momentum/trades] OKX fallback error: {e}", flush=True)
+        traceback.print_exc()
+
+    # 3. Last resort: DB paired trades
     try:
         db_trades = await db.get_paired_trades(limit=limit)
         result = []
@@ -824,9 +886,73 @@ async def alpha_reset():
 
 @app.get("/api/alpha/trades")
 async def alpha_trades(limit: int = 50):
-    if not alpha:
+    """Alpha trades — in-memory first, fallback to OKX fills."""
+    # 1. In-memory from running alpha bot
+    if alpha and len(alpha._trade_log) > 0:
+        return {"trades": alpha._trade_log[-limit:]}
+
+    # 2. Fallback: fetch real fills from OKX exchange
+    try:
+        global _fills_cache_ts
+        _fills_cache_ts = 0  # bypass cache
+        raw_fills = await _fetch_okx_fills(limit=300)
+        paired = await _pair_fills(raw_fills)
+        # Enrich with algo orders (TP/SL)
+        try:
+            algo_r = await _okx_call(lambda c: c.get_algo_orders(ord_type="conditional"))
+            algo_map = {}
+            if not algo_r.get("error") and algo_r.get("data"):
+                for o in algo_r["data"]:
+                    iid = o.get("instId", "")
+                    algo_map.setdefault(iid, []).append(o)
+        except Exception:
+            algo_map = {}
+
+        trades = []
+        for t in reversed(paired):
+            if len(trades) >= limit:
+                break
+            entry = t.get("entry", 0) or t.get("entry_price", 0)
+            exit_px = t.get("exit_price", 0)
+            is_open = t.get("reason") == "open"
+            inst_id = t.get("inst_id", "") or t.get("symbol", "")
+            coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+            trade = {
+                "time": t.get("time", ""),
+                "entry_time": t.get("entry_time", ""),
+                "exit_time": t.get("time", "") if not is_open else None,
+                "symbol": inst_id,
+                "inst_id": inst_id,
+                "coin": coin,
+                "side": t.get("side", ""),
+                "pos_side": t.get("pos_side", "long"),
+                "size": t.get("size", 0),
+                "pnl": t.get("pnl", 0),
+                "entry": entry,
+                "entry_price": entry,
+                "exit_price": exit_px,
+                "stop": 0,
+                "reason": t.get("reason", ""),
+                "ord_id": t.get("ord_id", ""),
+                "source": "okx",
+            }
+            # Add TP/SL from algo orders for open positions
+            if is_open and inst_id in algo_map:
+                for ao in algo_map[inst_id]:
+                    sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
+                    tp = ao.get("tpTriggerPxPx") or ao.get("tpTriggerPx")
+                    if sl:
+                        trade["stop"] = float(sl)
+                    if tp:
+                        trade["tp"] = float(tp)
+            trades.append(trade)
+        print(f"[alpha/trades] OKX fallback: {len(trades)} trades from exchange", flush=True)
+        return {"trades": trades}
+    except Exception as e:
+        import traceback
+        print(f"[alpha/trades] OKX fallback error: {e}", flush=True)
+        traceback.print_exc()
         return {"trades": []}
-    return {"trades": alpha._trade_log[-limit:]}
 
 
 @app.get("/api/alpha/indicators")
@@ -1412,13 +1538,47 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         paired = paired[-limit:]
         return {"trades": paired}
 
-    # 2. Fallback: load from DB
+    # 2. Fallback: fetch real fills from OKX exchange
+    try:
+        global _fills_cache_ts
+        _fills_cache_ts = 0
+        raw_fills = await _fetch_okx_fills(limit=300)
+        paired = await _pair_fills(raw_fills)
+        if paired:
+            result = []
+            for t in paired[-limit:]:
+                entry_px = t.get("entry", 0) or t.get("entry_price", 0)
+                exit_px = t.get("exit_price", 0)
+                is_open = t.get("reason") == "open"
+                result.append({
+                    "time": t.get("time", ""),
+                    "entry_time": t.get("entry_time", ""),
+                    "exit_time": t.get("time", "") if not is_open else None,
+                    "side": "buy" if t.get("pos_side") == "long" else "sell",
+                    "symbol": t.get("inst_id", "") or t.get("symbol", ""),
+                    "inst_id": t.get("inst_id", "") or t.get("symbol", ""),
+                    "entry": entry_px,
+                    "entry_px": entry_px,
+                    "exit_price": exit_px,
+                    "exit_px": exit_px,
+                    "pnl": t.get("pnl", 0) if not is_open else None,
+                    "reason": t.get("reason", ""),
+                    "pos_side": t.get("pos_side", "long"),
+                    "signal_id": t.get("ord_id", ""),
+                })
+            print(f"[trades/paired] OKX fallback: {len(result)} trades from exchange", flush=True)
+            return {"trades": result}
+    except Exception as e:
+        import traceback
+        print(f"[trades/paired] OKX fallback error: {e}", flush=True)
+        traceback.print_exc()
+
+    # 3. Last resort: DB paired trades
     try:
         db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end)
         result = []
         for t in db_trades:
             entry_side = t.get("entry_side", "buy")
-            # px columns are TEXT in DB — convert to float
             entry_px = t.get("entry_px", 0)
             exit_px = t.get("exit_px", 0)
             try:

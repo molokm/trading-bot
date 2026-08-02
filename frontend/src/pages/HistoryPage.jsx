@@ -113,7 +113,7 @@ export default function HistoryPage() {
   const winRate = filtered.length > 0 ? ((winCount / filtered.length) * 100).toFixed(1) : '0.0'
 
   const handleExportCSV = useCallback(() => {
-    const header = [t('history.time'), t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), t('history.pnl'), t('history.reason')].join(',')
+    const header = [t('history.time'), t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), 'SL', 'TP', t('history.pnl'), t('history.reason')].join(',')
     const rows = filtered.map(tr => {
       const time = tr.time ? new Date(tr.time).toLocaleString(locale) : ''
       const type = tr.side === 'buy' ? 'BUY' : 'SELL'
@@ -121,9 +121,11 @@ export default function HistoryPage() {
       const size = tr.size ? tr.size.toFixed(2) : ''
       const entry = tr.entry_price ? parseFloat(tr.entry_price).toFixed(2) : ''
       const exit = tr.exit_price ? parseFloat(tr.exit_price).toFixed(2) : ''
+      const sl = tr.stop ? parseFloat(tr.stop).toFixed(2) : ''
+      const tp = tr.tp ? parseFloat(tr.tp).toFixed(2) : ''
       const pnl = tr.pnl != null ? (parseFloat(tr.pnl) >= 0 ? '+' : '') + parseFloat(tr.pnl).toFixed(2) : ''
       const reason = REASON_MAP[(tr.reason || '').toLowerCase()]?.label || tr.reason || ''
-      return [time, type, inst, size, entry, exit, pnl, reason].map(v => `"${v}"`).join(',')
+      return [time, type, inst, size, entry, exit, sl, tp, pnl, reason].map(v => `"${v}"`).join(',')
     })
     const csv = [header, ...rows].join('\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
@@ -221,6 +223,8 @@ export default function HistoryPage() {
                   <th>{t('history.instrument')}</th>
                   <th className="text-right">{t('history.entry')}</th>
                   <th className="text-right">{t('history.exit')}</th>
+                  <th className="text-right">SL</th>
+                  <th className="text-right">TP</th>
                   <th className="text-right">{t('history.pnl')}</th>
                   <th className="text-right">{t('history.reason')}</th>
                 </tr>
@@ -244,6 +248,8 @@ export default function HistoryPage() {
                       <td className="text-[var(--txt)] font-medium text-xs">{symbol}</td>
                       <td className="text-right mono text-xs">{tr.entry_price || tr.entry ? `$${parseFloat(tr.entry_price || tr.entry).toFixed(2)}` : '-'}</td>
                       <td className="text-right mono text-xs">{tr.exit_price || tr.exit ? `$${parseFloat(tr.exit_price || tr.exit).toFixed(2)}` : '-'}</td>
+                      <td className="text-right mono text-xs">{tr.stop ? `$${parseFloat(tr.stop).toFixed(2)}` : '-'}</td>
+                      <td className="text-right mono text-xs">{tr.tp ? `$${parseFloat(tr.tp).toFixed(2)}` : '-'}</td>
                       <td className={`text-right mono text-xs font-bold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                         {tr.pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-'}
                       </td>
