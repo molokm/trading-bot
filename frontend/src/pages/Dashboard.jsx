@@ -779,9 +779,27 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       ))}
                     </div>
                   )}
+                  {!isGuest && (
+                    <button
+                      className="btn btn-danger btn-sm w-full"
+                      onClick={async () => { try { await api.alphaStop(); loadData() } catch (e) { alert(e.message) } }}
+                    >
+                      <Square size={12} /> {t('dash.stop_bot')}
+                    </button>
+                  )}
                 </>
               ) : (
-                <div className="text-center py-3"><span className="text-xs text-[var(--txt-muted)]">Loading...</span></div>
+                <div className="text-center py-6">
+                  <p className="text-xs text-[var(--txt-muted)] mb-3">{t('dash.bot_not_running')}</p>
+                  {!isGuest && (
+                    <button
+                      className="btn btn-primary btn-sm"
+                      onClick={async () => { try { await api.alphaStart({}); loadData() } catch (e) { alert(e.message) } }}
+                    >
+                      <Play size={12} /> {t('dash.start')}
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>

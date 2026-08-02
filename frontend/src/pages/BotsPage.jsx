@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import {
   Plus, Play, Pause, Square, Copy, Trash2, Edit3, Bot, Settings2,
-  TrendingUp, X, Loader2, Zap, ChevronRight, Clock
+  TrendingUp, X, Loader2, Zap, ChevronRight, Clock, RotateCcw
 } from 'lucide-react'
 import { api } from '../services/api'
 import { SliderPanel, Tip, StatusBadge, MetricCard, ConfirmDialog, getStrategyDesc, EmptyState, Loader } from '../components/ui'
@@ -183,6 +183,10 @@ function RiskMeter({ value }) {
 
 export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
+  // ── Alpha Bot State ──
+  const [alphaStatus, setAlphaStatus] = useState(null)
+  const [alphaLoading, setAlphaLoading] = useState(false)
+
   const [bots, setBots] = useState(() => {
     const saved = localStorage.getItem('bots_config')
     if (saved) {
@@ -235,7 +239,27 @@ export default function BotsPage({ connected, isGuest }) {
         } : b))
       }
     }).catch(() => {})
+    // Fetch Alpha status
+    api.alphaStatus().then(s => setAlphaStatus(s)).catch(() => {})
   }, [connected])
+
+  const alphaToggle = async () => {
+    setAlphaLoading(true)
+    try {
+      if (alphaStatus?.running) {
+        await api.alphaStop()
+        setAlphaStatus(null)
+      } else {
+        const s = await api.alphaStart({})
+        setAlphaStatus(s)
+      }
+    } catch (e) { alert(e.message) }
+    setAlphaLoading(false)
+  }
+
+  const alphaReset = async () => {
+    try { await api.alphaReset(); setAlphaStatus(null) } catch (e) { alert(e.message) }
+  }
 
   const saveBots = useCallback((updaterOrArray) => {
     setBots(prev => {
@@ -306,6 +330,88 @@ export default function BotsPage({ connected, isGuest }) {
                 <Plus size={12} /> {t('bots.new_bot')}
               </button>
             </>
+          )}
+        </div>
+      </div>
+
+      {/* ═══ Alpha Strategy Bot ═══ */ }
+      <div className="panel border-[var(--warn)]/30 hover:border-[var(--warn)]/60 transition-colors">
+        <div className="p-4 space-y-3">
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-[var(--warn-dim)] flex items-center justify-center">
+                <Zap size={16} className="text-[var(--warn)]" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-[var(--txt)]">Alpha Rotation</div>
+                <div className="text-2xs text-[var(--txt-muted)] mono">alpha_strategy</div>
+              </div>
+            </div>
+            <StatusBadge mode={alphaStatus?.running ? 'live' : 'stopped'} label={alphaStatus?.running ? t('bots.status_running') : t('bots.status_stopped')} />
+          </div>
+
+          <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
+            Aggressive rotation v2: RSI + ATR + correlation filters, dynamic leverage up to 3x, partial TP +7%,
+            wider trailing (ATR×0.8), breakeven after 2%, BTC 200MA bear filter. Risk 3%/trade.
+          </div>
+
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-[var(--txt-muted)]">Coins:</span>
+            <div className="flex gap-1">
+              {['BTC', 'ETH', 'SOL', 'BNB'].map(s => (
+                <span key={s} className="px-1.5 py-0.5 rounded text-2xs font-medium bg-[var(--warn-dim)] text-[var(--warn)]">{s}</span>
+              ))}
+            </div>
+          </div>
+
+          {alphaStatus && (
+            <div className="grid grid-cols-3 gap-2">
+              <div className="p-2 rounded-md bg-[var(--bg)]">
+                <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                <div className={`mono text-sm font-bold ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  {alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
+                </div>
+              </div>
+              <div className="p-2 rounded-md bg-[var(--bg)]">
+                <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
+                <div className="mono text-sm font-bold text-[var(--txt)]">{alphaStatus.total_trades || 0}</div>
+              </div>
+              <div className="p-2 rounded-md bg-[var(--bg)]">
+                <div className="text-2xs text-[var(--txt-muted)]">Win Rate</div>
+                <div className="mono text-sm font-bold text-[var(--txt)]">{alphaStatus.win_rate || 0}%</div>
+              </div>
+            </div>
+          )}
+
+          {alphaStatus?.running && alphaStatus.open_positions?.length > 0 && (
+            <div className="space-y-1">
+              <div className="text-2xs text-[var(--txt-muted)] font-medium">Open Positions</div>
+              {alphaStatus.open_positions.map((p, i) => {
+                const isLong = p.side !== 'short'
+                return (
+                  <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
+                    <div className="flex items-center gap-2">
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                      <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                    </div>
+                    <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
+          {!isGuest && (
+            <div className="flex gap-1.5 pt-1">
+              <button className={`btn btn-sm flex-1 ${alphaStatus?.running ? 'btn-danger' : 'btn-primary'}`} onClick={alphaToggle} disabled={alphaLoading}>
+                {alphaLoading ? <Loader /> : alphaStatus?.running ? <><Square size={11} /> {t('bots.stop')}</> : <><Play size={11} /> {t('bots.start')}</>}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={alphaReset} title="Reset Alpha data">
+                <RotateCcw size={12} />
+              </button>
+            </div>
           )}
         </div>
       </div>

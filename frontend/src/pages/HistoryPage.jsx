@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
-import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp } from 'lucide-react'
+import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp, Zap } from 'lucide-react'
 import { api } from '../services/api'
-import { EmptyState, Loader, Chip } from '../components/ui'
+import { EmptyState, Loader, Chip, StatusBadge } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
 const PAGE_SIZE = 30
@@ -9,6 +9,10 @@ const ALL_PAIRS_KEY = '__all__'
 
 export default function HistoryPage() {
   const { t, locale } = useTranslation()
+  // ── Tab: momentum | alpha ──
+  const [activeTab, setActiveTab] = useState('momentum')
+  const [alphaStatus, setAlphaStatus] = useState(null)
+
   const REASON_MAP = {
     closed: { label: t('reason.closed'), color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
     open: { label: t('reason.open'), color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
@@ -28,47 +32,76 @@ export default function HistoryPage() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
+  // ── Alpha trades ──
+  const [alphaTrades, setAlphaTrades] = useState([])
+  const [alphaLoading, setAlphaLoading] = useState(true)
+
   useEffect(() => {
-    setLoading(true)
-    api.getPairedTrades(500).then(data => {
-      setTrades(data.trades || [])
-      setLoading(false)
-    }).catch(() => {
-      setTrades([])
-      setLoading(false)
-    })
-  }, [])
+    if (activeTab === 'momentum') {
+      setLoading(true)
+      api.getPairedTrades(500).then(data => {
+        setTrades(data.trades || [])
+        setLoading(false)
+      }).catch(() => {
+        setTrades([])
+        setLoading(false)
+      })
+    } else {
+      setAlphaLoading(true)
+      Promise.all([
+        api.alphaStatus().catch(() => null),
+        api.alphaTrades(500).catch(() => ({ trades: [] })),
+      ]).then(([status, tradeData]) => {
+        setAlphaStatus(status)
+        setAlphaTrades(tradeData?.trades || [])
+        setAlphaLoading(false)
+      })
+    }
+  }, [activeTab])
+
+  const isAlpha = activeTab === 'alpha'
+  const currentTrades = isAlpha ? alphaTrades : trades
+  const currentLoading = isAlpha ? alphaLoading : loading
 
   const allPairs = useMemo(() => {
-    const pairs = new Set(trades.map(t => (t.symbol || t.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')))
+    const pairs = new Set(currentTrades.map(t => (t.coin || t.symbol || t.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')))
     return [ALL_PAIRS_KEY, ...Array.from(pairs).filter(Boolean).sort()]
-  }, [trades])
+  }, [currentTrades])
 
   const filtered = useMemo(() => {
-    return trades.filter(t => {
+    return currentTrades.filter(t => {
       if (filterResult !== 'all') {
         const pnl = parseFloat(t.pnl || 0)
         if (filterResult === 'win' && pnl < 0) return false
         if (filterResult === 'loss' && pnl >= 0) return false
       }
       if (filterPair !== ALL_PAIRS_KEY) {
-        const pair = (t.symbol || t.inst_id || '').toUpperCase()
+        const pair = (t.coin || t.symbol || t.inst_id || '').toUpperCase()
         if (!pair.includes(filterPair.toUpperCase())) return false
       }
       if (dateFrom) {
-        const tradeTime = t.time ? new Date(t.time) : (t.entry_time ? new Date(t.entry_time) : null)
+        const tradeTime = t.time || t.exit_time || t.entry_time ? new Date(t.time || t.exit_time || t.entry_time) : null
         if (tradeTime && tradeTime < new Date(dateFrom)) return false
       }
       if (dateTo) {
-        const tradeTime = t.time ? new Date(t.time) : (t.exit_time ? new Date(t.exit_time) : null)
+        const tradeTime = t.time || t.exit_time ? new Date(t.time || t.exit_time) : null
         if (tradeTime && tradeTime > new Date(dateTo)) return false
       }
       return true
     })
-  }, [trades, filterResult, filterPair, dateFrom, dateTo])
+  }, [currentTrades, filterResult, filterPair, dateFrom, dateTo])
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
   const pageTrades = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+
+  // Reset filters/page on tab switch
+  useEffect(() => {
+    setPage(0)
+    setFilterResult('all')
+    setFilterPair(ALL_PAIRS_KEY)
+    setDateFrom('')
+    setDateTo('')
+  }, [activeTab])
 
   const fmtTime = (ts) => {
     if (!ts) return '---'
@@ -106,9 +139,27 @@ export default function HistoryPage() {
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
       {/* Header */}
       <div className="flex items-center justify-between flex-shrink-0">
-        <div className="flex items-center gap-2">
-          <ScrollText size={18} className="text-accent-purple" />
-          <h2 className="text-lg font-bold text-[var(--txt)]">{t('history.title')}</h2>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <ScrollText size={18} className="text-accent-purple" />
+            <h2 className="text-lg font-bold text-[var(--txt)]">{t('history.title')}</h2>
+          </div>
+          {/* Bot Tabs */}
+          <div className="flex items-center gap-1 bg-[var(--bg)] rounded-lg p-0.5">
+            <button
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === 'momentum' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+              onClick={() => setActiveTab('momentum')}
+            >
+              <TrendingUp size={11} className="inline -mt-px mr-1" />Momentum
+            </button>
+            <button
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === 'alpha' ? 'bg-[var(--warn-dim)] text-[var(--warn)]' : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+              onClick={() => setActiveTab('alpha')}
+            >
+              <Zap size={11} className="inline -mt-px mr-1" />Alpha
+              {alphaStatus?.running && <StatusBadge mode="live" label="" />}
+            </button>
+          </div>
           <span className="text-2xs text-[var(--txt-muted)]">{filtered.length} {t('history.records')}</span>
         </div>
         <div className="flex items-center gap-3">
@@ -157,7 +208,7 @@ export default function HistoryPage() {
       {/* Table */}
       <div className="panel flex-1 flex flex-col min-h-0">
         <div className="flex-1 overflow-auto">
-          {loading ? (
+          {currentLoading ? (
             <div className="flex items-center justify-center py-16"><Loader /></div>
           ) : pageTrades.length === 0 ? (
             <EmptyState icon={ScrollText} text={t('history.empty')} sub={t('history.empty_hint')} />
@@ -168,7 +219,6 @@ export default function HistoryPage() {
                   <th>{t('history.time')}</th>
                   <th>{t('history.type')}</th>
                   <th>{t('history.instrument')}</th>
-                  <th className="text-right">{t('history.size')}</th>
                   <th className="text-right">{t('history.entry')}</th>
                   <th className="text-right">{t('history.exit')}</th>
                   <th className="text-right">{t('history.pnl')}</th>
@@ -176,25 +226,26 @@ export default function HistoryPage() {
                 </tr>
               </thead>
               <tbody>
-                {pageTrades.map((t, i) => {
-                  const isBuy = t.side === 'buy'
-                  const pnl = parseFloat(t.pnl || 0)
-                  const reason = (t.reason || '').toLowerCase()
-                  const reasonInfo = REASON_MAP[reason] || { label: t.reason || '-', color: 'text-[var(--txt-muted)]', bg: 'bg-[var(--surface-overlay)]' }
+                {pageTrades.map((tr, i) => {
+                  const isLong = tr.side === 'buy' || tr.side === 'long'
+                  const pnl = parseFloat(tr.pnl || 0)
+                  const reason = (tr.reason || '').toLowerCase()
+                  const reasonInfo = REASON_MAP[reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]', bg: 'bg-[var(--surface-overlay)]' }
+                  const symbol = tr.coin ? `${tr.coin}-USDT-SWAP` : (tr.symbol || tr.inst_id || '-')
+                  const tradeTime = tr.time || tr.exit_time || tr.entry_time
                   return (
                     <tr key={i}>
-                      <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(t.time)}</td>
+                      <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tradeTime)}</td>
                       <td>
-                        <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isBuy ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                          {isBuy ? 'BUY' : 'SELL'}
+                        <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          {isLong ? 'LONG' : 'SHORT'}
                         </span>
                       </td>
-                      <td className="text-[var(--txt)] font-medium text-xs">{t.symbol || t.inst_id || '-'}</td>
-                      <td className="text-right mono text-xs">{t.size ? t.size.toFixed(2) : '-'}</td>
-                      <td className="text-right mono text-xs">{t.entry_price ? `$${t.entry_price.toFixed(2)}` : '-'}</td>
-                      <td className="text-right mono text-xs">{t.exit_price ? `$${t.exit_price.toFixed(2)}` : '-'}</td>
+                      <td className="text-[var(--txt)] font-medium text-xs">{symbol}</td>
+                      <td className="text-right mono text-xs">{tr.entry_price || tr.entry ? `$${(tr.entry_price || tr.entry).toFixed(2)}` : '-'}</td>
+                      <td className="text-right mono text-xs">{tr.exit_price || tr.exit ? `$${(tr.exit_price || tr.exit).toFixed(2)}` : '-'}</td>
                       <td className={`text-right mono text-xs font-bold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        {t.pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-'}
+                        {tr.pnl != null ? `${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}` : '-'}
                       </td>
                       <td className="text-right">
                         <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded ${reasonInfo.bg} ${reasonInfo.color}`}>
