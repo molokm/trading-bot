@@ -207,11 +207,11 @@ class OKXClient:
     async def cancel_algo_order(self, inst_id: str, algo_id: str,
                                 ord_type: str = "conditional") -> dict:
         """Cancel a single algo order. OKX /api/v5/trade/cancel-algos."""
-        body = {
-            "algoId": [algo_id],
-            "instId": [inst_id],
+        body = [{
+            "algoId": algo_id,
+            "instId": inst_id,
             "ordType": ord_type,
-        }
+        }]
         return await self._request("POST", "/api/v5/trade/cancel-algos", body=body)
 
     async def close(self):
