@@ -419,7 +419,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
                       const botName = p.bot || ''
-                      const botColor = botName === 'Alpha' ? 'text-[var(--warn)]' : botName === 'Momentum' ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'
+                      const botBadge = botName === 'Alpha'
+                        ? { label: 'ALP', cls: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' }
+                        : botName === 'Momentum'
+                        ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
+                        : { label: '—', cls: 'text-[var(--txt-muted)]' }
                       return (
                         <tr key={i} style={{
                           background: upl >= 0
@@ -428,7 +432,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
                         }}>
                           <td className="text-[var(--txt)] font-medium">{p.instId?.replace('-USDT-SWAP', '')}</td>
-                          <td className={`text-2xs font-bold ${botColor}`}>{botName || '—'}</td>
+                          <td><span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span></td>
                           <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
                           <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
                           <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
