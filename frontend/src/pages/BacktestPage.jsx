@@ -16,7 +16,7 @@ const PAIRS = [
 ]
 const PERIODS = ['7d', '30d', '90d', '1y']
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
-const STRATEGY_IDS = ['momentum', 'grid', 'dca', 'scalping']
+const STRATEGY_IDS = ['momentum', 'alpha']
 
 
 function generateMockResult(config) {
@@ -263,6 +263,9 @@ export default function BacktestPage({ connected }) {
       </div>
 
       <div className="panel flex-shrink-0">
+        <div className="px-4 py-2.5 text-2xs text-[var(--warn)] bg-[var(--warn-dim)] border-b border-[var(--border)]">
+          {t('backtest.mock_banner')}
+        </div>
         <div className="panel-header"><BarChart3 size={13} className="text-[var(--info)]" /> {t('backtest.config')}</div>
         <div className="p-4 flex flex-wrap items-end gap-6">
           <div className="flex-1 min-w-[200px]">
@@ -279,7 +282,9 @@ export default function BacktestPage({ connected }) {
             <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.strategy')}</label>
             <div className="flex gap-1 mt-1.5">
               {STRATEGY_IDS.map(id => (
-                <Chip key={id} active={config.strategy === id} onClick={() => setConfig(c => ({ ...c, strategy: id }))}>{id === 'grid' ? t('backtest.grid') : id === 'scalping' ? t('backtest.scalping') : id.charAt(0).toUpperCase() + id.slice(1)}</Chip>
+                <Chip key={id} active={config.strategy === id} onClick={() => setConfig(c => ({ ...c, strategy: id }))}>
+                  {id === 'alpha' ? 'Alpha' : 'Momentum'}
+                </Chip>
               ))}
             </div>
           </div>

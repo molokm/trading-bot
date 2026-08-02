@@ -1,8 +1,8 @@
 import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
-import { Routes, Route, NavLink, useNavigate, useLocation } from 'react-router-dom'
+import { Routes, Route, NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Bot, BarChart3, ScrollText, Settings, BookOpen,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, ChevronDown, X, Globe
+  LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
 import { Loader } from './components/ui'
@@ -33,13 +33,10 @@ function AppLayout() {
   const { auth, setAuth } = useAuth()
   const { theme, toggle } = useTheme()
   const { t, lang, setLang } = useTranslation()
-  const navigate = useNavigate()
-  const location = useLocation()
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
   const [glossaryOpen, setGlossaryOpen] = useState(false)
-  const [docsOpen, setDocsOpen] = useState(false)
 
   const isGuest = auth?.role === 'guest'
   const isAdmin = auth?.role === 'admin'

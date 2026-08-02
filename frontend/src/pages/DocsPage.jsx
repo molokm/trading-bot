@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react'
-import { BookOpen, ChevronRight, Bot, BarChart3, TrendingUp, Settings2, Zap, AlertTriangle, Search } from 'lucide-react'
+import { BookOpen, Bot, BarChart3, AlertTriangle, Search } from 'lucide-react'
 import { useTranslation } from '../hooks/useTranslation'
 import { getStrategyDesc } from '../components/ui'
 
@@ -21,9 +21,7 @@ function getSections(t) {
       icon: Bot,
       items: [
         { title: t('docs.strat_momentum_title'), text: getStrategyDesc(t).momentum + '\n\n' + t('docs.strat_params') + t('docs.strat_momentum_params') },
-        { title: t('docs.strat_grid_title'), text: getStrategyDesc(t).grid + '\n\n' + t('docs.strat_params') + t('docs.strat_grid_params') },
-        { title: t('docs.strat_dca_title'), text: getStrategyDesc(t).dca + '\n\n' + t('docs.strat_params') + t('docs.strat_dca_params') },
-        { title: t('docs.strat_scalping_title'), text: getStrategyDesc(t).scalping + '\n\n' + t('docs.strat_params') + t('docs.strat_scalping_params') },
+        { title: t('docs.strat_alpha_title'), text: getStrategyDesc(t).alpha + '\n\n' + t('docs.strat_params') + t('docs.strat_alpha_params') },
       ],
     },
     {

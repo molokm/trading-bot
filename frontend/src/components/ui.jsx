@@ -214,9 +214,8 @@ export function getGlossary(t) {
     { term: t('ui.glossary_sl_term'), desc: t('ui.glossary_sl_desc') },
     { term: t('ui.glossary_trail_term'), desc: t('ui.glossary_trail_desc') },
     { term: t('ui.glossary_be_term'), desc: t('ui.glossary_be_desc') },
-    { term: t('ui.glossary_grid_term'), desc: t('ui.glossary_grid_desc') },
-    { term: t('ui.glossary_dca_term'), desc: t('ui.glossary_dca_desc') },
-    { term: t('ui.glossary_scalp_term'), desc: t('ui.glossary_scalp_desc') },
+    { term: t('ui.glossary_rotation_term'), desc: t('ui.glossary_rotation_desc') },
+    { term: t('ui.glossary_alpha_term'), desc: t('ui.glossary_alpha_desc') },
     { term: t('ui.glossary_roe_term'), desc: t('ui.glossary_roe_desc') },
   ]
 }
@@ -287,10 +286,7 @@ export function Loader() {
 /* ═══════ Strategy Description Tip ═══════ */
 export function getStrategyDesc(t) {
   return {
-    grid: t('ui.strategy_desc.grid'),
-    dca: t('ui.strategy_desc.dca'),
-    scalping: t('ui.strategy_desc.scalping'),
     momentum: t('ui.strategy_desc.momentum'),
-    custom: t('ui.strategy_desc.custom'),
+    alpha: t('ui.strategy_desc.alpha'),
   }
 }

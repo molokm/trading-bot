@@ -16,9 +16,11 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
-from app.services.momentum_strategy import MomentumStrategy, MomentumConfig, MOM_BOT_ID
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.alpha_strategy import AlphaStrategy, AlphaConfig, ALPHA_BOT_ID, STRATEGY_DESC as ALPHA_DESC
+
+# Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
+MOM_BOT_ID = "momentum_strategy"
 
 load_dotenv()
 
@@ -44,7 +46,6 @@ _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
-momentum: Optional[MomentumStrategy] = None
 rotation: Optional[RotationStrategy] = None
 alpha: Optional[AlphaStrategy] = None
 
@@ -144,8 +145,6 @@ async def shutdown():
         await rotation.stop()
     if alpha and alpha._running:
         await alpha.stop()
-    if momentum and momentum._running:
-        await momentum.stop()
     await db.close()
 
 
@@ -487,19 +486,30 @@ async def momentum_start(data: dict = None):
     """Start Rotation strategy (Dashboard calls this endpoint)."""
     global rotation
     if rotation and rotation._running:
-        return {"message": "Rotation already running"}
+        return {"message": "Rotation already running", **rotation.get_status()}
     d = data or {}
     config = RotationConfig(
         symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
-        capital=d.get("capital", 10000.0),
-        top_k=d.get("top_k", 2),
-        max_leverage=d.get("leverage", 3.0),
+        capital=float(d.get("capital", 10000.0)),
+        top_k=int(d.get("top_k", d.get("max_positions", 2))),
+        roc_period=int(d.get("roc_period", 14)),
+        ema_fast=int(d.get("ema_fast", 20)),
+        ema_slow=int(d.get("ema_slow", 50)),
+        atr_period=int(d.get("atr_period", 14)),
+        breakeven_pct=float(d.get("breakeven_pct", 0.03)),
+        adx_min=float(d.get("adx_min", d.get("adx_threshold", 18.0))),
+        min_hold_days=int(d.get("min_hold_days", 3)),
+        max_leverage=float(d.get("max_leverage", d.get("leverage", 3.0))),
+        risk_per_trade=float(d.get("risk_per_trade", 0.02)),
+        trail_atr_mult=float(d.get("trail_atr_mult", 0.5)),
+        partial_tp_pct=float(d.get("partial_tp_pct", d.get("tp1_pct", 0.05))),
+        partial_tp_ratio=float(d.get("partial_tp_ratio", d.get("tp1_frac", 0.5))),
         auto_execute=d.get("auto_execute", True),
-        poll_interval_sec=d.get("poll_interval_sec", 300),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
     )
     rotation = RotationStrategy(config=config, client_manager=client_manager, db=db)
     await rotation.start()
-    return {"message": "Momentum Rotation started", "config": asdict(config)}
+    return {"message": "Momentum Rotation started", **rotation.get_status()}
 
 
 @app.post("/api/momentum/stop")
@@ -514,25 +524,36 @@ async def momentum_stop():
 
 @app.post("/api/momentum/config")
 async def momentum_update_config(data: dict = None):
-    global momentum
-    if not momentum:
-        return {"message": "Momentum not running"}
+    """Update running Rotation strategy config (hot-reload safe fields)."""
+    global rotation
+    if not rotation:
+        return {"message": "Bot not running"}
     if not data:
         return {"message": "No config provided"}
-    cfg = momentum.config
+    cfg = rotation.config
     if "symbols" in data:
         cfg.symbols = data["symbols"]
-    for key in ("risk_per_trade", "max_positions", "auto_execute", "poll_interval_sec",
-                "roc_fast", "roc_slow", "ema_fast", "ema_slow", "atr_stop_mult",
-                "trail_pct", "adx_threshold", "mom_threshold",
-                "breakeven_pct", "tp1_pct", "tp1_frac",
-                "sl1_pct", "sl1_frac",
-                "trend_adx_min", "range_adx_max", "range_sl_mult",
-                "max_budget", "max_notional_per_position_pct", "max_total_notional_pct",
-                "signal_risk_min", "signal_risk_max", "signal_adx_weak", "signal_adx_strong"):
+    # Map legacy UI names → RotationConfig fields
+    aliases = {
+        "max_positions": "top_k",
+        "adx_threshold": "adx_min",
+        "tp1_pct": "partial_tp_pct",
+        "tp1_frac": "partial_tp_ratio",
+        "leverage": "max_leverage",
+    }
+    for src, dst in aliases.items():
+        if src in data and dst not in data:
+            data[dst] = data[src]
+    for key in (
+        "capital", "top_k", "risk_per_trade", "auto_execute", "poll_interval_sec",
+        "roc_period", "ema_fast", "ema_slow", "atr_period",
+        "trail_atr_mult", "adx_min", "min_hold_days", "max_leverage",
+        "breakeven_pct", "partial_tp_pct", "partial_tp_ratio",
+        "rsi_period", "rsi_long_max", "rsi_short_min", "vol_mult", "corr_threshold",
+    ):
         if key in data:
             setattr(cfg, key, data[key])
-    return {"message": "Config updated", "config": cfg}
+    return {"message": "Config updated", "config": asdict(cfg)}
 
 
 @app.get("/api/momentum/trades")
@@ -674,16 +695,14 @@ async def momentum_trades(limit: int = 20):
 @app.get("/api/momentum/indicators")
 async def momentum_indicators():
     """Return latest computed indicators per coin (debug)."""
-    if rotation:
-        return {"indicators": rotation._latest_indicators}
-    if not momentum:
+    if not rotation:
         return {"indicators": {}}
-    return {"indicators": getattr(momentum, "_latest_indicators", {})}
+    return {"indicators": rotation._latest_indicators}
+
 
 @app.get("/api/momentum/chart-data")
 async def momentum_chart_data():
     """Return trade markers + entry/stop/be/tp1 lines for chart overlay."""
-    global momentum
     markers = []
     trade_lines = []
 
@@ -695,75 +714,73 @@ async def momentum_chart_data():
         except Exception:
             return None
 
-    def be_price(entry, pct=0.005):
-        return round(entry * (1 + pct), 2)
+    if not rotation:
+        return {"markers": markers, "trade_lines": trade_lines}
 
-    def tp1_price(entry, pct=0.02):
-        return round(entry * (1 + pct), 2)
+    cfg = rotation.config
+    tp1_pct = getattr(cfg, "partial_tp_pct", 0.05)
 
-    if momentum:
-        cfg = momentum.config
-        be_pct = cfg.breakeven_pct if hasattr(cfg, 'breakeven_pct') else 0.005
-        tp1_pct = cfg.tp1_pct if hasattr(cfg, 'tp1_pct') else 0.02
+    buys: dict[str, list] = {}
+    for t in rotation._trade_log:
+        side = t.get("side", "")
+        symbol = t.get("symbol", "")
+        time_str = t.get("time", "")
+        if not time_str or not symbol:
+            continue
+        t_ts = ts_or_none(time_str)
+        if not t_ts:
+            continue
 
-        buys: dict[str, dict] = {}
-        for t in momentum._trade_log:
-            side = t.get("side", "")
-            symbol = t.get("symbol", "")
-            time_str = t.get("time", "")
-            if not time_str or not symbol:
-                continue
-            t_ts = ts_or_none(time_str)
-            if not t_ts:
-                continue
-
-            if side == "buy":
-                markers.append({
-                    "time": t_ts, "side": "buy", "symbol": symbol,
-                    "entry": t.get("entry", 0), "stop": t.get("stop", 0),
-                })
-                buys.setdefault(symbol, []).append({
-                    "ts": t_ts, "entry": t.get("entry", 0),
-                    "stop": t.get("stop", 0),
-                })
-            elif side == "sell":
-                markers.append({
-                    "time": t_ts, "side": "sell", "symbol": symbol,
-                    "exit_price": t.get("exit_price", 0),
-                    "entry_price": t.get("entry_price", 0),
-                    "pnl": t.get("pnl", 0), "reason": t.get("reason", ""),
-                })
-
-        for coin, pos in momentum._positions.items():
-            entry = pos.entry_price
-            trade_lines.append({
-                "symbol": pos.symbol, "inst_id": pos.inst_id,
-                "entry": entry, "stop": pos.stop_price,
-                "breakeven": be_price(entry, be_pct),
-                "tp1": tp1_price(entry, tp1_pct),
-                "peak": pos.peak_price,
-                "stage": pos.stage, "size": pos.size_remaining, "original_size": pos.size,
+        if side in ("buy", "long", "open") or t.get("reason") == "open":
+            markers.append({
+                "time": t_ts, "side": "buy", "symbol": symbol,
+                "entry": t.get("entry_price") or t.get("entry", 0),
+                "stop": t.get("stop", 0),
+            })
+            buys.setdefault(symbol, []).append({
+                "ts": t_ts,
+                "entry": t.get("entry_price") or t.get("entry", 0),
+                "stop": t.get("stop", 0),
+            })
+        elif side in ("sell", "short") or t.get("pnl", 0) != 0:
+            markers.append({
+                "time": t_ts, "side": "sell", "symbol": symbol,
+                "exit_price": t.get("exit_price", 0),
+                "entry_price": t.get("entry_price") or t.get("entry", 0),
+                "pnl": t.get("pnl", 0), "reason": t.get("reason", ""),
             })
 
-        # Past closed trades: skip buys that match current open positions
-        open_keys = set()
-        for coin, pos in momentum._positions.items():
-            open_keys.add((pos.symbol, round(pos.entry_price, 2)))
-        for symbol, ent in buys.items():
-            for b in ent:
-                entry = b["entry"]
-                sym_short = symbol.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-                key = (sym_short, round(entry, 2))
-                if key in open_keys:
-                    continue
-                trade_lines.append({
-                    "symbol": symbol,
-                    "entry": entry,
-                    "stop": b["stop"],
-                    "breakeven": be_price(entry, be_pct),
-                    "tp1": tp1_price(entry, tp1_pct),
-                    "stage": "closed",
-                })
+    for coin, pos in rotation._positions.items():
+        entry = pos.entry_price
+        if pos.side == "long":
+            be = round(entry * (1 - 0.001), 2)
+            tp1 = round(entry * (1 + tp1_pct), 2)
+        else:
+            be = round(entry * (1 + 0.001), 2)
+            tp1 = round(entry * (1 - tp1_pct), 2)
+        trade_lines.append({
+            "symbol": pos.symbol, "inst_id": pos.inst_id,
+            "entry": entry, "stop": pos.stop_price,
+            "breakeven": be, "tp1": tp1,
+            "peak": pos.peak_price,
+            "stage": "trailing" if pos.breakeven else ("partial" if pos.partial_done else "initial"),
+            "size": pos.size, "original_size": pos.size_original,
+        })
+
+    open_keys = {(pos.symbol, round(pos.entry_price, 2)) for pos in rotation._positions.values()}
+    for symbol, ent in buys.items():
+        for b in ent:
+            entry = b["entry"]
+            if (symbol, round(entry, 2)) in open_keys:
+                continue
+            trade_lines.append({
+                "symbol": symbol,
+                "entry": entry,
+                "stop": b["stop"],
+                "breakeven": round(entry * (1 - 0.001), 2),
+                "tp1": round(entry * (1 + tp1_pct), 2),
+                "stage": "closed",
+            })
 
     return {"markers": markers, "trade_lines": trade_lines}
 
@@ -849,16 +866,13 @@ async def rotation_reset():
 @app.post("/api/db/reset-all")
 async def db_reset_all():
     """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
-    global rotation, momentum, alpha
+    global rotation, alpha
     if rotation and rotation._running:
         await rotation.stop()
     if alpha and alpha._running:
         await alpha.stop()
-    if momentum and momentum._running:
-        await momentum.stop()
     rotation = None
     alpha = None
-    momentum = None
     for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
         try:
             if db._conn:
@@ -920,27 +934,30 @@ async def alpha_status():
 async def alpha_start(data: dict = None):
     global alpha
     if alpha and alpha._running:
-        return {"message": "Alpha already running"}
+        return {"message": "Alpha already running", **alpha.get_status()}
     d = data or {}
     cfg = AlphaConfig(
         symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
-        capital=d.get("capital", 10000.0),
-        top_k=d.get("top_k", 2),
-        roc_period=d.get("roc_period", 14),
-        ema_fast=d.get("ema_fast", 20),
-        ema_slow=d.get("ema_slow", 50),
-        atr_period=d.get("atr_period", 14),
-        breakeven_pct=d.get("breakeven_pct", 0.02),
-        adx_min=d.get("adx_min", 22.0),
-        min_hold_days=d.get("min_hold_days", 5),
-        max_leverage=d.get("leverage", 3.0),
-        risk_per_trade=d.get("risk_per_trade", 0.03),
-        poll_interval_sec=d.get("poll_interval_sec", 300),
+        capital=float(d.get("capital", 10000.0)),
+        top_k=int(d.get("top_k", d.get("max_positions", 2))),
+        roc_period=int(d.get("roc_period", 14)),
+        ema_fast=int(d.get("ema_fast", 20)),
+        ema_slow=int(d.get("ema_slow", 50)),
+        atr_period=int(d.get("atr_period", 14)),
+        breakeven_pct=float(d.get("breakeven_pct", 0.02)),
+        adx_min=float(d.get("adx_min", 22.0)),
+        min_hold_days=int(d.get("min_hold_days", 5)),
+        max_leverage=float(d.get("max_leverage", d.get("leverage", 3.0))),
+        risk_per_trade=float(d.get("risk_per_trade", 0.03)),
+        trail_atr_mult=float(d.get("trail_atr_mult", 0.8)),
+        partial_tp_pct=float(d.get("partial_tp_pct", 0.07)),
+        partial_tp_ratio=float(d.get("partial_tp_ratio", 0.4)),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
         auto_execute=d.get("auto_execute", True),
     )
     alpha = AlphaStrategy(config=cfg, client_manager=client_manager, db=db)
     await alpha.start()
-    return {"message": "Alpha started", "config": asdict(cfg)}
+    return {"message": "Alpha started", **alpha.get_status()}
 
 
 @app.post("/api/alpha/stop")

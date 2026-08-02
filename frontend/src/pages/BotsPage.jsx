@@ -1,61 +1,44 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import {
-  Plus, Play, Pause, Square, Copy, Trash2, Edit3, Bot, Settings2,
-  TrendingUp, X, Loader2, Zap, ChevronRight, Clock, RotateCcw
+  Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw
 } from 'lucide-react'
 import { api } from '../services/api'
-import { SliderPanel, Tip, StatusBadge, MetricCard, ConfirmDialog, getStrategyDesc, EmptyState, Loader } from '../components/ui'
+import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
-
-const STRATEGIES_BASE = [
-  { id: 'momentum', nameKey: null, name: 'Momentum', icon: TrendingUp, descKey: 'momentum', params: [
-    'max_budget', 'max_notional_per_position_pct', 'max_total_notional_pct',
-    'signal_risk_min', 'signal_risk_max', 'signal_adx_weak', 'signal_adx_strong',
-    'risk_per_trade', 'max_positions', 'poll_interval_sec', 'trail_pct', 'breakeven_pct',
-    'tp1_pct', 'tp1_frac', 'sl1_pct', 'sl1_frac', 'adx_threshold'
-  ] },
-  { id: 'grid', nameKey: 'bots.grid', name: 'Grid', icon: Settings2, descKey: 'grid', params: ['position_size', 'grid_levels', 'grid_step', 'max_positions', 'tp_pct', 'sl_pct'] },
-  { id: 'dca', nameKey: null, name: 'DCA', icon: TrendingUp, descKey: 'dca', params: ['position_size', 'dca_orders', 'dca_step', 'max_positions', 'tp_pct'] },
-  { id: 'scalping', nameKey: 'bots.scalping', name: 'Scalping', icon: Zap, descKey: 'scalping', params: ['position_size', 'tp_pct', 'sl_pct', 'max_positions', 'poll_interval_sec'] },
-  { id: 'custom', nameKey: 'bots.custom', name: 'Custom', icon: Settings2, descKey: 'custom', params: [] },
-]
-
-function getStrategies(t) {
-  const strategyDesc = getStrategyDesc(t)
-  return STRATEGIES_BASE.map(s => ({
-    ...s,
-    name: s.nameKey ? t(s.nameKey) : s.name,
-    desc: strategyDesc[s.descKey],
-  }))
-}
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
 
+/** Params that map 1:1 to RotationConfig / AlphaConfig on the backend */
+const ROTATION_PARAMS = [
+  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
+  'breakeven_pct', 'partial_tp_pct', 'partial_tp_ratio',
+  'trail_atr_mult', 'adx_min', 'min_hold_days', 'max_leverage',
+]
+
 const PARAM_BASE = {
-  max_budget:                     { min: 500, max: 100000, step: 500, unit: '$', div: 1 },
-  max_notional_per_position_pct:   { min: 5, max: 50, step: 5, unit: '%', div: 0.01 },
-  max_total_notional_pct:          { min: 30, max: 100, step: 5, unit: '%', div: 0.01 },
-  signal_risk_min:                { min: 0.5, max: 3, step: 0.5, unit: '%', div: 0.01 },
-  signal_risk_max:                { min: 2, max: 10, step: 0.5, unit: '%', div: 0.01 },
-  signal_adx_weak:                { min: 15, max: 35, step: 1, unit: '', div: 1 },
-  signal_adx_strong:              { min: 30, max: 60, step: 1, unit: '', div: 1 },
-  risk_per_trade:                 { min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01 },
-  max_positions:                  { min: 1, max: 10, step: 1, unit: '', div: 1 },
-  poll_interval_sec:   { min: 15, max: 300, step: 15, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's', div: 1 },
-  trail_pct:           { min: 0.5, max: 5, step: 0.1, unit: '%', div: 0.01 },
-  breakeven_pct:       { min: 0.1, max: 3, step: 0.1, unit: '%', div: 0.01 },
-  tp1_pct:             { min: 0.5, max: 10, step: 0.5, unit: '%', div: 0.01 },
-  tp1_frac:            { min: 20, max: 100, step: 5, unit: '%', div: 0.01 },
-  sl1_pct:             { min: 0, max: 5, step: 0.5, unit: '%', div: 0.01 },
-  sl1_frac:            { min: 20, max: 100, step: 5, unit: '%', div: 0.01 },
-  adx_threshold:       { min: 10, max: 50, step: 1, unit: '', div: 1 },
-  position_size:       { min: 1, max: 100, step: 1, unit: 'USDT', div: 1 },
-  grid_levels:         { min: 2, max: 20, step: 1, unit: '', div: 1 },
-  grid_step:           { min: 0.1, max: 5, step: 0.1, unit: '%', div: 1 },
-  tp_pct:              { min: 0.1, max: 20, step: 0.1, unit: '%', div: 1 },
-  sl_pct:              { min: 0.1, max: 20, step: 0.1, unit: '%', div: 1 },
-  dca_orders:          { min: 1, max: 10, step: 1, unit: '', div: 1 },
-  dca_step:            { min: 0.1, max: 10, step: 0.1, unit: '%', div: 1 },
+  capital:            { min: 500, max: 100000, step: 500, unit: '$' },
+  top_k:              { min: 1, max: 4, step: 1, unit: '' },
+  risk_per_trade:     { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
+  poll_interval_sec:  { min: 60, max: 900, step: 60, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's' },
+  breakeven_pct:      { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
+  partial_tp_pct:     { min: 1, max: 20, step: 0.5, unit: '%', asPercent: true },
+  partial_tp_ratio:   { min: 20, max: 100, step: 5, unit: '%', asPercent: true },
+  trail_atr_mult:     { min: 0.2, max: 2, step: 0.1, unit: '×ATR' },
+  adx_min:            { min: 10, max: 40, step: 1, unit: '' },
+  min_hold_days:      { min: 1, max: 14, step: 1, unit: 'd' },
+  max_leverage:       { min: 1, max: 5, step: 0.5, unit: 'x' },
+}
+
+const DEFAULT_MOM_CONFIG = {
+  capital: 10000, top_k: 2, risk_per_trade: 0.02, poll_interval_sec: 300,
+  breakeven_pct: 0.03, partial_tp_pct: 0.05, partial_tp_ratio: 0.5,
+  trail_atr_mult: 0.5, adx_min: 18, min_hold_days: 3, max_leverage: 3,
+}
+
+const DEFAULT_ALPHA_CONFIG = {
+  capital: 10000, top_k: 2, risk_per_trade: 0.03, poll_interval_sec: 300,
+  breakeven_pct: 0.02, partial_tp_pct: 0.07, partial_tp_ratio: 0.4,
+  trail_atr_mult: 0.8, adx_min: 22, min_hold_days: 5, max_leverage: 3,
 }
 
 function getParamMeta(t) {
@@ -72,46 +55,25 @@ function getParamMeta(t) {
   return result
 }
 
-function getDefaultBot(t) {
-  return {
-    id: 'mom-1',
-    name: t('bots.default_bot_name'),
-    strategy: 'momentum',
-    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
-    status: 'stopped',
-    config: {
-      risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
-      trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
-      sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
-      max_budget: 10000, max_notional_per_position_pct: 0.25, max_total_notional_pct: 0.80,
-      signal_risk_min: 0.01, signal_risk_max: 0.05, signal_adx_weak: 25, signal_adx_strong: 45,
-    },
-    pnl: 0, trades: 0, created: new Date().toISOString(),
-  }
+function toDisplay(raw, meta) {
+  if (raw == null || Number.isNaN(raw)) return meta.min
+  return meta.asPercent ? +(raw * 100).toFixed(2) : raw
 }
 
-function simpleHash(str) {
-  let h = 0
-  for (let i = 0; i < str.length; i++) { h = ((h << 5) - h + str.charCodeAt(i)) | 0 }
-  return Math.abs(h)
-}
-function seededRandom(seed) {
-  let s = seed
-  return () => { s = (s * 16807) % 2147483647; return (s - 1) / 2147483646 }
+function fromDisplay(display, meta) {
+  return meta.asPercent ? display / 100 : display
 }
 
 function BotSparkline({ botId, pnl }) {
   const points = useMemo(() => {
-    const rng = seededRandom(simpleHash(botId || 'default') % 2147483647)
-    const data = [100]
+    // Deterministic shape from PnL only — no fake random walk
+    const base = [100, 100, 100, 100, 100, 100, 100, 100]
+    const end = pnl >= 0 ? 100 + Math.min(20, Math.abs(pnl) / 50) : 100 - Math.min(20, Math.abs(pnl) / 50)
     for (let i = 1; i < 8; i++) {
-      const delta = (rng() - 0.45) * 12
-      data.push(Math.max(80, data[i - 1] + delta))
+      base[i] = 100 + ((end - 100) * i) / 7
     }
-    if (pnl < 0) data[data.length - 1] = Math.min(data[data.length - 1], 95)
-    else if (pnl > 0) data[data.length - 1] = Math.max(data[data.length - 1], 105)
-    return data
-  }, [botId, pnl])
+    return base
+  }, [pnl])
 
   const w = 80, h = 28, pad = 2
   const min = Math.min(...points) * 0.98
@@ -120,7 +82,7 @@ function BotSparkline({ botId, pnl }) {
   const xStep = (w - pad * 2) / (points.length - 1)
   const coords = points.map((v, i) => ({
     x: pad + i * xStep,
-    y: pad + (1 - (v - min) / range) * (h - pad * 2)
+    y: pad + (1 - (v - min) / range) * (h - pad * 2),
   }))
   const lineD = coords.map((c, i) => `${i === 0 ? 'M' : 'L'}${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' ')
   const areaD = lineD + ` L${coords[coords.length - 1].x.toFixed(1)},${(h - pad).toFixed(1)} L${coords[0].x.toFixed(1)},${(h - pad).toFixed(1)} Z`
@@ -140,7 +102,7 @@ function BotSparkline({ botId, pnl }) {
   )
 }
 
-function useRuntime(startedAt, t) {
+function BotRuntime({ startedAt, t }) {
   const [now, setNow] = useState(Date.now())
   useEffect(() => {
     if (!startedAt) return
@@ -152,14 +114,21 @@ function useRuntime(startedAt, t) {
   const totalMin = Math.floor(diffMs / 60000)
   const h = Math.floor(totalMin / 60)
   const m = totalMin % 60
-  if (h === 0 && m === 0) return t('bots.uptime_less_1m')
-  if (h === 0) return t('bots.uptime_minutes', { m })
-  return t('bots.uptime_hours', { h, m })
+  let label
+  if (h === 0 && m === 0) label = t('bots.uptime_less_1m')
+  else if (h === 0) label = t('bots.uptime_minutes', { m })
+  else label = t('bots.uptime_hours', { h, m })
+  return (
+    <div className="flex items-center gap-1.5 text-2xs text-[var(--profit)]">
+      <Clock size={11} className="flex-shrink-0" />
+      <span>{label}</span>
+    </div>
+  )
 }
 
-function RiskMeter({ value }) {
+function RiskMeter({ percentValue }) {
   const { t } = useTranslation()
-  const pct = ((value - 0.5) / 9.5) * 100
+  const pct = ((percentValue - 0.5) / 9.5) * 100
   let color
   if (pct <= 33) color = 'var(--profit)'
   else if (pct <= 66) color = 'var(--warn)'
@@ -181,137 +150,229 @@ function RiskMeter({ value }) {
   )
 }
 
+function BotCard({
+  id, name, stratId, icon: Icon, accentDim, accentTxt,
+  statusMode, statusLabel, coins, description,
+  pnl, trades, winRate, sparklinePnl, startedAt,
+  openPositions = [], onToggle, onReset, onEdit,
+  isGuest, loading, t,
+}) {
+  return (
+    <div className="panel hover:border-[var(--border-hover)] transition-colors">
+      <div className="p-4 space-y-3 flex flex-col h-full">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-2">
+            <div className={`w-8 h-8 rounded-lg ${accentDim} flex items-center justify-center`}>
+              <Icon size={16} className={accentTxt} />
+            </div>
+            <div>
+              <div className="text-sm font-semibold text-[var(--txt)]">{name}</div>
+              <div className="text-2xs text-[var(--txt-muted)] mono">{stratId}</div>
+            </div>
+          </div>
+          <StatusBadge mode={statusMode} label={statusLabel} />
+        </div>
+
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-[var(--txt-muted)]">{t('bots.coins')}</span>
+          <div className="flex gap-1 flex-wrap">
+            {coins.map(s => (
+              <span key={s} className={`px-1.5 py-0.5 rounded text-2xs font-medium ${accentDim} ${accentTxt}`}>{s}</span>
+            ))}
+          </div>
+        </div>
+
+        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed line-clamp-2">{description}</div>
+
+        <BotSparkline botId={id} pnl={sparklinePnl} />
+
+        {statusMode === 'live' && <BotRuntime startedAt={startedAt} t={t} />}
+
+        <div className="grid grid-cols-3 gap-2">
+          <div className="p-2 rounded-md bg-[var(--bg)]">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('bots.total_pnl')}</div>
+            <div className={`mono text-sm font-bold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              ${pnl >= 0 ? '+' : ''}{Number(pnl || 0).toFixed(2)}
+            </div>
+          </div>
+          <div className="p-2 rounded-md bg-[var(--bg)]">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
+            <div className="mono text-sm font-bold text-[var(--txt)]">{trades}</div>
+          </div>
+          <div className="p-2 rounded-md bg-[var(--bg)]">
+            <div className="text-2xs text-[var(--txt-muted)]">Win Rate</div>
+            <div className="mono text-sm font-bold text-[var(--txt)]">{winRate != null ? `${winRate}%` : '—'}</div>
+          </div>
+        </div>
+
+        {openPositions.length > 0 && (
+          <div className="space-y-1">
+            <div className="text-2xs text-[var(--txt-muted)] font-medium">{t('dash.open_positions')}</div>
+            {openPositions.map((p, i) => {
+              const isLong = p.side !== 'short'
+              const upnl = parseFloat(p.unrealized_pnl || 0)
+              return (
+                <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                    <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                  </div>
+                  <span className={`mono font-semibold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {!isGuest && (
+          <div className="flex gap-1.5 pt-1 mt-auto">
+            <button
+              className={`btn btn-sm flex-1 ${statusMode === 'live' ? 'btn-danger' : 'btn-primary'}`}
+              onClick={onToggle}
+              disabled={loading}
+            >
+              {loading ? <Loader /> : statusMode === 'live' ? <><Square size={11} /> {t('bots.stop')}</> : <><Play size={11} /> {t('bots.start')}</>}
+            </button>
+            {onReset && <button className="btn btn-ghost btn-sm" onClick={onReset} title="Reset"><RotateCcw size={12} /></button>}
+            {onEdit && <button className="btn btn-ghost btn-sm" onClick={onEdit}><Edit3 size={12} /></button>}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function loadSavedConfig(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return fallback
+    return { ...fallback, ...JSON.parse(raw) }
+  } catch {
+    return fallback
+  }
+}
+
 export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
-  // ── Alpha Bot State ──
-  const [alphaStatus, setAlphaStatus] = useState(null)
-  const [alphaLoading, setAlphaLoading] = useState(false)
+  const strategyDesc = getStrategyDesc(t)
 
-  const [bots, setBots] = useState(() => {
-    const saved = localStorage.getItem('bots_config')
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved)
-        // Migration: fix old percentage params that were stored as integers
-        let migrated = false
-        const fixed = parsed.map(b => {
-          const cfg = b.config || {}
-          const newCfg = { ...cfg }
-          // If risk_per_trade >= 1, it's in old integer-percentage format (e.g. 3 instead of 0.03)
-          if (cfg.risk_per_trade >= 1) { newCfg.risk_per_trade = cfg.risk_per_trade / 100; migrated = true }
-          if (cfg.trail_pct >= 0.1 && cfg.trail_pct < 1) { /* old format like 0.15 = 15% */ } else if (cfg.trail_pct >= 1) { newCfg.trail_pct = cfg.trail_pct / 100; migrated = true }
-          if (cfg.breakeven_pct >= 0.01) { /* already decimal */ } else if (cfg.breakeven_pct >= 1) { newCfg.breakeven_pct = cfg.breakeven_pct / 100; migrated = true }
-          if (cfg.tp1_pct >= 1) { newCfg.tp1_pct = cfg.tp1_pct / 100; migrated = true }
-          if (cfg.tp1_frac >= 1) { newCfg.tp1_frac = cfg.tp1_frac / 100; migrated = true }
-          if (cfg.sl1_frac >= 1) { newCfg.sl1_frac = cfg.sl1_frac / 100; migrated = true }
-          // Migration: rename old bot names to Momentum Rotation
-          let name = b.name || ''
-          if (name === 'Бот Momentum' || name === 'Momentum Bot' || name === 'Momentum') {
-            name = 'Momentum Rotation'
-            migrated = true
-          }
-          return { ...b, config: newCfg, name }
-        })
-        if (migrated) localStorage.setItem('bots_config', JSON.stringify(fixed))
-        return fixed
-      } catch { /* ignore parse error */ }
-    }
-    return [getDefaultBot(t)]
-  })
+  const [alphaStatus, setAlphaStatus] = useState(null)
   const [momentumStatus, setMomentumStatus] = useState(null)
-  const [sliderOpen, setSliderOpen] = useState(false)
-  const [editingBot, setEditingBot] = useState(null)
-  const [confirmDelete, setConfirmDelete] = useState(null)
+  const [alphaLoading, setAlphaLoading] = useState(false)
+  const [momLoading, setMomLoading] = useState(false)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
+  const [sliderOpen, setSliderOpen] = useState(false)
+  const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'alpha'
   const [saving, setSaving] = useState(false)
   const formRef = useRef(null)
 
-  const STRATEGIES = useMemo(() => getStrategies(t), [t])
+  const [momLocal, setMomLocal] = useState(() => loadSavedConfig('bot_config_momentum', {
+    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
+    config: DEFAULT_MOM_CONFIG,
+  }))
+  const [alphaLocal, setAlphaLocal] = useState(() => loadSavedConfig('bot_config_alpha', {
+    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
+    config: DEFAULT_ALPHA_CONFIG,
+  }))
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const [m, a] = await Promise.all([
+        api.momentumStatus().catch(() => null),
+        api.alphaStatus().catch(() => null),
+      ])
+      if (m) {
+        setMomentumStatus(m)
+        if (m.config) {
+          setMomLocal(prev => ({
+            symbols: m.config.symbols || prev.symbols,
+            config: { ...prev.config, ...pickRotationParams(m.config) },
+          }))
+        }
+      }
+      if (a) {
+        setAlphaStatus(a)
+        if (a.config) {
+          setAlphaLocal(prev => ({
+            symbols: a.config.symbols || prev.symbols,
+            config: { ...prev.config, ...pickRotationParams(a.config) },
+          }))
+        }
+      }
+    } catch { /* ignore */ }
+  }, [])
 
   useEffect(() => {
-    api.momentumStatus().then(s => {
-      if (s?.running) {
-        setMomentumStatus(s)
-        // Sync real bot symbols and config from backend
-        setBots(prev => prev.map(b => b.id === 'mom-1' ? {
-          ...b, status: 'running', startedAt: b.startedAt || Date.now(),
-          symbols: s.config?.symbols || b.symbols,
-        } : b))
+    refreshStatus()
+    const id = setInterval(refreshStatus, 10000)
+    return () => clearInterval(id)
+  }, [connected, refreshStatus])
+
+  const momToggle = async () => {
+    setMomLoading(true)
+    try {
+      if (momentumStatus?.running) {
+        await api.momentumStop()
+      } else {
+        await api.momentumStart({
+          symbols: momLocal.symbols,
+          ...momLocal.config,
+          leverage: momLocal.config.max_leverage,
+        })
       }
-    }).catch(() => {})
-    // Fetch Alpha status
-    api.alphaStatus().then(s => setAlphaStatus(s)).catch(() => {})
-  }, [connected])
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setMomLoading(false)
+  }
 
   const alphaToggle = async () => {
     setAlphaLoading(true)
     try {
       if (alphaStatus?.running) {
         await api.alphaStop()
-        setAlphaStatus(null)
       } else {
-        const s = await api.alphaStart({})
-        setAlphaStatus(s)
+        await api.alphaStart({
+          symbols: alphaLocal.symbols,
+          ...alphaLocal.config,
+          leverage: alphaLocal.config.max_leverage,
+        })
       }
+      await refreshStatus()
     } catch (e) { alert(e.message) }
     setAlphaLoading(false)
   }
 
   const alphaReset = async () => {
-    try { await api.alphaReset(); setAlphaStatus(null) } catch (e) { alert(e.message) }
+    try {
+      await api.alphaReset()
+      setAlphaStatus(null)
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
   }
-
-  const saveBots = useCallback((updaterOrArray) => {
-    setBots(prev => {
-      const next = typeof updaterOrArray === 'function' ? updaterOrArray(prev) : updaterOrArray
-      localStorage.setItem('bots_config', JSON.stringify(next))
-      return next
-    })
-  }, [])
 
   const handleSave = (botData) => {
     setSaving(true)
+    const payload = { symbols: botData.symbols, config: botData.config }
+    if (editingBot === 'momentum') {
+      setMomLocal(payload)
+      localStorage.setItem('bot_config_momentum', JSON.stringify(payload))
+    } else if (editingBot === 'alpha') {
+      setAlphaLocal(payload)
+      localStorage.setItem('bot_config_alpha', JSON.stringify(payload))
+    }
     setTimeout(() => {
-      saveBots(prev => {
-        if (botData.id) {
-          return prev.map(b => b.id === botData.id ? { ...b, ...botData } : b)
-        }
-        return [...prev, { ...botData, id: `bot-${Date.now()}`, status: 'stopped', pnl: 0, trades: 0, created: new Date().toISOString() }]
-      })
       setSaving(false)
       setSliderOpen(false)
       setEditingBot(null)
-    }, 300)
+    }, 200)
   }
 
-  const handleClone = (bot) => {
-    const clone = { ...bot, id: `bot-${Date.now()}`, name: `${bot.name} ${t('bots.copy')}`, status: 'stopped', pnl: 0, trades: 0, startedAt: undefined }
-    saveBots(prev => [...prev, clone])
-  }
-
-  const handleDelete = (id) => {
-    saveBots(prev => prev.filter(b => b.id !== id))
-    setConfirmDelete(null)
-  }
-
-  const handleToggle = async (bot) => {
-    if (bot.status === 'running') {
-      try { await api.momentumStop() } catch (e) { alert(e.message) }
-      saveBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'stopped' } : b))
-    } else {
-      // Pass all selected symbols to backend
-      const syms = bot.symbols?.length ? bot.symbols : ['BTC', 'ETH', 'SOL', 'BNB']
-      try { await api.momentumStart({ symbols: syms, ...bot.config }) } catch (e) { alert(e.message) }
-      saveBots(prev => prev.map(b => b.id === bot.id ? { ...b, status: 'running', startedAt: Date.now() } : b))
-    }
-  }
-
-  const statusMap = {
-    running: { mode: 'live', label: t('bots.status_running') },
-    paused: { mode: 'paused', label: t('bots.status_paused') },
-    stopped: { mode: 'stopped', label: t('bots.status_stopped') },
-    error: { mode: 'error', label: t('bots.status_error') },
-  }
+  const momRunning = !!momentumStatus?.running
+  const alphaRunning = !!alphaStatus?.running
+  const momStartedAt = momentumStatus?.started_at ? Date.parse(momentumStatus.started_at) : null
+  const alphaStartedAt = alphaStatus?.started_at ? Date.parse(alphaStatus.started_at) : null
 
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
@@ -322,176 +383,68 @@ export default function BotsPage({ connected, isGuest }) {
         </div>
         <div className="flex gap-2">
           {!isGuest && (
-            <>
-              <button className="btn btn-ghost btn-sm" onClick={() => setConfirmStopAll(true)}>
-                <Square size={12} /> {t('bots.stop_all')}
-              </button>
-              <button className="btn btn-primary btn-sm" onClick={() => { setEditingBot(null); setSliderOpen(true) }}>
-                <Plus size={12} /> {t('bots.new_bot')}
-              </button>
-            </>
+            <button className="btn btn-ghost btn-sm" onClick={() => setConfirmStopAll(true)}>
+              <Square size={12} /> {t('bots.stop_all')}
+            </button>
           )}
         </div>
       </div>
 
-      {/* ═══ Alpha Strategy Bot ═══ */ }
-      <div className="panel border-[var(--warn)]/30 hover:border-[var(--warn)]/60 transition-colors">
-        <div className="p-4 space-y-3">
-          <div className="flex items-start justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-lg bg-[var(--warn-dim)] flex items-center justify-center">
-                <Zap size={16} className="text-[var(--warn)]" />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-[var(--txt)]">Alpha Rotation</div>
-                <div className="text-2xs text-[var(--txt-muted)] mono">alpha_strategy</div>
-              </div>
-            </div>
-            <StatusBadge mode={alphaStatus?.running ? 'live' : 'stopped'} label={alphaStatus?.running ? t('bots.status_running') : t('bots.status_stopped')} />
-          </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        <BotCard
+          id="alpha"
+          name="Alpha Rotation"
+          stratId="alpha_strategy"
+          icon={Zap}
+          accentDim="bg-[var(--warn-dim)]"
+          accentTxt="text-[var(--warn)]"
+          statusMode={alphaRunning ? 'live' : 'stopped'}
+          statusLabel={alphaRunning ? t('bots.status_running') : t('bots.status_stopped')}
+          coins={alphaStatus?.config?.symbols || alphaLocal.symbols}
+          description={alphaStatus?.description || strategyDesc.alpha || 'Aggressive rotation: risk 3%, wider trailing, partial TP +7%.'}
+          pnl={alphaStatus?.total_pnl || 0}
+          trades={alphaStatus?.total_trades || 0}
+          winRate={alphaStatus?.win_rate}
+          sparklinePnl={alphaStatus?.total_pnl || 0}
+          startedAt={alphaRunning ? alphaStartedAt : null}
+          openPositions={alphaStatus?.open_positions || []}
+          onToggle={alphaToggle}
+          onReset={alphaReset}
+          onEdit={() => { setEditingBot('alpha'); setSliderOpen(true) }}
+          isGuest={isGuest}
+          loading={alphaLoading}
+          t={t}
+        />
 
-          <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
-            Aggressive rotation v2: RSI + ATR + correlation filters, dynamic leverage up to 3x, partial TP +7%,
-            wider trailing (ATR×0.8), breakeven after 2%, BTC 200MA bear filter. Risk 3%/trade.
-          </div>
-
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-[var(--txt-muted)]">Coins:</span>
-            <div className="flex gap-1">
-              {['BTC', 'ETH', 'SOL', 'BNB'].map(s => (
-                <span key={s} className="px-1.5 py-0.5 rounded text-2xs font-medium bg-[var(--warn-dim)] text-[var(--warn)]">{s}</span>
-              ))}
-            </div>
-          </div>
-
-          {alphaStatus && (
-            <div className="grid grid-cols-3 gap-1.5">
-              <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                <div className={`mono text-xs font-bold ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                  ${alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
-                </div>
-              </div>
-              <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
-                <div className="mono text-xs font-bold text-[var(--txt)]">{alphaStatus.total_trades || 0}</div>
-              </div>
-              <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                <div className="text-2xs text-[var(--txt-muted)]">Win Rate</div>
-                <div className="mono text-xs font-bold text-[var(--txt)]">{alphaStatus.win_rate || 0}%</div>
-              </div>
-            </div>
-          )}
-
-          {alphaStatus?.running && alphaStatus.open_positions?.length > 0 && (
-            <div className="space-y-1">
-              <div className="text-2xs text-[var(--txt-muted)] font-medium">Open Positions</div>
-              {alphaStatus.open_positions.map((p, i) => {
-                const isLong = p.side !== 'short'
-                return (
-                  <div className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                    <div className="flex items-center gap-1.5">
-                      <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                      <span className="text-[var(--txt)] font-medium">{p.coin}</span>
-                    </div>
-                    <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                    </span>
-                  </div>
-                )
-              })}
-            </div>
-          )}
-
-          {!isGuest && (
-            <div className="flex gap-1.5 pt-1">
-              <button className={`btn btn-sm flex-1 ${alphaStatus?.running ? 'btn-danger' : 'btn-primary'}`} onClick={alphaToggle} disabled={alphaLoading}>
-                {alphaLoading ? <Loader /> : alphaStatus?.running ? <><Square size={11} /> {t('bots.stop')}</> : <><Play size={11} /> {t('bots.start')}</>}
-              </button>
-              <button className="btn btn-ghost btn-sm" onClick={alphaReset} title="Reset Alpha data">
-                <RotateCcw size={12} />
-              </button>
-            </div>
-          )}
-        </div>
+        <BotCard
+          id="momentum"
+          name={t('dash.momentum_bot')}
+          stratId="momentum_rotation"
+          icon={TrendingUp}
+          accentDim="bg-[var(--info-dim)]"
+          accentTxt="text-[var(--info)]"
+          statusMode={momRunning ? 'live' : 'stopped'}
+          statusLabel={momRunning ? t('bots.status_running') : t('bots.status_stopped')}
+          coins={momentumStatus?.config?.symbols || momLocal.symbols}
+          description={momentumStatus?.description || strategyDesc.momentum}
+          pnl={momentumStatus?.total_pnl || 0}
+          trades={momentumStatus?.total_trades || 0}
+          winRate={momentumStatus?.win_rate}
+          sparklinePnl={momentumStatus?.total_pnl || 0}
+          startedAt={momRunning ? momStartedAt : null}
+          openPositions={momentumStatus?.open_positions || []}
+          onToggle={momToggle}
+          onEdit={() => { setEditingBot('momentum'); setSliderOpen(true) }}
+          isGuest={isGuest}
+          loading={momLoading}
+          t={t}
+        />
       </div>
-
-      {bots.length === 0 ? (
-        <EmptyState icon={Bot} text={t('bots.not_created')} sub={t('bots.not_created_hint')} />
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {bots.map(bot => {
-            const st = statusMap[bot.status] || statusMap.stopped
-            const strat = STRATEGIES.find(s => s.id === bot.strategy)
-            const runtime = useRuntime(bot.startedAt, t)
-            return (
-              <div key={bot.id} className="panel hover:border-[var(--border-hover)] transition-colors">
-                <div className="p-4 space-y-3">
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-2">
-                      {strat && <strat.icon size={16} className="text-[var(--info)]" />}
-                      <div>
-                        <div className="text-sm font-semibold text-[var(--txt)]">{bot.name}</div>
-                        <div className="text-2xs text-[var(--txt-muted)] mono">{bot.id}</div>
-                      </div>
-                    </div>
-                    <StatusBadge mode={st.mode} label={st.label} />
-                  </div>
-
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="text-[var(--txt-muted)]">{t('bots.coins')}</span>
-                    <div className="flex gap-1">
-                      {(bot.status === 'running' && momentumStatus?.config?.symbols ? momentumStatus.config.symbols : bot.symbols || []).map(s => (
-                        <span key={s} className="px-1.5 py-0.5 rounded text-2xs font-medium bg-[var(--info-dim)] text-[var(--info)]">{s}</span>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
-                    {strat?.desc?.substring(0, 100)}...
-                  </div>
-
-                  <BotSparkline botId={bot.id} pnl={bot.pnl} />
-
-                  {bot.status === 'running' && runtime && (
-                    <div className="flex items-center gap-1.5 text-2xs text-[var(--profit)]">
-                      <Clock size={11} className="flex-shrink-0" />
-                      <span>{runtime}</span>
-                    </div>
-                  )}
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('bots.total_pnl')}</div>
-                      <div className={`mono text-sm font-bold ${bot.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>${bot.pnl.toFixed(2)}</div>
-                    </div>
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
-                      <div className="mono text-sm font-bold text-[var(--txt)]">{bot.trades}</div>
-                    </div>
-                  </div>
-
-                  {!isGuest && (
-                    <div className="flex gap-1.5 pt-1">
-                      <button className={`btn btn-sm flex-1 ${bot.status === 'running' ? 'btn-danger' : 'btn-primary'}`} onClick={() => handleToggle(bot)}>
-                        {bot.status === 'running' ? <><Square size={11} /> {t('bots.stop')}</> : <><Play size={11} /> {t('bots.start')}</>}
-                      </button>
-                      <button className="btn btn-ghost btn-sm" onClick={() => { setEditingBot(bot); setSliderOpen(true) }}><Edit3 size={12} /></button>
-                      <button className="btn btn-ghost btn-sm" onClick={() => handleClone(bot)}><Copy size={12} /></button>
-                      <button className="btn btn-ghost btn-sm text-[var(--loss)]" onClick={() => setConfirmDelete(bot.id)}><Trash2 size={12} /></button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      )}
 
       <SliderPanel
         open={sliderOpen}
         onClose={() => { setSliderOpen(false); setEditingBot(null) }}
-        title={editingBot ? `${t('bots.edit')} ${editingBot.name}` : t('bots.new_bot')}
+        title={editingBot === 'alpha' ? `${t('bots.edit')} Alpha` : `${t('bots.edit')} Momentum`}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => { setSliderOpen(false); setEditingBot(null) }}>{t('bots.cancel')}</button>
@@ -501,23 +454,22 @@ export default function BotsPage({ connected, isGuest }) {
           </>
         }
       >
-        <BotConfigForm ref={formRef} bot={editingBot} onSave={handleSave} />
+        <BotConfigForm
+          ref={formRef}
+          botType={editingBot}
+          symbols={editingBot === 'alpha' ? alphaLocal.symbols : momLocal.symbols}
+          config={editingBot === 'alpha' ? alphaLocal.config : momLocal.config}
+          onSave={handleSave}
+        />
       </SliderPanel>
 
-      <ConfirmDialog
-        open={!!confirmDelete}
-        onClose={() => setConfirmDelete(null)}
-        onConfirm={() => handleDelete(confirmDelete)}
-        title={t('bots.delete_bot')}
-        text={t('bots.delete_confirm')}
-        danger
-      />
       <ConfirmDialog
         open={confirmStopAll}
         onClose={() => setConfirmStopAll(false)}
         onConfirm={async () => {
           try { await api.momentumStop() } catch {}
-          saveBots(prev => prev.map(b => ({ ...b, status: 'stopped' })))
+          try { await api.alphaStop() } catch {}
+          await refreshStatus()
           setConfirmStopAll(false)
         }}
         title={t('bots.stop_all_confirm')}
@@ -529,31 +481,34 @@ export default function BotsPage({ connected, isGuest }) {
   )
 }
 
-const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
+function pickRotationParams(cfg) {
+  const out = {}
+  for (const key of ROTATION_PARAMS) {
+    if (cfg[key] != null) out[key] = cfg[key]
+  }
+  if (cfg.leverage != null && out.max_leverage == null) out.max_leverage = cfg.leverage
+  return out
+}
+
+const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, config, onSave }, ref) {
   const { t } = useTranslation()
-  const STRATEGIES = useMemo(() => getStrategies(t), [t])
   const PARAM_META = useMemo(() => getParamMeta(t), [t])
 
-  const strat = bot?.strategy || 'momentum'
   const [form, setForm] = useState({
-    name: bot?.name || '',
-    strategy: bot?.strategy || 'momentum',
-    symbols: bot?.symbols?.length ? [...bot.symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
-    config: bot?.config || {
-      risk_per_trade: 0.03, max_positions: 4, poll_interval_sec: 60,
-      trail_pct: 0.015, breakeven_pct: 0.003, tp1_pct: 0.02, tp1_frac: 0.75,
-      sl1_pct: 0, sl1_frac: 0.5, adx_threshold: 20,
-      max_budget: 10000, max_notional_per_position_pct: 0.25, max_total_notional_pct: 0.80,
-      signal_risk_min: 0.01, signal_risk_max: 0.05, signal_adx_weak: 25, signal_adx_strong: 45,
-    },
+    symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
+    config: { ...(botType === 'alpha' ? DEFAULT_ALPHA_CONFIG : DEFAULT_MOM_CONFIG), ...config },
   })
 
-  const activeStrategy = STRATEGIES.find(s => s.id === form.strategy)
-  const activeParams = activeStrategy?.params || []
+  useEffect(() => {
+    setForm({
+      symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
+      config: { ...(botType === 'alpha' ? DEFAULT_ALPHA_CONFIG : DEFAULT_MOM_CONFIG), ...config },
+    })
+  }, [botType, symbols, config])
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    onSave({ id: bot?.id, ...form })
+    onSave(form)
   }
 
   const updateConfig = (key, val) => {
@@ -562,34 +517,17 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
 
   return (
     <form ref={ref} onSubmit={handleSubmit} className="space-y-5">
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
-          {t('bots.name')} <Tip text={t('bots.name_tip')} />
-        </label>
-        <input className="w-full mt-1.5" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} placeholder={t('bots.default_name')} autoFocus />
-      </div>
-
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.strategy')}</label>
-        <div className="grid grid-cols-2 gap-2 mt-2">
-          {STRATEGIES.map(s => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => setForm(f => ({ ...f, strategy: s.id, name: f.name || s.name }))}
-              className={`p-3 rounded-lg text-left border transition-all ${
-                form.strategy === s.id
-                  ? 'border-[var(--info)] bg-[var(--info-dim)]'
-                  : 'border-[var(--border)] hover:border-[var(--border-hover)]'
-              }`}
-            >
-              <div className="flex items-center gap-2 mb-1">
-                <s.icon size={14} className={form.strategy === s.id ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'} />
-                <span className={`text-xs font-semibold ${form.strategy === s.id ? 'text-[var(--info)]' : 'text-[var(--txt)]'}`}>{s.name}</span>
-              </div>
-              <div className="text-2xs text-[var(--txt-muted)] leading-relaxed line-clamp-2">{s.desc?.substring(0, 80)}...</div>
-            </button>
-          ))}
+      <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+        {botType === 'alpha'
+          ? <Zap size={14} className="text-[var(--warn)]" />
+          : <TrendingUp size={14} className="text-[var(--info)]" />}
+        <div>
+          <div className="text-xs font-semibold text-[var(--txt)]">
+            {botType === 'alpha' ? 'Alpha Rotation' : t('dash.momentum_bot')}
+          </div>
+          <div className="text-2xs text-[var(--txt-muted)]">
+            {botType === 'alpha' ? 'alpha_strategy' : 'momentum_rotation'}
+          </div>
         </div>
       </div>
 
@@ -606,7 +544,9 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
                 type="button"
                 onClick={() => setForm(f => ({
                   ...f,
-                  symbols: active ? f.symbols.filter(x => x !== s) : [...f.symbols, s]
+                  symbols: active
+                    ? (f.symbols.length > 1 ? f.symbols.filter(x => x !== s) : f.symbols)
+                    : [...f.symbols, s],
                 }))}
                 className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
                   active
@@ -621,77 +561,56 @@ const BotConfigForm = forwardRef(function BotConfigForm({ bot, onSave }, ref) {
         </div>
       </div>
 
-      {activeParams.length > 0 && (
-        <div>
-          <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-3 block">{t('bots.params')}</label>
-          <div className="space-y-4">
-            {activeParams.map(key => {
-              const meta = PARAM_META[key]
-              if (!meta) return null
-              const rawVal = form.config[key] ?? meta.min
-              const displayVal = meta.div < 1 ? (rawVal * meta.div).toFixed(meta.step < 1 ? 1 : 0) : rawVal
-              return (
-                <div key={key}>
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-xs text-[var(--txt-secondary)] flex items-center gap-1">
-                      {meta.label}
-                      <Tip text={meta.tip} />
-                    </span>
-                    <span className="mono text-xs font-semibold text-[var(--txt)]">{displayVal}{meta.unit}</span>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="range"
-                      min={meta.min}
-                      max={meta.max}
-                      step={meta.step}
-                      value={rawVal}
-                      onChange={e => updateConfig(key, parseFloat(e.target.value))}
-                      className="flex-1"
-                    />
-                    <input
-                      type="number"
-                      className="w-20 text-right mono"
-                      value={typeof rawVal === 'number' ? displayVal : rawVal}
-                      onChange={e => {
-                        const v = parseFloat(e.target.value)
-                        if (!isNaN(v)) updateConfig(key, meta.div < 1 ? v / meta.div : v)
-                      }}
-                      step={meta.step}
-                      min={meta.min}
-                      max={meta.max}
-                    />
-                  </div>
-                  {key === 'risk_per_trade' && <RiskMeter value={rawVal} />}
+      <div>
+        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-3 block">{t('bots.params')}</label>
+        <div className="space-y-4">
+          {ROTATION_PARAMS.map(key => {
+            const meta = PARAM_META[key]
+            if (!meta) return null
+            const rawVal = form.config[key] ?? (meta.asPercent ? meta.min / 100 : meta.min)
+            const displayVal = toDisplay(rawVal, meta)
+            return (
+              <div key={key}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs text-[var(--txt-secondary)] flex items-center gap-1">
+                    {meta.label}
+                    <Tip text={meta.tip} />
+                  </span>
+                  <span className="mono text-xs font-semibold text-[var(--txt)]">{displayVal}{meta.unit}</span>
                 </div>
-              )
-            })}
-          </div>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={meta.min}
+                    max={meta.max}
+                    step={meta.step}
+                    value={displayVal}
+                    onChange={e => updateConfig(key, fromDisplay(parseFloat(e.target.value), meta))}
+                    className="flex-1"
+                  />
+                  <input
+                    type="number"
+                    className="w-20 text-right mono"
+                    value={displayVal}
+                    onChange={e => {
+                      const v = parseFloat(e.target.value)
+                      if (!isNaN(v)) updateConfig(key, fromDisplay(v, meta))
+                    }}
+                    step={meta.step}
+                    min={meta.min}
+                    max={meta.max}
+                  />
+                </div>
+                {key === 'risk_per_trade' && <RiskMeter percentValue={displayVal} />}
+              </div>
+            )
+          })}
         </div>
-      )}
+      </div>
 
-      {form.strategy === 'grid' && form.config.grid_levels && form.config.grid_step && (
-        <div>
-          <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-2 block">{t('bots.grid_visual')}</label>
-          <div className="relative h-40 bg-[var(--bg)] rounded-lg border border-[var(--border)] p-3">
-            <div className="absolute inset-x-3 top-1/2 h-px bg-[var(--txt-muted)] opacity-30" />
-            <span className="absolute left-1/2 -translate-x-1/2 -translate-y-1/2 text-2xs text-[var(--txt-muted)]">{t('bots.current_price')}</span>
-            {Array.from({ length: form.config.grid_levels }).map((_, i) => {
-              const offset = (i + 1) * 12
-              return (
-                <React.Fragment key={i}>
-                  <div className="absolute left-3 right-3 border-t border-dashed border-[var(--profit)] opacity-40" style={{ top: `calc(50% - ${offset}px)` }}>
-                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--profit)]">{t('bots.buy')}</span>
-                  </div>
-                  <div className="absolute left-3 right-3 border-t border-dashed border-[var(--loss)] opacity-40" style={{ top: `calc(50% + ${offset}px)` }}>
-                    <span className="absolute right-0 -top-3 text-2xs mono text-[var(--loss)]">{t('bots.sell')}</span>
-                  </div>
-                </React.Fragment>
-              )
-            })}
-          </div>
-        </div>
-      )}
+      <p className="text-2xs text-[var(--txt-muted)]">
+        {t('bots.config_apply_hint')}
+      </p>
     </form>
   )
 })
