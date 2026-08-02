@@ -1436,31 +1436,100 @@ async def _get_okx_realized_pnl() -> dict:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Realized from _trade_log, unrealized from OKX."""
-    total_realized = 0.0
+    """PNL for Dashboard metric cards. Realized from OKX fills, unrealized from OKX positions."""
+    from datetime import datetime as dt, timezone as tz
+
     realized_1d = 0.0
     realized_7d = 0.0
     realized_30d = 0.0
-    if rotation and rotation._trade_log:
-        from datetime import datetime as dt, timezone as tz
+    total_realized = 0.0
+    total_fees = 0.0
+    source = "none"
+
+    # ── 1. Primary: OKX fills-history (matches exchange data) ──
+    try:
+        global _fills_cache_ts
+        _fills_cache_ts = 0  # bypass cache
+        raw_fills = await _fetch_okx_fills(limit=300)
+        paired = await _pair_fills(raw_fills)
+
+        if paired:
+            source = "okx"
+            now = dt.now(tz.utc)
+
+            for t in paired:
+                if t.get("reason") != "closed":
+                    continue
+                try:
+                    trade_pnl = float(t.get("pnl", 0) or 0)
+                except (ValueError, TypeError):
+                    continue
+                total_realized += trade_pnl
+
+                # Subtract fees if PnL was calculated from prices (not from OKX fillPnl)
+                fee_str = t.get("fee", "0")
+                try:
+                    total_fees += abs(float(fee_str))
+                except (ValueError, TypeError):
+                    pass
+
+                # Time-based periods
+                time_str = t.get("time", "")
+                if time_str:
+                    try:
+                        t_time = dt.fromisoformat(time_str)
+                        if t_time.tzinfo is None:
+                            t_time = t_time.replace(tzinfo=tz.utc)
+                        age_sec = (now - t_time).total_seconds()
+                        if age_sec <= 86400:
+                            realized_1d += trade_pnl
+                        if age_sec <= 604800:
+                            realized_7d += trade_pnl
+                        if age_sec <= 2592000:
+                            realized_30d += trade_pnl
+                    except (ValueError, OSError, TypeError):
+                        realized_30d += trade_pnl
+                else:
+                    realized_30d += trade_pnl
+
+            print(f"[pnl] OKX source: total={total_realized:.2f} 1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} fees={total_fees:.2f}",
+                  flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[pnl] OKX fills error: {e}", flush=True)
+        traceback.print_exc()
+
+    # ── 2. Fallback: in-memory from running bots ──
+    if source == "none":
         now = dt.now(tz.utc)
-        for t in rotation._trade_log:
-            pnl = t.get("pnl", 0)
-            if not pnl:
-                continue
-            total_realized += pnl
-            try:
-                t_time = dt.fromisoformat(t["time"])
-                age = (now - t_time).total_seconds()
-                if age <= 86400:
-                    realized_1d += pnl
-                if age <= 604800:
-                    realized_7d += pnl
-                if age <= 2592000:
+        all_logs = []
+        if rotation and rotation._trade_log:
+            all_logs.extend(rotation._trade_log)
+        if alpha and alpha._trade_log:
+            all_logs.extend(alpha._trade_log)
+
+        if all_logs:
+            source = "memory"
+            for t in all_logs:
+                pnl = t.get("pnl", 0)
+                if not pnl:
+                    continue
+                total_realized += pnl
+                try:
+                    t_time = dt.fromisoformat(t["time"])
+                    if t_time.tzinfo is None:
+                        t_time = t_time.replace(tzinfo=tz.utc)
+                    age = (now - t_time).total_seconds()
+                    if age <= 86400:
+                        realized_1d += pnl
+                    if age <= 604800:
+                        realized_7d += pnl
+                    if age <= 2592000:
+                        realized_30d += pnl
+                except Exception:
                     realized_30d += pnl
-            except Exception:
-                realized_30d += pnl
-    # Unrealized PNL — from OKX positions (same source as positions table)
+
+    # ── Unrealized PNL — always from OKX positions (matches exchange) ──
     unrealized = 0.0
     try:
         pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
@@ -1469,12 +1538,15 @@ async def get_pnl():
                 unrealized += float(p.get("upl", 0) or 0)
     except Exception:
         pass
+
     return {
         "total": round(total_realized, 2),
         "1d": round(realized_1d, 2),
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
         "unrealized": round(unrealized, 2),
+        "source": source,
+        "fees": round(total_fees, 2),
     }
 
 
