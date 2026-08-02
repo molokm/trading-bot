@@ -805,7 +805,8 @@ class RotationStrategy:
                 await self._update_exchange_stop(client, pos)
 
         # 3. Check if we should rotate (once per day, respect min_hold)
-        if self._last_daily_check == today_str:
+        #    Exception: if no positions (e.g. manual close), always re-evaluate
+        if self._positions and self._last_daily_check == today_str:
             return
 
         now_ts = int(time.time() * 1000)
