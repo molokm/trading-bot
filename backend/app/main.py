@@ -1325,55 +1325,80 @@ async def get_all_trades(limit: int = 100):
 
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
-    """Paired entry+exit trades from Rotation strategy, formatted for Dashboard."""
-    if not rotation:
-        return {"trades": []}
-    trades = rotation._trade_log
-    # Pair entry (pnl=0 or reason=open) with next exit for same coin
-    paired = []
-    entry_map = {}
-    for t in trades:
-        coin = t.get("coin", "")
-        if t.get("reason") == "open" or t.get("pnl", 0) == 0:
-            entry_map[coin] = t
-        elif t.get("pnl", 0) != 0:
-            entry = entry_map.pop(coin, None)
+    """Paired entry+exit trades — in-memory from running bot, fallback to DB."""
+    # 1. Try in-memory rotation trade log
+    if rotation and len(rotation._trade_log) > 0:
+        trades = rotation._trade_log
+        paired = []
+        entry_map = {}
+        for t in trades:
+            coin = t.get("coin", "")
+            if t.get("reason") == "open" or t.get("pnl", 0) == 0:
+                entry_map[coin] = t
+            elif t.get("pnl", 0) != 0:
+                entry = entry_map.pop(coin, None)
+                paired.append({
+                    "time": t.get("time", ""),
+                    "entry_time": entry.get("time", "") if entry else t.get("time", ""),
+                    "exit_time": t.get("time", ""),
+                    "side": "buy" if t.get("pos_side") == "long" else "sell",
+                    "symbol": t.get("symbol", ""),
+                    "inst_id": t.get("symbol", ""),
+                    "entry": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
+                    "entry_px": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
+                    "exit_price": t.get("exit_price", 0),
+                    "exit_px": t.get("exit_price", 0),
+                    "pnl": t.get("pnl", 0),
+                    "reason": t.get("reason", ""),
+                    "pos_side": t.get("pos_side", ""),
+                    "signal_id": t.get("signal_id", ""),
+                })
+        for coin, entry in entry_map.items():
             paired.append({
-                "time": t.get("time", ""),
-                "entry_time": entry.get("time", "") if entry else t.get("time", ""),
-                "exit_time": t.get("time", ""),
-                "side": "buy" if t.get("pos_side") == "long" else "sell",
-                "symbol": t.get("symbol", ""),
-                "inst_id": t.get("symbol", ""),
-                "entry": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
-                "entry_px": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
-                "exit_price": t.get("exit_price", 0),
-                "exit_px": t.get("exit_price", 0),
-                "pnl": t.get("pnl", 0),
-                "reason": t.get("reason", ""),
-                "pos_side": t.get("pos_side", ""),
+                "time": entry.get("time", ""),
+                "entry_time": entry.get("time", ""),
+                "exit_time": None,
+                "side": "buy" if entry.get("pos_side") == "long" else "sell",
+                "symbol": entry.get("symbol", ""),
+                "inst_id": entry.get("symbol", ""),
+                "entry": entry.get("entry_price") or entry.get("entry", 0),
+                "entry_px": entry.get("entry_price") or entry.get("entry", 0),
+                "exit_price": None,
+                "exit_px": None,
+                "pnl": None,
+                "reason": "open",
+                "pos_side": entry.get("pos_side", ""),
+                "signal_id": entry.get("signal_id", ""),
+            })
+        paired = paired[-limit:]
+        return {"trades": paired}
+
+    # 2. Fallback: load from DB
+    try:
+        db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end)
+        result = []
+        for t in db_trades:
+            entry_side = t.get("entry_side", "buy")
+            result.append({
+                "time": t.get("exit_time") or t.get("entry_time", ""),
+                "entry_time": t.get("entry_time", ""),
+                "exit_time": t.get("exit_time", ""),
+                "side": entry_side,
+                "symbol": t.get("inst_id", ""),
+                "inst_id": t.get("inst_id", ""),
+                "entry": t.get("entry_px", 0) or 0,
+                "entry_px": t.get("entry_px", 0) or 0,
+                "exit_price": t.get("exit_px", 0) or 0,
+                "exit_px": t.get("exit_px", 0) or 0,
+                "pnl": t.get("pnl", 0) or 0,
+                "reason": "closed",
+                "pos_side": "long" if entry_side == "buy" else "short",
                 "signal_id": t.get("signal_id", ""),
             })
-    # Also include unmatched entries as open trades
-    for coin, entry in entry_map.items():
-        paired.append({
-            "time": entry.get("time", ""),
-            "entry_time": entry.get("time", ""),
-            "exit_time": None,
-            "side": "buy" if entry.get("pos_side") == "long" else "sell",
-            "symbol": entry.get("symbol", ""),
-            "inst_id": entry.get("symbol", ""),
-            "entry": entry.get("entry_price") or entry.get("entry", 0),
-            "entry_px": entry.get("entry_price") or entry.get("entry", 0),
-            "exit_price": None,
-            "exit_px": None,
-            "pnl": None,
-            "reason": "open",
-            "pos_side": entry.get("pos_side", ""),
-            "signal_id": entry.get("signal_id", ""),
-        })
-    paired = paired[-limit:]
-    return {"trades": paired}
+        return {"trades": result}
+    except Exception as e:
+        print(f"[trades/paired] DB fallback error: {e}", flush=True)
+        return {"trades": []}
 
 
 # ── DB Positions ──

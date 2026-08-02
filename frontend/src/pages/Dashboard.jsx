@@ -564,8 +564,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           </div>
         </div>
 
-        {/* ═══ RIGHT — Filters + Bot Log ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 right-panel">
+                {/* ═══ RIGHT — Filters + Bots ═══ */}
+        <div className="flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
           {/* Filter Chips */}
           <div className="panel flex-shrink-0">
@@ -589,114 +589,75 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* Bot Status Card */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          {/* ─── Momentum Bot ─── */}
+          <div className="panel flex-shrink-0">
             <div className="panel-header">
-              <Bot size={13} className="text-[var(--warn)]" />
-              {t('dash.momentum_bot')}
+              <Bot size={13} className="text-[var(--info)]" />
+              <span className="flex-1">{t('dash.momentum_bot')}</span>
               {momentumStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
               {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
-            <div className="flex-1 overflow-auto p-3 space-y-3">
+            <div className="p-3 space-y-2">
               {momentumStatus?.running ? (
                 <>
-                  {/* Uptime */}
-                  <div className="flex items-center justify-between px-3 py-2 rounded-md bg-[var(--bg)] border border-[var(--border)]">
-                    <div className="flex items-center gap-1.5">
-                      <Clock size={12} className="text-[var(--profit)]" />
-                      <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">{t('dash.uptime')}</span>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                      <div className={`mono text-xs font-bold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        ${momentumStatus.total_pnl >= 0 ? '+' : ''}{(momentumStatus.total_pnl || 0).toFixed(2)}
+                      </div>
                     </div>
-                    <span className="mono text-sm font-bold text-[var(--profit)]">{formatUptime(uptimeSec)}</span>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.capital')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">${(momentumStatus.capital || 10000).toLocaleString()}</div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${momentumStatus.equity?.toLocaleString?.() || '---'}</div>
                     </div>
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.equity')}</div>
-                      <div className={`mono text-sm font-semibold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>${momentumStatus.equity?.toLocaleString() || '---'}</div>
-                    </div>
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0} / {momentumStatus.config?.max_positions || 2}</div>
-                    </div>
-                    <div className="p-2 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Leverage</div>
-                      <div className="mono text-sm font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.config?.leverage || 3}x</div>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">Pos</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0}/{momentumStatus.config?.max_positions || 2}</div>
                     </div>
                   </div>
-
-                  {/* Open bot positions — compact summary in sidebar */}
                   {momentumStatus.open_positions?.length > 0 && (
-                    <div>
-                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">{t('dash.bot_positions')}</div>
-                      <div className="space-y-1">
-                        {momentumStatus.open_positions.map((p, i) => {
-                          const isLong = p.side !== 'short'
-                          const stageInfo = STAGE_MAP[p.stage] || { label: p.stage, color: 'text-[var(--txt-muted)]' }
-                          return (
-                          <div key={i} className="flex items-center justify-between text-2xs p-2 rounded-md bg-[var(--bg)]">
-                            <div className="flex items-center gap-2">
-                              <span className={`px-1.5 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                    <div className="space-y-1">
+                      {momentumStatus.open_positions.map((p, i) => {
+                        const isLong = p.side !== 'short'
+                        return (
+                          <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                            <div className="flex items-center gap-1.5">
+                              <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
                               <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
                             </div>
-                            <div className="flex items-center gap-2">
-                              <span className={stageInfo.color}>{stageInfo.label}</span>
-                              <span className="text-[var(--txt-muted)]">${p.notional?.toLocaleString() || '---'}</span>
-                              <span className="text-[var(--txt-muted)]">{p.leverage?.toFixed(0) || '3'}x</span>
-                            </div>
+                            <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                            </span>
                           </div>
-                          )
-                        })}
-                      </div>
+                        )
+                      })}
                     </div>
                   )}
-
-                  {/* Recent bot trades */}
                   {momentumTrades.length > 0 && (
-                    <div>
-                      <div className="text-2xs text-[var(--txt-muted)] font-medium mb-1.5">{t('dash.bot_log')}</div>
-                      <div className="space-y-1">
-                        {momentumTrades.slice(0, 15).map((tr, i) => {
-                          const isBuy = tr.side === 'buy'
-                          return (
-                            <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                              <div className="flex items-center gap-1.5">
-                                <span className={`w-1.5 h-1.5 rounded-full ${isBuy ? 'bg-[var(--profit)]' : 'bg-[var(--loss)]'}`} />
-                                <span className="text-[var(--txt)]">{tr.symbol}</span>
-                              </div>
-                              {tr.pnl != null && (
-                                <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                                  {tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}
-                                </span>
-                              )}
-                              <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
-                            </div>
-                          )
-                        })}
-                      </div>
+                    <div className="space-y-0.5">
+                      {momentumTrades.slice(0, 4).map((tr, i) => (
+                        <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
+                          <span className="text-[var(--txt)]">{tr.symbol}</span>
+                          <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
+                          </span>
+                          <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                        </div>
+                      ))}
                     </div>
                   )}
-
                   {!isGuest && (
-                    <button
-                      className="btn btn-danger btn-sm w-full"
-                      onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}
-                    >
+                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}>
                       <Square size={12} /> {t('dash.stop_bot')}
                     </button>
                   )}
                 </>
               ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-[var(--txt-muted)] mb-3">{t('dash.bot_not_running')}</p>
+                <div className="text-center py-4">
+                  <p className="text-xs text-[var(--txt-muted)] mb-2">{t('dash.bot_not_running')}</p>
                   {!isGuest && (
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}
-                    >
+                    <button className="btn btn-primary btn-sm" onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}>
                       <Play size={12} /> {t('dash.start')}
                     </button>
                   )}
@@ -705,18 +666,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* Alpha Bot Card */}
+          {/* ─── Alpha Bot ─── */}
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--warn)]" />
-              Alpha Bot
+              <span className="flex-1">Alpha Bot</span>
               {alphaStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
               {!alphaStatus?.running && alphaStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
             <div className="p-3 space-y-2">
               {alphaStatus ? (
                 <>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-3 gap-1.5">
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
                       <div className={`mono text-xs font-bold mt-0.5 ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
@@ -732,13 +693,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.win_rate || 0}%</div>
                     </div>
                   </div>
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-3 gap-1.5">
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">Trades</div>
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.total_trades || 0}</div>
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Positions</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">Pos</div>
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.open_positions?.length || 0}</div>
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
@@ -746,7 +707,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       <div className="mono text-xs font-semibold text-[var(--warn)] mt-0.5">{((alphaStatus.config?.risk_per_trade || 0.03) * 100).toFixed(0)}%</div>
                     </div>
                   </div>
-                  {/* Alpha positions */}
                   {alphaStatus.open_positions?.length > 0 && (
                     <div className="space-y-1">
                       {alphaStatus.open_positions.map((p, i) => {
@@ -765,10 +725,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       })}
                     </div>
                   )}
-                  {/* Alpha recent trades */}
                   {alphaTrades.length > 0 && (
                     <div className="space-y-0.5">
-                      {alphaTrades.slice(0, 5).map((tr, i) => (
+                      {alphaTrades.slice(0, 4).map((tr, i) => (
                         <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
                           <span className="text-[var(--txt)]">{tr.coin}</span>
                           <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
@@ -780,22 +739,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </div>
                   )}
                   {!isGuest && (
-                    <button
-                      className="btn btn-danger btn-sm w-full"
-                      onClick={async () => { try { await api.alphaStop(); loadData() } catch (e) { alert(e.message) } }}
-                    >
+                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.alphaStop(); loadData() } catch (e) { alert(e.message) } }}>
                       <Square size={12} /> {t('dash.stop_bot')}
                     </button>
                   )}
                 </>
               ) : (
-                <div className="text-center py-6">
-                  <p className="text-xs text-[var(--txt-muted)] mb-3">{t('dash.bot_not_running')}</p>
+                <div className="text-center py-4">
+                  <p className="text-xs text-[var(--txt-muted)] mb-2">{t('dash.bot_not_running')}</p>
                   {!isGuest && (
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={async () => { try { await api.alphaStart({}); loadData() } catch (e) { alert(e.message) } }}
-                    >
+                    <button className="btn btn-primary btn-sm" onClick={async () => { try { await api.alphaStart({}); loadData() } catch (e) { alert(e.message) } }}>
                       <Play size={12} /> {t('dash.start')}
                     </button>
                   )}
