@@ -28,10 +28,21 @@ class Database:
         if self._pg_mode:
             import asyncpg
             print("[db] Connecting to PostgreSQL ...", flush=True)
-            self._pool = await asyncio.wait_for(
-                asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3),
-                timeout=15
-            )
+            last_err = None
+            for attempt in range(1, 4):
+                try:
+                    self._pool = await asyncio.wait_for(
+                        asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3),
+                        timeout=30
+                    )
+                    break
+                except (asyncio.TimeoutError, OSError, Exception) as e:
+                    last_err = e
+                    print(f"[db] Attempt {attempt}/3 failed: {e}", flush=True)
+                    if attempt < 3:
+                        await asyncio.sleep(3 * attempt)
+            else:
+                raise last_err  # type: ignore
             print("[db] Connected, running migrations ...", flush=True)
             async with self._pool.acquire() as conn:
                 await self._migrate_pg(conn)
