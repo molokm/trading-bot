@@ -8,7 +8,7 @@ import { useTranslation } from '../hooks/useTranslation'
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
 
-/** Params that map 1:1 to RotationConfig / AlphaConfig on the backend */
+/** Params that map 1:1 to RotationConfig on the backend */
 const ROTATION_PARAMS = [
   'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
   'breakeven_pct', 'partial_tp_pct', 'partial_tp_ratio',
@@ -33,12 +33,6 @@ const DEFAULT_MOM_CONFIG = {
   capital: 10000, top_k: 2, risk_per_trade: 0.02, poll_interval_sec: 300,
   breakeven_pct: 0.03, partial_tp_pct: 0.05, partial_tp_ratio: 0.5,
   trail_atr_mult: 0.5, adx_min: 18, min_hold_days: 3, max_leverage: 3,
-}
-
-const DEFAULT_ALPHA_CONFIG = {
-  capital: 10000, top_k: 2, risk_per_trade: 0.03, poll_interval_sec: 300,
-  breakeven_pct: 0.02, partial_tp_pct: 0.07, partial_tp_ratio: 0.4,
-  trail_atr_mult: 0.8, adx_min: 22, min_hold_days: 5, max_leverage: 3,
 }
 
 function getParamMeta(t) {
@@ -258,13 +252,11 @@ export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
   const strategyDesc = getStrategyDesc(t)
 
-  const [alphaStatus, setAlphaStatus] = useState(null)
   const [momentumStatus, setMomentumStatus] = useState(null)
-  const [alphaLoading, setAlphaLoading] = useState(false)
   const [momLoading, setMomLoading] = useState(false)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [sliderOpen, setSliderOpen] = useState(false)
-  const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'alpha'
+  const [editingBot, setEditingBot] = useState(null) // 'momentum'
   const [saving, setSaving] = useState(false)
   const formRef = useRef(null)
 
@@ -272,32 +264,16 @@ export default function BotsPage({ connected, isGuest }) {
     symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
     config: DEFAULT_MOM_CONFIG,
   }))
-  const [alphaLocal, setAlphaLocal] = useState(() => loadSavedConfig('bot_config_alpha', {
-    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
-    config: DEFAULT_ALPHA_CONFIG,
-  }))
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [m, a] = await Promise.all([
-        api.momentumStatus().catch(() => null),
-        api.alphaStatus().catch(() => null),
-      ])
+      const m = await api.momentumStatus().catch(() => null)
       if (m) {
         setMomentumStatus(m)
         if (m.config) {
           setMomLocal(prev => ({
             symbols: m.config.symbols || prev.symbols,
             config: { ...prev.config, ...pickRotationParams(m.config) },
-          }))
-        }
-      }
-      if (a) {
-        setAlphaStatus(a)
-        if (a.config) {
-          setAlphaLocal(prev => ({
-            symbols: a.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickRotationParams(a.config) },
           }))
         }
       }
@@ -327,40 +303,12 @@ export default function BotsPage({ connected, isGuest }) {
     setMomLoading(false)
   }
 
-  const alphaToggle = async () => {
-    setAlphaLoading(true)
-    try {
-      if (alphaStatus?.running) {
-        await api.alphaStop()
-      } else {
-        await api.alphaStart({
-          symbols: alphaLocal.symbols,
-          ...alphaLocal.config,
-          leverage: alphaLocal.config.max_leverage,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setAlphaLoading(false)
-  }
-
-  const alphaReset = async () => {
-    try {
-      await api.alphaReset()
-      setAlphaStatus(null)
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-  }
-
   const handleSave = (botData) => {
     setSaving(true)
     const payload = { symbols: botData.symbols, config: botData.config }
     if (editingBot === 'momentum') {
       setMomLocal(payload)
       localStorage.setItem('bot_config_momentum', JSON.stringify(payload))
-    } else if (editingBot === 'alpha') {
-      setAlphaLocal(payload)
-      localStorage.setItem('bot_config_alpha', JSON.stringify(payload))
     }
     setTimeout(() => {
       setSaving(false)
@@ -370,9 +318,7 @@ export default function BotsPage({ connected, isGuest }) {
   }
 
   const momRunning = !!momentumStatus?.running
-  const alphaRunning = !!alphaStatus?.running
   const momStartedAt = momentumStatus?.started_at ? Date.parse(momentumStatus.started_at) : null
-  const alphaStartedAt = alphaStatus?.started_at ? Date.parse(alphaStatus.started_at) : null
 
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
@@ -391,31 +337,6 @@ export default function BotsPage({ connected, isGuest }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        <BotCard
-          id="alpha"
-          name="Alpha Rotation"
-          stratId="alpha_strategy"
-          icon={Zap}
-          accentDim="bg-[var(--warn-dim)]"
-          accentTxt="text-[var(--warn)]"
-          statusMode={alphaRunning ? 'live' : 'stopped'}
-          statusLabel={alphaRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={alphaStatus?.config?.symbols || alphaLocal.symbols}
-          description={alphaStatus?.description || strategyDesc.alpha || 'Aggressive rotation: risk 3%, wider trailing, partial TP +7%.'}
-          pnl={alphaStatus?.total_pnl || 0}
-          trades={alphaStatus?.total_trades || 0}
-          winRate={alphaStatus?.win_rate}
-          sparklinePnl={alphaStatus?.total_pnl || 0}
-          startedAt={alphaRunning ? alphaStartedAt : null}
-          openPositions={alphaStatus?.open_positions || []}
-          onToggle={alphaToggle}
-          onReset={alphaReset}
-          onEdit={() => { setEditingBot('alpha'); setSliderOpen(true) }}
-          isGuest={isGuest}
-          loading={alphaLoading}
-          t={t}
-        />
-
         <BotCard
           id="momentum"
           name={t('dash.momentum_bot')}
@@ -444,7 +365,7 @@ export default function BotsPage({ connected, isGuest }) {
       <SliderPanel
         open={sliderOpen}
         onClose={() => { setSliderOpen(false); setEditingBot(null) }}
-        title={editingBot === 'alpha' ? `${t('bots.edit')} Alpha` : `${t('bots.edit')} Momentum`}
+        title={`${t('bots.edit')} Momentum`}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => { setSliderOpen(false); setEditingBot(null) }}>{t('bots.cancel')}</button>
@@ -457,8 +378,8 @@ export default function BotsPage({ connected, isGuest }) {
         <BotConfigForm
           ref={formRef}
           botType={editingBot}
-          symbols={editingBot === 'alpha' ? alphaLocal.symbols : momLocal.symbols}
-          config={editingBot === 'alpha' ? alphaLocal.config : momLocal.config}
+          symbols={momLocal.symbols}
+          config={momLocal.config}
           onSave={handleSave}
         />
       </SliderPanel>
@@ -468,7 +389,6 @@ export default function BotsPage({ connected, isGuest }) {
         onClose={() => setConfirmStopAll(false)}
         onConfirm={async () => {
           try { await api.momentumStop() } catch {}
-          try { await api.alphaStop() } catch {}
           await refreshStatus()
           setConfirmStopAll(false)
         }}
@@ -496,13 +416,13 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
 
   const [form, setForm] = useState({
     symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
-    config: { ...(botType === 'alpha' ? DEFAULT_ALPHA_CONFIG : DEFAULT_MOM_CONFIG), ...config },
+    config: { ...DEFAULT_MOM_CONFIG, ...config },
   })
 
   useEffect(() => {
     setForm({
       symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
-      config: { ...(botType === 'alpha' ? DEFAULT_ALPHA_CONFIG : DEFAULT_MOM_CONFIG), ...config },
+      config: { ...DEFAULT_MOM_CONFIG, ...config },
     })
   }, [botType, symbols, config])
 
@@ -518,15 +438,13 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
   return (
     <form ref={ref} onSubmit={handleSubmit} className="space-y-5">
       <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-        {botType === 'alpha'
-          ? <Zap size={14} className="text-[var(--warn)]" />
-          : <TrendingUp size={14} className="text-[var(--info)]" />}
+        <TrendingUp size={14} className="text-[var(--info)]" />
         <div>
           <div className="text-xs font-semibold text-[var(--txt)]">
-            {botType === 'alpha' ? 'Alpha Rotation' : t('dash.momentum_bot')}
+            {t('dash.momentum_bot')}
           </div>
           <div className="text-2xs text-[var(--txt-muted)]">
-            {botType === 'alpha' ? 'alpha_strategy' : 'momentum_rotation'}
+            momentum_rotation
           </div>
         </div>
       </div>

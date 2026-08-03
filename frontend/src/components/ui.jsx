@@ -215,7 +215,6 @@ export function getGlossary(t) {
     { term: t('ui.glossary_trail_term'), desc: t('ui.glossary_trail_desc') },
     { term: t('ui.glossary_be_term'), desc: t('ui.glossary_be_desc') },
     { term: t('ui.glossary_rotation_term'), desc: t('ui.glossary_rotation_desc') },
-    { term: t('ui.glossary_alpha_term'), desc: t('ui.glossary_alpha_desc') },
     { term: t('ui.glossary_roe_term'), desc: t('ui.glossary_roe_desc') },
   ]
 }
@@ -287,6 +286,5 @@ export function Loader() {
 export function getStrategyDesc(t) {
   return {
     momentum: t('ui.strategy_desc.momentum'),
-    alpha: t('ui.strategy_desc.alpha'),
   }
 }

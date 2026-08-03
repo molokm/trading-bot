@@ -16,7 +16,7 @@ const PAIRS = [
 ]
 const PERIODS = ['7d', '30d', '90d', '1y']
 const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
-const STRATEGY_IDS = ['momentum', 'alpha']
+const STRATEGY_IDS = ['momentum']
 
 
 function generateMockResult(config) {
@@ -283,7 +283,7 @@ export default function BacktestPage({ connected }) {
             <div className="flex gap-1 mt-1.5">
               {STRATEGY_IDS.map(id => (
                 <Chip key={id} active={config.strategy === id} onClick={() => setConfig(c => ({ ...c, strategy: id }))}>
-                  {id === 'alpha' ? 'Alpha' : 'Momentum'}
+                  Momentum
                 </Chip>
               ))}
             </div>

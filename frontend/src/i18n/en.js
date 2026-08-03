@@ -178,7 +178,7 @@ const en = {
 
   // ── Bots ──
   'bots.title': 'Bots',
-  'bots.subtitle': 'Two live bots: Momentum Rotation and Alpha. Params apply on next start.',
+  'bots.subtitle': 'Live bot: Momentum Rotation. Params apply on next start.',
   'bots.config_apply_hint': 'Saved params apply on the next bot start. If the bot is already running — stop it first.',
   'bots.stop_all': 'Stop All',
   'bots.coins': 'Coins:',
@@ -315,17 +315,14 @@ const en = {
   'docs.getting_connected_title': 'Connecting to OKX',
   'docs.getting_connected_text': 'Go to Settings and enter your API keys. It is recommended to start with demo mode. API keys are created in OKX → API → Create API Key. The bot only needs "Trade" permission.',
   'docs.first_bot_title': 'Running Your First Bot',
-  'docs.first_bot_text': 'On the Bots page open the Momentum Rotation or Alpha card, optionally edit params (pencil), then click Start. Params apply on start.',
+  'docs.first_bot_text': 'On the Bots page open the Momentum Rotation card, optionally edit params (pencil), then click Start. Params apply on start.',
   'docs.monitoring_title': 'Monitoring',
   'docs.monitoring_text': 'The Dashboard shows all open positions, real-time PnL and bot log. Use filters to quickly search through trades.',
   'docs.sec_strategies': 'Strategies',
   'docs.strat_momentum_title': 'Momentum Rotation',
   'docs.strat_momentum_text': 'Top-K rotation by ROC/EMA/ADX with ATR stops, RSI and correlation filters, partial TP and trailing.',
-  'docs.strat_alpha_title': 'Alpha Rotation',
-  'docs.strat_alpha_text': 'Aggressive rotation variant: risk 3%, wider trailing, partial TP +7%, BE after 2%, higher ADX and longer min hold.',
   'docs.strat_params': 'Parameters: ',
   'docs.strat_momentum_params': 'capital, top-K, risk per trade, poll interval, BE%, partial TP, TP fraction, trailing ×ATR, ADX min, min hold, leverage.',
-  'docs.strat_alpha_params': 'same fields as Momentum with more aggressive defaults (risk 3%, trail 0.8×ATR, TP 7%).',
   'docs.sec_backtesting': 'Backtesting',
   'docs.bt_run_title': 'Running a Backtest',
   'docs.bt_run_text': 'The Backtest page is currently in demo mode: results are randomly generated and do not reflect real trading. Real OKX candle backtest is not wired to the UI yet.',
@@ -352,7 +349,6 @@ const en = {
 
   // Strategy descriptions
   'ui.strategy_desc.momentum': 'Momentum Rotation v2: top-K rotation by ROC/EMA/ADX, ATR stops, RSI+correlation filters, partial TP, trailing. Risk 2%/trade.',
-  'ui.strategy_desc.alpha': 'Alpha: aggressive rotation — risk 3%, trailing ATR×0.8, partial TP +7%, BE after 2%, ADX>22, min hold 5d.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Profit/Loss)',
@@ -377,8 +373,6 @@ const en = {
   'ui.glossary_be_desc': 'Breakeven — price level at which the position is closed without profit or loss (commissions not included).',
   'ui.glossary_rotation_term': 'Momentum Rotation',
   'ui.glossary_rotation_desc': 'Top-K coin rotation by momentum (ROC/EMA/ADX) with ATR stops, RSI/correlation filters and partial profit taking.',
-  'ui.glossary_alpha_term': 'Alpha Rotation',
-  'ui.glossary_alpha_desc': 'Aggressive rotation variant: higher risk per trade, wider trailing, farther partial TP and stricter ADX filter.',
   'ui.glossary_roe_term': 'ROE (Return on Equity)',
   'ui.glossary_roe_desc': 'Return on Equity — return on invested capital. ROE 50% means you earned $0.50 for every $1 of margin.',
 

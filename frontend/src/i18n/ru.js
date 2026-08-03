@@ -179,7 +179,7 @@ const ru = {
 
   // ── Bots ──
   'bots.title': 'Боты',
-  'bots.subtitle': 'Два live-бота: Momentum Rotation и Alpha. Параметры применяются при следующем запуске.',
+  'bots.subtitle': 'Live-бот: Momentum Rotation. Параметры применяются при следующем запуске.',
   'bots.config_apply_hint': 'Сохранённые параметры применяются при следующем старте бота. Если бот уже запущен — сначала остановите его.',
   'bots.stop_all': 'Остановить все',
   'bots.coins': 'Монеты:',
@@ -316,17 +316,14 @@ const ru = {
   'docs.getting_connected_title': 'Подключение к OKX',
   'docs.getting_connected_text': 'Перейдите в раздел Settings и введите API ключи. Рекомендуется начать с демо-режима. API ключи создаются в OKX → API → Создать API ключ. Для бота достаточно прав «Торговля».',
   'docs.first_bot_title': 'Запуск первого бота',
-  'docs.first_bot_text': 'На странице Bots откройте карточку Momentum Rotation или Alpha, при необходимости отредактируйте параметры (карандаш) и нажмите Start. Параметры применяются при старте.',
+  'docs.first_bot_text': 'На странице Bots откройте карточку Momentum Rotation, при необходимости отредактируйте параметры (карандаш) и нажмите Start. Параметры применяются при старте.',
   'docs.monitoring_title': 'Мониторинг',
   'docs.monitoring_text': 'На Dashboard отображаются все открытые позиции, PnL в реальном времени и лог бота. Используйте фильтры для быстрого поиска по сделкам.',
   'docs.sec_strategies': 'Стратегии',
   'docs.strat_momentum_title': 'Momentum Rotation',
   'docs.strat_momentum_text': 'Ротация top-K по ROC/EMA/ADX с ATR-стопами, RSI и корреляционными фильтрами, частичным TP и трейлингом.',
-  'docs.strat_alpha_title': 'Alpha Rotation',
-  'docs.strat_alpha_text': 'Агрессивный вариант ротации: риск 3%, шире трейлинг, partial TP +7%, BE после 2%, выше ADX и дольше min hold.',
   'docs.strat_params': 'Параметры: ',
   'docs.strat_momentum_params': 'капитал, top-K, риск на сделку, интервал опроса, BE%, partial TP, доля TP, трейлинг ×ATR, ADX min, min hold, плечо.',
-  'docs.strat_alpha_params': 'те же поля, что у Momentum, с более агрессивными дефолтами (risk 3%, trail 0.8×ATR, TP 7%).',
   'docs.sec_backtesting': 'Бэктестинг',
   'docs.bt_run_title': 'Запуск бэктеста',
   'docs.bt_run_text': 'Страница Backtest сейчас в демо-режиме: результаты генерируются случайно и не отражают реальную торговлю. Реальный бэктест по свечам OKX ещё не подключён к UI.',
@@ -353,7 +350,6 @@ const ru = {
 
   // Strategy descriptions
   'ui.strategy_desc.momentum': 'Momentum Rotation v2: ротация top-K по ROC/EMA/ADX, ATR-стопы, RSI+корреляция, частичный TP, трейлинг. Risk 2%/trade.',
-  'ui.strategy_desc.alpha': 'Alpha: агрессивная ротация — risk 3%, трейлинг ATR×0.8, partial TP +7%, BE после 2%, ADX>22, min hold 5d.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Прибыль/Убыток)',
@@ -378,8 +374,6 @@ const ru = {
   'ui.glossary_be_desc': 'Безубыток — уровень цены, при котором позиция закрывается без прибыли и убытка (комиссии не учитываются).',
   'ui.glossary_rotation_term': 'Momentum Rotation',
   'ui.glossary_rotation_desc': 'Ротация top-K монет по моментуму (ROC/EMA/ADX) с ATR-стопами, фильтрами RSI/корреляции и частичной фиксацией прибыли.',
-  'ui.glossary_alpha_term': 'Alpha Rotation',
-  'ui.glossary_alpha_desc': 'Агрессивный вариант ротации: выше риск на сделку, шире трейлинг, более далёкий partial TP и строже фильтр ADX.',
   'ui.glossary_roe_term': 'ROE (Доходность капитала)',
   'ui.glossary_roe_desc': 'Return on Equity — доходность вложенных средств. ROE 50% означает, что на каждый $1 маржи вы заработали $0.50.',
 

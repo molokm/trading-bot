@@ -17,7 +17,6 @@ from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
-from app.services.alpha_strategy import AlphaStrategy, AlphaConfig, ALPHA_BOT_ID, STRATEGY_DESC as ALPHA_DESC
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -47,7 +46,6 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
 rotation: Optional[RotationStrategy] = None
-alpha: Optional[AlphaStrategy] = None
 
 
 @app.on_event("startup")
@@ -119,11 +117,7 @@ async def startup():
             global rotation
             rotation = r
             await rotation.start()
-        print("[startup] 5/5 Alpha auto-start ...", flush=True)
-        # Alpha bot disabled: replaced by rewritten Rotation v3 (daily-bar model)
-        # that matched the winning backtest config (+76% CAGR / 20% DD).
-
-        print("[startup] Done - server ready", flush=True)
+        print("[startup] 5/5 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
         raise
@@ -133,8 +127,6 @@ async def startup():
 async def shutdown():
     if rotation and rotation._running:
         await rotation.stop()
-    if alpha and alpha._running:
-        await alpha.stop()
     await db.close()
 
 
@@ -295,22 +287,12 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
     """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
     # Normalize pos_side for matching
     norm_side = pos_side.lower() if pos_side else ""
-    # Check Alpha bot positions
-    if alpha and alpha._running and alpha._positions:
-        for coin, pos in alpha._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Alpha"
-    # Check Rotation (Momentum) bot positions
+    # Check Rotation bot positions
     if rotation and rotation._running and rotation._positions:
         for coin, pos in rotation._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
                 return "Momentum"
     # Fallback: check trade logs for recent open entry of this instrument
-    if alpha and alpha._trade_log:
-        for t in reversed(alpha._trade_log):
-            sym = t.get("symbol", "") or t.get("inst_id", "")
-            if sym == inst_id and t.get("reason") == "open":
-                return "Alpha"
     if rotation and rotation._trade_log:
         for t in reversed(rotation._trade_log):
             sym = t.get("symbol", "") or t.get("inst_id", "")
@@ -327,20 +309,12 @@ def _tag_trade_bot(trade: dict) -> str:
         return _tag_position_bot(inst_id, pos_side)
     # For closed trades, check trade logs for matching entry+exit
     entry_time = trade.get("entry_time", "")
-    if alpha and alpha._trade_log:
-        for t in alpha._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "Alpha"
     if rotation and rotation._trade_log:
         for t in rotation._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "Momentum"
     # Fallback: match by symbol+side (works when entry_time is unknown)
     side = trade.get("side", "")
-    if alpha and alpha._trade_log:
-        for t in alpha._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Alpha"
     if rotation and rotation._trade_log:
         for t in rotation._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
@@ -351,8 +325,6 @@ def _tag_trade_bot(trade: dict) -> str:
 
 def _db_bot_name(bot_id: str) -> str:
     """Map DB bot_id -> UI bot name."""
-    if bot_id in ("alpha_strategy", ALPHA_BOT_ID):
-        return "Alpha"
     if bot_id in ("momentum_strategy", "rotation_strategy", MOM_BOT_ID, ROT_BOT_ID):
         return "Momentum"
     return ""
@@ -856,13 +828,10 @@ async def rotation_reset():
 @app.post("/api/db/reset-all")
 async def db_reset_all():
     """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
-    global rotation, alpha
+    global rotation
     if rotation and rotation._running:
         await rotation.stop()
-    if alpha and alpha._running:
-        await alpha.stop()
     rotation = None
-    alpha = None
     for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
         try:
             if db._conn:
@@ -908,182 +877,6 @@ async def rotation_update_config(data: dict = None):
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": asdict(cfg)}
 
-
-# ── Alpha Strategy ──
-
-@app.get("/api/alpha/status")
-async def alpha_status():
-    if not alpha:
-        return {"running": False, "strategy": "alpha_strategy", "equity": 0,
-                "open_positions": {}, "total_trades": 0, "total_pnl": 0,
-                "config": None, "description": ""}
-    return alpha.get_status()
-
-
-@app.post("/api/alpha/start")
-async def alpha_start(data: dict = None):
-    global alpha
-    if alpha and alpha._running:
-        return {"message": "Alpha already running", **alpha.get_status()}
-    d = data or {}
-    cfg = AlphaConfig(
-        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
-        capital=float(d.get("capital", 10000.0)),
-        top_k=int(d.get("top_k", d.get("max_positions", 2))),
-        roc_period=int(d.get("roc_period", 14)),
-        ema_fast=int(d.get("ema_fast", 20)),
-        ema_slow=int(d.get("ema_slow", 50)),
-        atr_period=int(d.get("atr_period", 14)),
-        breakeven_pct=float(d.get("breakeven_pct", 0.02)),
-        adx_min=float(d.get("adx_min", 22.0)),
-        min_hold_days=int(d.get("min_hold_days", 5)),
-        max_leverage=float(d.get("max_leverage", d.get("leverage", 3.0))),
-        risk_per_trade=float(d.get("risk_per_trade", 0.03)),
-        trail_atr_mult=float(d.get("trail_atr_mult", 0.8)),
-        partial_tp_pct=float(d.get("partial_tp_pct", 0.07)),
-        partial_tp_ratio=float(d.get("partial_tp_ratio", 0.4)),
-        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
-        auto_execute=d.get("auto_execute", True),
-    )
-    alpha = AlphaStrategy(config=cfg, client_manager=client_manager, db=db)
-    await alpha.start()
-    return {"message": "Alpha started", **alpha.get_status()}
-
-
-@app.post("/api/alpha/stop")
-async def alpha_stop():
-    global alpha
-    if not alpha:
-        return {"message": "Alpha not running"}
-    await alpha.stop()
-    return {"message": "Alpha stopped"}
-
-
-@app.post("/api/alpha/reset")
-async def alpha_reset():
-    global alpha
-    if alpha and alpha._running:
-        await alpha.stop()
-    if db._conn:
-        for table in ["trades", "signals", "positions", "performance_metrics"]:
-            try:
-                await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (ALPHA_BOT_ID,))
-            except Exception as e:
-                print(f"[alpha reset] Error clearing {table}: {e}", flush=True)
-        try:
-            await db._execute("DELETE FROM bots WHERE id = ?", (ALPHA_BOT_ID,))
-        except Exception as e:
-            print(f"[alpha reset] Error clearing bots: {e}", flush=True)
-    elif db._pool:
-        import asyncpg
-        async with db._pool.acquire() as conn:
-            for table in ["trades", "signals", "positions", "performance_metrics"]:
-                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", ALPHA_BOT_ID)
-            await conn.execute("DELETE FROM bots WHERE id = $1", ALPHA_BOT_ID)
-    alpha = None
-    return {"message": "Alpha reset complete"}
-
-
-@app.get("/api/alpha/trades")
-async def alpha_trades(limit: int = 50):
-    """Alpha trades — in-memory first, fallback to OKX fills."""
-    # 1. In-memory from running alpha bot
-    if alpha and len(alpha._trade_log) > 0:
-        trades = [dict(t) for t in alpha._trade_log[-limit:]]
-        for t in trades:
-            t.setdefault("bot", "Alpha")
-        return {"trades": trades}
-
-    # 2. Fallback: fetch real fills from OKX exchange
-    try:
-        global _fills_cache_ts
-        _fills_cache_ts = 0  # bypass cache
-        raw_fills = await _fetch_okx_fills(limit=300)
-        paired = await _pair_fills(raw_fills)
-        # Enrich with algo orders (TP/SL)
-        try:
-            algo_r = await _okx_call(lambda c: c.get_algo_orders(ord_type="conditional"))
-            algo_map = {}
-            if not algo_r.get("error") and algo_r.get("data"):
-                for o in algo_r["data"]:
-                    iid = o.get("instId", "")
-                    algo_map.setdefault(iid, []).append(o)
-        except Exception:
-            algo_map = {}
-
-        trades = []
-        for t in reversed(paired):
-            if len(trades) >= limit:
-                break
-            entry = t.get("entry", 0) or t.get("entry_price", 0)
-            exit_px = t.get("exit_price", 0)
-            is_open = t.get("reason") == "open"
-            inst_id = t.get("inst_id", "") or t.get("symbol", "")
-            coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-            trade = {
-                "time": t.get("time", ""),
-                "entry_time": t.get("entry_time", ""),
-                "exit_time": t.get("time", "") if not is_open else None,
-                "symbol": inst_id,
-                "inst_id": inst_id,
-                "coin": coin,
-                "side": t.get("side", ""),
-                "pos_side": t.get("pos_side", "long"),
-                "size": t.get("size", 0),
-                "pnl": t.get("pnl", 0),
-                "entry": entry,
-                "entry_price": entry,
-                "exit_price": exit_px,
-                "stop": 0,
-                "reason": t.get("reason", ""),
-                "ord_id": t.get("ord_id", ""),
-                "source": "okx",
-            }
-            trade["bot"] = _tag_trade_bot(trade)
-            # Add TP/SL from algo orders for open positions
-            if is_open and inst_id in algo_map:
-                for ao in algo_map[inst_id]:
-                    sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
-                    tp = ao.get("tpTriggerPxPx") or ao.get("tpTriggerPx")
-                    if sl:
-                        trade["stop"] = float(sl)
-                    if tp:
-                        trade["tp"] = float(tp)
-            trades.append(trade)
-        print(f"[alpha/trades] OKX fallback: {len(trades)} trades from exchange", flush=True)
-        return {"trades": trades}
-    except Exception as e:
-        import traceback
-        print(f"[alpha/trades] OKX fallback error: {e}", flush=True)
-        traceback.print_exc()
-        return {"trades": []}
-
-
-@app.get("/api/alpha/indicators")
-async def alpha_indicators():
-    if not alpha:
-        return {"indicators": {}}
-    return {"indicators": alpha._latest_indicators}
-
-
-@app.post("/api/alpha/config")
-async def alpha_update_config(data: dict = None):
-    global alpha
-    if not alpha:
-        return {"message": "Alpha not running"}
-    if not data:
-        return {"message": "No config provided"}
-    cfg = alpha.config
-    for key in ("symbols", "top_k", "roc_period", "ema_fast", "ema_slow",
-                "atr_period", "adx_min", "min_hold_days", "max_leverage",
-                "risk_per_trade", "trail_atr_mult", "breakeven_pct",
-                "partial_tp_pct", "partial_tp_ratio", "rsi_period",
-                "rsi_long_max", "rsi_short_min", "vol_mult", "corr_threshold",
-                "hourly_atr_period", "hourly_atr_stop_mult", "limit_offset_pct",
-                "limit_wait_sec", "poll_interval_sec", "auto_execute", "capital"):
-        if key in data:
-            setattr(cfg, key, data[key])
-    return {"message": "Config updated", "config": asdict(cfg)}
 
 
 @app.get("/api/chart/trades")
@@ -1629,8 +1422,6 @@ async def get_pnl():
         all_logs = []
         if rotation and rotation._trade_log:
             all_logs.extend(rotation._trade_log)
-        if alpha and alpha._trade_log:
-            all_logs.extend(alpha._trade_log)
 
         if all_logs:
             source = "memory"

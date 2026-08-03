@@ -52,8 +52,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [ticker, setTicker] = useState(null)
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
-  const [alphaStatus, setAlphaStatus] = useState(null)
-  const [alphaTrades, setAlphaTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -106,7 +104,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, trades, pnlData, aStatus, aTrades] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, trades, pnlData] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
@@ -114,8 +112,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.momentumTrades(30).catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
-        api.alphaStatus().catch(() => null),
-        api.alphaTrades(15).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
@@ -124,8 +120,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
-      if (aStatus) setAlphaStatus(aStatus)
-      if (aTrades) setAlphaTrades(aTrades.trades || [])
     } catch {}
     setLoading(false)
   }
@@ -194,7 +188,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
     const allOpen = [
       ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
-      ...(alphaStatus?.open_positions || []).map(p => ({ ...p, bot: 'Alpha' })),
     ]
     for (const p of allOpen) {
       const isLong = p.side !== 'short'
@@ -248,7 +241,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, alphaStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -429,9 +422,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
                       const botName = p.bot || ''
-                      const botBadge = botName === 'Alpha'
-                        ? { label: 'ALP', cls: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' }
-                        : botName === 'Momentum'
+                      const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : { label: '—', cls: 'text-[var(--txt-muted)]' }
                       return (
@@ -528,9 +519,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     const stageInfo = isOpen
                       ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
-                    const botBadge = tr.bot === 'Alpha'
-                      ? { label: 'ALP', cls: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' }
-                      : tr.bot === 'Momentum'
+                    const botBadge = tr.bot === 'Momentum'
                       ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                       : null
                     return (
@@ -699,84 +688,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* ─── Alpha Bot ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Zap size={13} className="text-[var(--warn)]" />
-              <span className="flex-1">Alpha Bot</span>
-              {alphaStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!alphaStatus?.running && alphaStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              {alphaStatus ? (
-                <>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                      <div className={`mono text-xs font-bold mt-0.5 ${alphaStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        ${alphaStatus.total_pnl >= 0 ? '+' : ''}{(alphaStatus.total_pnl || 0).toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${alphaStatus.equity?.toLocaleString?.() || '---'}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Pos</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{alphaStatus.open_positions?.length || 0}</div>
-                    </div>
-                  </div>
-                  {alphaStatus.open_positions?.length > 0 && (
-                    <div className="space-y-1">
-                      {alphaStatus.open_positions.map((p, i) => {
-                        const isLong = p.side !== 'short'
-                        return (
-                          <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                            <div className="flex items-center gap-1.5">
-                              <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                              <span className="text-[var(--txt)] font-medium">{p.coin}</span>
-                            </div>
-                            <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                              {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {alphaTrades.length > 0 && (
-                    <div className="space-y-0.5">
-                      {alphaTrades.slice(0, 4).map((tr, i) => (
-                        <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
-                          <span className="text-[var(--txt)]">{tr.coin}</span>
-                          <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
-                          </span>
-                          <span className="text-[var(--txt-muted)]">{tr.reason}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {!isGuest && (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.alphaStop(); loadData() } catch (e) { alert(e.message) } }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-4">
-                  <p className="text-xs text-[var(--txt-muted)] mb-2">{t('dash.bot_not_running')}</p>
-                  {!isGuest && (
-                    <button className="btn btn-primary btn-sm" onClick={async () => { try { await api.alphaStart({}); loadData() } catch (e) { alert(e.message) } }}>
-                      <Play size={12} /> {t('dash.start')}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Market Data */}
+          {/* ─── Market Data ─── */}
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <BarChart3 size={13} className="text-[var(--info)]" />

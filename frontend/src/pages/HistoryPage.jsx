@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react'
-import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp, Zap } from 'lucide-react'
+import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp } from 'lucide-react'
 import { api } from '../services/api'
-import { EmptyState, Loader, Chip, StatusBadge } from '../components/ui'
+import { EmptyState, Loader, Chip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
 const PAGE_SIZE = 30
@@ -9,9 +9,6 @@ const ALL_PAIRS_KEY = '__all__'
 
 export default function HistoryPage() {
   const { t, locale } = useTranslation()
-  // ── Tab: momentum | alpha ──
-  const [activeTab, setActiveTab] = useState('momentum')
-  const [alphaStatus, setAlphaStatus] = useState(null)
 
   const REASON_MAP = {
     closed: { label: t('reason.closed'), color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
@@ -32,36 +29,19 @@ export default function HistoryPage() {
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
 
-  // ── Alpha trades ──
-  const [alphaTrades, setAlphaTrades] = useState([])
-  const [alphaLoading, setAlphaLoading] = useState(true)
-
   useEffect(() => {
-    if (activeTab === 'momentum') {
-      setLoading(true)
-      api.getPairedTrades(500).then(data => {
-        setTrades(data.trades || [])
-        setLoading(false)
-      }).catch(() => {
-        setTrades([])
-        setLoading(false)
-      })
-    } else {
-      setAlphaLoading(true)
-      Promise.all([
-        api.alphaStatus().catch(() => null),
-        api.alphaTrades(500).catch(() => ({ trades: [] })),
-      ]).then(([status, tradeData]) => {
-        setAlphaStatus(status)
-        setAlphaTrades(tradeData?.trades || [])
-        setAlphaLoading(false)
-      })
-    }
-  }, [activeTab])
+    setLoading(true)
+    api.getPairedTrades(500).then(data => {
+      setTrades(data.trades || [])
+      setLoading(false)
+    }).catch(() => {
+      setTrades([])
+      setLoading(false)
+    })
+  }, [])
 
-  const isAlpha = activeTab === 'alpha'
-  const currentTrades = isAlpha ? alphaTrades : trades
-  const currentLoading = isAlpha ? alphaLoading : loading
+  const currentTrades = trades
+  const currentLoading = loading
 
   const allPairs = useMemo(() => {
     const pairs = new Set(currentTrades.map(t => (t.coin || t.symbol || t.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')))
@@ -93,15 +73,6 @@ export default function HistoryPage() {
 
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
   const pageTrades = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
-
-  // Reset filters/page on tab switch
-  useEffect(() => {
-    setPage(0)
-    setFilterResult('all')
-    setFilterPair(ALL_PAIRS_KEY)
-    setDateFrom('')
-    setDateTo('')
-  }, [activeTab])
 
   const fmtTime = (ts) => {
     if (!ts) return '---'
@@ -145,22 +116,6 @@ export default function HistoryPage() {
           <div className="flex items-center gap-2">
             <ScrollText size={18} className="text-accent-purple" />
             <h2 className="text-lg font-bold text-[var(--txt)]">{t('history.title')}</h2>
-          </div>
-          {/* Bot Tabs */}
-          <div className="flex items-center gap-1 bg-[var(--bg)] rounded-lg p-0.5">
-            <button
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === 'momentum' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-              onClick={() => setActiveTab('momentum')}
-            >
-              <TrendingUp size={11} className="inline -mt-px mr-1" />Momentum
-            </button>
-            <button
-              className={`px-3 py-1 rounded-md text-xs font-medium transition-all ${activeTab === 'alpha' ? 'bg-[var(--warn-dim)] text-[var(--warn)]' : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-              onClick={() => setActiveTab('alpha')}
-            >
-              <Zap size={11} className="inline -mt-px mr-1" />Alpha
-              {alphaStatus?.running && <StatusBadge mode="live" label="" />}
-            </button>
           </div>
           <span className="text-2xs text-[var(--txt-muted)]">{filtered.length} {t('history.records')}</span>
         </div>
@@ -241,7 +196,7 @@ export default function HistoryPage() {
                   return (
                     <tr key={i}>
                       <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tradeTime)}</td>
-                      <td className={`text-2xs font-bold ${tr.bot === 'Alpha' ? 'text-[var(--warn)]' : tr.bot === 'Momentum' ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'}`}>{tr.bot || '—'}</td>
+                      <td className={`text-2xs font-bold ${tr.bot === 'Momentum' ? 'text-[var(--info)]' : 'text-[var(--txt-muted)]'}`}>{tr.bot || '—'}</td>
                       <td>
                         <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                           {isLong ? 'LONG' : 'SHORT'}

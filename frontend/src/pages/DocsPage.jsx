@@ -21,7 +21,6 @@ function getSections(t) {
       icon: Bot,
       items: [
         { title: t('docs.strat_momentum_title'), text: getStrategyDesc(t).momentum + '\n\n' + t('docs.strat_params') + t('docs.strat_momentum_params') },
-        { title: t('docs.strat_alpha_title'), text: getStrategyDesc(t).alpha + '\n\n' + t('docs.strat_params') + t('docs.strat_alpha_params') },
       ],
     },
     {
