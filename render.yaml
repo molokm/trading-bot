@@ -25,3 +25,7 @@ services:
         sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
