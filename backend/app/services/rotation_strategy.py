@@ -1286,3 +1286,4 @@ class RotationStrategy:
                       f"stop={stop_price:.2f}", flush=True)
         except Exception as e:
             print(f"[Rotation] Sync open positions error: {e}", flush=True)
+# Deploy trigger 2026-08-03T20:19:04Z
