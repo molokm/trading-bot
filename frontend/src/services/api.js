@@ -100,4 +100,13 @@ export const api = {
 
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
+
+  // ── Telegram notifications ──
+  telegramStatus: () => request('/telegram/status'),
+
+  telegramConfig: (config) =>
+    request('/telegram/config', { method: 'POST', body: JSON.stringify(config) }),
+
+  telegramTest: () =>
+    request('/telegram/test', { method: 'POST' }),
 };

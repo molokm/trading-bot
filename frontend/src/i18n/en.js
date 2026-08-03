@@ -167,6 +167,16 @@ const en = {
   'settings.recommendation_4': 'Start with a demo account to test the bot',
   'settings.recommendation_5': 'Warning: Automated trading may result in financial loss',
   'settings.get_key_tip': 'Get it in OKX → API → Create API Key',
+  'settings.tg_title': 'Telegram Notifications',
+  'settings.tg_tip': 'Bot sends notifications on trade open/close, partial take-profits and PnL. Get a token from @BotFather, chat_id via @userinfobot.',
+  'settings.tg_on': 'Active',
+  'settings.tg_off': 'Not configured',
+  'settings.tg_no_token': 'No token',
+  'settings.tg_test': 'Test',
+  'settings.tg_save': 'Save',
+  'settings.tg_saved': 'Telegram settings saved.',
+  'settings.tg_configured_to': 'Notifications go to chat',
+  'settings.tg_token': 'Token:',
 
   // ── Chart ──
   'chart.title': 'Chart',

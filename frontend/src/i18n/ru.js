@@ -168,6 +168,16 @@ const ru = {
   'settings.recommendation_4': 'Начните с демо-счёта для тестирования бота',
   'settings.recommendation_5': 'Предупреждение: Автоматическая торговля может привести к финансовым потерям',
   'settings.get_key_tip': 'Получите в OKX → API → Создать API ключ',
+  'settings.tg_title': 'Telegram-уведомления',
+  'settings.tg_tip': 'Бот присылает уведомления об открытии/закрытии сделок, частичных тейках и PnL. Получите token у @BotFather, chat_id — через @userinfobot.',
+  'settings.tg_on': 'Активно',
+  'settings.tg_off': 'Не настроено',
+  'settings.tg_no_token': 'Нет токена',
+  'settings.tg_test': 'Тест',
+  'settings.tg_save': 'Сохранить',
+  'settings.tg_saved': 'Настройки Telegram сохранены.',
+  'settings.tg_configured_to': 'Уведомления идут в чат',
+  'settings.tg_token': 'Токен:',
 
   // ── Chart ──
   'chart.title': 'График',

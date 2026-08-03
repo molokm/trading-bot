@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from dataclasses import dataclass, asdict, field
 from typing import Optional
 
+from .telegram_notifier import TelegramNotifier
+
 ROT_BOT_ID = "rotation_strategy"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.1, "SOL": 0.1}
@@ -99,10 +101,12 @@ class RotPosition:
 
 
 class RotationStrategy:
-    def __init__(self, config: RotationConfig, client_manager=None, db=None):
+    def __init__(self, config: RotationConfig, client_manager=None, db=None,
+                 notifier: Optional[TelegramNotifier] = None):
         self.config = config
         self.client_manager = client_manager
         self.db = db
+        self.notifier = notifier or TelegramNotifier()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -524,6 +528,16 @@ class RotationStrategy:
         print(f"[Rotation] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f}", flush=True)
+
+        if self.notifier:
+            try:
+                self.notifier.fire(self.notifier.partial_msg(
+                    coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
+                    exit_px=round(fill_px, 2), pnl=round(pnl, 2),
+                    closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
+                ))
+            except Exception as e:
+                print(f"[Rotation] TG partial notify error: {e}", flush=True)
         return {"fill_px": fill_px, "fee": fee, "pnl": pnl, "close_sz": close_sz}
 
     async def _close_position(self, client, inst_id: str, pos: RotPosition, reason: str):
@@ -578,6 +592,15 @@ class RotationStrategy:
         print(f"[Rotation] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
               f"pnl={pnl:+.2f} ({reason})", flush=True)
+
+        if self.notifier:
+            try:
+                self.notifier.fire(self.notifier.close_msg(
+                    coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
+                    exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
+                ))
+            except Exception as e:
+                print(f"[Rotation] TG close notify error: {e}", flush=True)
 
     async def _open_position(self, client, coin: str, side: str, ind: dict,
                               lev: float):
@@ -706,6 +729,15 @@ class RotationStrategy:
               f"price={fill_px:.1f} stop={stop:.1f} sz={sz} "
               f"lev={lev} atr={atr_val:.1f} fee={fee:.2f}", flush=True)
 
+        if self.notifier:
+            try:
+                self.notifier.fire(self.notifier.open_msg(
+                    coin=coin, side=side, price=round(fill_px, 2),
+                    stop=round(stop, 2), size=round(sz, 4), leverage=lev,
+                ))
+            except Exception as e:
+                print(f"[Rotation] TG open notify error: {e}", flush=True)
+
     # ─── Core logic ───
 
     async def _reconcile_exchange_positions(self, client):
@@ -770,6 +802,17 @@ class RotationStrategy:
                             print(f"[Rotation] DB reconcile save error: {e}", flush=True)
                     print(f"[Rotation] RECONCILE {now[:19]} {coin:4} {pos.side:5} "
                           f"gone from exchange, booked stop pnl={pnl:+.2f}", flush=True)
+
+                    if self.notifier:
+                        try:
+                            self.notifier.fire(self.notifier.close_msg(
+                                coin=coin, side=pos.side,
+                                entry=round(pos.entry_price, 2),
+                                exit_px=round(fill_px, 2), pnl=round(pnl, 2),
+                                reason="exchange_stop",
+                            ))
+                        except Exception as e:
+                            print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
                     del self._positions[coin]
                 elif real_sz != pos.size:
                     # Size drift (e.g. manual partial close on the exchange).

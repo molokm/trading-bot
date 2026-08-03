@@ -17,6 +17,7 @@ from app.services.okx_client import OKXClientManager
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
+from app.services.telegram_notifier import TelegramNotifier
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -46,6 +47,7 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
 rotation: Optional[RotationStrategy] = None
+telegram = TelegramNotifier()
 
 
 @app.on_event("startup")
@@ -113,7 +115,8 @@ async def startup():
                 poll_interval_sec=300,
                 auto_execute=True,
             )
-            r = RotationStrategy(config=rot_config, client_manager=client_manager, db=db)
+            r = RotationStrategy(config=rot_config, client_manager=client_manager, db=db,
+                                 notifier=telegram)
             global rotation
             rotation = r
             await rotation.start()
@@ -469,7 +472,8 @@ async def momentum_start(data: dict = None):
         auto_execute=d.get("auto_execute", True),
         poll_interval_sec=int(d.get("poll_interval_sec", 300)),
     )
-    rotation = RotationStrategy(config=config, client_manager=client_manager, db=db)
+    rotation = RotationStrategy(config=config, client_manager=client_manager, db=db,
+                                notifier=telegram)
     await rotation.start()
     return {"message": "Momentum Rotation started", **rotation.get_status()}
 
@@ -877,6 +881,43 @@ async def rotation_update_config(data: dict = None):
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": asdict(cfg)}
 
+
+
+# ══════════════════════════════════════════════════════════════
+# TELEGRAM NOTIFICATIONS
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/telegram/status")
+async def telegram_status():
+    """Return Telegram notification config status (token masked)."""
+    masked_token = (telegram.token[:10] + "…" + telegram.token[-4:]) if telegram.token else ""
+    return {
+        "configured": telegram.configured,
+        "status": telegram.status,
+        "chat_id": telegram.chat_id,
+        "token_masked": masked_token,
+    }
+
+
+@app.post("/api/telegram/config")
+async def telegram_config(data: dict = None):
+    """Set/update Telegram bot token and chat id at runtime."""
+    d = data or {}
+    telegram.configure(token=d.get("token", ""), chat_id=d.get("chat_id", ""))
+    return telegram_status()
+
+
+@app.post("/api/telegram/test")
+async def telegram_test():
+    """Send a test message to verify the Telegram connection."""
+    if not telegram.configured:
+        return {"ok": False, "message": "Telegram не настроен: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID"}
+    ok = await telegram.send("✅ Уведомления о сделках настроены и работают!")
+    return {
+        "ok": ok,
+        "message": "Сообщение отправлено" if ok
+        else "Не удалось отправить. Проверьте token и chat_id (например, через @userinfobot).",
+    }
 
 
 @app.get("/api/chart/trades")

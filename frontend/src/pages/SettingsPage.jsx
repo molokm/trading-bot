@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle } from 'lucide-react'
+import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
@@ -13,6 +13,10 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [status, setStatus] = useState(null)
   const [testSteps, setTestSteps] = useState([])
   const [dangerConfirm, setDangerConfirm] = useState(false)
+  const [tg, setTg] = useState({ token: '', chat_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
+  const [tgTesting, setTgTesting] = useState(false)
+  const [tgSaving, setTgSaving] = useState(false)
+  const [tgStatus, setTgStatus] = useState(null)
   const timersRef = useRef([])
 
   useEffect(() => {
@@ -26,6 +30,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
           onDemoMode?.(h.env_demo)
         }
       }
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    api.telegramStatus().then(s => {
+      setTg({ ...s, loaded: true })
     }).catch(() => {})
   }, [])
 
@@ -94,6 +104,31 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       onConnected?.(true); onDemoMode?.(form.demo)
     } catch (err) { setStatus({ ok: false, message: err.message }) }
     setTesting(false)
+  }
+
+  const handleSaveTelegram = async () => {
+    setTgSaving(true); setTgStatus(null)
+    try {
+      const s = await api.telegramConfig({ token: tg.token, chat_id: tg.chat_id })
+      setTg({ ...tg, token: '', chat_id: '', ...s, loaded: true })
+      setTgStatus({ ok: true, message: t('settings.tg_saved') })
+    } catch (err) { setTgStatus({ ok: false, message: err.message }) }
+    setTgSaving(false)
+  }
+
+  const handleTestTelegram = async () => {
+    setTgTesting(true); setTgStatus(null)
+    try {
+      const r = await api.telegramTest()
+      setTgStatus({ ok: r.ok, message: r.message })
+    } catch (err) { setTgStatus({ ok: false, message: err.message }) }
+    setTgTesting(false)
+  }
+
+  const tgBadge = () => {
+    if (!tg.configured) return <span className="ml-auto status-badge status-off"><span className="dot" /> {t('settings.tg_off')}</span>
+    if (tg.status === 'no_token') return <span className="ml-auto status-badge status-off"><span className="dot" /> {t('settings.tg_no_token')}</span>
+    return <span className="ml-auto status-badge status-live"><span className="dot" /> {t('settings.tg_on')}</span>
   }
 
   const handleClearCredentials = () => {
@@ -206,6 +241,66 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <div className={`flex items-center gap-2 p-3 rounded-lg text-xs ${status.ok ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                   {status.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
                   {status.message}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Telegram Notifications */}
+          <div className="panel">
+            <div className="panel-header">
+              <MessageCircle size={13} className="text-[var(--info)]" /> {t('settings.tg_title')}
+              {tgBadge()}
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-2xs text-[var(--txt-muted)]">{t('settings.tg_tip')}</p>
+
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Bot Token</label>
+                <input
+                  className="w-full mt-1.5 mono text-2xs"
+                  type="password"
+                  placeholder="123456789:AAbb..."
+                  value={tg.token}
+                  onChange={e => setTg({ ...tg, token: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">Chat ID</label>
+                <input
+                  className="w-full mt-1.5 mono text-2xs"
+                  placeholder="123456789"
+                  value={tg.chat_id}
+                  onChange={e => setTg({ ...tg, chat_id: e.target.value })}
+                />
+              </div>
+
+              {tg.configured && (
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-[var(--info-dim)] border border-[var(--info)]/20">
+                  <CheckCircle size={16} className="text-[var(--info)] shrink-0" />
+                  <div className="text-2xs text-[var(--txt-secondary)]">
+                    {t('settings.tg_configured_to')} <code className="mono text-[var(--info)]">{tg.chat_id || '—'}</code>
+                    {tg.token_masked && <div>{t('settings.tg_token')} <code className="mono">{tg.token_masked}</code></div>}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                <button className="btn btn-primary flex-1" onClick={handleTestTelegram} disabled={tgTesting || !tg.configured}>
+                  {tgTesting ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                  {t('settings.tg_test')}
+                </button>
+                <button className="btn btn-ghost flex-1" onClick={handleSaveTelegram} disabled={tgSaving}>
+                  {tgSaving ? <Loader2 size={14} className="animate-spin" /> : <RotateCw size={14} />}
+                  {t('settings.tg_save')}
+                </button>
+              </div>
+
+              {tgStatus && (
+                <div className={`flex items-center gap-2 p-3 rounded-lg text-xs ${tgStatus.ok ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                  {tgStatus.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+                  {tgStatus.message}
                 </div>
               )}
             </div>
