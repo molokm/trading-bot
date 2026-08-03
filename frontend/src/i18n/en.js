@@ -358,7 +358,7 @@ const en = {
   'ui.nothing_found': 'Nothing found',
 
   // Strategy descriptions
-  'ui.strategy_desc.momentum': 'Momentum Rotation v2: top-K rotation by ROC/EMA/ADX, ATR stops, RSI+correlation filters, partial TP, trailing. Risk 2%/trade.',
+  'ui.strategy_desc.momentum': 'Momentum Rotation v3: daily top-2 rotation from {BTC,ETH,BNB,SOL} by combined score (ROC14, EMA20/50, ADX14, volume, BTC correlation). Filters: ADX≥25, |ROC|≥3%, EMA trend, RSI (long≤75/short≥25), vol≥1.5×avg, corr<0.7, BTC>SMA200 (blocks longs). Risk 10%/trade, dynamic ATR-based sizing (SL=3×daily ATR), max lev 2×. Management: trailing 0.2×hourly ATR (profit-only), breakeven at +2%, partial TP 50% at +5%, min hold 20d. Rotation: exit top-2 → market close. Cross margin, demo/live via env. Backtest: ~76% CAGR / 20% max DD.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Profit/Loss)',

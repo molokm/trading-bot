@@ -176,7 +176,7 @@ function BotCard({
           </div>
         </div>
 
-        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed line-clamp-2">{description}</div>
+        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">{description}</div>
 
         <BotSparkline botId={id} pnl={sparklinePnl} />
 

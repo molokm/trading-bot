@@ -359,7 +359,7 @@ const ru = {
   'ui.nothing_found': 'Ничего не найдено',
 
   // Strategy descriptions
-  'ui.strategy_desc.momentum': 'Momentum Rotation v2: ротация top-K по ROC/EMA/ADX, ATR-стопы, RSI+корреляция, частичный TP, трейлинг. Risk 2%/trade.',
+  'ui.strategy_desc.momentum': 'Momentum Rotation v3: дневная ротация топ-2 монет из {BTC,ETH,BNB,SOL} по комбинированному скорингу (ROC14, EMA20/50, ADX14, объём, корреляция с BTC). Фильтры: ADX≥25, |ROC|≥3%, тренд по EMA, RSI (лонг≤75/шорт≥25), объём≥1.5×средний, корреляция<0.7, BTC>SMA200 (иначе лонги блокируются). Риск 10%/сделка, динамический размер по ATR (стоп=3×daily ATR), макс. плечо 2×. Менеджмент: трейлинг 0.2×hourly ATR (только в прибыль), безубыток при +2%, частичный TP 50% при +5%, мин. удержание 20д. Ротация: выход из топ-2 → закрытие по рынку. Режим: cross margin, демо/реал через env. Бэктест: ~76% CAGR / 20% max DD.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Прибыль/Убыток)',
