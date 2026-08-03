@@ -1,3 +1,4 @@
+# Deploy trigger: 2026-08-03T20:30:00Z
 # Stage 1: Build frontend
 FROM node:20-slim AS frontend
 WORKDIR /build
