@@ -913,15 +913,19 @@ async def telegram_config(data: dict = None):
             await db.set_setting("TELEGRAM_CHAT_ID", telegram.chat_id)
     except Exception as e:
         print(f"[telegram/config] DB persist error: {e}", flush=True)
-    return telegram_status()
+    return await telegram_status()
 
 
 @app.post("/api/telegram/test")
-async def telegram_test():
+async def telegram_test(data: dict = None):
     """Send a test message to verify the Telegram connection."""
-    if not telegram.configured:
+    d = data or {}
+    token = d.get("token", "") or telegram.token
+    chat_id = d.get("chat_id", "") or telegram.chat_id
+    if not (token and chat_id):
         return {"ok": False, "message": "Telegram не настроен: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID"}
-    ok = await telegram.send("✅ Уведомления о сделках настроены и работают!")
+    notifier = TelegramNotifier(token=token, chat_id=chat_id)
+    ok = await notifier.send("✅ Уведомления о сделках настроены и работают!")
     return {
         "ok": ok,
         "message": "Сообщение отправлено" if ok

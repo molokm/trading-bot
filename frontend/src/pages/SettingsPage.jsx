@@ -119,11 +119,16 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const handleTestTelegram = async () => {
     setTgTesting(true); setTgStatus(null)
     try {
-      const r = await api.telegramTest()
+      const payload = {}
+      if (tg.token) payload.token = tg.token
+      if (tg.chat_id) payload.chat_id = tg.chat_id
+      const r = await api.telegramTest(payload)
       setTgStatus({ ok: r.ok, message: r.message })
     } catch (err) { setTgStatus({ ok: false, message: err.message }) }
     setTgTesting(false)
   }
+
+  const tgReady = tg.configured || (tg.token && tg.chat_id)
 
   const tgBadge = () => {
     if (!tg.configured) return <span className="ml-auto status-badge status-off"><span className="dot" /> {t('settings.tg_off')}</span>
@@ -287,7 +292,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               )}
 
               <div className="flex gap-3">
-                <button className="btn btn-primary flex-1" onClick={handleTestTelegram} disabled={tgTesting || !tg.configured}>
+                <button className="btn btn-primary flex-1" onClick={handleTestTelegram} disabled={tgTesting || !tgReady}>
                   {tgTesting ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                   {t('settings.tg_test')}
                 </button>
