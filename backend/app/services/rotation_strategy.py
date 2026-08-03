@@ -94,6 +94,8 @@ class RotPosition:
     signal_id: int = 0
     raw_entry: float = 0.0
     algo_id: str = ""            # exchange-side conditional SL algo order
+    stop_synced: float = 0.0     # stop price last synced to the exchange
+    size_synced: float = 0.0     # size last synced to the exchange stop
 
 
 class RotationStrategy:
@@ -434,6 +436,9 @@ class RotationStrategy:
         if resp.get("data"):
             algo_id = resp["data"][0].get("algoId", "")
         pos.algo_id = algo_id
+        if algo_id:
+            pos.stop_synced = pos.stop_price
+            pos.size_synced = pos.size
         print(f"[Rotation] Stop placed {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
               f"sz={pos.size} algoId={algo_id}", flush=True)
         return algo_id
@@ -472,6 +477,8 @@ class RotationStrategy:
         if new_algo_id:
             await self._cancel_exchange_stop(client, pos)
             pos.algo_id = new_algo_id
+            pos.stop_synced = pos.stop_price
+            pos.size_synced = pos.size
             print(f"[Rotation] Stop updated {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
                   f"sz={pos.size} algoId={new_algo_id}", flush=True)
 
@@ -508,6 +515,12 @@ class RotationStrategy:
         })
         pos.size -= close_sz
         pos.partial_done = True
+        # Immediately re-size the exchange-side stop to the reduced position so
+        # the exchange never holds a stop larger than the remaining size.
+        if pos.algo_id:
+            await self._update_exchange_stop(client, pos)
+        if self.db:
+            await self._sync_positions_db()
         print(f"[Rotation] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f}", flush=True)
@@ -695,12 +708,90 @@ class RotationStrategy:
 
     # ─── Core logic ───
 
+    async def _reconcile_exchange_positions(self, client):
+        """Reconcile locally-tracked positions against the real exchange state.
+
+        Handles:
+         * exchange-side SL fired between polls -> position vanished locally,
+           book PnL conservatively at stop price and drop the phantom position
+         * manual partial close / drift -> align local size, force stop re-sync
+        """
+        if not self._positions:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            actual = {}
+            if not result.get("error") and result.get("data"):
+                for p in result.get("data", []):
+                    inst_id = p.get("instId", "")
+                    coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    if coin not in self.config.symbols:
+                        continue
+                    pos_side = p.get("posSide", "net")
+                    is_long = pos_side != "short"
+                    sz = float(p.get("pos", 0) or 0)
+                    if sz <= 0:
+                        continue
+                    actual[(coin, "long" if is_long else "short")] = sz
+
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                real_sz = actual.get((coin, pos.side))
+                if real_sz is None:
+                    # Position vanished from the exchange -> its SL fired (or was
+                    # closed manually). Book the PnL conservatively at stop price.
+                    ct = CT_VAL.get(coin, 0.01)
+                    fill_px = pos.stop_price
+                    if pos.side == "long":
+                        pnl = pos.size * ct * (fill_px - pos.entry_price)
+                    else:
+                        pnl = pos.size * ct * (pos.entry_price - fill_px)
+                    self._equity += pnl
+                    now = datetime.now(timezone.utc).isoformat()
+                    self._trade_log.append({
+                        "time": now, "side": "sell" if pos.side == "long" else "buy",
+                        "symbol": pos.inst_id, "size": pos.size,
+                        "pnl": round(pnl, 2),
+                        "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
+                        "reason": "exchange_stop", "pos_side": pos.side, "coin": coin,
+                        "signal_id": pos.signal_id,
+                    })
+                    if self.db:
+                        try:
+                            await self.db.save_trade(
+                                bot_id=ROT_BOT_ID, side="sell" if pos.side == "long" else "buy",
+                                sz=pos.size, px=round(fill_px, 2), ord_id="",
+                                inst_id=pos.inst_id, ord_type="market",
+                                fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                                state="filled", signal_id=pos.signal_id,
+                            )
+                            await self._sync_positions_db()
+                        except Exception as e:
+                            print(f"[Rotation] DB reconcile save error: {e}", flush=True)
+                    print(f"[Rotation] RECONCILE {now[:19]} {coin:4} {pos.side:5} "
+                          f"gone from exchange, booked stop pnl={pnl:+.2f}", flush=True)
+                    del self._positions[coin]
+                elif real_sz != pos.size:
+                    # Size drift (e.g. manual partial close on the exchange).
+                    old = pos.size
+                    pos.size = real_sz
+                    pos.size_synced = 0.0  # force the exchange stop to re-sync
+                    print(f"[Rotation] RECONCILE {coin:4} size {old} -> {real_sz} "
+                          f"(exchange drift), stop will re-sync", flush=True)
+                    if self.db:
+                        await self._sync_positions_db()
+        except Exception as e:
+            print(f"[Rotation] Reconcile error: {e}", flush=True)
+
     async def _check_and_trade(self):
         """Main logic: indicators, filters, ranking, rotate, manage stops."""
         client = await self._get_client()
         if not client:
             print("[Rotation] No OKX client available", flush=True)
             return
+
+        # 0. Reconcile with real exchange state before touching positions.
+        await self._reconcile_exchange_positions(client)
 
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -777,8 +868,9 @@ class RotationStrategy:
                 await self._cancel_exchange_stop(client, pos)
                 await self._close_position(client, pos.inst_id, pos, reason)
                 del self._positions[coin]
-            elif pos.algo_id:
-                # Stop moved (or size changed after partial TP) → sync exchange SL
+            elif pos.algo_id and (pos.stop_price != pos.stop_synced or pos.size != pos.size_synced):
+                # Stop moved (and/or size changed after partial TP) → sync exchange SL.
+                # Only re-place when it actually changed (avoids API spam every poll).
                 await self._update_exchange_stop(client, pos)
 
         # 3. Check if we should rotate
