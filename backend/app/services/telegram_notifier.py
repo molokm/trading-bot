@@ -38,6 +38,18 @@ class TelegramNotifier:
         os.environ[ENV_TOKEN] = self.token
         os.environ[ENV_CHAT] = self.chat_id
 
+    async def load_from_db(self, db) -> None:
+        """Restore credentials persisted in the settings table (survives restarts)."""
+        try:
+            token = await db.get_setting(ENV_TOKEN)
+            chat_id = await db.get_setting(ENV_CHAT)
+            if token:
+                self.token = token
+            if chat_id:
+                self.chat_id = chat_id
+        except Exception:
+            pass
+
     @property
     def configured(self) -> bool:
         return bool(self.token and self.chat_id)

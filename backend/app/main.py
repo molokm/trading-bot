@@ -55,6 +55,7 @@ async def startup():
     try:
         print("[startup] 1/4 DB init ...", flush=True)
         await db.init()
+        await telegram.load_from_db(db)
         print("[startup] 2/4 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
@@ -904,6 +905,14 @@ async def telegram_config(data: dict = None):
     """Set/update Telegram bot token and chat id at runtime."""
     d = data or {}
     telegram.configure(token=d.get("token", ""), chat_id=d.get("chat_id", ""))
+    # Persist to DB so the config survives restarts/redeploys.
+    try:
+        if telegram.token:
+            await db.set_setting("TELEGRAM_BOT_TOKEN", telegram.token)
+        if telegram.chat_id:
+            await db.set_setting("TELEGRAM_CHAT_ID", telegram.chat_id)
+    except Exception as e:
+        print(f"[telegram/config] DB persist error: {e}", flush=True)
     return telegram_status()
 
 

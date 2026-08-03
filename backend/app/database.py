@@ -141,6 +141,11 @@ class Database:
                 total_trades  INTEGER DEFAULT 0,
                 FOREIGN KEY (bot_id) REFERENCES bots(id)
             );
+
+            CREATE TABLE IF NOT EXISTS settings (
+                key            TEXT PRIMARY KEY,
+                value          TEXT
+            );
         """)
         await self._conn.commit()
 
@@ -231,6 +236,13 @@ class Database:
                 sharpe_ratio  DOUBLE PRECISION,
                 max_drawdown  DOUBLE PRECISION,
                 total_trades  INTEGER DEFAULT 0
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key            TEXT PRIMARY KEY,
+                value          TEXT
             )
         """)
 
@@ -751,6 +763,26 @@ class Database:
             "SELECT * FROM performance_metrics WHERE bot_id = ? ORDER BY id DESC LIMIT ?",
             (bot_id, limit)
         )
+
+    # ── Settings (key-value) ──
+
+    async def get_setting(self, key: str) -> Optional[str]:
+        sql = "SELECT value FROM settings WHERE key = $1" if self._pg_mode else "SELECT value FROM settings WHERE key = ?"
+        row = await self._fetchone(sql, (key,))
+        return row["value"] if row else None
+
+    async def set_setting(self, key: str, value: str):
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO settings (key, value) VALUES ($1, $2) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, value)
+            )
+        else:
+            await self._execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value)
+            )
 
     # ── Cleanup ──
 
