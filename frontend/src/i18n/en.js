@@ -358,7 +358,7 @@ const en = {
   'ui.nothing_found': 'Nothing found',
 
   // Strategy descriptions
-  'ui.strategy_desc.momentum': 'Momentum Rotation v3: daily top-2 rotation from {BTC,ETH,BNB,SOL} by combined score (ROC14, EMA20/50, ADX14, volume, BTC correlation). Filters: ADX≥25, |ROC|≥3%, EMA trend, RSI (long≤75/short≥25), vol≥1.5×avg, corr<0.7, BTC>SMA200 (blocks longs). Risk 10%/trade, dynamic ATR-based sizing (SL=3×daily ATR), max lev 2×. Management: trailing 0.2×hourly ATR (profit-only), breakeven at +2%, partial TP 50% at +5%, min hold 20d. Rotation: exit top-2 → market close. Cross margin, demo/live via env. Backtest: ~76% CAGR / 20% max DD.',
+  'ui.strategy_desc.momentum': 'The bot scans BTC, ETH, BNB, SOL on daily bars and picks the top 2 strongest trends. Scoring: ROC(14) for momentum, EMA20/50 for trend direction, ADX(14) for trend strength. Filters remove noise: ADX≥25, |ROC|≥3%, EMA trend, RSI not overbought/oversold, volume above average, low BTC correlation. Longs are blocked when BTC is below SMA200. Position size is risk-based (10% of equity): stop = 3× daily ATR, leverage up to 2× (higher volatility = lower leverage). After entry: trailing stop follows price (0.2× hourly ATR), at +2% stop moves to breakeven, at +5% half the position is closed. Minimum hold 20 days. If a coin drops out of the top 2, it is closed at market. Cross margin, demo/live toggled via env.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Profit/Loss)',

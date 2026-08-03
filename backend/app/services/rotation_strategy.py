@@ -31,13 +31,14 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "SOL"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v3: daily top-2 rotation from {BTC,ETH,BNB,SOL} by combined score "
-    "(ROC14, EMA20/50, ADX14, volume, BTC correlation). Filters: ADX≥25, |ROC|≥3%, EMA trend, "
-    "RSI (long≤75/short≥25), vol≥1.5×avg, corr<0.7, BTC>SMA200 (blocks longs). "
-    "Risk 10%/trade, dynamic ATR-based sizing (SL=3×daily ATR), max lev 2×. "
-    "Management: trailing 0.2×hourly ATR (profit-only), breakeven at +2%, "
-    "partial TP 50% at +5%, min hold 20d. Rotation: exit top-2 → market close. "
-    "Cross margin, demo/live via env. Backtest: ~76% CAGR / 20% max DD."
+    "Бот ежедневно сканирует BTC, ETH, BNB, SOL на дневных барах и выбирает до 2 самых сильных тренда. "
+    "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
+    "Фильтры отсекают шум: ADX≥25, |ROC|≥3%, тренд по EMA, RSI не перекуплен/перепродан, "
+    "объём выше среднего, низкая корреляция с BTC. Лонги блокируются, если BTC ниже SMA200. "
+    "Размер позиции считается от риска 10% капитала: стоп = 3× дневной ATR, плечо до 2× (чем выше волатильность, тем меньше плечо). "
+    "После входа: трейлинг-стоп следует за ценой (0.2× часовой ATR), при +2% стоп уходит в безубыток, "
+    "при +5% закрывается половина позиции. Минимум держим 20 дней. "
+    "Если монета выпадает из топа — закрываем по рынку. Режим cross margin, демо/реал переключается env."
 )
 
 
