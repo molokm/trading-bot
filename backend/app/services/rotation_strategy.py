@@ -54,14 +54,14 @@ class RotationConfig:
     adx_min: float = 25.0
     min_roc: float = 3.0            # min |roc| to even rank a coin
     sma_long: int = 200            # BTC regime MA
-    min_hold_days: int = 20        # cooldown before rotating again
+    min_hold_days: int = 3         # cooldown before rotating again
     max_leverage: float = 2.0
     risk_per_trade: float = 0.10   # 10% risk of equity per trade
     allocation_pct: float = 1.0    # max total margin = eq * this
-    atr_stop_mult: float = 3.0     # initial stop = daily ATR * 3.0
-    trail_atr_mult: float = 0.2    # trailing = daily ATR * 0.2
+    atr_stop_mult: float = 2.5     # initial stop = daily ATR * 2.5
+    trail_atr_mult: float = 0.1    # trailing = daily ATR * 0.1
     breakeven_pct: float = 0.02    # move to BE after 2%
-    partial_tp_pct: float = 0.05   # close 50% at +5%
+    partial_tp_pct: float = 0.10   # close 50% at +10%
     partial_tp_ratio: float = 0.5  # fraction to close
     rsi_period: int = 14
     rsi_long_max: float = 75.0     # no long if RSI > 75
