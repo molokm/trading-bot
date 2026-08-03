@@ -13,6 +13,9 @@ frontend/dist/
 strategies/*.pyc
 backtests_data/
 backend/backtests_data/
+scripts/__pycache__/
+scripts/honest_3y_cache.json
+scripts/honest_3y_results.json
 
 # Database
 backend/data/

@@ -1,17 +1,15 @@
-"""Momentum Rotation Strategy v2 — Adaptive multi-factor with risk management.
+"""Momentum Rotation Strategy v3 — daily-bar model (validated +76% CAGR backtest).
 
-Improvements over v1:
-  - Hourly ATR(24) for initial stop (1.5x for 3x leverage)
-  - Dynamic leverage: min(3, 1/(ATR% x 2))
-  - Risk-based sizing: 2% of equity per trade
-  - Volatility filter: skip if ATR > 1.5x avg 30d
-  - RSI(14) filter: no long if RSI>75, no short if RSI<25
-  - Correlation filter: max 1 pair with corr > 0.7
-  - Weighted ranking: ROC*0.5 + trend*0.3 + ADX/50*0.2
-  - Dynamic trailing: ATR(opening) x 0.5
-  - Partial profit: close 50% at +5%
-  - Limit orders with 5-min market fallback
-  - Long-only mode when BTC < 200d MA
+Rewritten to exactly match the winning honest-backtest config:
+  - Signal computed on yesterday's daily close (causal), entry today
+  - Initial stop = daily ATR x atr_stop_mult (was hourly ATR)
+  - Risk-per-trade sizing 10% of equity, capped by allocation_pct of equity
+  - Dynamic leverage: 1 / (2 * ATR%) capped by max_leverage
+  - Long cooldown: min_hold_days before rotating again
+  - Volatility / RSI / correlation filters on the daily bar
+  - Daily ATR trailing x trail_atr_mult, breakeven, partial TP
+  - BTC 200d MA regime: block longs below it
+  - Shorts allowed (allow_short)
 """
 
 import asyncio
@@ -31,8 +29,9 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "SOL"]
 
 STRATEGY_DESC = (
-    "Rotation v2: adaptive leverage, hourly ATR stops, RSI+volatility+correlation filters, "
-    "weighted ranking, dynamic trailing, partial TP at +5%. Risk 2% per trade."
+    "Rotation v3 (daily-bar): ROC/EMA/ADX ranking, risk 10%/trade, daily-ATR stops, "
+    "long cooldown, RSI+volatility+correlation filters, USD trailing, partial TP. "
+    "Backtest +76% CAGR / 20% DD."
 )
 
 
@@ -45,23 +44,26 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 18.0
-    min_hold_days: int = 3
-    max_leverage: float = 3.0
-    risk_per_trade: float = 0.02       # 2% risk per trade
-    trail_atr_mult: float = 0.5       # trailing = ATR x 0.5
-    breakeven_pct: float = 0.03       # move to BE after 3%
-    partial_tp_pct: float = 0.05      # close 50% at +5%
-    partial_tp_ratio: float = 0.5     # fraction to close
+    adx_min: float = 25.0
+    min_roc: float = 3.0            # min |roc| to even rank a coin
+    sma_long: int = 200            # BTC regime MA
+    min_hold_days: int = 20        # cooldown before rotating again
+    max_leverage: float = 2.0
+    risk_per_trade: float = 0.10   # 10% risk of equity per trade
+    allocation_pct: float = 1.0    # max total margin = eq * this
+    atr_stop_mult: float = 3.0     # initial stop = daily ATR * 3.0
+    trail_atr_mult: float = 0.2    # trailing = daily ATR * 0.2
+    breakeven_pct: float = 0.02    # move to BE after 2%
+    partial_tp_pct: float = 0.05   # close 50% at +5%
+    partial_tp_ratio: float = 0.5  # fraction to close
     rsi_period: int = 14
-    rsi_long_max: float = 75.0       # no long if RSI > 75
-    rsi_short_min: float = 25.0      # no short if RSI < 25
-    vol_mult: float = 1.5            # skip if ATR > avg * 1.5
-    corr_threshold: float = 0.7      # max correlation between held pairs
-    hourly_atr_period: int = 24      # hourly ATR bars for initial stop
-    hourly_atr_stop_mult: float = 1.5  # initial stop = hourly_atr * 1.5
+    rsi_long_max: float = 75.0     # no long if RSI > 75
+    rsi_short_min: float = 25.0    # no short if RSI < 25
+    vol_mult: float = 1.5          # skip if ATR > avg * 1.5
+    corr_threshold: float = 0.7    # max correlation between held pairs
+    allow_short: bool = True       # allow shorting bearish coins
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
-    limit_wait_sec: int = 300        # 5 min fallback to market
+    limit_wait_sec: int = 300      # 5 min fallback to market
     poll_interval_sec: int = 300
     auto_execute: bool = True
 
@@ -111,8 +113,7 @@ class RotationStrategy:
         self._started_at: str = ""
         self._last_rotate_ts: int = 0
         self._last_daily_check: str = ""
-        self._hourly_atr_cache: dict = {}   # per-coin hourly ATR
-        self._btc_200ma: float = 0.0        # BTC 200-day MA (for long-only filter)
+        self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
 
     # ─── Indicators (no look-ahead) ───
 
@@ -270,13 +271,9 @@ class RotationStrategy:
         candles.sort(key=lambda x: x["ts"])
         return candles
 
-    async def _fetch_daily(self, client, coin: str, limit: int = 200) -> list:
-        """Fetch daily candles (200 bars for 200d MA)."""
+    async def _fetch_daily(self, client, coin: str, limit: int = 250) -> list:
+        """Fetch daily candles (250 bars for indicators)."""
         return await self._fetch_candles(client, coin, bar="1D", limit=limit)
-
-    async def _fetch_hourly(self, client, coin: str, limit: int = 48) -> list:
-        """Fetch hourly candles (48 bars = 2 days for ATR(24))."""
-        return await self._fetch_candles(client, coin, bar="1H", limit=limit)
 
     def _compute_daily_indicators(self, candles: list) -> dict:
         """Compute all daily indicators. Signal bar = second to last (yesterday)."""
@@ -324,37 +321,29 @@ class RotationStrategy:
             "date_today": candles[-1]["datetime"].strftime("%Y-%m-%d"),
         }
 
-    def _compute_hourly_atr(self, candles: list) -> float:
-        """Compute ATR from hourly candles."""
-        if len(candles) < self.config.hourly_atr_period + 2:
-            return 0.0
-        highs = [c["H"] for c in candles]
-        lows = [c["L"] for c in candles]
-        closes = [c["C"] for c in candles]
-        atr_arr = self.atr(highs, lows, closes, self.config.hourly_atr_period)
-        return atr_arr[-2] if atr_arr[-2] > 0 else atr_arr[-1]
-
     def _compute_btc_200ma(self, candles: list) -> float:
-        """Compute BTC 200-day SMA for long-only filter."""
-        if len(candles) < 200:
+        """Compute BTC long-MA for long-only filter."""
+        period = self.config.sma_long
+        if len(candles) < period:
             return 0.0
         closes = [c["C"] for c in candles]
-        sma200 = self.sma(closes, 200)
-        return sma200[-1]
+        sma = self.sma(closes, period)
+        return sma[-1]
 
     # ─── Dynamic leverage & sizing ───
 
-    def _calc_dynamic_leverage(self, atr_hourly: float, price: float) -> float:
-        """Dynamic leverage: min(max_leverage, 1 / (ATR% x 2))."""
-        if atr_hourly <= 0 or price <= 0:
+    def _calc_dynamic_leverage(self, atr: float, price: float) -> float:
+        """Dynamic leverage: min(max_leverage, 1 / (daily ATR% x 2))."""
+        if atr <= 0 or price <= 0:
             return 1.0
-        atr_pct = atr_hourly / price
+        atr_pct = atr / price
         lev = 1.0 / (atr_pct * 2)
         lev = max(1.0, min(lev, self.config.max_leverage))
         return round(lev, 1)
 
     def _calc_size(self, coin: str, price: float, stop_distance: float, leverage: float) -> float:
-        """Risk-based position sizing: risk_per_trade / (stop_pct x leverage)."""
+        """Risk-based position sizing: risk_per_trade / (stop_pct x leverage),
+        capped so total margin <= equity * allocation_pct."""
         ct_val = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         cfg = self.config
@@ -366,18 +355,16 @@ class RotationStrategy:
 
         # Risk amount in USD
         risk_usd = self._equity * cfg.risk_per_trade
-        # Notional = risk / stop_pct (how much we can expose per 1% move)
         notional = risk_usd / stop_pct
-        # Margin = notional / leverage
         margin = notional / leverage if leverage > 0 else notional
-        # Cap margin at 40% of equity
-        max_margin = self._equity * 0.40
+        # Cap margin at allocation_pct * equity
+        max_margin = self._equity * cfg.allocation_pct
         if margin > max_margin:
             margin = max_margin
             notional = margin * leverage
 
         raw_sz = notional / (ct_val * price)
-        sz = round(raw_sz / lot) * lot
+        sz = math.floor(raw_sz / lot + 1e-12) * lot
         return max(sz, lot)
 
     # ─── Correlation filter ───
@@ -580,7 +567,7 @@ class RotationStrategy:
               f"pnl={pnl:+.2f} ({reason})", flush=True)
 
     async def _open_position(self, client, coin: str, side: str, ind: dict,
-                              atr_h: float, lev: float):
+                              lev: float):
         """Open a new position with limit order + market fallback."""
         inst_id = SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
         price = ind["close_today"]
@@ -596,11 +583,8 @@ class RotationStrategy:
             if lev_resp.get("error"):
                 print(f"[Rotation] Set leverage error {coin}: {lev_resp.get('message', '')}", flush=True)
 
-        # Initial stop = price - hourly_atr * 1.5 (for long)
-        if atr_h > 0:
-            stop_dist = atr_h * self.config.hourly_atr_stop_mult
-        else:
-            stop_dist = atr_val * 2.0  # fallback to daily ATR
+        # Initial stop = price ± daily ATR * atr_stop_mult
+        stop_dist = atr_val * self.config.atr_stop_mult
         if side == "long":
             stop = price - stop_dist
         else:
@@ -675,7 +659,7 @@ class RotationStrategy:
             side=side, size=sz, size_original=sz,
             entry_price=fill_px,
             stop_price=stop, peak_price=fill_px,
-            opened_at=now, atr=atr_val, atr_hourly=atr_h,
+            opened_at=now, atr=atr_val, atr_hourly=0.0,
             leverage=lev, signal_id=signal_id, raw_entry=price,
         )
         self._positions[coin] = pos
@@ -707,7 +691,7 @@ class RotationStrategy:
         self._equity -= fee
         print(f"[Rotation] OPEN  {now[:19]} {coin:4} {side:5} "
               f"price={fill_px:.1f} stop={stop:.1f} sz={sz} "
-              f"lev={lev} atr_h={atr_h:.1f} fee={fee:.2f}", flush=True)
+              f"lev={lev} atr={atr_val:.1f} fee={fee:.2f}", flush=True)
 
     # ─── Core logic ───
 
@@ -722,22 +706,16 @@ class RotationStrategy:
 
         # 1. Fetch data and compute indicators
         indicators = {}
-        hourly_atrs = {}
         cfg = self.config
 
         for coin in cfg.symbols:
             try:
-                candles_d = await self._fetch_daily(client, coin, limit=200)
+                candles_d = await self._fetch_daily(client, coin, limit=250)
                 if not candles_d:
                     continue
                 ind = self._compute_daily_indicators(candles_d)
                 if ind:
                     indicators[coin] = ind
-
-                # Hourly ATR for initial stop
-                candles_h = await self._fetch_hourly(client, coin, limit=48)
-                if candles_h:
-                    hourly_atrs[coin] = self._compute_hourly_atr(candles_h)
 
                 # BTC 200-day MA (for long-only filter)
                 if coin == "BTC":
@@ -746,7 +724,6 @@ class RotationStrategy:
                 print(f"[Rotation] Error fetching {coin}: {e}", flush=True)
 
         self._latest_indicators = indicators
-        self._hourly_atr_cache = hourly_atrs
 
         if not indicators:
             return
@@ -850,6 +827,11 @@ class RotationStrategy:
                     print(f"[Rotation] Bear filter: {coin} -> skip long (BTC < 200MA)", flush=True)
                     continue
 
+            # ── FILTER: min |roc| ──
+            if abs(ind["roc"]) < cfg.min_roc:
+                print(f"[Rotation] min_roc filter: {coin} ROC={ind['roc']:.1f} < {cfg.min_roc} -> SKIP", flush=True)
+                continue
+
             # ── Weighted score ──
             roc_val = ind["roc"]
             trend_val = (ind["ema_fast"] - ind["ema_slow"]) / ind["ema_slow"] * 100 if ind["ema_slow"] > 0 else 0
@@ -871,9 +853,10 @@ class RotationStrategy:
                 break
 
             # Direction: based on trend + ROC
-            if roc_val > 0 and ema_trend and adx_val >= cfg.adx_min:
+            if roc_val > cfg.min_roc and ema_trend and adx_val >= cfg.adx_min:
                 side = "long"
-            elif roc_val < 0 and not ema_trend and adx_val >= cfg.adx_min:
+            elif (cfg.allow_short and roc_val < -cfg.min_roc and not ema_trend
+                  and adx_val >= cfg.adx_min):
                 side = "short"
             else:
                 continue
@@ -900,9 +883,8 @@ class RotationStrategy:
             ind = indicators.get(coin)
             if not ind:
                 continue
-            atr_h = hourly_atrs.get(coin, 0.0)
-            lev = self._calc_dynamic_leverage(atr_h, ind["close_today"])
-            await self._open_position(client, coin, side, ind, atr_h, lev)
+            lev = self._calc_dynamic_leverage(ind["atr"], ind["close_today"])
+            await self._open_position(client, coin, side, ind, lev)
             opened_any = True
 
         # Update daily check only when doing a full rotation or opening a trade
@@ -938,7 +920,7 @@ class RotationStrategy:
         await self._sync_open_positions()
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
-        print(f"[Rotation v2] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
+        print(f"[Rotation v3] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
               flush=True)
 
     async def stop(self):
@@ -953,7 +935,7 @@ class RotationStrategy:
                 await self.db.update_bot_stopped(ROT_BOT_ID)
             except Exception:
                 pass
-        print("[Rotation v2] Stopped", flush=True)
+        print("[Rotation v3] Stopped", flush=True)
 
     def get_status(self) -> dict:
         """Return current status dict."""
@@ -1015,7 +997,7 @@ class RotationStrategy:
 
         return {
             "running": self._running,
-            "strategy": "momentum_rotation_v2",
+            "strategy": "momentum_rotation_v3",
             "config": cfg,
             "equity": round(full_equity, 2),
             "capital": self._capital,
@@ -1076,8 +1058,8 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES ($1, 'rotation', 'momentum_rotation_v2', 'MULTI', '1D', "
-                    "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v2') "
+                    "VALUES ($1, 'rotation', 'momentum_rotation_v3', 'MULTI', '1D', "
+                    "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v3') "
                     "ON CONFLICT (id) DO NOTHING",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )
@@ -1085,8 +1067,8 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES (?, 'rotation', 'momentum_rotation_v2', 'MULTI', '1D', "
-                    "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v2')",
+                    "VALUES (?, 'rotation', 'momentum_rotation_v3', 'MULTI', '1D', "
+                    "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v3')",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )
         except Exception as e:

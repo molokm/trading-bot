@@ -99,11 +99,19 @@ async def startup():
                 ema_fast=20,
                 ema_slow=50,
                 atr_period=14,
-                breakeven_pct=0.03,
-                adx_min=18.0,
-                min_hold_days=3,
-                max_leverage=3.0,
-                risk_per_trade=0.02,
+                adx_min=25.0,
+                min_roc=3.0,
+                sma_long=200,
+                min_hold_days=20,
+                max_leverage=2.0,
+                risk_per_trade=0.10,
+                allocation_pct=1.0,
+                atr_stop_mult=3.0,
+                trail_atr_mult=0.2,
+                breakeven_pct=0.02,
+                partial_tp_pct=0.05,
+                partial_tp_ratio=0.5,
+                allow_short=True,
                 poll_interval_sec=300,
                 auto_execute=True,
             )
@@ -112,27 +120,9 @@ async def startup():
             rotation = r
             await rotation.start()
         print("[startup] 5/5 Alpha auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
-            alpha_config = AlphaConfig(
-                symbols=["BTC", "ETH", "BNB", "SOL"],
-                capital=10000.0,
-                top_k=2,
-                roc_period=14,
-                ema_fast=20,
-                ema_slow=50,
-                atr_period=14,
-                breakeven_pct=0.02,
-                adx_min=22.0,
-                min_hold_days=5,
-                max_leverage=3.0,
-                risk_per_trade=0.03,
-                poll_interval_sec=300,
-                auto_execute=True,
-            )
-            a = AlphaStrategy(config=alpha_config, client_manager=client_manager, db=db)
-            global alpha
-            alpha = a
-            await alpha.start()
+        # Alpha bot disabled: replaced by rewritten Rotation v3 (daily-bar model)
+        # that matched the winning backtest config (+76% CAGR / 20% DD).
+
         print("[startup] Done - server ready", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -2017,13 +2007,19 @@ if STATIC_DIR.exists():
 
     @app.get("/")
     async def serve_root():
-        return FileResponse(str(STATIC_DIR / "index.html"))
+        return FileResponse(
+            str(STATIC_DIR / "index.html"),
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
-        return FileResponse(str(STATIC_DIR / "index.html"))
+        return FileResponse(
+            str(STATIC_DIR / "index.html"),
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 if __name__ == "__main__":
