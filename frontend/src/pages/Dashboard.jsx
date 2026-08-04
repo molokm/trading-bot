@@ -397,9 +397,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           sparkData={sparkData[5]}
         />
         {PRICE_COINS.map((coin, i) => {
-          const t = coin === 'BTC' ? ticker : tickers[coin]
-          const price = t ? parseFloat(t.last) : 0
-          const change = t ? parseFloat(t.change24h || 0).toFixed(2) : '0.00'
+          const tk = coin === 'BTC' ? ticker : tickers[coin]
+          const price = tk ? parseFloat(tk.last) : 0
+          const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
           return (
             <MetricCard
               key={coin}
