@@ -1408,11 +1408,12 @@ async def _get_okx_realized_pnl() -> dict:
 @app.get("/api/pnl")
 async def get_pnl():
     """PNL for Dashboard metric cards. Realized from OKX fills, unrealized from OKX positions."""
-    from datetime import datetime as dt, timezone as tz
+    from datetime import datetime as dt, timezone as tz, timedelta as td
 
     realized_1d = 0.0
     realized_7d = 0.0
     realized_30d = 0.0
+    realized_week = 0.0
     total_realized = 0.0
     total_fees = 0.0
     source = "none"
@@ -1427,6 +1428,7 @@ async def get_pnl():
         if paired:
             source = "okx"
             now = dt.now(tz.utc)
+            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
 
             for t in paired:
                 if t.get("reason") != "closed":
@@ -1458,12 +1460,15 @@ async def get_pnl():
                             realized_7d += trade_pnl
                         if age_sec <= 2592000:
                             realized_30d += trade_pnl
+                        # Calendar week: Monday 00:00 UTC → now
+                        if t_time >= week_start:
+                            realized_week += trade_pnl
                     except (ValueError, OSError, TypeError):
                         realized_30d += trade_pnl
                 else:
                     realized_30d += trade_pnl
 
-            print(f"[pnl] OKX source: total={total_realized:.2f} 1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} fees={total_fees:.2f}",
+            print(f"[pnl] OKX source: total={total_realized:.2f} 1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} fees={total_fees:.2f}",
                   flush=True)
     except Exception as e:
         import traceback
@@ -1473,6 +1478,7 @@ async def get_pnl():
     # ── 2. Fallback: in-memory from running bots ──
     if source == "none":
         now = dt.now(tz.utc)
+        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         all_logs = []
         if rotation and rotation._trade_log:
             all_logs.extend(rotation._trade_log)
@@ -1495,6 +1501,8 @@ async def get_pnl():
                         realized_7d += pnl
                     if age <= 2592000:
                         realized_30d += pnl
+                    if t_time >= week_start:
+                        realized_week += pnl
                 except Exception:
                     realized_30d += pnl
 
@@ -1513,6 +1521,7 @@ async def get_pnl():
         "1d": round(realized_1d, 2),
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
+        "week": round(realized_week, 2),
         "unrealized": round(unrealized, 2),
         "source": source,
         "fees": round(total_fees, 2),

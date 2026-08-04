@@ -10,6 +10,9 @@ import { useTranslation } from '../hooks/useTranslation'
 
 const PAIRS = ['Все', 'BTC', 'ETH', 'SOL', 'BNB']
 
+// Coins the bot actively trades — shown as live price cards on the dashboard
+const PRICE_COINS = ['BTC', 'ETH', 'SOL', 'BNB']
+
 /* ═══════ Animated Value — smooth colour transition ═══════ */
 function AnimatedValue({ children, className = '' }) {
   return (
@@ -50,6 +53,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
+  const [tickers, setTickers] = useState({})
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
@@ -104,7 +108,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, trades, pnlData] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, trades, pnlData, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
@@ -112,6 +116,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.momentumTrades(30).catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
+        Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
@@ -120,18 +125,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
+      if (priceTickers) {
+        const byCoin = {}
+        priceTickers.forEach((tp, idx) => {
+          if (tp) byCoin[PRICE_COINS[idx]] = tp
+        })
+        setTickers(byCoin)
+      }
     } catch {}
     setLoading(false)
   }
 
   // Derived values (declared early — before any useMemo that depends on them)
-  const btcUsd = ticker ? parseFloat(ticker.last) : 0
   const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
   const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
   const unrealizedPnl = pnl?.unrealized || 0
   const pnlTotal = pnl?.total || 0
   const pnlDay = pnl?.['1d'] || 0
-  const pnlWeek = pnl?.['7d'] || 0
+  const pnlWeek = pnl?.week || 0
   const pnlMonth = pnl?.['30d'] || 0
 
     // Raw trades from DB + bot log (used as source for activeTrades)
@@ -274,7 +285,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   // Sparkline data for golden-zone MetricCards (stable random 10-point trends)
   const sparkData = useMemo(() =>
-    Array.from({ length: 6 }, () =>
+    Array.from({ length: 10 }, () =>
       Array.from({ length: 10 }, () => Math.random() * 100)
     )
   , [])
@@ -322,7 +333,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
 
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
-      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 lg:grid-cols-6 gap-3">
+      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-10 gap-3">
         <MetricCard
           label={t('dash.balance')}
           value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
@@ -355,6 +366,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           sparkData={sparkData[2]}
         />
         <MetricCard
+          label={t('dash.pnl_week')}
+          value={
+            <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
+            </AnimatedValue>
+          }
+          changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
+          mono
+          tip={t('dash.pnl_week_tip')}
+          sparkData={sparkData[3]}
+        />
+        <MetricCard
           label={t('dash.total_pnl')}
           value={
             <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
@@ -363,25 +386,33 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
           changeType={pnlTotal >= 0 ? 'positive' : 'negative'}
           mono
-          tip={t('dash.pnl_week_tip')}
-          sparkData={sparkData[3]}
+          tip={t('dash.total_pnl_tip')}
+          sparkData={sparkData[4]}
         />
         <MetricCard
           label={t('dash.positions_count')}
           value={<AnimatedValue>{positions.length}</AnimatedValue>}
           mono
           tip={t('dash.positions_count_tip')}
-          sparkData={sparkData[4]}
-        />
-        <MetricCard
-          label="BTC"
-          value={<AnimatedValue>{btcUsd ? `$${btcUsd.toLocaleString()}` : '---'}</AnimatedValue>}
-          change={`${btcChange}%`}
-          changeType={parseFloat(btcChange) >= 0 ? 'positive' : 'negative'}
-          mono
-          tip={t('dash.btc_tip')}
           sparkData={sparkData[5]}
         />
+        {PRICE_COINS.map((coin, i) => {
+          const t = coin === 'BTC' ? ticker : tickers[coin]
+          const price = t ? parseFloat(t.last) : 0
+          const change = t ? parseFloat(t.change24h || 0).toFixed(2) : '0.00'
+          return (
+            <MetricCard
+              key={coin}
+              label={coin}
+              value={<AnimatedValue>{price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}</AnimatedValue>}
+              change={`${change}%`}
+              changeType={parseFloat(change) >= 0 ? 'positive' : 'negative'}
+              mono
+              tip={t('dash.btc_tip')}
+              sparkData={sparkData[6 + i]}
+            />
+          )
+        })}
       </div>
 
       {/* ═══ MAIN GRID 65/35 ═══ */}
