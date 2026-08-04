@@ -58,7 +58,7 @@ class RotationConfig:
     max_leverage: float = 2.0
     risk_per_trade: float = 0.10   # 10% risk of equity per trade
     allocation_pct: float = 1.0    # max total margin = eq * this
-    atr_stop_mult: float = 2.5     # initial stop = daily ATR * 2.5
+    atr_stop_mult: float = 3.5     # initial stop = daily ATR * 3.5
     trail_atr_mult: float = 0.1    # trailing = daily ATR * 0.1
     breakeven_pct: float = 0.02    # move to BE after 2%
     partial_tp_pct: float = 0.10   # close 50% at +10%

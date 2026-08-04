@@ -76,6 +76,14 @@ ALPHA = StratConfig(
     partial_tp_pct=0.07, partial_tp_ratio=0.4,
 )
 
+V3_LIVE = StratConfig(
+    name="Momentum Rotation v3 (live sweep)",
+    adx_min=22.0, min_hold_days=3, risk_per_trade=0.05,
+    max_leverage=2.0, atr_stop_mult=3.5, trail_atr_mult=0.1,
+    breakeven_pct=0.02, partial_tp_pct=0.10, partial_tp_ratio=0.5,
+    max_margin_pct=2.0,
+)
+
 
 # ── Indicators (causal: value at i uses only data[:i+1]) ──
 
@@ -641,6 +649,14 @@ def summarize(cfg, equity_curve, trades, filters_hit, final_equity):
     wins = [t for t in closed if t["pnl"] > 0]
     losses = [t for t in closed if t["pnl"] <= 0]
 
+    gross_profit = sum(t["pnl"] for t in wins)
+    gross_loss = sum(t["pnl"] for t in losses)
+
+    reason_counts = {}
+    for t in closed:
+        r = t.get("reason", "unknown")
+        reason_counts[r] = reason_counts.get(r, 0) + 1
+
     first = equity_curve[0]["date"] if equity_curve else ""
     last = equity_curve[-1]["date"] if equity_curve else ""
     years = max(len(equity_curve) / 365.25, 1e-9)
@@ -696,11 +712,14 @@ def summarize(cfg, equity_curve, trades, filters_hit, final_equity):
         "max_drawdown_date": max_dd_date,
         "sharpe": round(sharpe, 2),
         "closed_trades": len(closed),
+        "exit_reasons": reason_counts,
         "wins": len(wins),
         "losses": len(losses),
         "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0.0,
         "avg_win": round(sum(t["pnl"] for t in wins) / len(wins), 2) if wins else 0.0,
         "avg_loss": round(sum(t["pnl"] for t in losses) / len(losses), 2) if losses else 0.0,
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
         "profit_factor": round(
             (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses)))
             if losses and sum(t["pnl"] for t in losses) != 0 else 0.0, 2
@@ -797,6 +816,10 @@ async def main():
     alpha = run_strategy(data, ALPHA)
     print_report(alpha)
 
+    print("\n[run] Momentum Rotation v3 (live) ...", flush=True)
+    v3 = run_strategy(data, V3_LIVE)
+    print_report(v3)
+
     print("\n[run] BTC Buy & Hold benchmark ...", flush=True)
     bnh = buy_and_hold_btc(data)
     print_report(bnh)
@@ -805,7 +828,7 @@ async def main():
     print("\n" + "=" * 72)
     print("COMPARISON")
     print("=" * 72)
-    rows = [mom, alpha, bnh]
+    rows = [mom, alpha, v3, bnh]
     print(f"  {'Strategy':28s} {'Return':>8} {'CAGR':>7} {'MaxDD':>7} {'Sharpe':>7} {'Trades':>7}")
     for r in rows:
         print(f"  {r['strategy']:28s} {r['total_return_pct']:+7.1f}% {r['cagr_pct']:6.1f}% "
@@ -814,12 +837,12 @@ async def main():
     # Verdict
     print("\nVERDICT")
     best = max(rows, key=lambda r: r["sharpe"] if r["max_drawdown_pct"] < 60 else -999)
-    vs_btc = mom["total_return_pct"] - bnh["total_return_pct"]
+    vs_btc = v3["total_return_pct"] - bnh["total_return_pct"]
     print(f"  Best risk-adjusted (Sharpe, DD<60%): {best['strategy']}")
-    print(f"  Momentum vs BTC buy&hold: {vs_btc:+.1f} pp total return")
-    if mom["sharpe"] < 0.5 or mom["total_return_pct"] < bnh["total_return_pct"]:
+    print(f"  V3 live vs BTC buy&hold: {vs_btc:+.1f} pp total return")
+    if v3["sharpe"] < 0.5 or v3["total_return_pct"] < bnh["total_return_pct"]:
         print("  → Current live strategies are NOT clearly better than holding BTC on this window.")
-    elif mom["max_drawdown_pct"] > 35:
+    elif v3["max_drawdown_pct"] > 35:
         print("  → Returns exist but drawdowns are heavy — size/risk params need tightening.")
     else:
         print("  → Momentum shows usable edge vs buy&hold under honest assumptions.")
@@ -837,9 +860,11 @@ async def main():
         },
         "momentum": {k: v for k, v in mom.items() if k not in ("equity_curve", "recent_trades", "config")},
         "alpha": {k: v for k, v in alpha.items() if k not in ("equity_curve", "recent_trades", "config")},
+        "v3_live": {k: v for k, v in v3.items() if k not in ("equity_curve", "recent_trades", "config")},
         "btc_buy_hold": bnh,
         "momentum_full": mom,
         "alpha_full": alpha,
+        "v3_full": v3,
     }
     with open(OUT_PATH, "w") as f:
         json.dump(out, f, indent=2)
