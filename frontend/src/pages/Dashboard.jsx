@@ -333,7 +333,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
 
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
-      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-10 gap-3">
+      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
         <MetricCard
           label={t('dash.balance')}
           value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
@@ -396,23 +396,32 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           tip={t('dash.positions_count_tip')}
           sparkData={sparkData[5]}
         />
-        {PRICE_COINS.map((coin, i) => {
-          const tk = coin === 'BTC' ? ticker : tickers[coin]
-          const price = tk ? parseFloat(tk.last) : 0
-          const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
-          return (
-            <MetricCard
-              key={coin}
-              label={coin}
-              value={<AnimatedValue>{price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}</AnimatedValue>}
-              change={`${change}%`}
-              changeType={parseFloat(change) >= 0 ? 'positive' : 'negative'}
-              mono
-              tip={t('dash.btc_tip')}
-              sparkData={sparkData[6 + i]}
-            />
-          )
-        })}
+        <MetricCard
+          label={t('dash.prices')}
+          tip={t('dash.prices_tip')}
+          className="col-span-2 md:col-span-4 lg:col-span-7"
+          value={
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 w-full">
+              {PRICE_COINS.map((coin) => {
+                const tk = coin === 'BTC' ? ticker : tickers[coin]
+                const price = tk ? parseFloat(tk.last) : 0
+                const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
+                const isUp = parseFloat(change) >= 0
+                return (
+                  <div key={coin} className="flex items-baseline justify-between gap-1 min-w-0">
+                    <span className="text-[0.62rem] font-medium text-[var(--txt-muted)] uppercase tracking-wide shrink-0">{coin}</span>
+                    <span className="text-[0.72rem] font-semibold mono text-[var(--txt)] truncate">
+                      {price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}
+                    </span>
+                    <span className={`text-[0.65rem] font-medium shrink-0 ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {isUp ? '▲' : '▼'}{Math.abs(parseFloat(change)).toFixed(2)}%
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          }
+        />
       </div>
 
       {/* ═══ MAIN GRID 65/35 ═══ */}

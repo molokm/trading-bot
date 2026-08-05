@@ -34,6 +34,8 @@ const en = {
   'dash.pnl_day_tip': 'Realized profit/loss in the last 24 hours',
   'dash.pnl_week': 'PnL Week',
   'dash.pnl_week_tip': 'Realized profit/loss for the current week (Mon–Sun)',
+  'dash.prices': 'Prices',
+  'dash.prices_tip': 'Current prices of coins the bot trades',
   'dash.total_pnl_tip': 'Total realized profit/loss all time',
   'dash.positions_count': 'Positions',
   'dash.positions_count_tip': 'Number of open positions',

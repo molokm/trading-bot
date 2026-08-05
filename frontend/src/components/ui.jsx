@@ -31,10 +31,10 @@ export function StatusBadge({ mode, label }) {
 }
 
 /* ═══════ Metric Card ═══════ */
-export function MetricCard({ label, value, change, changeType, tip, mono = true, sparkData }) {
+export function MetricCard({ label, value, change, changeType, tip, mono = true, sparkData, className }) {
   const color = changeType === 'positive' ? 'text-[var(--profit)]' : changeType === 'negative' ? 'text-[var(--loss)]' : 'text-[var(--txt-secondary)]'
   return (
-    <div className="metric-card">
+    <div className={`metric-card ${className || ''}`}>
       <div className="flex items-center gap-1">
         <span className="label">{label}</span>
         {tip && <Tip text={tip} />}
