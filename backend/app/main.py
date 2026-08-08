@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.services.okx_client import OKXClientManager
+from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
@@ -394,6 +395,39 @@ async def get_candles(inst_id: str = "BTC-USDT-SWAP", bar: str = "1H", limit: in
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
     return {"candles": result.get("data", [])}
+
+
+# ── Backtest ──
+
+@app.post("/api/backtest/run")
+async def backtest_run(data: dict):
+    """Run a real-data momentum backtest on OKX candles. Public market data."""
+    try:
+        result = await run_backtest_async(data or {})
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        print(f"[backtest] ERROR: {e}", flush=True)
+        raise HTTPException(status_code=500, detail=f"Ошибка бэктеста: {e}")
+
+    # Persist as the "last backtest" so it survives reloads / other devices.
+    try:
+        await db.set_setting("last_backtest", json.dumps(result, ensure_ascii=False))
+    except Exception as e:
+        print(f"[backtest] save last result failed: {e}", flush=True)
+    return result
+
+
+@app.get("/api/backtest/last")
+async def backtest_last():
+    """Return the most recently run backtest result (or null)."""
+    raw = await db.get_setting("last_backtest")
+    if not raw:
+        return {"result": None}
+    try:
+        return {"result": json.loads(raw)}
+    except Exception:
+        return {"result": None}
 
 
 # ── Trade ──

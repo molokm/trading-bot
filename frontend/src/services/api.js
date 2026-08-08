@@ -101,6 +101,12 @@ export const api = {
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 
+  // ── Backtest (real OKX data) ──
+  runBacktest: (config) =>
+    request('/backtest/run', { method: 'POST', body: JSON.stringify(config || {}) }),
+
+  getLastBacktest: () => request('/backtest/last'),
+
   // ── Telegram notifications ──
   telegramStatus: () => request('/telegram/status'),
 

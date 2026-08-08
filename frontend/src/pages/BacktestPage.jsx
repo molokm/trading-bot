@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
 import {
   Play, Download, BarChart3, Loader2, TrendingUp, TrendingDown,
-  ArrowUpRight, ArrowDownRight, GitCompare, CheckCircle, Image
+  ArrowUpRight, ArrowDownRight, GitCompare, CheckCircle, Image,
+  AlertTriangle, Calendar, Database, Coins
 } from 'lucide-react'
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import { api } from '../services/api'
@@ -15,59 +16,9 @@ const PAIRS = [
   { id: 'BNB-USDT-SWAP', label: 'BNB/USDT' },
 ]
 const PERIODS = ['7d', '30d', '90d', '1y']
-const TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d']
+const TIMEFRAMES = ['1d']
 const STRATEGY_IDS = ['momentum']
 
-
-function generateMockResult(config) {
-  const trades = Math.floor(Math.random() * 80) + 20
-  const winRate = 45 + Math.random() * 25
-  const wins = Math.floor(trades * winRate / 100)
-  const losses = trades - wins
-  const avgWin = 15 + Math.random() * 30
-  const avgLoss = 8 + Math.random() * 15
-  const totalReturn = (wins * avgWin - losses * avgLoss)
-  const maxDD = 5 + Math.random() * 25
-  const profitFactor = wins > 0 && losses > 0 ? ((wins * avgWin) / (losses * avgLoss)) : 0
-  const sharpe = (totalReturn / (maxDD || 1)) * (Math.random() * 0.5 + 0.5)
-
-  const tradeList = []
-  let equity = 10000
-  const equityCurve = [{ trade: 0, value: equity }]
-  for (let i = 0; i < trades; i++) {
-    const isWin = Math.random() * 100 < winRate
-    const pnl = isWin ? avgWin * (0.5 + Math.random()) : -avgLoss * (0.5 + Math.random())
-    equity += pnl
-    equityCurve.push({ trade: i + 1, value: Math.max(0, equity) })
-    const reasons = ['tp', 'sl', 'trail', 'breakeven']
-    tradeList.push({
-      entry_time: new Date(Date.now() - (trades - i) * 3600000).toISOString(),
-      exit_time: new Date(Date.now() - (trades - i - 1) * 3600000).toISOString(),
-      pair: config.pairs[0]?.replace('-USDT-SWAP', '') || 'BTC',
-      side: Math.random() > 0.5 ? 'LONG' : 'SHORT',
-      entry_px: 60000 + Math.random() * 10000,
-      exit_px: 60000 + Math.random() * 10000,
-      pnl,
-      pnl_pct: (pnl / equity) * 100,
-      reason: isWin ? 'tp' : reasons[Math.floor(Math.random() * reasons.length)],
-    })
-  }
-
-  const heatmap = []
-  for (let d = 0; d < 7; d++) {
-    for (let h = 0; h < 24; h++) {
-      heatmap.push({ day: d, hour: h, value: (Math.random() - 0.4) * 2 })
-    }
-  }
-
-  return {
-    metrics: { totalReturn, totalReturnPct: (totalReturn / 10000 * 100), winRate, profitFactor, sharpe, maxDD, trades },
-    equityCurve,
-    tradeList,
-    heatmap,
-    config: { ...config, runAt: new Date().toISOString() },
-  }
-}
 
 /* Custom Recharts tooltip for dark theme */
 function EquityTooltip({ active, payload, label }) {
@@ -169,11 +120,19 @@ function exportPng(equityCurve, t) {
   link.click()
 }
 
+function fmtDate(iso, locale) {
+  try {
+    return new Date(iso).toLocaleDateString(locale, { day: '2-digit', month: '2-digit', year: 'numeric' })
+  } catch {
+    return iso
+  }
+}
+
 export default function BacktestPage({ connected }) {
   const { t, locale } = useTranslation()
   const [config, setConfig] = useState({
     pairs: ['BTC-USDT-SWAP'],
-    period: '30d',
+    period: '1y',
     timeframe: '1d',
     strategy: 'momentum',
   })
@@ -181,27 +140,49 @@ export default function BacktestPage({ connected }) {
   const [results, setResults] = useState([])
   const [activeResult, setActiveResult] = useState(null)
   const [compareMode, setCompareMode] = useState(false)
+  const [error, setError] = useState(null)
 
   const runBacktest = async () => {
     setRunning(true)
-    await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000))
-    const result = generateMockResult(config)
-    const newResults = [...results, result]
-    setResults(newResults)
-    setActiveResult(result)
-    setRunning(false)
-    localStorage.setItem('backtest_history', JSON.stringify(newResults.slice(-20)))
+    setError(null)
+    try {
+      const result = await api.runBacktest(config)
+      const newResults = [...results, result]
+      setResults(newResults)
+      setActiveResult(result)
+      localStorage.setItem('backtest_history', JSON.stringify(newResults.slice(-20)))
+    } catch (e) {
+      setError(e.message || t('backtest.run_failed'))
+    } finally {
+      setRunning(false)
+    }
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem('backtest_history')
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved)
-        setResults(parsed)
-        if (parsed.length > 0) setActiveResult(parsed[parsed.length - 1])
-      } catch {}
-    }
+    let history = []
+    try {
+      const saved = localStorage.getItem('backtest_history')
+      if (saved) history = JSON.parse(saved) || []
+    } catch {}
+    // Load the last backtest persisted on the server (survives reload / other devices).
+    api.getLastBacktest()
+      .then(({ result }) => {
+        if (result) {
+          const exists = history.some(h => h?.config?.runAt === result.config?.runAt)
+          if (!exists) history = [...history, result]
+          setResults(history)
+          setActiveResult(result)
+        } else if (history.length) {
+          setResults(history)
+          setActiveResult(history[history.length - 1])
+        }
+      })
+      .catch(() => {
+        if (history.length) {
+          setResults(history)
+          setActiveResult(history[history.length - 1])
+        }
+      })
   }, [])
 
   const togglePair = (pairId) => {
@@ -262,9 +243,18 @@ export default function BacktestPage({ connected }) {
         </div>
       </div>
 
+      {error && (
+        <div className="flex items-center gap-2 px-4 py-2.5 text-2xs text-[var(--loss)] bg-[var(--loss-dim)] border border-[var(--loss)]/30 rounded-md flex-shrink-0">
+          <AlertTriangle size={13} />
+          <span className="font-medium">{t('backtest.run_failed')}:</span>
+          <span>{error}</span>
+          <button className="ml-auto btn btn-ghost btn-sm !text-[var(--txt-muted)]" onClick={() => setError(null)}>×</button>
+        </div>
+      )}
+
       <div className="panel flex-shrink-0">
-        <div className="px-4 py-2.5 text-2xs text-[var(--warn)] bg-[var(--warn-dim)] border-b border-[var(--border)]">
-          {t('backtest.mock_banner')}
+        <div className="px-4 py-2.5 text-2xs text-[var(--info)] bg-[var(--info-dim)] border-b border-[var(--border)] flex items-center gap-2">
+          <Database size={12} /> {t('backtest.real_data_banner')}
         </div>
         <div className="panel-header"><BarChart3 size={13} className="text-[var(--info)]" /> {t('backtest.config')}</div>
         <div className="p-4 flex flex-wrap items-end gap-6">
@@ -353,6 +343,28 @@ export default function BacktestPage({ connected }) {
       {/* Results */}
       {activeResult && m && (
         <>
+          {/* Run metadata — real data info */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header"><CheckCircle size={13} className="text-[var(--profit)]" /> {t('backtest.run_info')}</div>
+            <div className="px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-2xs">
+              <span className="flex items-center gap-1.5 text-[var(--txt-muted)]">
+                <Coins size={11} /> {config.pairs.join(', ')}
+              </span>
+              <span className="flex items-center gap-1.5 text-[var(--txt-muted)]">
+                <BarChart3 size={11} /> {activeResult.config.timeframe} · {activeResult.config.period}
+              </span>
+              <span className="flex items-center gap-1.5 text-[var(--txt-muted)]">
+                <Calendar size={11} /> {t('backtest.range')}: {fmtDate(activeResult.dataRange?.start, locale)} — {fmtDate(activeResult.dataRange?.end, locale)} ({activeResult.dataRange?.bars} {t('backtest.bars')})
+              </span>
+              <span className="flex items-center gap-1.5 text-[var(--txt-muted)]">
+                <Database size={11} /> {activeResult.dataNote}
+              </span>
+              <span className="ml-auto text-[var(--txt-muted)]">
+                {t('backtest.started_at')}: {new Date(activeResult.config.runAt).toLocaleString(locale)}
+              </span>
+            </div>
+          </div>
+
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 flex-shrink-0">
             <MetricCard label={t('backtest.total_return')} value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip={t('backtest.total_return_tip')} />
             <MetricCard label={t('backtest.trades_pct_full')} value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip={t('backtest.trades_pct_tip')} />
@@ -416,7 +428,7 @@ export default function BacktestPage({ connected }) {
         </>
       )}
 
-      {!activeResult && !running && (
+      {!activeResult && !running && !error && (
         <EmptyState icon={BarChart3} text={t('backtest.no_results')} sub={t('backtest.no_results_hint')} />
       )}
     </div>
