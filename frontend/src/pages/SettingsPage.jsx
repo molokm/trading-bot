@@ -128,6 +128,18 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     setTgTesting(false)
   }
 
+  const handleSimulateTelegram = async () => {
+    setTgTesting(true); setTgStatus(null)
+    try {
+      const payload = {}
+      if (tg.token) payload.token = tg.token
+      if (tg.chat_id) payload.chat_id = tg.chat_id
+      const r = await api.telegramSimulate(payload)
+      setTgStatus({ ok: r.ok, message: r.message })
+    } catch (err) { setTgStatus({ ok: false, message: err.message }) }
+    setTgTesting(false)
+  }
+
   const tgReady = tg.configured || (tg.token && tg.chat_id)
 
   const tgBadge = () => {
@@ -299,6 +311,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <button className="btn btn-ghost flex-1" onClick={handleSaveTelegram} disabled={tgSaving}>
                   {tgSaving ? <Loader2 size={14} className="animate-spin" /> : <RotateCw size={14} />}
                   {t('settings.tg_save')}
+                </button>
+              </div>
+              <div>
+                <button className="btn btn-ghost w-full" onClick={handleSimulateTelegram} disabled={tgTesting || !tgReady}>
+                  {tgTesting ? <Loader2 size={14} className="animate-spin" /> : <MessageCircle size={14} />}
+                  {t('settings.tg_simulate')}
                 </button>
               </div>
 

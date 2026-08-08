@@ -177,6 +177,7 @@ const en = {
   'settings.tg_no_token': 'No token',
   'settings.tg_test': 'Test',
   'settings.tg_save': 'Save',
+  'settings.tg_simulate': 'Simulate signals',
   'settings.tg_saved': 'Telegram settings saved.',
   'settings.tg_configured_to': 'Notifications go to chat',
   'settings.tg_token': 'Token:',

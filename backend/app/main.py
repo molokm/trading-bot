@@ -933,6 +933,48 @@ async def telegram_test(data: dict = None):
     }
 
 
+@app.post("/api/telegram/simulate")
+async def telegram_simulate(data: dict = None):
+    """Send sample trade-signal messages to Telegram to preview the real format.
+
+    No real order is placed — just the exact open / partial-TP / close messages
+    the rotation bot would send, with sample data.
+    """
+    d = data or {}
+    token = d.get("token", "") or telegram.token
+    chat_id = d.get("chat_id", "") or telegram.chat_id
+    if not (token and chat_id):
+        return {"ok": False, "message": "Telegram не настроен: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID"}
+    notifier = TelegramNotifier(token=token, chat_id=chat_id)
+
+    open_px = 67250.00
+    msg_open = notifier.open_msg(
+        coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
+        size=0.03, leverage=3.0,
+    )
+    msg_partial = notifier.partial_msg(
+        coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
+        pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
+    )
+    msg_close = notifier.close_msg(
+        coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
+        pnl=201.75, reason="trail_stop",
+    )
+
+    results = {}
+    for name, text in (("open", msg_open), ("partial", msg_partial), ("close", msg_close)):
+        ok = await notifier.send(text)
+        results[name] = ok
+        print(f"[telegram/simulate] {name}: sent={ok}", flush=True)
+
+    ok_all = all(results.values())
+    return {
+        "ok": ok_all,
+        "message": "Все 3 сигнала отправлены" if ok_all else f"Частичная отправка: {results}",
+        "results": results,
+    }
+
+
 @app.get("/api/chart/trades")
 async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
     """Return real trade markers + TP/SL lines for a specific instrument.

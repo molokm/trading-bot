@@ -178,6 +178,7 @@ const ru = {
   'settings.tg_no_token': 'Нет токена',
   'settings.tg_test': 'Тест',
   'settings.tg_save': 'Сохранить',
+  'settings.tg_simulate': 'Симуляция сигналов',
   'settings.tg_saved': 'Настройки Telegram сохранены.',
   'settings.tg_configured_to': 'Уведомления идут в чат',
   'settings.tg_token': 'Токен:',

@@ -107,6 +107,9 @@ export const api = {
   telegramConfig: (config) =>
     request('/telegram/config', { method: 'POST', body: JSON.stringify(config) }),
 
-  telegramTest: () =>
-    request('/telegram/test', { method: 'POST' }),
+  telegramTest: (config) =>
+    request('/telegram/test', { method: 'POST', body: JSON.stringify(config || {}) }),
+
+  telegramSimulate: (config) =>
+    request('/telegram/simulate', { method: 'POST', body: JSON.stringify(config || {}) }),
 };
