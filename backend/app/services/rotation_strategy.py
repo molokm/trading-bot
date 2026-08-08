@@ -52,7 +52,7 @@ class RotationConfig:
     ema_slow: int = 50
     atr_period: int = 14
     adx_min: float = 25.0
-    min_roc: float = 3.0            # min |roc| to even rank a coin
+    min_roc: float = 2.0            # min |roc| to even rank a coin
     sma_long: int = 200            # BTC regime MA
     min_hold_days: int = 3         # cooldown before rotating again
     max_leverage: float = 2.0

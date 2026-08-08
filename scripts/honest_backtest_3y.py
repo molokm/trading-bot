@@ -35,6 +35,10 @@ SLIPPAGE = 0.0005     # 0.05%
 DAYS_BACK = 1100      # ~3 years + warmup
 CACHE_PATH = os.path.join(os.path.dirname(__file__), "honest_3y_cache.json")
 OUT_PATH = os.path.join(os.path.dirname(__file__), "honest_3y_results.json")
+FUNDING_CACHE_PATH = os.path.join(os.path.dirname(__file__), "honest_3y_funding_cache.json")
+
+# Perp funding: OKX charges every 8h (3x/day). Longs pay shorts when rate>0.
+FUNDING_INTERVALS_PER_DAY = 3
 
 
 @dataclass
@@ -42,11 +46,14 @@ class StratConfig:
     name: str
     capital: float = 10000.0
     top_k: int = 2
-    roc_period: int = 14
+    roc_period: int = 14              # single-ROC mode (dual mode if roc_fast_period>0)
+    roc_fast_period: int = 0          # >0 → dual-ROC: rank by fast, filter by slow sign
+    roc_slow_period: int = 0
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
     adx_min: float = 18.0
+    min_roc: float = 0.0              # 0 = disabled; |roc| below this is skipped
     min_hold_days: int = 3
     max_leverage: float = 3.0
     risk_per_trade: float = 0.02
@@ -60,6 +67,7 @@ class StratConfig:
     corr_threshold: float = 0.7
     atr_stop_mult: float = 1.5
     max_margin_pct: float = 0.40
+    allow_short: bool = True
 
 
 MOMENTUM = StratConfig(
@@ -81,7 +89,17 @@ V3_LIVE = StratConfig(
     adx_min=22.0, min_hold_days=3, risk_per_trade=0.05,
     max_leverage=2.0, atr_stop_mult=3.5, trail_atr_mult=0.1,
     breakeven_pct=0.02, partial_tp_pct=0.10, partial_tp_ratio=0.5,
-    max_margin_pct=2.0,
+    max_margin_pct=2.0, min_roc=2.0,
+)
+
+V3_PROPOSED = StratConfig(
+    name="Momentum Rotation v4 (proposed)",
+    top_k=3, roc_fast_period=20, roc_slow_period=50,
+    ema_fast=15, ema_slow=70, adx_min=25.0, min_roc=3.0,
+    min_hold_days=3, max_leverage=2.0, risk_per_trade=0.02,
+    atr_stop_mult=2.5, trail_atr_mult=1.5,
+    breakeven_pct=0.02, partial_tp_pct=0.10, partial_tp_ratio=0.5,
+    max_margin_pct=2.0, allow_short=False,
 )
 
 
@@ -271,6 +289,73 @@ async def fetch_daily(coin: str, days_back: int = DAYS_BACK):
     return all_candles
 
 
+async def fetch_funding_okx(inst_id: str, after: str | None = None, limit: int = 100):
+    url = "https://www.okx.com/api/v5/public/funding-rate-history"
+    params = {"instId": inst_id, "limit": str(limit)}
+    if after:
+        params["after"] = after
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            resp = await client.get(url, params=params)
+            data = resp.json()
+            if data.get("code") != "0":
+                return [], False
+            out = []
+            for c in data.get("data", []):
+                out.append({
+                    "ts": int(c["fundingTime"]),
+                    "rate": float(c.get("fundingRate", 0.0)) or 0.0,
+                })
+            out.sort(key=lambda x: x["ts"])
+            return out, True
+        except Exception:
+            return [], False
+
+
+async def fetch_funding_daily(coin: str, days_back: int = DAYS_BACK):
+    inst_id = f"{coin}-USDT-SWAP"
+    all_rates = []
+    after = None
+    while True:
+        batch, ok = await fetch_funding_okx(inst_id, after=after, limit=100)
+        if not batch:
+            break
+        all_rates = batch + all_rates
+        after = str(batch[0]["ts"])
+        if len(batch) < 100:
+            break
+        await asyncio.sleep(0.2)
+    # aggregate to daily funding sum (3 intervals/day)
+    daily = {}
+    for r in all_rates:
+        d = datetime.fromtimestamp(r["ts"] / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+        daily[d] = daily.get(d, 0.0) + r["rate"]
+    return daily
+
+
+async def load_funding(force_refresh: bool = False):
+    if not force_refresh and os.path.exists(FUNDING_CACHE_PATH):
+        with open(FUNDING_CACHE_PATH) as f:
+            cached = json.load(f)
+        age_h = (time.time() - cached.get("fetched_at", 0)) / 3600
+        if age_h < 48 and all(c in cached.get("data", {}) for c in COINS):
+            print(f"  Using funding cache ({age_h:.1f}h old)", flush=True)
+            return cached["data"]
+    print("  Fetching OKX SWAP funding history (~3y)...", flush=True)
+    funding = {}
+    for coin in COINS:
+        daily = await fetch_funding_daily(coin)
+        if not daily:
+            daily = {}
+            print(f"    WARN: no funding data for {coin}", flush=True)
+        funding[coin] = daily
+        print(f"    {coin}: {len(daily)} days funding", flush=True)
+        await asyncio.sleep(0.25)
+    with open(FUNDING_CACHE_PATH, "w") as f:
+        json.dump({"fetched_at": time.time(), "data": funding}, f)
+    return funding
+
+
 async def load_data(force_refresh: bool = False):
     if not force_refresh and os.path.exists(CACHE_PATH):
         with open(CACHE_PATH) as f:
@@ -326,10 +411,9 @@ def build_coin_frame(candles, cfg: StratConfig):
     closes = [c["C"] for c in candles]
     highs = [c["H"] for c in candles]
     lows = [c["L"] for c in candles]
-    return {
+    frame = {
         "candles": candles,
         "closes": closes,
-        "roc": roc_series(closes, cfg.roc_period),
         "ema_f": ema_series(closes, cfg.ema_fast),
         "ema_s": ema_series(closes, cfg.ema_slow),
         "atr": atr_series(highs, lows, closes, cfg.atr_period),
@@ -337,9 +421,22 @@ def build_coin_frame(candles, cfg: StratConfig):
         "rsi": rsi_series(closes, 14),
         "sma200": sma_series(closes, 200),
     }
+    if cfg.roc_fast_period > 0:
+        frame["roc"] = roc_series(closes, cfg.roc_fast_period)
+        frame["roc_fast"] = frame["roc"]
+        frame["roc_slow"] = roc_series(closes, cfg.roc_slow_period)
+    else:
+        frame["roc"] = roc_series(closes, cfg.roc_period)
+    return frame
 
 
-def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
+def run_strategy(daily_data: dict, cfg: StratConfig, funding: dict | None = None,
+                 window: tuple[str, str] | None = None,
+                 return_trades: bool = False) -> dict:
+    """Run strategy. If window=(start_date, end_date) given, restrict to that
+    date range (used for walk-forward train/test). Indicators are computed on
+    the full history (causal), so warmup values are valid inside any window.
+    """
     coin_data = {}
     for coin in COINS:
         bars = daily_data.get(coin, [])
@@ -366,8 +463,20 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
     filters_hit = defaultdict(int)
     last_rotate = -10**9
     start_i = max(cfg.ema_slow + 20, 210)  # need SMA200
+    total_funding = 0.0
 
-    for i in range(start_i, len(all_dates)):
+    if window is not None:
+        w_start, w_end = window
+        idxs = [j for j, d in enumerate(all_dates) if w_start <= d <= w_end]
+        if len(idxs) < 30:
+            raise RuntimeError(f"window {w_start}→{w_end}: too few common dates ({len(idxs)})")
+        i_lo, i_hi = idxs[0], idxs[-1]
+    else:
+        i_lo, i_hi = start_i, len(all_dates) - 1
+    if i_lo < start_i:
+        i_lo = start_i
+
+    for i in range(i_lo, i_hi + 1):
         date = all_dates[i]
         sig_date = all_dates[i - 1]
 
@@ -376,6 +485,25 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
         for coin in COINS:
             ci = date_idx[coin][date]
             mtm[coin] = coin_data[coin]["candles"][ci]["C"]
+
+        # ── 0. Funding accrual for open positions (before stop/peak logic) ──
+        if funding:
+            for coin in list(positions.keys()):
+                pos = positions[coin]
+                ci = date_idx[coin][date]
+                bar = coin_data[coin]["candles"][ci]
+                ct = CT_VAL[coin]
+                rate_day = funding.get(coin, {}).get(date, 0.0)
+                if rate_day != 0.0:
+                    notional = pos["size"] * ct * bar["C"]
+                    if pos["side"] == "long":
+                        fpnl = -notional * rate_day
+                    else:
+                        # shorts receive when rate>0, pay when rate<0
+                        fpnl = notional * rate_day
+                    equity += fpnl
+                    total_funding += fpnl
+                    pos["funding"] = pos.get("funding", 0.0) + fpnl
 
         # ── 1. Manage open positions on TODAY's bar (H/L first) ──
         for coin in list(positions.keys()):
@@ -458,6 +586,7 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
                 equity += pnl
                 trades.append({
                     "date": date, "coin": coin, "side": pos["side"], "pnl": round(pnl, 2),
+                    "funding_pnl": round(pos.get("funding", 0.0), 2),
                     "reason": reason, "entry": pos["entry"], "exit": round(fill, 4),
                     "size": pos["size"], "closed": True, "hold_days": i - pos["entry_i"],
                 })
@@ -493,7 +622,12 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
             ema_trend = cd["ema_f"][si] > cd["ema_s"][si]
             rsi = cd["rsi"][si]
             roc = cd["roc"][si]
+            roc_slow = cd.get("roc_slow", [0.0])[si] if cfg.roc_fast_period > 0 else roc
             adx = cd["adx"][si]
+
+            if cfg.min_roc > 0 and abs(roc) < cfg.min_roc:
+                filters_hit["min_roc"] += 1
+                continue
 
             if rsi > cfg.rsi_long_max and ema_trend:
                 filters_hit["rsi_overbought"] += 1
@@ -517,8 +651,8 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
                     rets.append(cd["closes"][j] / cd["closes"][j - 1] - 1)
 
             ranked.append({
-                "coin": coin, "score": score, "roc": roc, "ema_trend": ema_trend,
-                "adx": adx, "atr": atr, "rets": rets,
+                "coin": coin, "score": score, "roc": roc, "roc_slow": roc_slow,
+                "ema_trend": ema_trend, "adx": adx, "atr": atr, "rets": rets,
             })
 
         ranked.sort(key=lambda x: x["score"], reverse=True)
@@ -527,9 +661,12 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
         for row in ranked:
             if len(targets) >= cfg.top_k:
                 break
-            if row["roc"] > 0 and row["ema_trend"] and row["adx"] >= cfg.adx_min:
+            slow_ok = cfg.roc_fast_period <= 0 or row["roc_slow"] > 0
+            if row["roc"] > 0 and row["ema_trend"] and slow_ok and row["adx"] >= cfg.adx_min:
                 side = "long"
-            elif row["roc"] < 0 and not row["ema_trend"] and row["adx"] >= cfg.adx_min:
+            elif (cfg.allow_short and row["roc"] < 0 and not row["ema_trend"]
+                  and (cfg.roc_fast_period <= 0 or row["roc_slow"] < 0)
+                  and row["adx"] >= cfg.adx_min):
                 side = "short"
             else:
                 continue
@@ -565,6 +702,7 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
             equity += pnl
             trades.append({
                 "date": date, "coin": coin, "side": pos["side"], "pnl": round(pnl, 2),
+                "funding_pnl": round(pos.get("funding", 0.0), 2),
                 "reason": "rotation_exit", "entry": pos["entry"], "exit": round(fill, 4),
                 "size": pos["size"], "closed": True, "hold_days": i - pos["entry_i"],
             })
@@ -607,7 +745,7 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
 
     # Force-close at last close
     if positions and all_dates:
-        date = all_dates[-1]
+        date = all_dates[i_hi]
         for coin in list(positions.keys()):
             pos = positions[coin]
             ci = date_idx[coin][date]
@@ -622,13 +760,15 @@ def run_strategy(daily_data: dict, cfg: StratConfig) -> dict:
             equity += pnl
             trades.append({
                 "date": date, "coin": coin, "side": pos["side"], "pnl": round(pnl, 2),
+                "funding_pnl": round(pos.get("funding", 0.0), 2),
                 "reason": "backtest_end", "entry": pos["entry"], "exit": round(fill, 4),
                 "size": pos["size"], "closed": True,
             })
         if equity_curve:
             equity_curve[-1]["equity"] = equity
 
-    return summarize(cfg, equity_curve, trades, filters_hit, equity)
+    return summarize(cfg, equity_curve, trades, filters_hit, equity, total_funding,
+                     return_trades=return_trades)
 
 
 def _unrealized(positions, mtm):
@@ -643,7 +783,8 @@ def _unrealized(positions, mtm):
     return u
 
 
-def summarize(cfg, equity_curve, trades, filters_hit, final_equity):
+def summarize(cfg, equity_curve, trades, filters_hit, final_equity, total_funding=0.0,
+              return_trades=False):
     capital = cfg.capital
     closed = [t for t in trades if t.get("closed")]
     wins = [t for t in closed if t["pnl"] > 0]
@@ -657,60 +798,20 @@ def summarize(cfg, equity_curve, trades, filters_hit, final_equity):
         r = t.get("reason", "unknown")
         reason_counts[r] = reason_counts.get(r, 0) + 1
 
-    first = equity_curve[0]["date"] if equity_curve else ""
-    last = equity_curve[-1]["date"] if equity_curve else ""
-    years = max(len(equity_curve) / 365.25, 1e-9)
-    total_return = (final_equity / capital - 1) * 100
-    cagr = (final_equity / capital) ** (1 / years) - 1 if final_equity > 0 else -1
-
-    peak = capital
-    max_dd = 0.0
-    max_dd_date = ""
-    for pt in equity_curve:
-        peak = max(peak, pt["equity"])
-        dd = (peak - pt["equity"]) / peak * 100 if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-            max_dd_date = pt["date"]
-
-    rets = []
-    for j in range(1, len(equity_curve)):
-        prev = equity_curve[j - 1]["equity"]
-        if prev > 0:
-            rets.append(equity_curve[j]["equity"] / prev - 1)
-    if rets:
-        mean = sum(rets) / len(rets)
-        var = sum((r - mean) ** 2 for r in rets) / len(rets)
-        std = math.sqrt(var)
-        sharpe = (mean * 365) / (std * math.sqrt(365)) if std > 0 else 0.0
-    else:
-        sharpe = 0.0
-
-    # Yearly breakdown
-    by_year = {}
-    for pt in equity_curve:
-        y = pt["date"][:4]
-        by_year[y] = pt["equity"]
-    yearly = []
-    years_sorted = sorted(by_year)
-    prev = capital
-    for y in years_sorted:
-        eq = by_year[y]
-        yearly.append({"year": y, "equity": round(eq, 2), "return_pct": round((eq / prev - 1) * 100, 1)})
-        prev = eq
+    mc = monte_carlo(closed, capital, n=500, block=5)
 
     return {
         "strategy": cfg.name,
         "config": asdict(cfg),
-        "period": f"{first} → {last}",
-        "years": round(years, 2),
+        "period": f"{equity_curve[0]['date'] if equity_curve else ''} → {equity_curve[-1]['date'] if equity_curve else ''}",
+        "years": round(max(len(equity_curve) / 365.25, 1e-9), 2),
         "capital": capital,
         "final_equity": round(final_equity, 2),
-        "total_return_pct": round(total_return, 1),
-        "cagr_pct": round(cagr * 100, 1),
-        "max_drawdown_pct": round(max_dd, 1),
-        "max_drawdown_date": max_dd_date,
-        "sharpe": round(sharpe, 2),
+        "total_return_pct": round((final_equity / capital - 1) * 100, 1),
+        "cagr_pct": round(((final_equity / capital) ** (1 / max(len(equity_curve) / 365.25, 1e-9)) - 1) * 100, 1),
+        "max_drawdown_pct": round(_max_dd(equity_curve, capital)["dd"], 1),
+        "max_drawdown_date": _max_dd(equity_curve, capital)["date"],
+        "sharpe": round(_sharpe(equity_curve), 2),
         "closed_trades": len(closed),
         "exit_reasons": reason_counts,
         "wins": len(wins),
@@ -724,11 +825,110 @@ def summarize(cfg, equity_curve, trades, filters_hit, final_equity):
             (sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses)))
             if losses and sum(t["pnl"] for t in losses) != 0 else 0.0, 2
         ),
+        "total_funding_pnl": round(total_funding, 2),
+        "funding_pct_of_capital": round(total_funding / capital * 100, 2) if capital else 0.0,
+        "monte_carlo": mc,
         "filters_hit": dict(filters_hit),
-        "yearly": yearly,
+        "yearly": _yearly(equity_curve, capital),
         "equity_curve": equity_curve[::7],  # weekly samples for file size
         "recent_trades": closed[-15:],
+        "all_trades": trades if return_trades else [],
     }
+
+
+def _max_dd(equity_curve, capital):
+    peak = capital
+    max_dd = 0.0
+    date = ""
+    for pt in equity_curve:
+        peak = max(peak, pt["equity"])
+        dd = (peak - pt["equity"]) / peak * 100 if peak > 0 else 0
+        if dd > max_dd:
+            max_dd = dd
+            date = pt["date"]
+    return {"dd": max_dd, "date": date}
+
+
+def _yearly(equity_curve, capital):
+    by_year = {}
+    for pt in equity_curve:
+        y = pt["date"][:4]
+        by_year[y] = pt["equity"]
+    yearly = []
+    prev = capital
+    for y in sorted(by_year):
+        eq = by_year[y]
+        yearly.append({"year": y, "equity": round(eq, 2), "return_pct": round((eq / prev - 1) * 100, 1)})
+        prev = eq
+    return yearly
+
+
+def _sharpe(equity_curve):
+    rets = []
+    for j in range(1, len(equity_curve)):
+        prev = equity_curve[j - 1]["equity"]
+        if prev > 0:
+            rets.append(equity_curve[j]["equity"] / prev - 1)
+    if len(rets) < 2:
+        return 0.0
+    mean = sum(rets) / len(rets)
+    var = sum((r - mean) ** 2 for r in rets) / len(rets)
+    std = math.sqrt(var)
+    return (mean * 365) / (std * math.sqrt(365)) if std > 0 else 0.0
+
+
+def monte_carlo(closed_trades, capital, n=500, block=5):
+    """Block-bootstrap trade sequence to estimate distribution of outcomes.
+    Resamples trades in contiguous blocks (preserving autocorrelation from
+    correlated same-regime trades) and re-runs the equity path.
+    """
+    if not closed_trades:
+        return {"n": 0}
+    import random
+    rng = random.Random(42)
+    final = []
+    maxdd = []
+    for _ in range(n):
+        boot = _block_bootstrap(closed_trades, block, rng)
+        eq = capital
+        peak = capital
+        dd = 0.0
+        for t in boot:
+            eq += t["pnl"]
+            if eq <= 0:
+                eq = 0
+                break
+            peak = max(peak, eq)
+            dd = max(dd, (peak - eq) / peak * 100 if peak > 0 else 0)
+        final.append(eq)
+        maxdd.append(dd)
+    final.sort()
+    maxdd.sort()
+    def pct(arr, p):
+        idx = min(len(arr) - 1, int(p / 100 * len(arr)))
+        return arr[idx]
+    return {
+        "n": n,
+        "block_size": block,
+        "profit_pct": round(sum(1 for f in final if f > capital) / n * 100, 1),
+        "final_equity_p05": round(pct(final, 5), 0),
+        "final_equity_median": round(pct(final, 50), 0),
+        "final_equity_p95": round(pct(final, 95), 0),
+        "maxdd_p05": round(pct(maxdd, 5), 1),   # worst 5% drawdown
+        "maxdd_median": round(pct(maxdd, 50), 1),
+        "maxdd_p95": round(pct(maxdd, 95), 1),
+    }
+
+
+def _block_bootstrap(closed, block, rng):
+    n = len(closed)
+    if n <= block:
+        return list(closed)
+    out = []
+    while len(out) < n:
+        start = rng.randrange(0, n - block + 1)
+        out.extend(closed[start:start + block])
+    return out[:n]
 
 
 def buy_and_hold_btc(daily_data: dict, capital: float = 10000.0) -> dict:
@@ -797,6 +997,16 @@ def print_report(r: dict):
             print("  Filters:")
             for k, v in sorted(r["filters_hit"].items(), key=lambda x: -x[1]):
                 print(f"    {k:18s} {v}")
+        if "total_funding_pnl" in r and r["strategy"] != "BTC Buy & Hold":
+            print(f"  Funding PnL:    ${r['total_funding_pnl']:,.2f}  "
+                  f"({r['funding_pct_of_capital']:+.2f}% of capital)")
+        mc = r.get("monte_carlo")
+        if mc and mc.get("n"):
+            print("  Monte Carlo (block bootstrap):")
+            print(f"    P(profit)          {mc['profit_pct']}%")
+            print(f"    Final equity p05/med/p95: ${mc['final_equity_p05']:,.0f} / "
+                  f"${mc['final_equity_median']:,.0f} / ${mc['final_equity_p95']:,.0f}")
+            print(f"    MaxDD p05/med/p95:   {mc['maxdd_p05']}% / {mc['maxdd_median']}% / {mc['maxdd_p95']}%")
 
 
 async def main():
@@ -807,18 +1017,23 @@ async def main():
     print("=" * 72)
 
     data = await load_data(force_refresh=force)
+    funding = await load_funding(force_refresh=force)
 
     print("\n[run] Momentum Rotation v2 ...", flush=True)
-    mom = run_strategy(data, MOMENTUM)
+    mom = run_strategy(data, MOMENTUM, funding)
     print_report(mom)
 
     print("\n[run] Alpha Rotation ...", flush=True)
-    alpha = run_strategy(data, ALPHA)
+    alpha = run_strategy(data, ALPHA, funding)
     print_report(alpha)
 
     print("\n[run] Momentum Rotation v3 (live) ...", flush=True)
-    v3 = run_strategy(data, V3_LIVE)
+    v3 = run_strategy(data, V3_LIVE, funding)
     print_report(v3)
+
+    print("\n[run] Momentum Rotation v4 (proposed) ...", flush=True)
+    v4 = run_strategy(data, V3_PROPOSED, funding)
+    print_report(v4)
 
     print("\n[run] BTC Buy & Hold benchmark ...", flush=True)
     bnh = buy_and_hold_btc(data)
@@ -828,7 +1043,7 @@ async def main():
     print("\n" + "=" * 72)
     print("COMPARISON")
     print("=" * 72)
-    rows = [mom, alpha, v3, bnh]
+    rows = [mom, alpha, v3, v4, bnh]
     print(f"  {'Strategy':28s} {'Return':>8} {'CAGR':>7} {'MaxDD':>7} {'Sharpe':>7} {'Trades':>7}")
     for r in rows:
         print(f"  {r['strategy']:28s} {r['total_return_pct']:+7.1f}% {r['cagr_pct']:6.1f}% "
@@ -840,6 +1055,10 @@ async def main():
     vs_btc = v3["total_return_pct"] - bnh["total_return_pct"]
     print(f"  Best risk-adjusted (Sharpe, DD<60%): {best['strategy']}")
     print(f"  V3 live vs BTC buy&hold: {vs_btc:+.1f} pp total return")
+    vs_v4 = v4["total_return_pct"] - v3["total_return_pct"]
+    print(f"  V4 proposed vs V3 live: {vs_v4:+.1f} pp total return, "
+          f"Sharpe {v4['sharpe']:.2f} vs {v3['sharpe']:.2f}, "
+          f"MaxDD {v4['max_drawdown_pct']}% vs {v3['max_drawdown_pct']}%")
     if v3["sharpe"] < 0.5 or v3["total_return_pct"] < bnh["total_return_pct"]:
         print("  → Current live strategies are NOT clearly better than holding BTC on this window.")
     elif v3["max_drawdown_pct"] > 35:
@@ -861,10 +1080,12 @@ async def main():
         "momentum": {k: v for k, v in mom.items() if k not in ("equity_curve", "recent_trades", "config")},
         "alpha": {k: v for k, v in alpha.items() if k not in ("equity_curve", "recent_trades", "config")},
         "v3_live": {k: v for k, v in v3.items() if k not in ("equity_curve", "recent_trades", "config")},
+        "v4_proposed": {k: v for k, v in v4.items() if k not in ("equity_curve", "recent_trades", "config")},
         "btc_buy_hold": bnh,
         "momentum_full": mom,
         "alpha_full": alpha,
         "v3_full": v3,
+        "v4_full": v4,
     }
     with open(OUT_PATH, "w") as f:
         json.dump(out, f, indent=2)

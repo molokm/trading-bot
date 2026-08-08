@@ -101,7 +101,7 @@ async def startup():
                 ema_slow=50,
                 atr_period=14,
                 adx_min=22.0,
-                min_roc=3.0,
+                min_roc=2.0,
                 sma_long=200,
                 min_hold_days=3,
                 max_leverage=2.0,
