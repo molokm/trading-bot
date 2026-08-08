@@ -194,6 +194,10 @@ export default function BacktestPage({ connected }) {
 
   const m = activeResult?.metrics
 
+  // Safe formatter for nullable metric values (legacy results may carry nulls).
+  const fmt = (v, digits = 0, prefix = '') =>
+    v == null || isNaN(v) ? '—' : `${prefix}${Number(v).toFixed(digits)}`
+
   /* Pre-compute best values per metric column for compare mode */
   const bestMetrics = useMemo(() => {
     if (results.length < 2) return {}
@@ -229,7 +233,7 @@ export default function BacktestPage({ connected }) {
           {results.length > 0 && (
             <button className="btn btn-ghost btn-sm" onClick={() => {
               const csv = [t('backtest.csv_header'), ...activeResult.tradeList.map(tr =>
-                `${tr.entry_time},${tr.exit_time},${tr.pair},${tr.side},${tr.entry_px.toFixed(2)},${tr.exit_px.toFixed(2)},${tr.pnl.toFixed(2)},${tr.pnl_pct.toFixed(2)}%,${tr.reason}`
+                `${tr.entry_time},${tr.exit_time ?? ''},${tr.pair},${tr.side},${tr.entry_px == null ? '' : tr.entry_px.toFixed(2)},${tr.exit_px == null ? '' : tr.exit_px.toFixed(2)},${tr.pnl == null ? '' : tr.pnl.toFixed(2)},${tr.pnl_pct == null ? '' : tr.pnl_pct.toFixed(2)}%,${tr.reason}`
               )].join('\n')
               const blob = new Blob([csv], { type: 'text/csv' })
               const url = URL.createObjectURL(blob)
@@ -324,12 +328,12 @@ export default function BacktestPage({ connected }) {
                   return (
                     <tr key={i}>
                       <td className="font-medium text-[var(--txt)]">#{i + 1}</td>
-                      <td className={`text-right mono font-semibold ${rm.totalReturnPct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'} ${rm.totalReturnPct === bestMetrics.totalReturnPct ? '!bg-[var(--profit-dim)]' : ''}`}> {rm.totalReturnPct >= 0 ? '+' : ''}{rm.totalReturnPct.toFixed(2)}%</td>
-                      <td className={`text-right mono ${rm.winRate === bestMetrics.winRate ? '!bg-[var(--profit-dim)]' : ''}`}>{rm.winRate.toFixed(1)}%</td>
-                      <td className={`text-right mono ${rm.profitFactor === bestMetrics.profitFactor ? '!bg-[var(--profit-dim)]' : ''}`}>{rm.profitFactor.toFixed(2)}</td>
-                      <td className={`text-right mono ${rm.sharpe === bestMetrics.sharpe ? '!bg-[var(--profit-dim)]' : ''}`}>{rm.sharpe.toFixed(2)}</td>
-                      <td className={`text-right mono text-[var(--loss)] ${rm.maxDD === bestMetrics.maxDD ? '!bg-[var(--profit-dim)]' : ''}`}>-{rm.maxDD.toFixed(1)}%</td>
-                      <td className="text-right mono">{rm.trades}</td>
+                      <td className={`text-right mono font-semibold ${rm.totalReturnPct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'} ${rm.totalReturnPct === bestMetrics.totalReturnPct ? '!bg-[var(--profit-dim)]' : ''}`}> {fmt(rm.totalReturnPct, 2, rm.totalReturnPct >= 0 ? '+' : '')}%</td>
+                      <td className={`text-right mono ${rm.winRate === bestMetrics.winRate ? '!bg-[var(--profit-dim)]' : ''}`}>{fmt(rm.winRate, 1)}%</td>
+                      <td className={`text-right mono ${rm.profitFactor === bestMetrics.profitFactor ? '!bg-[var(--profit-dim)]' : ''}`}>{fmt(rm.profitFactor, 2)}</td>
+                      <td className={`text-right mono ${rm.sharpe === bestMetrics.sharpe ? '!bg-[var(--profit-dim)]' : ''}`}>{fmt(rm.sharpe, 2)}</td>
+                      <td className={`text-right mono text-[var(--loss)] ${rm.maxDD === bestMetrics.maxDD ? '!bg-[var(--profit-dim)]' : ''}`}>-{fmt(rm.maxDD, 1)}%</td>
+                      <td className="text-right mono">{fmt(rm.trades, 0)}</td>
                       <td className="text-right"><button className="btn btn-ghost btn-sm" onClick={() => setActiveResult(r)}>{t('backtest.view')}</button></td>
                     </tr>
                   )
@@ -366,12 +370,12 @@ export default function BacktestPage({ connected }) {
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 flex-shrink-0">
-            <MetricCard label={t('backtest.total_return')} value={`${m.totalReturnPct >= 0 ? '+' : ''}${m.totalReturnPct.toFixed(2)}%`} change={`$${m.totalReturn >= 0 ? '+' : ''}${m.totalReturn.toFixed(0)}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip={t('backtest.total_return_tip')} />
-            <MetricCard label={t('backtest.trades_pct_full')} value={`${m.winRate.toFixed(1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip={t('backtest.trades_pct_tip')} />
-            <MetricCard label={t('backtest.profit_factor_full')} value={m.profitFactor.toFixed(2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.profit_factor_tip')} />
-            <MetricCard label={t('backtest.sharpe_full')} value={m.sharpe.toFixed(2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.sharpe_tip')} />
-            <MetricCard label={t('backtest.max_drawdown_full')} value={`-${m.maxDD.toFixed(1)}%`} changeType="negative" mono tip={t('backtest.max_drawdown_tip')} />
-            <MetricCard label={t('backtest.total_trades')} value={m.trades} mono tip={t('backtest.total_trades_tip')} />
+            <MetricCard label={t('backtest.total_return')} value={`${fmt(m.totalReturnPct, 2, m.totalReturnPct >= 0 ? '+' : '')}%`} change={`$${fmt(m.totalReturn, 0, m.totalReturn >= 0 ? '+' : '')}`} changeType={m.totalReturn >= 0 ? 'positive' : 'negative'} mono tip={t('backtest.total_return_tip')} />
+            <MetricCard label={t('backtest.trades_pct_full')} value={`${fmt(m.winRate, 1)}%`} changeType={m.winRate >= 50 ? 'positive' : 'negative'} mono tip={t('backtest.trades_pct_tip')} />
+            <MetricCard label={t('backtest.profit_factor_full')} value={fmt(m.profitFactor, 2)} changeType={m.profitFactor >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.profit_factor_tip')} />
+            <MetricCard label={t('backtest.sharpe_full')} value={fmt(m.sharpe, 2)} changeType={m.sharpe >= 1 ? 'positive' : 'negative'} mono tip={t('backtest.sharpe_tip')} />
+            <MetricCard label={t('backtest.max_drawdown_full')} value={`-${fmt(m.maxDD, 1)}%`} changeType="negative" mono tip={t('backtest.max_drawdown_tip')} />
+            <MetricCard label={t('backtest.total_trades')} value={fmt(m.trades, 0)} mono tip={t('backtest.total_trades_tip')} />
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-3">
@@ -413,10 +417,10 @@ export default function BacktestPage({ connected }) {
                         <td className="text-2xs mono">{new Date(tr.exit_time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
                         <td className="text-[var(--txt)] font-medium">{tr.pair}</td>
                         <td><span className={`text-2xs font-bold ${tr.side === 'LONG' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.side}</span></td>
-                        <td className="text-right mono">${tr.entry_px.toFixed(2)}</td>
-                        <td className="text-right mono">${tr.exit_px.toFixed(2)}</td>
-                        <td className={`text-right mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl >= 0 ? '+' : ''}{tr.pnl.toFixed(2)}</td>
-                        <td className={`text-right mono ${tr.pnl_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl_pct >= 0 ? '+' : ''}{tr.pnl_pct.toFixed(2)}%</td>
+                        <td className="text-right mono">${fmt(tr.entry_px, 2)}</td>
+                        <td className="text-right mono">${fmt(tr.exit_px, 2)}</td>
+                        <td className={`text-right mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl >= 0 ? '+' : ''}{fmt(tr.pnl, 2)}</td>
+                        <td className={`text-right mono ${tr.pnl_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{tr.pnl_pct >= 0 ? '+' : ''}{fmt(tr.pnl_pct, 2)}%</td>
                         <td className={`text-right text-2xs font-medium uppercase ${reasonColors[tr.reason] || 'text-[var(--txt-muted)]'}`}>{tr.reason}</td>
                       </tr>
                     )
