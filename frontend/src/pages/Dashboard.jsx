@@ -412,12 +412,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
           const isUp = parseFloat(change) >= 0
           const est = entryEst[coin]
-          const entryPx = est ? est.entry_price : 0
+          const entryPx = est && !est.blocked ? est.entry_price : 0
+          const blocked = est && est.blocked ? est.blocked_reason || '' : ''
           return (
             <MetricCard
               key={coin}
               label={coin}
-              tip={t('dash.prices_tip')}
+              tip={blocked ? `${t('dash.prices_tip')} · фильтр: ${blocked}` : t('dash.prices_tip')}
               mono
               change={`${isUp ? '▲' : '▼'}${Math.abs(parseFloat(change)).toFixed(2)}%`}
               changeType={isUp ? 'positive' : 'negative'}
@@ -425,7 +426,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <div className="flex flex-col leading-tight">
                   <span>{price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}</span>
                   <span className="text-[0.62rem] font-medium text-[var(--txt-muted)] whitespace-nowrap">
-                    {entryPx ? `вход ≈ $${entryPx.toLocaleString(undefined, { maximumFractionDigits: entryPx >= 1000 ? 0 : 2 })}` : 'вход ≈ ---'}
+                    {entryPx
+                      ? `вход ≈ $${entryPx.toLocaleString(undefined, { maximumFractionDigits: entryPx >= 1000 ? 0 : 2 })}`
+                      : blocked
+                        ? 'вход: фильтр'
+                        : 'вход ≈ ---'}
                   </span>
                 </div>
               }

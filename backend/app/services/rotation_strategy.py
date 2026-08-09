@@ -1201,15 +1201,85 @@ class RotationStrategy:
             "description": STRATEGY_DESC,
         }
 
+    def _evaluate_entry(self, coin: str, ind: dict) -> tuple:
+        """Оценка монеты фильтрами стратегии (как в _check_and_trade).
+
+        Возвращает (passed: bool, side: str, reason: str). Используется
+        и для реального открытия позиций, и для отображения на карточке,
+        чтобы «вход» показывался только для реально проходных сигналов.
+        """
+        cfg = self.config
+        regime = getattr(self, "_regime", "unknown")
+
+        if ind.get("atr", 0) <= 0:
+            return False, "", "нет ATR"
+
+        # ── FILTER: Volatility ──
+        if ind.get("avg_atr_30", 0) > 0 and ind["atr"] > ind["avg_atr_30"] * cfg.vol_mult:
+            return False, "", f"vol ATR>{ind['avg_atr_30'] * cfg.vol_mult:.0f}"
+
+        # ── FILTER: RSI ──
+        if ind["rsi"] > cfg.rsi_long_max and ind["ema_trend"]:
+            return False, "", f"RSI {ind['rsi']:.0f}>{cfg.rsi_long_max}"
+        if ind["rsi"] < cfg.rsi_short_min and not ind["ema_trend"]:
+            return False, "", f"RSI {ind['rsi']:.0f}<{cfg.rsi_short_min}"
+
+        # ── FILTER: min |roc| ──
+        if abs(ind["roc"]) < cfg.min_roc:
+            return False, "", f"|ROC| {ind['roc']:.1f}%<{cfg.min_roc}%"
+
+        # ── Направление по рыночному режиму ──
+        if regime in ("bull", "unknown"):
+            if ind["roc"] > cfg.min_roc and ind["ema_trend"] and ind["adx"] >= cfg.adx_min:
+                side = "long"
+            else:
+                return False, "", "нет лонг-условий (ROC/ADX/тренд)"
+        elif regime == "bear":
+            if cfg.allow_short and ind["roc"] < -cfg.min_roc \
+                    and not ind["ema_trend"] and ind["adx"] >= cfg.adx_min:
+                side = "short"
+            else:
+                return False, "", "нет шорт-условий (ROC/ADX/тренд)"
+        else:  # chop
+            return False, "", "режим chop (кэш)"
+
+        # ── FILTER: Correlation ──
+        if not self._check_correlation(coin, self._latest_indicators):
+            return False, "", "корреляция с открытой позицией"
+
+        return True, side, ""
+
     def _entry_estimates(self, equity: float) -> dict:
-        """Ориентировочная стоимость входа (маржа) по каждой монете."""
+        """Ориентировочная стоимость входа (маржа) по каждой монете.
+
+        Показывает вход ТОЛЬКО для монет, прошедших фильтры стратегии
+        (passed=True). Остальные приходят с blocked=True + причиной, чтобы
+        карточка не вводила в заблуждение.
+        """
         cfg = self.config
         out = {}
         for coin, ind in self._latest_indicators.items():
+            passed, side, reason = self._evaluate_entry(coin, ind)
             price = ind.get("close_today", 0)
             atr = ind.get("atr", 0)
-            if not price or price <= 0 or not atr or atr <= 0:
+
+            base = {
+                "price": round(price, 2) if price else 0,
+                "blocked": not passed,
+                "blocked_reason": reason if not passed else "",
+            }
+
+            if not passed:
+                base["entry_price"] = None
+                out[coin] = base
                 continue
+            if not price or price <= 0 or not atr or atr <= 0:
+                base["blocked"] = True
+                base["blocked_reason"] = "нет данных"
+                base["entry_price"] = None
+                out[coin] = base
+                continue
+
             atr_pct = atr / price * 100
             stop_pct = (atr * cfg.atr_stop_mult) / price
             notional = (equity * cfg.risk_per_trade) / stop_pct
@@ -1219,8 +1289,9 @@ class RotationStrategy:
             max_margin = equity * cfg.allocation_pct
             margin = min(margin, max_margin)
             out[coin] = {
-                "price": round(price, 2),
-                "entry_price": round(ind["close_today"], 2),
+                **base,
+                "side": side,
+                "entry_price": round(price, 2),
                 "atr_pct": round(atr_pct, 2),
                 "stop_pct": round(stop_pct * 100, 2),
                 "notional": round(notional, 0),
