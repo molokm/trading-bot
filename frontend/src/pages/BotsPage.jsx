@@ -487,6 +487,19 @@ export default function BotsPage({ connected, isGuest }) {
             <span>просадка 27%</span>
           </div>
 
+          <div className="rounded-xl bg-[var(--bg)]/50 ring-1 ring-[var(--border)]/40 p-3 space-y-1.5">
+            <div className="text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.fee_title')}</div>
+            <div className="grid grid-cols-5 gap-1 text-center">
+              {[{ f: '0%', c: '41.7%' }, { f: '0.05%', c: '33.5%' }, { f: '0.1%', c: '26.3%' }, { f: '0.15%', c: '19.0%' }, { f: '0.2%', c: '12.1%' }].map(x => (
+                <div key={x.f} className="rounded-md bg-[var(--surface-overlay)]/50 px-1 py-1.5">
+                  <div className="text-[0.6rem] text-[var(--txt-muted)]">ком. {x.f}</div>
+                  <div className="mono text-xs font-bold text-[var(--profit)]">{x.c}</div>
+                </div>
+              ))}
+            </div>
+            <div className="text-[0.6rem] text-[var(--txt-muted)] leading-snug">{t('bots.fee_note')}</div>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {[
               'bots.ft_check_wf',

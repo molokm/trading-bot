@@ -229,6 +229,8 @@ const en = {
   'bots.yearly_note': 'All years out-of-sample: 2024–2026 tested with params trained on 2022–2024; 2022–2023 — with params trained on 2024–2026. No year was fitted to its own data.',
   'bots.ft_prev': '2022–2023 (out-of-sample)',
   'bots.ft_prev_val': '+109% over 2 years',
+  'bots.fee_title': 'CAGR at different fees (forward test 2024–2026)',
+  'bots.fee_note': 'Fee depends on your exchange tier (taker/maker, volume). Numbers above use 0.05%/side.',
   'bots.tagline': 'Rotation of the strongest trends on daily candles: long in bull regime, short in bear, cash in uncertainty.',
   'bots.tag_timeframe': 'daily candles',
   'bots.tag_positions': 'up to {n} positions',
