@@ -251,7 +251,7 @@ function BotCard({
             <PerfTile label={t('bots.total_pnl')} value={pnlStr} tone={pnl >= 0 ? 'profit' : 'loss'} />
             <PerfTile label={t('bots.trades_count')} value={trades} />
             <PerfTile label={t('bots.win_rate')} value={winRate != null ? `${winRate}%` : '—'} />
-            <PerfTile label={t('bots.cagr')} value={BACKTEST_SUMMARY.cagr} />
+            <PerfTile label={t('bots.open_count')} value={openPositions.length} />
           </div>
         </div>
 

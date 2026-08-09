@@ -222,6 +222,7 @@ const en = {
   'bots.status_error': 'Error',
   'bots.default_bot_name': 'Momentum Rotation',
   'bots.perf_title': 'Performance',
+  'bots.open_count': 'Positions',
   'bots.uptime': 'Uptime',
   'bots.win_rate': 'Win Rate',
   'bots.assets': 'Assets',

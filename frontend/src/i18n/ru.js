@@ -223,6 +223,7 @@ const ru = {
   'bots.status_error': 'Ошибка',
   'bots.default_bot_name': 'Momentum Rotation',
   'bots.perf_title': 'Работоспособность',
+  'bots.open_count': 'Позиции',
   'bots.uptime': 'В работе',
   'bots.win_rate': 'Винрейт',
   'bots.assets': 'Активы',
