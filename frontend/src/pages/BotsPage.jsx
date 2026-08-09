@@ -174,9 +174,9 @@ function BotCard({
 }) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
-    <div className="panel overflow-hidden flex flex-col transition-colors hover:border-[var(--border-hover)]">
+    <div className="panel !overflow-visible flex flex-col transition-colors hover:border-[var(--border-hover)]">
       {/* ─── Banner ─── */}
-      <div className={`relative px-4 py-3.5 border-b border-[var(--border)] bg-gradient-to-br ${accentDim} via-transparent to-transparent`}>
+      <div className={`relative px-4 py-3.5 border-b border-[var(--border)] bg-gradient-to-br ${accentDim} via-transparent to-transparent rounded-t-[var(--radius-lg)]`}>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)] flex items-center justify-center shadow-sm">
