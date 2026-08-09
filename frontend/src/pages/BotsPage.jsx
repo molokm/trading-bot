@@ -166,7 +166,7 @@ function PerfTile({ label, value, tone = 'neutral' }) {
 
 function BotCard({
   id, name, stratId, version, icon: Icon, accentDim, accentTxt,
-  statusMode, statusLabel, coins, description,
+  statusMode, statusLabel, coins, description, tags = [],
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
   isGuest, loading, t,
@@ -241,8 +241,19 @@ function BotCard({
           </div>
         )}
 
-        {/* ─── Описание ─── */}
-        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">{description}</div>
+        {/* ─── Описание / особенности ─── */}
+        <div className="space-y-2">
+          <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('bots.tagline')}</div>
+          {tags.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {tags.map(tag => (
+                <span key={tag} className="px-2 py-0.5 rounded-full text-[0.62rem] font-medium bg-[var(--surface-overlay)] text-[var(--txt-secondary)] ring-1 ring-[var(--border)]/50">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
 
         {/* ─── Таблица доходности ─── */}
         <div className="rounded-xl bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-3">
@@ -362,6 +373,17 @@ export default function BotsPage({ connected, isGuest }) {
   const momRunning = !!momentumStatus?.running
   const momStartedAt = momentumStatus?.started_at ? Date.parse(momentumStatus.started_at) : null
 
+  const momCfg = momentumStatus?.config
+  const momTags = [
+    ...(momCfg?.symbols?.length ? [`${momCfg.symbols.length} монет`] : []),
+    t('bots.tag_timeframe'),
+    t('bots.tag_positions', { n: momCfg?.top_k || 2 }),
+    ...(momCfg?.max_leverage ? [t('bots.tag_leverage', { x: momCfg.max_leverage })] : []),
+    t('bots.tag_regime'),
+    t('bots.tag_trailing'),
+    t('bots.tag_roi'),
+  ]
+
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
       <div className="flex items-center justify-between flex-shrink-0">
@@ -391,6 +413,7 @@ export default function BotsPage({ connected, isGuest }) {
           statusLabel={momRunning ? t('bots.status_running') : t('bots.status_stopped')}
           coins={momentumStatus?.config?.symbols || momLocal.symbols}
           description={momentumStatus?.description || strategyDesc.momentum}
+          tags={momTags}
           pnl={momentumStatus?.total_pnl || 0}
           trades={momentumStatus?.total_trades || 0}
           winRate={momentumStatus?.win_rate}
