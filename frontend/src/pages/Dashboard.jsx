@@ -402,6 +402,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           tip={t('dash.positions_count_tip')}
           sparkData={sparkData[5]}
         />
+      </div>
+
+      {/* ═══ Цены — отдельная строка ═══ */}
+      <div className="flex-shrink-0 grid grid-cols-2 md:grid-cols-4 gap-3">
         {PRICE_COINS.map((coin) => {
           const tk = coin === 'BTC' ? ticker : tickers[coin]
           const price = tk ? parseFloat(tk.last) : 0
