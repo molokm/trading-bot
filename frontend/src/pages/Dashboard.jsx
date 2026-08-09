@@ -107,13 +107,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return () => clearInterval(interval)
   }, [connected])
 
-  // Ориентировочные цены входа обновляем раз в час (цены — каждые 10с выше)
-  useEffect(() => {
-    setEntryEst(entryRef.current)
-    const id = setInterval(() => setEntryEst(entryRef.current), 3600000)
-    return () => clearInterval(id)
-  }, [])
-
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
@@ -133,6 +126,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momStatus) {
         setMomentumStatus(momStatus)
         entryRef.current = momStatus.entry_estimates || {}
+        setEntryEst(entryRef.current)
       }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
