@@ -18,7 +18,7 @@ const ROTATION_PARAMS = [
 const PARAM_BASE = {
   capital:            { min: 500, max: 100000, step: 500, unit: '$' },
   top_k:              { min: 1, max: 4, step: 1, unit: '' },
-  risk_per_trade:     { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
+  risk_per_trade:     { min: 0.5, max: 20, step: 0.5, unit: '%', asPercent: true },
   poll_interval_sec:  { min: 60, max: 900, step: 60, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's' },
   breakeven_pct:      { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
   partial_tp_pct:     { min: 1, max: 20, step: 0.5, unit: '%', asPercent: true },
@@ -30,9 +30,9 @@ const PARAM_BASE = {
 }
 
 const DEFAULT_MOM_CONFIG = {
-  capital: 10000, top_k: 2, risk_per_trade: 0.02, poll_interval_sec: 300,
-  breakeven_pct: 0.03, partial_tp_pct: 0.05, partial_tp_ratio: 0.5,
-  trail_atr_mult: 0.5, adx_min: 18, min_hold_days: 3, max_leverage: 3,
+  capital: 10000, top_k: 2, risk_per_trade: 0.14, poll_interval_sec: 300,
+  breakeven_pct: 0.05, partial_tp_pct: 0.08, partial_tp_ratio: 0.5,
+  trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
 }
 
 function getParamMeta(t) {

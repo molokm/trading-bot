@@ -33,13 +33,11 @@ COINS = ["BTC", "ETH", "BNB", "SOL"]
 STRATEGY_DESC = (
     "Бот ежедневно сканирует BTC, ETH, BNB, SOL на дневных барах и выбирает до 2 самых сильных тренда. "
     "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
-    "Фильтры отсекают шум: ADX≥29, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
-    "волатильность не выше среднего, низкая корреляция. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
-    "в бычьем — только лонги, в медвежьем — только шорты, в неопределённости — кэш. "
-    "Размер позиции считается от риска 14% капитала: стоп = 2.7× дневной ATR, плечо до 2× "
-    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 0.2× дневной ATR, "
-    "при +5% стоп в безубыток, при +8% закрывается половина позиции, динамический тейк-профит "
-    "(37.6% → 23.7% → 9.2% → безубыток по мере удержания). Минимум держим 11 дней. "
+    "Фильтры отсекают шум: ADX≥25, |ROC|≥3%, тренд по EMA, RSI не перекуплен/перепродан, "
+    "объём выше среднего, низкая корреляция с BTC. Лонги блокируются, если BTC ниже SMA200. "
+    "Размер позиции считается от риска 10% капитала: стоп = 3× дневной ATR, плечо до 2× (чем выше волатильность, тем меньше плечо). "
+    "После входа: трейлинг-стоп следует за ценой (0.2× часовой ATR), при +2% стоп уходит в безубыток, "
+    "при +5% закрывается половина позиции. Минимум держим 20 дней. "
     "Если монета выпадает из топа — закрываем по рынку. Режим cross margin, демо/реал переключается env."
 )
 
@@ -66,7 +64,7 @@ class RotationConfig:
     breakeven_pct: float = 0.05    # move to BE after 5%
     partial_tp_pct: float = 0.08   # close 50% at +8%
     partial_tp_ratio: float = 0.5  # fraction to close
-    roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
+    roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...] desc
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
     rsi_short_min: float = 21.0    # no short if RSI < 21
@@ -82,7 +80,8 @@ class RotationConfig:
         if self.symbols is None:
             self.symbols = ["BTC", "ETH", "BNB", "SOL"]
         if self.roi_table is None:
-            # Динамический ROI: чем дольше держим, тем ниже TP.
+            # Динамический ROI (как в freqtrade): чем дольше держим, тем ниже TP.
+            # [(0d, 37.6%), (3d, 23.7%), (8d, 9.2%), (17d, 0%)] — отсортировано по убыванию hold.
             self.roi_table = [
                 (17, 0.00),
                 (8, 0.092),
@@ -1023,7 +1022,7 @@ class RotationStrategy:
         # Sort by weighted score descending
         ranked.sort(key=lambda x: x[1], reverse=True)
 
-        # 5. Determine target coins (режим-зависимое направление + correlation filter)
+        # 5. Determine target coins (regime-зависимое направление + correlation filter)
         target_coins = set()
         for coin, score, roc_val, ema_trend, adx_val, atr_val in ranked:
             if len(target_coins) >= cfg.top_k:
@@ -1181,7 +1180,7 @@ class RotationStrategy:
 
         return {
             "running": self._running,
-            "strategy": "momentum_rotation_v4",
+            "strategy": "momentum_rotation_v3",
             "config": cfg,
             "equity": round(full_equity, 2),
             "capital": self._capital,
@@ -1194,39 +1193,11 @@ class RotationStrategy:
             "recent_trades": trades[-20:],
             "recent_signals": self._signal_log[-10:],
             "indicators": self._latest_indicators,
-            "entry_estimates": self._entry_estimates(full_equity),
             "filters": filters_active,
             "btc_200ma": round(self._btc_200ma, 2) if self._btc_200ma else None,
             "started_at": self._started_at,
             "description": STRATEGY_DESC,
         }
-
-    def _entry_estimates(self, equity: float) -> dict:
-        """Ориентировочная стоимость входа (маржа) по каждой монете."""
-        cfg = self.config
-        out = {}
-        for coin, ind in self._latest_indicators.items():
-            price = ind.get("close_today", 0)
-            atr = ind.get("atr", 0)
-            if not price or price <= 0 or not atr or atr <= 0:
-                continue
-            atr_pct = atr / price * 100
-            stop_pct = (atr * cfg.atr_stop_mult) / price
-            notional = (equity * cfg.risk_per_trade) / stop_pct
-            lev = 1.0 / (2 * (atr / price))
-            lev = max(1.0, min(lev, cfg.max_leverage))
-            margin = notional / lev
-            max_margin = equity * cfg.allocation_pct
-            margin = min(margin, max_margin)
-            out[coin] = {
-                "price": round(price, 2),
-                "atr_pct": round(atr_pct, 2),
-                "stop_pct": round(stop_pct * 100, 2),
-                "notional": round(notional, 0),
-                "margin": round(margin, 0),
-                "leverage": round(lev, 1),
-            }
-        return out
 
     def _calc_unrealized(self, coin: str) -> float:
         pos = self._positions.get(coin)
@@ -1270,7 +1241,7 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES ($1, 'rotation', 'momentum_rotation_v4', 'MULTI', '1D', "
+                    "VALUES ($1, 'rotation', 'momentum_rotation_v3', 'MULTI', '1D', "
                     "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v3') "
                     "ON CONFLICT (id) DO NOTHING",
                     (ROT_BOT_ID, self._equity, str(params), now),
@@ -1279,7 +1250,7 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES (?, 'rotation', 'momentum_rotation_v4', 'MULTI', '1D', "
+                    "VALUES (?, 'rotation', 'momentum_rotation_v3', 'MULTI', '1D', "
                     "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v3')",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )

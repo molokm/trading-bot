@@ -54,6 +54,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
   const [tickers, setTickers] = useState({})
+  const [entryEst, setEntryEst] = useState({})
+  const entryRef = useRef({})
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
@@ -105,6 +107,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return () => clearInterval(interval)
   }, [connected])
 
+  // Ориентировочные цены входа обновляем раз в час (цены — каждые 10с выше)
+  useEffect(() => {
+    setEntryEst(entryRef.current)
+    const id = setInterval(() => setEntryEst(entryRef.current), 3600000)
+    return () => clearInterval(id)
+  }, [])
+
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
@@ -121,7 +130,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (momStatus) setMomentumStatus(momStatus)
+      if (momStatus) {
+        setMomentumStatus(momStatus)
+        entryRef.current = momStatus.entry_estimates || {}
+      }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
@@ -401,21 +413,27 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           tip={t('dash.prices_tip')}
           className="col-span-2 md:col-span-4 lg:col-span-7"
           value={
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-1.5 w-full">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 w-full">
               {PRICE_COINS.map((coin) => {
                 const tk = coin === 'BTC' ? ticker : tickers[coin]
                 const price = tk ? parseFloat(tk.last) : 0
                 const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
                 const isUp = parseFloat(change) >= 0
+                const est = entryEst[coin]
                 return (
-                  <div key={coin} className="flex items-baseline justify-between gap-1 min-w-0">
-                    <span className="text-[0.62rem] font-medium text-[var(--txt-muted)] uppercase tracking-wide shrink-0">{coin}</span>
-                    <span className="text-[0.72rem] font-semibold mono text-[var(--txt)] truncate">
+                  <div key={coin} className="flex flex-col min-w-0 rounded-lg border border-[var(--panel-border)]/40 px-2.5 py-1.5 bg-[var(--bg)]/30">
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[0.7rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wide">{coin}</span>
+                      <span className={`text-[0.68rem] font-medium shrink-0 ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {isUp ? '▲' : '▼'}{Math.abs(parseFloat(change)).toFixed(2)}%
+                      </span>
+                    </div>
+                    <div className="text-xl font-bold mono text-[var(--txt)] leading-tight truncate">
                       {price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}
-                    </span>
-                    <span className={`text-[0.65rem] font-medium shrink-0 ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {isUp ? '▲' : '▼'}{Math.abs(parseFloat(change)).toFixed(2)}%
-                    </span>
+                    </div>
+                    <div className="text-[0.62rem] text-[var(--txt-muted)] leading-tight">
+                      {est ? `вход ≈ $${est.margin.toLocaleString()}` : 'вход ≈ ---'}
+                    </div>
                   </div>
                 )
               })}

@@ -49,16 +49,16 @@ ALLOW_SHORT = True
 
 # Warmup needed for EMA50/SMA200/ADX14 indicators before any signal can fire.
 MIN_CANDLES_PER_PAIR = 130
-# Upper bound on candles fetched per pair (covers a full year on 1H bars).
-MAX_CANDLES_PER_PAIR = 10000
+# Upper bound on candles fetched per pair (covers a full year on 1H bars
+# and a 7-day window on 1m bars).
+MAX_CANDLES_PER_PAIR = 12000
 
 PERIOD_DAYS = {"7d": 7, "30d": 30, "90d": 90, "1y": 365}
-TF_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+TF_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+              "1h": 60, "2h": 120, "4h": 240, "6h": 360, "12h": 720, "1d": 1440}
 # UI timeframe -> OKX bar parameter (OKX is case-sensitive: 1H / 1D).
-BAR_MAP = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H", "4h": "4H", "1d": "1D"}
-
-# Live bot trades daily bars; the backtest engine is validated on 1D.
-VALIDATED_TF = "1d"
+BAR_MAP = {"1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+           "1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H", "1d": "1D"}
 
 
 def _pair_label(inst_id: str) -> str:
@@ -648,11 +648,6 @@ async def run_backtest_async(config: dict) -> dict:
         raise ValueError(f"Неизвестный период: {period}")
     if timeframe not in TF_MINUTES:
         raise ValueError(f"Неизвестный таймфрейм: {timeframe}")
-    if timeframe != VALIDATED_TF:
-        raise ValueError(
-            f"Бэктест синхронизирован с живой стратегией и работает только на "
-            f"таймфрейме 1d (бот торгует по дневным свечам). Выберите 1d."
-        )
 
     bar = BAR_MAP[timeframe]
     days = PERIOD_DAYS[period]
@@ -724,8 +719,11 @@ async def run_backtest_async(config: dict) -> dict:
     # Map internal exit reasons to UI display reasons (sl/tp/trail/be/rotation).
     reason_map = {"stop_loss": "sl", "partial_tp": "tp", "trail_stop": "trail",
                   "rotation_exit": "rotation", "backtest_end": "backtest_end", "open": "open"}
+    # Only include closed trades (entries tracked as "open" have no exit data).
     trade_list = []
     for t in trades:
+        if not t.get("exit_time"):
+            continue
         trade_list.append({
             **{k: v for k, v in t.items() if k not in ("symbol",)},
             "reason": reason_map.get(t["reason"], t["reason"]),

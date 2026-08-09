@@ -16,7 +16,7 @@ const PAIRS = [
   { id: 'BNB-USDT-SWAP', label: 'BNB/USDT' },
 ]
 const PERIODS = ['7d', '30d', '90d', '1y']
-const TIMEFRAMES = ['1d']
+const TIMEFRAMES = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d']
 const STRATEGY_IDS = ['momentum']
 
 
@@ -410,7 +410,7 @@ export default function BacktestPage({ connected }) {
                 </thead>
                 <tbody>
                   {activeResult.tradeList.map((tr, i) => {
-                    const reasonColors = { tp: 'text-[var(--profit)]', sl: 'text-[var(--loss)]', trail: 'text-[var(--info)]', breakeven: 'text-[var(--warn)]' }
+                    const reasonColors = { tp: 'text-[var(--profit)]', sl: 'text-[var(--loss)]', trail: 'text-[var(--info)]', breakeven: 'text-[var(--warn)]', rotation: 'text-[var(--warn)]', backtest_end: 'text-[var(--txt-muted)]' }
                     return (
                       <tr key={i}>
                         <td className="text-2xs mono">{new Date(tr.entry_time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>
