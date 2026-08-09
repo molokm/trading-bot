@@ -36,8 +36,10 @@ const DEFAULT_MOM_CONFIG = {
   trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
 }
 
-// Честный бэктест: только вне-выборочный форвард-тест 2024–2026 (параметры не видели эти данные)
+// Честный бэктест: все годы вне выборки (walk-forward в обе стороны)
 const BACKTEST_YEARS = [
+  { year: '2022', ret: '+23%' },
+  { year: '2023', ret: '+70%' },
   { year: '2024', ret: '+26%' },
   { year: '2025', ret: '+13%' },
   { year: '2026', ret: '+42%' },
@@ -271,7 +273,7 @@ function BotCard({
               </div>
             ))}
           </div>
-          <div className="text-[0.6rem] text-[var(--txt-muted)] mt-2 leading-snug">{t('bots.backtest_note')}</div>
+          <div className="text-[0.6rem] text-[var(--txt-muted)] mt-2 leading-snug">{t('bots.yearly_note')}</div>
         </div>
 
         {/* ─── Actions ─── */}
@@ -476,6 +478,13 @@ export default function BotsPage({ connected, isGuest }) {
               <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">0</div>
               <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">4.6 года</div>
             </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-secondary)] rounded-lg bg-[var(--bg)]/50 ring-1 ring-[var(--border)]/40 px-3 py-2">
+            <span className="font-semibold text-[var(--txt)]">{t('bots.ft_prev')}:</span>
+            <span className="mono font-bold text-[var(--profit)]">{t('bots.ft_prev_val')}</span>
+            <span>CAGR 44.7%</span>
+            <span>просадка 27%</span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
