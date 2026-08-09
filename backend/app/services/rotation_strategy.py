@@ -1220,6 +1220,7 @@ class RotationStrategy:
             margin = min(margin, max_margin)
             out[coin] = {
                 "price": round(price, 2),
+                "entry_price": round(ind["close_today"], 2),
                 "atr_pct": round(atr_pct, 2),
                 "stop_pct": round(stop_pct * 100, 2),
                 "notional": round(notional, 0),

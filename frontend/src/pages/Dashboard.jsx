@@ -402,38 +402,32 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           tip={t('dash.positions_count_tip')}
           sparkData={sparkData[5]}
         />
-        <MetricCard
-          label={t('dash.prices')}
-          tip={t('dash.prices_tip')}
-          className="col-span-2 md:col-span-4 lg:col-span-7"
-          value={
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 w-full">
-              {PRICE_COINS.map((coin) => {
-                const tk = coin === 'BTC' ? ticker : tickers[coin]
-                const price = tk ? parseFloat(tk.last) : 0
-                const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
-                const isUp = parseFloat(change) >= 0
-                const est = entryEst[coin]
-                return (
-                  <div key={coin} className="flex flex-col min-w-0 rounded-lg border border-[var(--panel-border)]/40 px-2.5 py-1.5 bg-[var(--bg)]/30">
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="text-[0.7rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wide">{coin}</span>
-                      <span className={`text-[0.68rem] font-medium shrink-0 ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        {isUp ? '▲' : '▼'}{Math.abs(parseFloat(change)).toFixed(2)}%
-                      </span>
-                    </div>
-                    <div className="text-xl font-bold mono text-[var(--txt)] leading-tight truncate">
-                      {price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}
-                    </div>
-                    <div className="text-[0.62rem] text-[var(--txt-muted)] leading-tight">
-                      {est ? `вход ≈ $${est.margin.toLocaleString()}` : 'вход ≈ ---'}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          }
-        />
+        {PRICE_COINS.map((coin) => {
+          const tk = coin === 'BTC' ? ticker : tickers[coin]
+          const price = tk ? parseFloat(tk.last) : 0
+          const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
+          const isUp = parseFloat(change) >= 0
+          const est = entryEst[coin]
+          const entryPx = est ? est.entry_price : 0
+          return (
+            <MetricCard
+              key={coin}
+              label={coin}
+              tip={t('dash.prices_tip')}
+              mono
+              change={`${isUp ? '▲' : '▼'}${Math.abs(parseFloat(change)).toFixed(2)}%`}
+              changeType={isUp ? 'positive' : 'negative'}
+              value={
+                <div className="flex flex-col leading-tight">
+                  <span>{price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}</span>
+                  <span className="text-[0.62rem] font-medium text-[var(--txt-muted)] whitespace-nowrap">
+                    {entryPx ? `вход ≈ $${entryPx.toLocaleString(undefined, { maximumFractionDigits: entryPx >= 1000 ? 0 : 2 })}` : 'вход ≈ ---'}
+                  </span>
+                </div>
+              }
+            />
+          )
+        })}
       </div>
 
       {/* ═══ MAIN GRID 65/35 ═══ */}
