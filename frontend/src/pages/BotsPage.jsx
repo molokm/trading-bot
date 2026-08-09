@@ -36,15 +36,13 @@ const DEFAULT_MOM_CONFIG = {
   trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
 }
 
-// Валидированные результаты бэктеста (walk-forward, OKX 0.05%, плечо 2x)
+// Честный бэктест: только вне-выборочный форвард-тест 2024–2026 (параметры не видели эти данные)
 const BACKTEST_YEARS = [
-  { year: '2022', ret: '+21%' },
-  { year: '2023', ret: '+234%' },
-  { year: '2024', ret: '+64%' },
-  { year: '2025', ret: '+17%' },
-  { year: '2026', ret: '+76%' },
+  { year: '2024', ret: '+26%' },
+  { year: '2025', ret: '+13%' },
+  { year: '2026', ret: '+42%' },
 ]
-const BACKTEST_SUMMARY = { cagr: '76.6%', dd: '33%' }
+const BACKTEST_SUMMARY = { cagr: '33.5%', dd: '38.6%' }
 
 function getParamMeta(t) {
   const result = {}
@@ -460,7 +458,7 @@ export default function BotsPage({ connected, isGuest }) {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
               <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_cagr')}</div>
-              <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">76.6%</div>
+              <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">33.5%</div>
               <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">{t('bots.ft_cagr_sub')}</div>
             </div>
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
