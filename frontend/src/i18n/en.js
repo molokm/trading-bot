@@ -226,7 +226,7 @@ const en = {
   'bots.win_rate': 'Win Rate',
   'bots.assets': 'Assets',
   'bots.yearly_title': 'Returns by year (out-of-sample)',
-  'bots.yearly_note': 'All years out-of-sample: 2024–2026 tested with params trained on 2022–2024; 2022–2023 — with params trained on 2024–2026. No year was fitted to its own data.',
+  'bots.yearly_note': 'All years are honest out-of-sample tests: settings taken from another period, never fitted to that year.',
   'bots.ft_prev': '2022–2023 (out-of-sample)',
   'bots.ft_prev_val': '+109% over 2 years',
   'bots.fee_title': 'CAGR at different fees (forward test 2024–2026)',
