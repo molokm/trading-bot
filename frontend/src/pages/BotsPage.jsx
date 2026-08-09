@@ -71,15 +71,27 @@ const DEFAULT_IMP_CONFIG = {
   max_hold_bars: 30, max_leverage: 3.0,
 }
 
-// Честный бэктест: все годы вне выборки (walk-forward в обе стороны)
-const BACKTEST_YEARS = [
-  { year: '2022', ret: '+23%' },
-  { year: '2023', ret: '+70%' },
-  { year: '2024', ret: '+26%' },
-  { year: '2025', ret: '+13%' },
-  { year: '2026', ret: '+42%' },
-]
-const BACKTEST_SUMMARY = { cagr: '33.5%', dd: '38.6%' }
+// Честный бэктест (Freqtrade, вне выборки) — по каждой стратегии
+const MOM_BACKTEST = {
+  years: [
+    { year: '2022', ret: '+23%' },
+    { year: '2023', ret: '+70%' },
+    { year: '2024', ret: '+26%' },
+    { year: '2025', ret: '+13%' },
+    { year: '2026', ret: '+42%' },
+  ],
+  summary: { cagr: '33.5%', dd: '38.6%' },
+}
+const IMP_BACKTEST = {
+  years: [
+    { year: '2022', ret: '+0.4%' },
+    { year: '2023', ret: '+26.9%' },
+    { year: '2024', ret: '+16.6%' },
+    { year: '2025', ret: '−9.7%' },
+    { year: '2026', ret: '+24.9%' },
+  ],
+  summary: { cagr: '11.9%', dd: '27.1%' },
+}
 
 function getParamMeta(t, base = PARAM_BASE) {
   const result = {}
@@ -203,6 +215,7 @@ function PerfTile({ label, value, tone = 'neutral' }) {
 function BotCard({
   id, name, stratId, version, icon: Icon, accentDim, accentTxt,
   statusMode, statusLabel, coins, description, tags = [],
+  tagline, backtest,
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
   isGuest, loading, t,
@@ -280,7 +293,7 @@ function BotCard({
         {/* ─── Описание / особенности ─── */}
         <div className="space-y-2">
           <div className="flex items-start gap-1">
-            <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('bots.tagline')}</div>
+            <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{tagline}</div>
             <Tip text={description} />
           </div>
           {tags.length > 0 && (
@@ -295,6 +308,7 @@ function BotCard({
         </div>
 
         {/* ─── Таблица доходности (freqtrade) ─── */}
+        {backtest && (
         <div className="rounded-xl bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-3">
           <div className="flex items-center gap-1.5 mb-2">
             <BadgeCheck size={13} className="text-[var(--info)] flex-shrink-0" />
@@ -302,10 +316,10 @@ function BotCard({
           </div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.yearly_title')}</span>
-            <span className="text-[0.6rem] text-[var(--txt-muted)]">CAGR {BACKTEST_SUMMARY.cagr} · DD {BACKTEST_SUMMARY.dd}</span>
+            <span className="text-[0.6rem] text-[var(--txt-muted)]">CAGR {backtest.summary.cagr} · DD {backtest.summary.dd}</span>
           </div>
           <div className="grid grid-cols-5 gap-1 text-center">
-            {BACKTEST_YEARS.map(y => (
+            {backtest.years.map(y => (
               <div key={y.year} className="rounded-md bg-[var(--surface-overlay)]/50 px-1 py-1.5">
                 <div className="text-[0.6rem] text-[var(--txt-muted)]">{y.year}</div>
                 <div className={`mono text-xs font-bold ${y.ret.startsWith('-') ? 'text-[var(--loss)]' : 'text-[var(--profit)]'}`}>{y.ret}</div>
@@ -314,6 +328,7 @@ function BotCard({
           </div>
           <div className="text-[0.6rem] text-[var(--txt-muted)] mt-2 leading-snug">{t('bots.yearly_note')}</div>
         </div>
+        )}
 
         {/* ─── Actions ─── */}
         {!isGuest && (
@@ -509,6 +524,8 @@ export default function BotsPage({ connected, isGuest }) {
           coins={momentumStatus?.config?.symbols || momLocal.symbols}
           description={momentumStatus?.description || strategyDesc.momentum}
           tags={momTags}
+          tagline={t('bots.tagline')}
+          backtest={MOM_BACKTEST}
           pnl={momentumStatus?.total_pnl || 0}
           trades={momentumStatus?.total_trades || 0}
           winRate={momentumStatus?.win_rate}
@@ -535,6 +552,8 @@ export default function BotsPage({ connected, isGuest }) {
           coins={impulseStatus?.config?.symbols || impLocal.symbols}
           description={impulseStatus?.description || strategyDesc.impulse}
           tags={impTags}
+          tagline={t('bots.tagline_impulse')}
+          backtest={IMP_BACKTEST}
           pnl={impulseStatus?.total_pnl || 0}
           trades={impulseStatus?.total_trades || 0}
           winRate={impulseStatus?.win_rate}

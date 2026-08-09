@@ -234,6 +234,7 @@ const en = {
   'bots.fee_title': 'CAGR at different fees (forward test 2024–2026)',
   'bots.fee_note': 'Fee depends on your exchange tier (taker/maker, volume). Numbers above use 0.05%/side.',
   'bots.tagline': 'Rotation of the strongest trends on daily candles: long in bull regime, short in bear, cash in uncertainty.',
+  'bots.tagline_impulse': 'Impulse entry on a strong daily move with volume surge, pyramiding up to 2 adds and cascade take-profit.',
   'bots.tag_timeframe': 'daily candles',
   'bots.tag_positions': 'up to {n} positions',
   'bots.tag_leverage': 'up to {x}x leverage',
