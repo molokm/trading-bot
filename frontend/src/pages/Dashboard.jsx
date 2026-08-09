@@ -53,9 +53,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
-  const [tickers, setTickers] = useState({})
-  const [entryEst, setEntryEst] = useState({})
-  const entryRef = useRef({})
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
@@ -125,8 +122,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (tk) setTicker(tk)
       if (momStatus) {
         setMomentumStatus(momStatus)
-        entryRef.current = momStatus.entry_estimates || {}
-        setEntryEst(entryRef.current)
       }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
@@ -411,27 +406,17 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           const price = tk ? parseFloat(tk.last) : 0
           const change = tk ? parseFloat(tk.change24h || 0).toFixed(2) : '0.00'
           const isUp = parseFloat(change) >= 0
-          const est = entryEst[coin]
-          const entryPx = est && !est.blocked ? est.entry_price : 0
-          const blocked = est && est.blocked ? est.blocked_reason || '' : ''
           return (
             <MetricCard
               key={coin}
               label={coin}
-              tip={blocked ? `${t('dash.prices_tip')} · фильтр: ${blocked}` : t('dash.prices_tip')}
+              tip={t('dash.prices_tip')}
               mono
               change={`${isUp ? '▲' : '▼'}${Math.abs(parseFloat(change)).toFixed(2)}%`}
               changeType={isUp ? 'positive' : 'negative'}
               value={
                 <div className="flex flex-col leading-tight">
                   <span>{price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'}</span>
-                  <span className="text-[0.62rem] font-medium text-[var(--txt-muted)] whitespace-nowrap">
-                    {entryPx
-                      ? `вход ≈ $${entryPx.toLocaleString(undefined, { maximumFractionDigits: entryPx >= 1000 ? 0 : 2 })}`
-                      : blocked
-                        ? 'вход: фильтр'
-                        : 'вход ≈ ---'}
-                  </span>
                 </div>
               }
             />
