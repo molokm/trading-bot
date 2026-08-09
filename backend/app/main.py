@@ -18,6 +18,7 @@ from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
+from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.telegram_notifier import TelegramNotifier
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -48,19 +49,20 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
 rotation: Optional[RotationStrategy] = None
+impulse: Optional[ImpulseStrategy] = None
 telegram = TelegramNotifier()
 
 
 @app.on_event("startup")
 async def startup():
     try:
-        print("[startup] 1/4 DB init ...", flush=True)
+        print("[startup] 1/6 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
-        print("[startup] 2/4 OKX client init ...", flush=True)
+        print("[startup] 2/6 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        print("[startup] 3/4 Migration check ...", flush=True)
+        print("[startup] 3/6 Migration check ...", flush=True)
         # One-time cleanup: check if any old momentum data exists, wipe it all.
         # Checks trades table for old bot_id - most reliable signal.
         needs_cleanup = False
@@ -91,7 +93,7 @@ async def startup():
                 except Exception as e:
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
-        print("[startup] 4/5 Rotation auto-start ...", flush=True)
+        print("[startup] 4/6 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "SOL"],
@@ -122,7 +124,35 @@ async def startup():
             global rotation
             rotation = r
             await rotation.start()
-        print("[startup] 5/5 Done ...", flush=True)
+        print("[startup] 4/6 Impulse 1D auto-start ...", flush=True)
+        if _env_key and _env_secret and _env_pass:
+            imp_config = ImpulseConfig(
+                symbols=["BTC", "ETH", "BNB", "SOL"],
+                capital=10000.0,
+                top_k=4,
+                entry_roc=4.0,
+                max_adds=2,
+                risk_per_trade=0.10,
+                sl_atr_mult=5.0,
+                sl_atr_mult_short=5.0,
+                trail_atr_mult=8.0,
+                trail_atr_mult_short=8.0,
+                cooldown_bars=5,
+                tp1_atr=2.0,
+                tp1_frac=0.3,
+                tp2_atr=6.0,
+                tp2_frac=0.3,
+                max_hold_bars=30,
+                max_leverage=3.0,
+                poll_interval_sec=300,
+                auto_execute=True,
+            )
+            imp = ImpulseStrategy(config=imp_config, client_manager=client_manager, db=db,
+                                  notifier=telegram)
+            global impulse
+            impulse = imp
+            await impulse.start()
+        print("[startup] 5/6 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
         raise
@@ -132,6 +162,8 @@ async def startup():
 async def shutdown():
     if rotation and rotation._running:
         await rotation.stop()
+    if impulse and impulse._running:
+        await impulse.stop()
     await db.close()
 
 
@@ -292,6 +324,11 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
     """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
     # Normalize pos_side for matching
     norm_side = pos_side.lower() if pos_side else ""
+    # Check Impulse bot positions
+    if impulse and impulse._running and impulse._positions:
+        for coin, pos in impulse._positions.items():
+            if pos.inst_id == inst_id and pos.side == norm_side:
+                return "Impulse 1D"
     # Check Rotation bot positions
     if rotation and rotation._running and rotation._positions:
         for coin, pos in rotation._positions.items():
@@ -303,6 +340,11 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "Momentum"
+    if impulse and impulse._trade_log:
+        for t in reversed(impulse._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "Impulse 1D"
     return ""
 
 
@@ -318,12 +360,20 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in rotation._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "Momentum"
+    if impulse and impulse._trade_log:
+        for t in impulse._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "Impulse 1D"
     # Fallback: match by symbol+side (works when entry_time is unknown)
     side = trade.get("side", "")
     if rotation and rotation._trade_log:
         for t in rotation._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
                 return "Momentum"
+    if impulse and impulse._trade_log:
+        for t in impulse._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "Impulse 1D"
     # Fallback: DB bot_id stored for this trade
     return _db_bot_name(trade.get("bot_id", ""))
 
@@ -332,6 +382,8 @@ def _db_bot_name(bot_id: str) -> str:
     """Map DB bot_id -> UI bot name."""
     if bot_id in ("momentum_strategy", "rotation_strategy", MOM_BOT_ID, ROT_BOT_ID):
         return "Momentum"
+    if bot_id in ("impulse_strategy", IMP_BOT_ID):
+        return "Impulse 1D"
     return ""
 
 
@@ -919,6 +971,124 @@ async def rotation_update_config(data: dict = None):
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": asdict(cfg)}
 
+
+# ══════════════════════════════════════════════════════════════
+# IMPULSE 1D STRATEGY ENDPOINTS
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/impulse/status")
+async def impulse_status():
+    if not impulse:
+        return {"running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
+                "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
+                "config": None, "description": IMPULSE_DESC}
+    return impulse.get_status()
+
+
+@app.post("/api/impulse/start")
+async def impulse_start(data: dict = None):
+    """Start Impulse 1D strategy."""
+    global impulse
+    if impulse and impulse._running:
+        return {"message": "Impulse already running", **impulse.get_status()}
+    d = data or {}
+    cfg = ImpulseConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        capital=float(d.get("capital", 10000.0)),
+        top_k=int(d.get("top_k", 4)),
+        entry_roc=float(d.get("entry_roc", 4.0)),
+        max_adds=int(d.get("max_adds", 2)),
+        risk_per_trade=float(d.get("risk_per_trade", 0.10)),
+        sl_atr_mult=float(d.get("sl_atr_mult", 5.0)),
+        sl_atr_mult_short=float(d.get("sl_atr_mult_short", 5.0)),
+        trail_atr_mult=float(d.get("trail_atr_mult", 8.0)),
+        trail_atr_mult_short=float(d.get("trail_atr_mult_short", 8.0)),
+        cooldown_bars=int(d.get("cooldown_bars", 5)),
+        tp1_atr=float(d.get("tp1_atr", 2.0)),
+        tp1_frac=float(d.get("tp1_frac", 0.3)),
+        tp2_atr=float(d.get("tp2_atr", 6.0)),
+        tp2_frac=float(d.get("tp2_frac", 0.3)),
+        max_hold_bars=int(d.get("max_hold_bars", 30)),
+        max_leverage=float(d.get("max_leverage", d.get("leverage", 3.0))),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
+        auto_execute=d.get("auto_execute", True),
+    )
+    impulse = ImpulseStrategy(config=cfg, client_manager=client_manager, db=db,
+                              notifier=telegram)
+    await impulse.start()
+    return {"message": "Impulse 1D started", **impulse.get_status()}
+
+
+@app.post("/api/impulse/stop")
+async def impulse_stop():
+    """Stop Impulse 1D strategy."""
+    global impulse
+    if not impulse:
+        return {"message": "Impulse not running"}
+    await impulse.stop()
+    return {"message": "Impulse stopped"}
+
+
+@app.post("/api/impulse/config")
+async def impulse_update_config(data: dict = None):
+    """Update running Impulse config (hot-reload safe fields)."""
+    global impulse
+    if not impulse:
+        return {"message": "Impulse not running"}
+    if not data:
+        return {"message": "No config provided"}
+    cfg = impulse.config
+    for key in ("symbols", "capital", "top_k", "entry_roc", "max_adds",
+                "risk_per_trade", "sl_atr_mult", "sl_atr_mult_short",
+                "trail_atr_mult", "trail_atr_mult_short", "cooldown_bars",
+                "tp1_atr", "tp1_frac", "tp2_atr", "tp2_frac", "max_hold_bars",
+                "max_leverage", "poll_interval_sec", "auto_execute"):
+        if key in data:
+            setattr(cfg, key, data[key])
+    return {"message": "Config updated", "config": asdict(cfg)}
+
+
+@app.get("/api/impulse/trades")
+async def impulse_trades(limit: int = 50):
+    if not impulse:
+        return {"trades": []}
+    trades = [dict(t) for t in impulse._trade_log[-limit:]]
+    for t in trades:
+        t.setdefault("bot", "Impulse 1D")
+    return {"trades": trades}
+
+
+@app.get("/api/impulse/indicators")
+async def impulse_indicators():
+    if not impulse:
+        return {"indicators": {}}
+    return {"indicators": impulse._latest_indicators}
+
+
+@app.post("/api/impulse/reset")
+async def impulse_reset():
+    """Reset all trades, signals, positions, PNL for the impulse strategy."""
+    global impulse
+    if impulse and impulse._running:
+        await impulse.stop()
+    if db._conn:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (IMP_BOT_ID,))
+            except Exception as e:
+                print(f"[impulse/reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = ?", (IMP_BOT_ID,))
+        except Exception as e:
+            print(f"[impulse/reset] Error clearing bots: {e}", flush=True)
+    elif db._pool:
+        import asyncpg
+        async with db._pool.acquire() as conn:
+            for table in ["trades", "signals", "positions", "performance_metrics"]:
+                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", IMP_BOT_ID)
+            await conn.execute("DELETE FROM bots WHERE id = $1", IMP_BOT_ID)
+    impulse = None
+    return {"message": "Impulse reset complete - PNL = 0"}
 
 
 # ══════════════════════════════════════════════════════════════

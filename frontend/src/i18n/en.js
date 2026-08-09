@@ -192,7 +192,7 @@ const en = {
 
   // ── Bots ──
   'bots.title': 'Bots',
-  'bots.subtitle': 'Live bot: Momentum Rotation. Params apply on next start.',
+  'bots.subtitle': 'Live bots: Momentum Rotation and Impulse 1D. Params apply on next start.',
   'bots.config_apply_hint': 'Saved params apply on the next bot start. If the bot is already running — stop it first.',
   'bots.stop_all': 'Stop All',
   'bots.coins': 'Coins:',
@@ -226,6 +226,7 @@ const en = {
   'bots.win_rate': 'Win Rate',
   'bots.assets': 'Assets',
   'bots.yearly_title': 'Returns by year (out-of-sample)',
+  'bots.ft_verified': 'Verified by independent source Freqtrade',
   'bots.yearly_note': 'All years are honest out-of-sample tests: settings taken from another period, never fitted to that year.',
   'bots.ft_prev': '2022–2023 (out-of-sample)',
   'bots.ft_prev_val': '+109% over 2 years',
@@ -304,6 +305,30 @@ const en = {
   'bots.param.tp_pct.tip': 'Target profit in % for position close.',
   'bots.param.sl_pct.label': 'Stop loss',
   'bots.param.sl_pct.tip': 'Maximum loss in % for forced close.',
+  'bots.param.entry_roc.label': 'Entry impulse (|ROC|)',
+  'bots.param.entry_roc.tip': 'Minimum 1-day price change (%). Enter only when |ROC| ≥ threshold.',
+  'bots.param.max_adds.label': 'Adds (pyramid)',
+  'bots.param.max_adds.tip': 'How many times to add within a 5-day window on new highs with a volume surge.',
+  'bots.param.cooldown_bars.label': 'Cooldown',
+  'bots.param.cooldown_bars.tip': 'Minimum days between entries into the same coin.',
+  'bots.param.sl_atr_mult.label': 'Stop (×ATR)',
+  'bots.param.sl_atr_mult.tip': 'Initial stop = entry − N daily ATRs for longs.',
+  'bots.param.sl_atr_mult_short.label': 'Short stop (×ATR)',
+  'bots.param.sl_atr_mult_short.tip': 'Initial stop for shorts. 0 = same as longs.',
+  'bots.param.trail_atr_mult_short.label': 'Short trailing (×ATR)',
+  'bots.param.trail_atr_mult_short.tip': 'Trailing stop distance for shorts. 0 = same as longs.',
+  'bots.param.tp1_atr.label': 'TP1 (×ATR)',
+  'bots.param.tp1_atr.tip': 'Profit level (+N ATR) at which the TP1 fraction is closed.',
+  'bots.param.tp1_frac.label': 'TP1 fraction',
+  'bots.param.tp1_frac.tip': 'Fraction of the position closed at TP1.',
+  'bots.param.tp2_atr.label': 'TP2 (×ATR)',
+  'bots.param.tp2_atr.tip': 'Profit level (+N ATR) at which the TP2 fraction is closed.',
+  'bots.param.tp2_frac.label': 'TP2 fraction',
+  'bots.param.tp2_frac.tip': 'Fraction of the position closed at TP2.',
+  'bots.param.max_hold_bars.label': 'Max hold',
+  'bots.param.max_hold_bars.tip': 'Forced time exit if the stop never triggers.',
+  'bots.tag_pyramid': 'pyramiding',
+  'bots.tag_cascade_tp': 'cascade TP',
 
   // ── Backtest ──
   'backtest.title': 'Backtest',
@@ -385,8 +410,11 @@ const en = {
   'docs.sec_strategies': 'Strategies',
   'docs.strat_momentum_title': 'Momentum Rotation',
   'docs.strat_momentum_text': 'Top-K rotation by ROC/EMA/ADX with ATR stops, RSI and correlation filters, partial TP and trailing.',
+  'docs.strat_impulse_title': 'Impulse 1D',
+  'docs.strat_impulse_text': 'Impulse entry on 1-day |ROC|≥4% with a volume surge and EMA20>EMA50 trend, pyramiding up to 2 adds, cascade TP (30% at +2 ATR and 30% at +6 ATR), 5× ATR stop, 8× ATR trailing and a 30-day time exit.',
   'docs.strat_params': 'Parameters: ',
   'docs.strat_momentum_params': 'capital, top-K, risk per trade, poll interval, BE%, partial TP, TP fraction, trailing ×ATR, ADX min, min hold, leverage.',
+  'docs.strat_impulse_params': 'capital, top positions, risk per trade, |ROC| threshold, adds, stop and trailing ×ATR (long/short), TP1/TP2 ×ATR and fractions, hold days, leverage.',
   'docs.sec_backtesting': 'Backtesting',
   'docs.bt_run_title': 'Running a Backtest',
   'docs.bt_run_text': 'The Backtest page runs the backtest on real historical OKX candles (public market data). Select instruments, period and timeframe and click "Run". The result of the last run is persisted on the server and shown when you reopen the page.',
@@ -413,6 +441,7 @@ const en = {
 
   // Strategy descriptions
   'ui.strategy_desc.momentum': 'The bot scans BTC, ETH, BNB, SOL on daily bars and picks the top 2 strongest trends. Scoring: ROC(14) for momentum, EMA20/50 for trend direction, ADX(14) for trend strength. Filters remove noise: ADX≥25, |ROC|≥3%, EMA trend, RSI not overbought/oversold, volume above average, low BTC correlation. Longs are blocked when BTC is below SMA200. Position size is risk-based (10% of equity): stop = 3× daily ATR, leverage up to 2× (higher volatility = lower leverage). After entry: trailing stop follows price (0.2× hourly ATR), at +2% stop moves to breakeven, at +5% half the position is closed. Minimum hold 20 days. If a coin drops out of the top 2, it is closed at market. Cross margin, demo/live toggled via env.',
+  'ui.strategy_desc.impulse': 'The bot scans BTC, ETH, BNB, SOL on daily bars and enters strong impulse moves. Entry signal: price up ≥4% in 1 day with a volume surge (above 1.5× average) and EMA20>EMA50 trend; shorts on the symmetric downward impulse. Up to 4 concurrent positions ranked by impulse strength (|ROC|). Stop = 5× daily ATR (both sides), risk per trade 10% of equity, leverage up to 3× (higher volatility = lower leverage). After entry: pyramiding — up to 2 adds within a 5-day window on new highs with a volume surge. Cascade exit: 30% of the position at +2 ATR, another 30% at +6 ATR, the rest is held with a wide trailing stop (8× ATR) and a forced 30-day exit. Cross margin, demo/live toggled via env.',
 
   // Glossary terms
   'ui.glossary_pnl_term': 'PnL (Profit/Loss)',

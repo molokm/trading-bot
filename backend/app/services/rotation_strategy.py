@@ -1345,18 +1345,18 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES ($1, 'rotation', STRATEGY_NAME, 'MULTI', '1D', "
-                    "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v3') "
+                    "VALUES ($1, 'rotation', $2, 'MULTI', '1D', "
+                    "$3, $4, 'running', 'demo', 'momentum', $5, 'Momentum Rotation v3') "
                     "ON CONFLICT (id) DO NOTHING",
-                    (ROT_BOT_ID, self._equity, str(params), now),
+                    (ROT_BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
                 )
             else:
                 await self.db._execute(
                     "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES (?, 'rotation', STRATEGY_NAME, 'MULTI', '1D', "
+                    "VALUES (?, 'rotation', ?, 'MULTI', '1D', "
                     "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v3')",
-                    (ROT_BOT_ID, self._equity, str(params), now),
+                    (ROT_BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
                 )
         except Exception as e:
             print(f"[Rotation] DB ensure_bot error: {e}", flush=True)

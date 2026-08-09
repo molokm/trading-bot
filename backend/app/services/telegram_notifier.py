@@ -151,3 +151,14 @@ class TelegramNotifier:
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
             f"PnL: {sign}{_esc(pnl)} USDT"
         )
+
+    def add_msg(self, coin: str, side: str, price: float, size: float,
+                total: float) -> str:
+        return (
+            f"⬆️ <b>ДОКУПКА (PYRAMID)</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Инструмент: <b>{_esc(coin)}</b>\n"
+            f"Направление: {self._side_label(side)}\n"
+            f"Цена: {_esc(price)}\n"
+            f"Докупка: {_esc(size)} (всего {_esc(total)})"
+        )

@@ -286,5 +286,6 @@ export function Loader() {
 export function getStrategyDesc(t) {
   return {
     momentum: t('ui.strategy_desc.momentum'),
+    impulse: t('ui.strategy_desc.impulse'),
   }
 }

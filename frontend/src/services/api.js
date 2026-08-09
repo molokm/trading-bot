@@ -98,6 +98,23 @@ export const api = {
 
   momentumTrades: (limit = 20) => request(`/momentum/trades?limit=${limit}`),
 
+  // ── Impulse 1D Strategy ──
+  impulseStatus: () => request('/impulse/status'),
+
+  impulseStart: (config = {}) =>
+    request('/impulse/start', { method: 'POST', body: JSON.stringify(config) }),
+
+  impulseStop: () =>
+    request('/impulse/stop', { method: 'POST' }),
+
+  impulseTrades: (limit = 50) => request(`/impulse/trades?limit=${limit}`),
+
+  impulseConfig: (config = {}) =>
+    request('/impulse/config', { method: 'POST', body: JSON.stringify(config) }),
+
+  impulseReset: () =>
+    request('/impulse/reset', { method: 'POST' }),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

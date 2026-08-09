@@ -36,6 +36,41 @@ const DEFAULT_MOM_CONFIG = {
   trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
 }
 
+/** Params that map 1:1 to ImpulseConfig on the backend */
+const IMPULSE_PARAMS = [
+  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
+  'entry_roc', 'max_adds', 'cooldown_bars',
+  'sl_atr_mult', 'sl_atr_mult_short', 'trail_atr_mult', 'trail_atr_mult_short',
+  'tp1_atr', 'tp1_frac', 'tp2_atr', 'tp2_frac', 'max_hold_bars', 'max_leverage',
+]
+
+/** Impulse uses its own ranges (shares keys with momentum but different scale) */
+const IMPULSE_PARAM_BASE = {
+  ...PARAM_BASE,
+  entry_roc:            { min: 1, max: 8, step: 0.5, unit: '%' },
+  max_adds:             { min: 0, max: 4, step: 1, unit: '' },
+  cooldown_bars:        { min: 0, max: 15, step: 1, unit: 'd' },
+  sl_atr_mult:          { min: 2, max: 10, step: 0.5, unit: '×ATR' },
+  sl_atr_mult_short:    { min: 2, max: 10, step: 0.5, unit: '×ATR' },
+  trail_atr_mult:       { min: 3, max: 15, step: 0.5, unit: '×ATR' },
+  trail_atr_mult_short: { min: 3, max: 15, step: 0.5, unit: '×ATR' },
+  tp1_atr:              { min: 1, max: 6, step: 0.5, unit: '×ATR' },
+  tp1_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
+  tp2_atr:              { min: 3, max: 12, step: 0.5, unit: '×ATR' },
+  tp2_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
+  max_hold_bars:        { min: 5, max: 90, step: 1, unit: 'd' },
+  max_leverage:         { min: 1, max: 5, step: 0.5, unit: 'x' },
+}
+
+const DEFAULT_IMP_CONFIG = {
+  capital: 10000, top_k: 4, risk_per_trade: 0.10, poll_interval_sec: 300,
+  entry_roc: 4.0, max_adds: 2, cooldown_bars: 5,
+  sl_atr_mult: 5.0, sl_atr_mult_short: 5.0,
+  trail_atr_mult: 8.0, trail_atr_mult_short: 8.0,
+  tp1_atr: 2.0, tp1_frac: 0.3, tp2_atr: 6.0, tp2_frac: 0.3,
+  max_hold_bars: 30, max_leverage: 3.0,
+}
+
 // Честный бэктест: все годы вне выборки (walk-forward в обе стороны)
 const BACKTEST_YEARS = [
   { year: '2022', ret: '+23%' },
@@ -46,15 +81,15 @@ const BACKTEST_YEARS = [
 ]
 const BACKTEST_SUMMARY = { cagr: '33.5%', dd: '38.6%' }
 
-function getParamMeta(t) {
+function getParamMeta(t, base = PARAM_BASE) {
   const result = {}
-  for (const key of Object.keys(PARAM_BASE)) {
-    const base = PARAM_BASE[key]
+  for (const key of Object.keys(base)) {
+    const b = base[key]
     result[key] = {
-      ...base,
+      ...b,
       label: t(`bots.param.${key}.label`),
       tip: t(`bots.param.${key}.tip`),
-      unit: base.unitKey ? t(base.unitKey) : base.unit,
+      unit: b.unitKey ? t(b.unitKey) : b.unit,
     }
   }
   return result
@@ -259,8 +294,12 @@ function BotCard({
           )}
         </div>
 
-        {/* ─── Таблица доходности ─── */}
+        {/* ─── Таблица доходности (freqtrade) ─── */}
         <div className="rounded-xl bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-3">
+          <div className="flex items-center gap-1.5 mb-2">
+            <BadgeCheck size={13} className="text-[var(--info)] flex-shrink-0" />
+            <span className="text-[0.62rem] font-semibold text-[var(--txt-secondary)]">{t('bots.ft_verified')}</span>
+          </div>
           <div className="flex items-center justify-between mb-2">
             <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.yearly_title')}</span>
             <span className="text-[0.6rem] text-[var(--txt-muted)]">CAGR {BACKTEST_SUMMARY.cagr} · DD {BACKTEST_SUMMARY.dd}</span>
@@ -311,15 +350,22 @@ export default function BotsPage({ connected, isGuest }) {
 
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momLoading, setMomLoading] = useState(false)
+  const [impulseStatus, setImpulseStatus] = useState(null)
+  const [impLoading, setImpLoading] = useState(false)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [sliderOpen, setSliderOpen] = useState(false)
-  const [editingBot, setEditingBot] = useState(null) // 'momentum'
+  const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'impulse'
   const [saving, setSaving] = useState(false)
   const formRef = useRef(null)
 
   const [momLocal, setMomLocal] = useState(() => loadSavedConfig('bot_config_momentum', {
     symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
     config: DEFAULT_MOM_CONFIG,
+  }))
+
+  const [impLocal, setImpLocal] = useState(() => loadSavedConfig('bot_config_impulse', {
+    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
+    config: DEFAULT_IMP_CONFIG,
   }))
 
   const refreshStatus = useCallback(async () => {
@@ -331,6 +377,18 @@ export default function BotsPage({ connected, isGuest }) {
           setMomLocal(prev => ({
             symbols: m.config.symbols || prev.symbols,
             config: { ...prev.config, ...pickRotationParams(m.config) },
+          }))
+        }
+      }
+    } catch { /* ignore */ }
+    try {
+      const i = await api.impulseStatus().catch(() => null)
+      if (i) {
+        setImpulseStatus(i)
+        if (i.config) {
+          setImpLocal(prev => ({
+            symbols: i.config.symbols || prev.symbols,
+            config: { ...prev.config, ...pickParams(i.config, IMPULSE_PARAMS) },
           }))
         }
       }
@@ -360,12 +418,31 @@ export default function BotsPage({ connected, isGuest }) {
     setMomLoading(false)
   }
 
+  const impToggle = async () => {
+    setImpLoading(true)
+    try {
+      if (impulseStatus?.running) {
+        await api.impulseStop()
+      } else {
+        await api.impulseStart({
+          symbols: impLocal.symbols,
+          ...impLocal.config,
+        })
+      }
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setImpLoading(false)
+  }
+
   const handleSave = (botData) => {
     setSaving(true)
     const payload = { symbols: botData.symbols, config: botData.config }
     if (editingBot === 'momentum') {
       setMomLocal(payload)
       localStorage.setItem('bot_config_momentum', JSON.stringify(payload))
+    } else if (editingBot === 'impulse') {
+      setImpLocal(payload)
+      localStorage.setItem('bot_config_impulse', JSON.stringify(payload))
     }
     setTimeout(() => {
       setSaving(false)
@@ -386,6 +463,20 @@ export default function BotsPage({ connected, isGuest }) {
     t('bots.tag_regime'),
     t('bots.tag_trailing'),
     t('bots.tag_roi'),
+  ]
+
+  const impRunning = !!impulseStatus?.running
+  const impStartedAt = impulseStatus?.started_at ? Date.parse(impulseStatus.started_at) : null
+
+  const impCfg = impulseStatus?.config
+  const impTags = [
+    ...(impCfg?.symbols?.length ? [`${impCfg.symbols.length} монет`] : []),
+    t('bots.tag_timeframe'),
+    t('bots.tag_positions', { n: impCfg?.top_k || 4 }),
+    ...(impCfg?.max_leverage ? [t('bots.tag_leverage', { x: impCfg.max_leverage })] : []),
+    t('bots.tag_pyramid'),
+    t('bots.tag_cascade_tp'),
+    t('bots.tag_trailing'),
   ]
 
   return (
@@ -428,6 +519,37 @@ export default function BotsPage({ connected, isGuest }) {
           onEdit={() => { setEditingBot('momentum'); setSliderOpen(true) }}
           isGuest={isGuest}
           loading={momLoading}
+          t={t}
+        />
+
+        <BotCard
+          id="impulse"
+          name={t('docs.strat_impulse_title')}
+          stratId={impulseStatus?.strategy || 'impulse_1d'}
+          version={impulseStatus?.version}
+          icon={Zap}
+          accentDim="bg-[var(--profit-dim)]"
+          accentTxt="text-[var(--profit)]"
+          statusMode={impRunning ? 'live' : 'stopped'}
+          statusLabel={impRunning ? t('bots.status_running') : t('bots.status_stopped')}
+          coins={impulseStatus?.config?.symbols || impLocal.symbols}
+          description={impulseStatus?.description || strategyDesc.impulse}
+          tags={impTags}
+          pnl={impulseStatus?.total_pnl || 0}
+          trades={impulseStatus?.total_trades || 0}
+          winRate={impulseStatus?.win_rate}
+          sparklinePnl={impulseStatus?.total_pnl || 0}
+          startedAt={impRunning ? impStartedAt : null}
+          openPositions={impulseStatus?.open_positions || []}
+          onToggle={impToggle}
+          onReset={() => {
+            if (window.confirm('Сбросить историю сделок Impulse 1D?')) {
+              api.impulseReset().then(refreshStatus).catch(e => alert(e.message))
+            }
+          }}
+          onEdit={() => { setEditingBot('impulse'); setSliderOpen(true) }}
+          isGuest={isGuest}
+          loading={impLoading}
           t={t}
         />
       </div>
@@ -536,7 +658,7 @@ export default function BotsPage({ connected, isGuest }) {
       <SliderPanel
         open={sliderOpen}
         onClose={() => { setSliderOpen(false); setEditingBot(null) }}
-        title={`${t('bots.edit')} Momentum`}
+        title={`${t('bots.edit')} ${editingBot === 'impulse' ? t('docs.strat_impulse_title') : 'Momentum'}`}
         footer={
           <>
             <button className="btn btn-ghost" onClick={() => { setSliderOpen(false); setEditingBot(null) }}>{t('bots.cancel')}</button>
@@ -549,8 +671,8 @@ export default function BotsPage({ connected, isGuest }) {
         <BotConfigForm
           ref={formRef}
           botType={editingBot}
-          symbols={momLocal.symbols}
-          config={momLocal.config}
+          symbols={editingBot === 'impulse' ? impLocal.symbols : momLocal.symbols}
+          config={editingBot === 'impulse' ? impLocal.config : momLocal.config}
           onSave={handleSave}
         />
       </SliderPanel>
@@ -560,6 +682,7 @@ export default function BotsPage({ connected, isGuest }) {
         onClose={() => setConfirmStopAll(false)}
         onConfirm={async () => {
           try { await api.momentumStop() } catch {}
+          try { await api.impulseStop() } catch {}
           await refreshStatus()
           setConfirmStopAll(false)
         }}
@@ -581,19 +704,30 @@ function pickRotationParams(cfg) {
   return out
 }
 
+function pickParams(cfg, keys) {
+  const out = {}
+  for (const key of keys) {
+    if (cfg[key] != null) out[key] = cfg[key]
+  }
+  return out
+}
+
 const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, config, onSave }, ref) {
   const { t } = useTranslation()
-  const PARAM_META = useMemo(() => getParamMeta(t), [t])
+  const isImpulse = botType === 'impulse'
+  const defaultConfig = isImpulse ? DEFAULT_IMP_CONFIG : DEFAULT_MOM_CONFIG
+  const PARAM_LIST = isImpulse ? IMPULSE_PARAMS : ROTATION_PARAMS
+  const PARAM_META = useMemo(() => getParamMeta(t, isImpulse ? IMPULSE_PARAM_BASE : PARAM_BASE), [t, isImpulse])
 
   const [form, setForm] = useState({
     symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
-    config: { ...DEFAULT_MOM_CONFIG, ...config },
+    config: { ...defaultConfig, ...config },
   })
 
   useEffect(() => {
     setForm({
       symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
-      config: { ...DEFAULT_MOM_CONFIG, ...config },
+      config: { ...defaultConfig, ...config },
     })
   }, [botType, symbols, config])
 
@@ -609,13 +743,15 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
   return (
     <form ref={ref} onSubmit={handleSubmit} className="space-y-5">
       <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-        <TrendingUp size={14} className="text-[var(--info)]" />
+        {isImpulse
+          ? <Zap size={14} className="text-[var(--profit)]" />
+          : <TrendingUp size={14} className="text-[var(--info)]" />}
         <div>
           <div className="text-xs font-semibold text-[var(--txt)]">
-            {t('dash.momentum_bot')}
+            {isImpulse ? t('docs.strat_impulse_title') : t('dash.momentum_bot')}
           </div>
           <div className="text-2xs text-[var(--txt-muted)]">
-            momentum_rotation
+            {isImpulse ? 'impulse_1d' : 'momentum_rotation'}
           </div>
         </div>
       </div>
@@ -653,7 +789,7 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
       <div>
         <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-3 block">{t('bots.params')}</label>
         <div className="space-y-4">
-          {ROTATION_PARAMS.map(key => {
+          {PARAM_LIST.map(key => {
             const meta = PARAM_META[key]
             if (!meta) return null
             const rawVal = form.config[key] ?? (meta.asPercent ? meta.min / 100 : meta.min)
