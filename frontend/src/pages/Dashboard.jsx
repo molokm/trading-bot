@@ -53,6 +53,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
+  const [tickers, setTickers] = useState({})
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
