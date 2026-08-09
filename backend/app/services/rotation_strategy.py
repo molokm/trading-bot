@@ -23,6 +23,8 @@ from typing import Optional
 from .telegram_notifier import TelegramNotifier
 
 ROT_BOT_ID = "rotation_strategy"
+STRATEGY_VERSION = "v4"
+STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.1, "SOL": 0.1}
 LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 0.01, "SOL": 0.01}
@@ -1181,7 +1183,8 @@ class RotationStrategy:
 
         return {
             "running": self._running,
-            "strategy": "momentum_rotation_v4",
+            "strategy": STRATEGY_NAME,
+            "version": STRATEGY_VERSION,
             "config": cfg,
             "equity": round(full_equity, 2),
             "capital": self._capital,
@@ -1342,7 +1345,7 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES ($1, 'rotation', 'momentum_rotation_v4', 'MULTI', '1D', "
+                    "VALUES ($1, 'rotation', STRATEGY_NAME, 'MULTI', '1D', "
                     "$2, $3, 'running', 'demo', 'momentum', $4, 'Momentum Rotation v3') "
                     "ON CONFLICT (id) DO NOTHING",
                     (ROT_BOT_ID, self._equity, str(params), now),
@@ -1351,7 +1354,7 @@ class RotationStrategy:
                 await self.db._execute(
                     "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
                     "capital, params, status, mode, signal_type, created_at, name) "
-                    "VALUES (?, 'rotation', 'momentum_rotation_v4', 'MULTI', '1D', "
+                    "VALUES (?, 'rotation', STRATEGY_NAME, 'MULTI', '1D', "
                     "?, ?, 'running', 'demo', 'momentum', ?, 'Momentum Rotation v3')",
                     (ROT_BOT_ID, self._equity, str(params), now),
                 )

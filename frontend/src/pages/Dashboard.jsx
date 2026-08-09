@@ -671,6 +671,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             <div className="panel-header">
               <Bot size={13} className="text-[var(--info)]" />
               <span className="flex-1">{t('dash.momentum_bot')}</span>
+              {momentumStatus?.version && (
+                <span className="text-[0.62rem] font-semibold mono text-[var(--info)] uppercase tracking-wide mr-1">
+                  {momentumStatus.version}
+                </span>
+              )}
               {momentumStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
               {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
