@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import {
-  Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw
+  Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
+  ShieldCheck, BadgeCheck, CheckCircle2, Award
 } from 'lucide-react'
 import { api } from '../services/api'
 import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
@@ -426,6 +427,67 @@ export default function BotsPage({ connected, isGuest }) {
           loading={momLoading}
           t={t}
         />
+      </div>
+
+      {/* ─── Проверено на Freqtrade ─── */}
+      <div className="panel relative overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-br from-[var(--info)]/12 via-transparent to-[var(--profit)]/10 pointer-events-none" />
+        <div className="relative p-5 space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-[var(--info)]/15 flex items-center justify-center ring-1 ring-[var(--info)]/30">
+                <ShieldCheck size={22} className="text-[var(--info)]" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-base font-bold text-[var(--txt)]">{t('bots.ft_title')}</span>
+                  <span className="px-2 py-0.5 rounded-full text-[0.6rem] font-bold uppercase tracking-wide bg-[var(--profit)]/15 text-[var(--profit)] ring-1 ring-[var(--profit)]/30">
+                    {t('bots.ft_badge')}
+                  </span>
+                </div>
+                <div className="text-2xs text-[var(--txt-muted)]">{t('bots.ft_subtitle')}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 text-2xs text-[var(--profit)] font-semibold">
+              <BadgeCheck size={14} />
+              <span>{t('bots.ft_note')}</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+            <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
+              <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_cagr')}</div>
+              <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">76.6%</div>
+            </div>
+            <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
+              <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_forward')}</div>
+              <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">+102%</div>
+              <div className="text-[0.62rem] text-[var(--txt-muted)]">{t('bots.ft_forward_val')}</div>
+            </div>
+            <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
+              <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_winrate')}</div>
+              <div className="mono text-2xl font-bold text-[var(--txt)] mt-1">~57%</div>
+            </div>
+            <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
+              <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_liq')}</div>
+              <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">0</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {[
+              'bots.ft_check_wf',
+              'bots.ft_check_lookahead',
+              'bots.ft_check_fees',
+              'bots.ft_check_funding',
+            ].map(k => (
+              <div key={k} className="flex items-start gap-2 text-2xs text-[var(--txt-secondary)]">
+                <CheckCircle2 size={14} className="text-[var(--profit)] flex-shrink-0 mt-0.5" />
+                <span>{t(k)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <SliderPanel
