@@ -461,19 +461,22 @@ export default function BotsPage({ connected, isGuest }) {
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
               <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_cagr')}</div>
               <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">76.6%</div>
+              <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">{t('bots.ft_cagr_sub')}</div>
             </div>
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
               <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_forward')}</div>
               <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">+102%</div>
-              <div className="text-[0.62rem] text-[var(--txt-muted)]">{t('bots.ft_forward_val')}</div>
+              <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">{t('bots.ft_forward_val')} · {t('bots.ft_forward_sub')}</div>
             </div>
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
               <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_winrate')}</div>
               <div className="mono text-2xl font-bold text-[var(--txt)] mt-1">~57%</div>
+              <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">{t('bots.ft_winrate_sub')}</div>
             </div>
             <div className="rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)]/60 p-3">
               <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{t('bots.ft_liq')}</div>
               <div className="mono text-2xl font-bold text-[var(--profit)] mt-1">0</div>
+              <div className="text-[0.58rem] text-[var(--txt-muted)] leading-tight mt-0.5">4.6 года</div>
             </div>
           </div>
 
@@ -487,6 +490,23 @@ export default function BotsPage({ connected, isGuest }) {
               <div key={k} className="flex items-start gap-2 text-2xs text-[var(--txt-secondary)]">
                 <CheckCircle2 size={14} className="text-[var(--profit)] flex-shrink-0 mt-0.5" />
                 <span>{t(k)}</span>
+              </div>
+            ))}
+          </div>
+
+          {/* ─── Методология / допущения ─── */}
+          <div className="rounded-xl bg-[var(--bg)]/50 ring-1 ring-[var(--border)]/40 p-3 space-y-1.5">
+            <div className="text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.ft_method_title')}</div>
+            <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">{t('bots.ft_method_data')}</div>
+            {[
+              'bots.ft_method_1',
+              'bots.ft_method_2',
+              'bots.ft_method_3',
+              'bots.ft_method_4',
+            ].map(k => (
+              <div key={k} className="flex items-start gap-1.5 text-2xs text-[var(--txt-muted)]">
+                <span className="text-[var(--info)] mt-0.5">•</span>
+                <span className="leading-relaxed">{t(k)}</span>
               </div>
             ))}
           </div>
