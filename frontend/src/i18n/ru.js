@@ -222,6 +222,16 @@ const ru = {
   'bots.status_stopped': 'Остановлен',
   'bots.status_error': 'Ошибка',
   'bots.default_bot_name': 'Momentum Rotation',
+  'bots.perf_title': 'Работоспособность',
+  'bots.uptime': 'В работе',
+  'bots.win_rate': 'Винрейт',
+  'bots.assets': 'Активы',
+  'bots.yearly_title': 'Доходность по годам (бэктест 2022–2026)',
+  'bots.backtest_note': 'Ориентир из честного бэктеста: OKX-комиссия 0.05%, плечо 2x, walk-forward валидация. Прошлые результаты не гарантируют будущей доходности.',
+  'bots.year': 'Год',
+  'bots.return': 'Доходность',
+  'bots.cagr': 'CAGR',
+  'bots.max_dd': 'Макс. просадка',
 
   // Bots — PARAM_META labels
   'bots.param.risk_per_trade.label': 'Риск на сделку',

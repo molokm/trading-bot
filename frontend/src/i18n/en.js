@@ -221,6 +221,16 @@ const en = {
   'bots.status_stopped': 'Stopped',
   'bots.status_error': 'Error',
   'bots.default_bot_name': 'Momentum Rotation',
+  'bots.perf_title': 'Performance',
+  'bots.uptime': 'Uptime',
+  'bots.win_rate': 'Win Rate',
+  'bots.assets': 'Assets',
+  'bots.yearly_title': 'Returns by year (backtest 2022–2026)',
+  'bots.backtest_note': 'Reference from honest backtest: OKX fee 0.05%, 2x leverage, walk-forward validated. Past results do not guarantee future returns.',
+  'bots.year': 'Year',
+  'bots.return': 'Return',
+  'bots.cagr': 'CAGR',
+  'bots.max_dd': 'Max Drawdown',
 
   // Bots — PARAM_META labels
   'bots.param.risk_per_trade.label': 'Risk per trade',

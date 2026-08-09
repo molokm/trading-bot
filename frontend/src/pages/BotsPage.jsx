@@ -35,6 +35,16 @@ const DEFAULT_MOM_CONFIG = {
   trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
 }
 
+// Валидированные результаты бэктеста (walk-forward, OKX 0.05%, плечо 2x)
+const BACKTEST_YEARS = [
+  { year: '2022', ret: '+21%' },
+  { year: '2023', ret: '+234%' },
+  { year: '2024', ret: '+64%' },
+  { year: '2025', ret: '+17%' },
+  { year: '2026', ret: '+76%' },
+]
+const BACKTEST_SUMMARY = { cagr: '76.6%', dd: '33%' }
+
 function getParamMeta(t) {
   const result = {}
   for (const key of Object.keys(PARAM_BASE)) {
@@ -144,6 +154,16 @@ function RiskMeter({ percentValue }) {
   )
 }
 
+function PerfTile({ label, value, tone = 'neutral' }) {
+  const color = tone === 'profit' ? 'text-[var(--profit)]' : tone === 'loss' ? 'text-[var(--loss)]' : 'text-[var(--txt)]'
+  return (
+    <div className="rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60 px-2.5 py-2">
+      <div className="text-[0.62rem] text-[var(--txt-muted)] uppercase tracking-wide">{label}</div>
+      <div className={`mono text-base font-bold mt-0.5 truncate ${color}`}>{value}</div>
+    </div>
+  )
+}
+
 function BotCard({
   id, name, stratId, version, icon: Icon, accentDim, accentTxt,
   statusMode, statusLabel, coins, description,
@@ -151,57 +171,55 @@ function BotCard({
   openPositions = [], onToggle, onReset, onEdit,
   isGuest, loading, t,
 }) {
+  const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
-    <div className="panel hover:border-[var(--border-hover)] transition-colors">
-      <div className="p-4 space-y-3 flex flex-col h-full">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2">
-            <div className={`w-8 h-8 rounded-lg ${accentDim} flex items-center justify-center`}>
-              <Icon size={16} className={accentTxt} />
+    <div className="panel overflow-hidden flex flex-col transition-colors hover:border-[var(--border-hover)]">
+      {/* ─── Banner ─── */}
+      <div className={`relative px-4 py-3.5 border-b border-[var(--border)] bg-gradient-to-br ${accentDim} via-transparent to-transparent`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)] flex items-center justify-center shadow-sm">
+              <Icon size={22} className={accentTxt} />
             </div>
             <div>
-              <div className="flex items-center gap-1.5">
-                <div className="text-sm font-semibold text-[var(--txt)]">{name}</div>
-                {version && <span className="text-[0.58rem] font-semibold mono text-[var(--info)] uppercase tracking-wide">{version}</span>}
+              <div className="flex items-center gap-2">
+                <span className="text-base font-bold text-[var(--txt)]">{name}</span>
+                {version && (
+                  <span className="text-[0.6rem] font-bold mono px-1.5 py-0.5 rounded-md bg-[var(--info)]/15 text-[var(--info)]">{version}</span>
+                )}
               </div>
               <div className="text-2xs text-[var(--txt-muted)] mono">{stratId}</div>
             </div>
           </div>
           <StatusBadge mode={statusMode} label={statusLabel} />
         </div>
+      </div>
 
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-[var(--txt-muted)]">{t('bots.coins')}</span>
-          <div className="flex gap-1 flex-wrap">
-            {coins.map(s => (
-              <span key={s} className={`px-1.5 py-0.5 rounded text-2xs font-medium ${accentDim} ${accentTxt}`}>{s}</span>
-            ))}
+      {/* ─── Body ─── */}
+      <div className="p-4 space-y-4 flex flex-col flex-1">
+        {/* Assets */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="text-2xs text-[var(--txt-muted)]">{t('bots.assets')}:</span>
+          {coins.map(s => (
+            <span key={s} className={`px-2 py-0.5 rounded-md text-2xs font-semibold ${accentDim} ${accentTxt}`}>{s}/USDT</span>
+          ))}
+        </div>
+
+        {/* ─── Работоспособность ─── */}
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.perf_title')}</span>
+            {statusMode === 'live' && <BotRuntime startedAt={startedAt} t={t} />}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <PerfTile label={t('bots.total_pnl')} value={pnlStr} tone={pnl >= 0 ? 'profit' : 'loss'} />
+            <PerfTile label={t('bots.trades_count')} value={trades} />
+            <PerfTile label={t('bots.win_rate')} value={winRate != null ? `${winRate}%` : '—'} />
+            <PerfTile label={t('bots.cagr')} value={BACKTEST_SUMMARY.cagr} />
           </div>
         </div>
 
-        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">{description}</div>
-
-        <BotSparkline botId={id} pnl={sparklinePnl} />
-
-        {statusMode === 'live' && <BotRuntime startedAt={startedAt} t={t} />}
-
-        <div className="grid grid-cols-3 gap-2">
-          <div className="p-2 rounded-md bg-[var(--bg)]">
-            <div className="text-2xs text-[var(--txt-muted)]">{t('bots.total_pnl')}</div>
-            <div className={`mono text-sm font-bold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              ${pnl >= 0 ? '+' : ''}{Number(pnl || 0).toFixed(2)}
-            </div>
-          </div>
-          <div className="p-2 rounded-md bg-[var(--bg)]">
-            <div className="text-2xs text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
-            <div className="mono text-sm font-bold text-[var(--txt)]">{trades}</div>
-          </div>
-          <div className="p-2 rounded-md bg-[var(--bg)]">
-            <div className="text-2xs text-[var(--txt-muted)]">Win Rate</div>
-            <div className="mono text-sm font-bold text-[var(--txt)]">{winRate != null ? `${winRate}%` : '—'}</div>
-          </div>
-        </div>
-
+        {/* Open positions */}
         {openPositions.length > 0 && (
           <div className="space-y-1">
             <div className="text-2xs text-[var(--txt-muted)] font-medium">{t('dash.open_positions')}</div>
@@ -223,6 +241,27 @@ function BotCard({
           </div>
         )}
 
+        {/* ─── Описание ─── */}
+        <div className="text-2xs text-[var(--txt-secondary)] leading-relaxed">{description}</div>
+
+        {/* ─── Таблица доходности ─── */}
+        <div className="rounded-xl bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-3">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">{t('bots.yearly_title')}</span>
+            <span className="text-[0.6rem] text-[var(--txt-muted)]">CAGR {BACKTEST_SUMMARY.cagr} · DD {BACKTEST_SUMMARY.dd}</span>
+          </div>
+          <div className="grid grid-cols-5 gap-1 text-center">
+            {BACKTEST_YEARS.map(y => (
+              <div key={y.year} className="rounded-md bg-[var(--surface-overlay)]/50 px-1 py-1.5">
+                <div className="text-[0.6rem] text-[var(--txt-muted)]">{y.year}</div>
+                <div className={`mono text-xs font-bold ${y.ret.startsWith('-') ? 'text-[var(--loss)]' : 'text-[var(--profit)]'}`}>{y.ret}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-[0.6rem] text-[var(--txt-muted)] mt-2 leading-snug">{t('bots.backtest_note')}</div>
+        </div>
+
+        {/* ─── Actions ─── */}
         {!isGuest && (
           <div className="flex gap-1.5 pt-1 mt-auto">
             <button
