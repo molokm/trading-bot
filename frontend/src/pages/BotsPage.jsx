@@ -145,7 +145,7 @@ function RiskMeter({ percentValue }) {
 }
 
 function BotCard({
-  id, name, stratId, icon: Icon, accentDim, accentTxt,
+  id, name, stratId, version, icon: Icon, accentDim, accentTxt,
   statusMode, statusLabel, coins, description,
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
@@ -160,7 +160,10 @@ function BotCard({
               <Icon size={16} className={accentTxt} />
             </div>
             <div>
-              <div className="text-sm font-semibold text-[var(--txt)]">{name}</div>
+              <div className="flex items-center gap-1.5">
+                <div className="text-sm font-semibold text-[var(--txt)]">{name}</div>
+                {version && <span className="text-[0.58rem] font-semibold mono text-[var(--info)] uppercase tracking-wide">{version}</span>}
+              </div>
               <div className="text-2xs text-[var(--txt-muted)] mono">{stratId}</div>
             </div>
           </div>
@@ -341,6 +344,7 @@ export default function BotsPage({ connected, isGuest }) {
           id="momentum"
           name={t('dash.momentum_bot')}
           stratId="momentum_rotation"
+          version={momentumStatus?.version}
           icon={TrendingUp}
           accentDim="bg-[var(--info-dim)]"
           accentTxt="text-[var(--info)]"
