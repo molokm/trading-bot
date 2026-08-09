@@ -244,7 +244,10 @@ function BotCard({
 
         {/* ─── Описание / особенности ─── */}
         <div className="space-y-2">
-          <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('bots.tagline')}</div>
+          <div className="flex items-start gap-1">
+            <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('bots.tagline')}</div>
+            <Tip text={description} />
+          </div>
           {tags.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {tags.map(tag => (
