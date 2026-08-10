@@ -136,11 +136,33 @@ export default function BacktestPage({ connected }) {
     timeframe: '1d',
     strategy: 'momentum',
   })
+  const [engine, setEngine] = useState('own')
+  const [ftCfg, setFtCfg] = useState({
+    strategy: 'momentum',
+    start: '20240225',
+    end: '20250809',
+  })
+  const [ftResults, setFtResults] = useState(null)
+  const [ftRunning, setFtRunning] = useState(false)
+  const [ftError, setFtError] = useState(null)
   const [running, setRunning] = useState(false)
   const [results, setResults] = useState([])
   const [activeResult, setActiveResult] = useState(null)
   const [compareMode, setCompareMode] = useState(false)
   const [error, setError] = useState(null)
+
+  const runFreqtrade = async () => {
+    setFtRunning(true)
+    setFtError(null)
+    try {
+      const r = await api.runFreqtradeBacktest(ftCfg)
+      setFtResults(r)
+    } catch (e) {
+      setFtError(e.message || t('backtest.ft_error'))
+    } finally {
+      setFtRunning(false)
+    }
+  }
 
   const runBacktest = async () => {
     setRunning(true)
@@ -262,6 +284,38 @@ export default function BacktestPage({ connected }) {
         </div>
         <div className="panel-header"><BarChart3 size={13} className="text-[var(--info)]" /> {t('backtest.config')}</div>
         <div className="p-4 flex flex-wrap items-end gap-6">
+          <div>
+            <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
+              {t('backtest.engine')} <Tip text={t('backtest.engine_tip')} />
+            </label>
+            <div className="flex gap-1 mt-1.5">
+              <Chip active={engine === 'own'} onClick={() => setEngine('own')}>{t('backtest.engine_own')}</Chip>
+              <Chip active={engine === 'freqtrade'} onClick={() => setEngine('freqtrade')}>{t('backtest.engine_freqtrade')}</Chip>
+            </div>
+          </div>
+          {engine === 'freqtrade' ? (
+            <>
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.ft_strategy')}</label>
+                <div className="flex gap-1 mt-1.5">
+                  <Chip active={ftCfg.strategy === 'momentum'} onClick={() => setFtCfg(c => ({ ...c, strategy: 'momentum' }))}>{t('backtest.ft_momentum')}</Chip>
+                  <Chip active={ftCfg.strategy === 'impulse'} onClick={() => setFtCfg(c => ({ ...c, strategy: 'impulse' }))}>{t('backtest.ft_impulse')}</Chip>
+                </div>
+              </div>
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.ft_start')}</label>
+                <input type="date" className="input input-sm mt-1.5 block" value={ftCfg.start.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')} onChange={e => setFtCfg(c => ({ ...c, start: e.target.value.replaceAll('-', '') }))} />
+              </div>
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">{t('backtest.ft_end')}</label>
+                <input type="date" className="input input-sm mt-1.5 block" value={ftCfg.end.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3')} onChange={e => setFtCfg(c => ({ ...c, end: e.target.value.replaceAll('-', '') }))} />
+              </div>
+              <button className="btn btn-primary" onClick={runFreqtrade} disabled={ftRunning}>
+                {ftRunning ? <><Loader /> {t('backtest.ft_running')}</> : <><BarChart3 size={13} /> {t('backtest.ft_run')}</>}
+              </button>
+            </>
+          ) : (
+            <>
           <div className="flex-1 min-w-[200px]">
             <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
               {t('backtest.instruments')} <Tip text={t('backtest.instruments_tip')} />
@@ -301,8 +355,49 @@ export default function BacktestPage({ connected }) {
           <button className="btn btn-primary" onClick={runBacktest} disabled={running || config.pairs.length === 0}>
             {running ? <><Loader /> {t('backtest.running')}</> : <><Play size={13} /> {t('backtest.run')}</>}
           </button>
+            </>
+          )}
         </div>
       </div>
+
+      {/* Freqtrade Results */}
+      {engine === 'freqtrade' && (ftResults || ftError || ftRunning) && (
+        <div className="panel flex-shrink-0">
+          <div className="panel-header">
+            <BarChart3 size={13} className="text-[var(--info)]" />
+            {ftResults?.strategy_name || t('backtest.ft_strategy')}
+            {ftResults && <span className="ml-auto text-2xs font-normal text-[var(--info)] flex items-center gap-1"><CheckCircle size={12} /> {t('backtest.ft_verified_badge')}</span>}
+          </div>
+          {ftError && (
+            <div className="flex items-center gap-2 px-4 py-2.5 text-2xs text-[var(--loss)] bg-[var(--loss-dim)] border-b border-[var(--loss)]/30">
+              <AlertTriangle size={13} />
+              <span>{t('backtest.ft_error')}: {ftError}</span>
+            </div>
+          )}
+          {ftResults && (
+            <div className="p-4">
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-2xs mb-3">
+                <span className="flex items-center gap-1.5 text-[var(--txt-muted)]"><Database size={11} /> freqtrade · {ftResults.strategy_name}</span>
+                <span className="flex items-center gap-1.5 text-[var(--txt-muted)]"><Calendar size={11} /> {t('backtest.ft_period')}: {ftResults.period}</span>
+                <span className="text-[var(--txt-muted)]">{ftResults.fee_note}</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+                <MetricCard label={t('backtest.ft_cagr')} value={`${fmt(ftResults.cagr_pct, 2, ftResults.cagr_pct != null && Number(ftResults.cagr_pct) >= 0 ? '+' : '')}%`} changeType={Number(ftResults.cagr_pct) >= 0 ? 'positive' : 'negative'} mono />
+                <MetricCard label={t('backtest.ft_total_return')} value={`${fmt(ftResults.total_return_pct, 2, ftResults.total_return_pct != null && Number(ftResults.total_return_pct) >= 0 ? '+' : '')}%`} changeType={Number(ftResults.total_return_pct) >= 0 ? 'positive' : 'negative'} mono />
+                <MetricCard label={t('backtest.ft_profit_usdt')} value={fmt(ftResults.total_profit_usdt, 2, Number(ftResults.total_profit_usdt) >= 0 ? '+' : '')} changeType={Number(ftResults.total_profit_usdt) >= 0 ? 'positive' : 'negative'} mono />
+                <MetricCard label={t('backtest.ft_drawdown')} value={`-${fmt(ftResults.max_drawdown_pct, 2)}%`} changeType="negative" mono />
+                <MetricCard label={t('backtest.ft_trades')} value={fmt(ftResults.trades, 0)} mono />
+                <MetricCard label={t('backtest.ft_win_rate')} value={`${fmt(ftResults.win_rate_pct, 1)}%`} changeType={Number(ftResults.win_rate_pct) >= 50 ? 'positive' : 'negative'} mono />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-2xs text-[var(--txt-muted)]">
+                <span>{t('backtest.ft_long_short')}: <span className="text-[var(--profit)] mono">{ftResults.longs}</span> / <span className="text-[var(--loss)] mono">{ftResults.shorts}</span></span>
+                <span>{t('backtest.ft_wins')}: <span className="mono text-[var(--profit)]">{ftResults.wins}</span> · {t('backtest.ft_losses')}: <span className="mono text-[var(--loss)]">{ftResults.losses}</span></span>
+                <span>{t('backtest.avg_profit_pct')}: <span className="mono">{fmt(ftResults.avg_profit_pct, 2)}%</span></span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Compare Mode */}
       {compareMode && results.length > 1 && (
@@ -410,7 +505,7 @@ export default function BacktestPage({ connected }) {
                 </thead>
                 <tbody>
                   {activeResult.tradeList.map((tr, i) => {
-                    const reasonColors = { tp: 'text-[var(--profit)]', sl: 'text-[var(--loss)]', trail: 'text-[var(--info)]', breakeven: 'text-[var(--warn)]', rotation: 'text-[var(--warn)]', backtest_end: 'text-[var(--txt-muted)]' }
+                    const reasonColors = { tp: 'text-[var(--profit)]', sl: 'text-[var(--loss)]', trail: 'text-[var(--info)]', breakeven: 'text-[var(--warn)]', rotation: 'text-[var(--warn)]', roi: 'text-[var(--profit)]', backtest_end: 'text-[var(--txt-muted)]' }
                     return (
                       <tr key={i}>
                         <td className="text-2xs mono">{new Date(tr.entry_time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</td>

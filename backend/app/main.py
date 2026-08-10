@@ -470,6 +470,83 @@ async def backtest_run(data: dict):
     return result
 
 
+@app.post("/api/backtest/freqtrade")
+async def backtest_freqtrade(data: dict):
+    """Run a backtest on the independent freqtrade engine (momentum / impulse)."""
+    import re
+    import subprocess
+
+    strategy = (data or {}).get("strategy", "momentum")
+    start = str((data or {}).get("start", "20220101"))
+    end = str((data or {}).get("end", "20260809"))
+    repo = Path(__file__).resolve().parents[2]
+    ft = repo / "freqtrade_test" / "venv" / "bin" / "freqtrade"
+    if strategy == "impulse":
+        cfg = repo / "freqtrade_test" / "config_impulse.json"
+        strat_name = "Impulse1D"
+    else:
+        cfg = repo / "freqtrade_test" / "config.json"
+        strat_name = "MomentumRotation"
+    userdir = repo / "freqtrade_test" / "user_data"
+
+    try:
+        p = subprocess.run(
+            [str(ft), "backtesting", "--config", str(cfg), "--strategy", strat_name,
+             "--userdir", str(userdir), "--timerange", f"{start}-{end}",
+             "--cache", "none"],
+            capture_output=True, text=True, timeout=900,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Freqtrade не запустился: {e}")
+
+    out = (p.stdout or "") + (p.stderr or "")
+
+    def grab(pattern):
+        m = re.search(pattern, out)
+        return m.group(1).strip() if m else None
+
+    row = None
+    row_line = re.search(r"│\s*" + re.escape(strat_name) + r"\s*│.*", out)
+    if row_line:
+        cells = [c.strip() for c in row_line.group(0).split("│")]
+        # cells: ['', NAME, trades, avg, usdt, pct, duration, 'wins 0 losses win%', 'dd_usdt USDT dd_pct', '']
+        try:
+            trades = cells[2]
+            avg_profit = cells[3]
+            total_usdt = cells[4]
+            total_pct = cells[5]
+            win_lose = cells[7].split()
+            wins, losses, win_pct = win_lose[0], win_lose[2], win_lose[3]
+            dd_usdt = cells[8].split()[0]
+            row = {
+                "trades": trades, "avg_profit_pct": avg_profit,
+                "total_profit_usdt": total_usdt, "total_return_pct": total_pct,
+                "wins": wins, "losses": losses, "win_rate_pct": win_pct,
+                "dd_usdt": dd_usdt,
+            }
+        except (IndexError, ValueError):
+            row = None
+
+    longs, shorts = grab(r"Long / Short trades\s*│\s*(\d+)\s*/\s*(\d+)"), None
+    ls = re.search(r"Long / Short trades\s*│\s*(\d+)\s*/\s*(\d+)", out)
+
+    r = {
+        "engine": "freqtrade",
+        "strategy": strategy,
+        "strategy_name": strat_name,
+        "period": f"{start}-{end}",
+        "cagr_pct": grab(r"CAGR %\s*│\s*([-\d.]+)%"),
+        "total_return_pct": grab(r"Total profit %\s*│\s*([-\d.]+)%"),
+        "max_drawdown_pct": grab(r"Max % of account underwater\s*│\s*([-\d.]+)%"),
+        "longs": ls.group(1) if ls else None,
+        "shorts": ls.group(2) if ls else None,
+        "fee_note": "комиссия 0.05%/сторона (тейкер OKX), плечо 2x (momentum) / 3x (impulse)",
+    }
+    if row:
+        r.update(row)
+    return r
+
+
 @app.get("/api/backtest/last")
 async def backtest_last():
     """Return the most recently run backtest result (or null)."""

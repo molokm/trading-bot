@@ -124,6 +124,10 @@ export const api = {
 
   getLastBacktest: () => request('/backtest/last'),
 
+  // ── Backtest (freqtrade engine) ──
+  runFreqtradeBacktest: (config) =>
+    request('/backtest/freqtrade', { method: 'POST', body: JSON.stringify(config || {}) }),
+
   // ── Telegram notifications ──
   telegramStatus: () => request('/telegram/status'),
 
