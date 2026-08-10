@@ -17,9 +17,9 @@ import pandas as pd
 OKX_MARKET_URL = "https://www.okx.com/api/v5/market/candles"
 OKX_HISTORY_URL = "https://www.okx.com/api/v5/market/history-candles"
 
-# ── Strategy config (V3 rotation, matches live bot: rotation_strategy.py) ──
+# ── Strategy config (v4 momentum rotation, matches live bot: rotation_strategy.py) ──
 DEFAULT_CAPITAL = 10_000.0
-RISK_PER_TRADE = 0.05
+RISK_PER_TRADE = 0.14
 COMMISSION_PCT = 0.001
 SLIPPAGE_PCT = 0.0005
 MAX_CONCURRENT = 2          # top_k
@@ -28,24 +28,35 @@ ROC_PERIOD = 14
 EMA_FAST = 20
 EMA_SLOW = 50
 ADX_PERIOD = 14
-ADX_THRESHOLD = 22.0
-MIN_ROC = 2.0               # min |roc| to even rank a coin
+ADX_THRESHOLD = 29.0
+MIN_ROC = 4.5               # min |roc| to even rank a coin
 ATR_PERIOD = 14
-ATR_STOP_MULT = 3.5
-TRAIL_ATR_MULT = 0.1
-BREAKEVEN_PCT = 0.02
-PARTIAL_TP_PCT = 0.10
+ATR_STOP_MULT = 2.7
+TRAIL_ATR_MULT = 0.2
+BREAKEVEN_PCT = 0.05
+PARTIAL_TP_PCT = 0.08
 PARTIAL_TP_RATIO = 0.5
 RSI_PERIOD = 14
-RSI_LONG_MAX = 75.0
-RSI_SHORT_MIN = 25.0
-VOL_MULT = 1.5
+RSI_LONG_MAX = 82.0
+RSI_SHORT_MIN = 21.0
+VOL_MULT = 1.8
 CORR_THRESHOLD = 0.7
 SMA_LONG = 200
-MIN_HOLD_BARS = 3
+SMA_REGIME = 50             # BTC SMA50 < SMA200 => bear regime (shorts only)
+MIN_HOLD_BARS = 11          # cooldown before rotating again
 MAX_LEVERAGE = 2.0
-MAX_MARGIN_PCT = 2.0
+MAX_MARGIN_PCT = 1.0        # allocation_pct: max total margin = equity * this
 ALLOW_SHORT = True
+# Dynamic ROI (v4): чем дольше держим, тем ниже TP: [(min_hold_days, tp_pct), ...].
+ROI_TABLE = [(17, 0.00), (8, 0.092), (3, 0.237), (0, 0.376)]
+
+
+def roi_target(hold_bars: int) -> float:
+    """Dynamic ROI threshold: hold longer -> lower take-profit target."""
+    for min_hold, tp_pct in ROI_TABLE:
+        if hold_bars >= min_hold:
+            return tp_pct
+    return 0.0
 
 # Warmup needed for EMA50/SMA200/ADX14 indicators before any signal can fire.
 MIN_CANDLES_PER_PAIR = 130
@@ -119,6 +130,7 @@ def enrich(df):
     df["ATR"] = atr(df, ATR_PERIOD)
     df["RSI"] = rsi(df["Close"], RSI_PERIOD)
     df["SMA_long"] = sma(df["Close"], SMA_LONG)
+    df["SMA_regime"] = sma(df["Close"], SMA_REGIME)
     # Rolling average of ATR over the trailing 30 bars (volatility filter).
     df["ATR_avg30"] = df["ATR"].rolling(30).mean()
     return df
@@ -214,16 +226,16 @@ def _corr(a, b):
 
 
 def run_backtest(data_dict: dict, initial_capital: float):
-    """V3 momentum rotation over aligned daily bars.
+    """v4 momentum rotation over aligned bars.
 
-    Rules match the live bot (rotation_strategy.py):
+    Rules match the live bot (rotation_strategy.py, STRATEGY_VERSION="v4"):
       - Signal on bar T close (causal indicators) -> entry at bar T+1 open.
-      - Direction: roc > +min_roc + EMA trend + ADX>=22 -> long;
-        roc < -min_roc + no EMA trend + ADX>=22 -> short (if allow_short).
-      - Filters: volatility (ATR vs avg30), RSI extremes, BTC 200-MA regime,
-        min |roc|, correlation between held pairs.
-      - Exit: initial stop 3.5xATR, dynamic trailing 0.1xATR, breakeven after
-        2%, partial TP: close 50% at +10%.
+      - Market regime on BTC (SMA50 vs SMA200): bull -> longs only,
+        bear -> shorts only, chop -> cash (no entries).
+      - Direction requires |roc| > min_roc, EMA trend alignment, ADX >= 29.
+      - Filters: volatility (ATR vs avg30), RSI extremes, correlation.
+      - Exit: initial stop 2.7xATR, dynamic trailing 0.2xATR, breakeven after
+        5%, partial TP (close 50% at +8%), dynamic ROI (lower TP the longer held).
     """
     equity = initial_capital
     positions = {}                     # sym -> pos dict
@@ -240,20 +252,26 @@ def run_backtest(data_dict: dict, initial_capital: float):
     # Pre-build bar lookup per symbol for O(1) index access.
     idx_map = {sym: {d: i for i, d in enumerate(df.index)} for sym, df in data_dict.items()}
 
-    def btc_above_200ma(date):
+    def btc_regime(date):
+        """BTC market regime on the signal bar (yesterday's close): bull/bear/chop/unknown."""
         btc_df = data_dict.get("BTC-USDT-SWAP")
         if btc_df is None:
-            return True
-        btc_dates = list(btc_df.index)
-        if date not in idx_map["BTC-USDT-SWAP"]:
-            return True
-        i = idx_map["BTC-USDT-SWAP"][date]
-        if i < 1:
-            return True
+            return "unknown"
+        i = idx_map.get("BTC-USDT-SWAP", {}).get(date)
+        if i is None or i < 1:
+            return "unknown"
         prev = btc_df.iloc[i - 1]
-        if pd.isna(prev["SMA_long"]) or prev["SMA_long"] <= 0:
-            return True
-        return prev["Close"] > prev["SMA_long"]
+        sma200 = prev["SMA_long"]
+        if pd.isna(sma200) or sma200 <= 0:
+            return "unknown"
+        if prev["Close"] > sma200:
+            return "bull"
+        sma50 = prev["SMA_regime"]
+        if pd.isna(sma50):
+            return "chop"
+        if sma50 < sma200:
+            return "bear"
+        return "chop"
 
     for date in all_dates:
         date_i = all_dates.index(date)
@@ -327,6 +345,17 @@ def run_backtest(data_dict: dict, initial_capital: float):
                     pos["partial"] = True
                     hit = False
 
+            # ── v4 dynamic ROI exit: TP lowers the longer we hold ──
+            if not hit:
+                hold_bars = date_i - pos["entry_i"]
+                pnl_now = ((row["Close"] / pos["entry_price"] - 1) * 100) if pos["side"] == "long" \
+                    else ((pos["entry_price"] / row["Close"] - 1) * 100)
+                tp = roi_target(hold_bars)
+                if pnl_now > 0 and pnl_now >= tp * 100:
+                    hit = True
+                    exit_raw = row["Close"]
+                    reason = "roi"
+
             if hit:
                 fill = exit_raw * (1 - SLIPPAGE_PCT) if pos["side"] == "long" else exit_raw * (1 + SLIPPAGE_PCT)
                 pnl = pos["shares"] * (fill - pos["entry_price"]) - pos["shares"] * fill * COMMISSION_PCT
@@ -349,11 +378,11 @@ def run_backtest(data_dict: dict, initial_capital: float):
                 equity_curve.append({"trade": len(all_trades), "value": round(equity, 4)})
                 del positions[sym]
 
-        # ── 2. Rotation (min-hold cooldown) ──
-        if date_i - last_rotate < MIN_HOLD_BARS and positions:
+        # ── 2. Rotation (min-hold cooldown when all slots are full) ──
+        if date_i - last_rotate < MIN_HOLD_BARS and len(positions) >= MAX_CONCURRENT:
             continue
 
-        btc_above = btc_above_200ma(date)
+        regime = btc_regime(date)
 
         ranked = []
         for sym, df in data_dict.items():
@@ -383,9 +412,6 @@ def run_backtest(data_dict: dict, initial_capital: float):
                 continue
             if rsi_val < RSI_SHORT_MIN and not ema_trend:
                 continue
-            # BTC 200-MA regime: no longs below it
-            if not btc_above and roc_val > 0 and ema_trend:
-                continue
             # min |roc|
             if abs(roc_val) < MIN_ROC:
                 continue
@@ -404,12 +430,20 @@ def run_backtest(data_dict: dict, initial_capital: float):
         for row in ranked:
             if len(targets) >= MAX_CONCURRENT:
                 break
-            if row["roc"] > 0 and row["ema_trend"] and row["adx"] >= ADX_THRESHOLD:
-                side = "long"
-            elif (ALLOW_SHORT and row["roc"] < 0 and not row["ema_trend"]
-                  and row["adx"] >= ADX_THRESHOLD):
-                side = "short"
-            else:
+            # Direction is regime-dependent (v4): bull/unknown -> longs only,
+            # bear -> shorts only, chop -> cash.
+            if regime in ("bull", "unknown"):
+                if row["roc"] > MIN_ROC and row["ema_trend"] and row["adx"] >= ADX_THRESHOLD:
+                    side = "long"
+                else:
+                    continue
+            elif regime == "bear":
+                if ALLOW_SHORT and row["roc"] < -MIN_ROC and not row["ema_trend"] \
+                        and row["adx"] >= ADX_THRESHOLD:
+                    side = "short"
+                else:
+                    continue
+            else:  # chop
                 continue
             # Correlation vs held / selected
             corr_ok = True
@@ -422,34 +456,35 @@ def run_backtest(data_dict: dict, initial_capital: float):
                 continue
             targets.append({"sym": row["sym"], "side": side, "atr": row["atr"], "rets": row["rets"]})
 
-        # Close rotated-out positions at TODAY OPEN (no longer in top-k).
-        target_set = {(t["sym"], t["side"]) for t in targets}
-        for sym in list(positions.keys()):
-            pos = positions[sym]
-            if (sym, pos["side"]) in target_set:
-                continue
-            i = idx_map[sym][date]
-            exit_raw = data_dict[sym].iloc[i]["Open"]
-            fill = exit_raw * (1 - SLIPPAGE_PCT) if pos["side"] == "long" else exit_raw * (1 + SLIPPAGE_PCT)
-            pnl = pos["shares"] * (fill - pos["entry_price"]) - pos["shares"] * fill * COMMISSION_PCT
-            if pos["side"] == "short":
-                pnl = pos["shares"] * (pos["entry_price"] - fill) - pos["shares"] * fill * COMMISSION_PCT
-            equity += pnl
-            entry_val = pos["shares"] * pos["entry_price"]
-            pnl_pct = (pnl / entry_val * 100) if entry_val else 0.0
-            r_dist = abs(pos["entry_price"] - pos["stop_at_entry"])
-            r_mult = ((fill - pos["entry_price"]) / r_dist) if pos["side"] == "long" and r_dist > 0 else 0.0
-            if pos["side"] == "short" and r_dist > 0:
-                r_mult = ((pos["entry_price"] - fill) / r_dist)
-            all_trades.append({
-                "symbol": sym, "entry_time": _iso(pos["entry_date"]), "exit_time": _iso(date),
-                "pair": _pair_label(sym), "side": "LONG" if pos["side"] == "long" else "SHORT",
-                "entry_px": round(pos["entry_price"], 6), "exit_px": round(fill, 6),
-                "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 4),
-                "reason": "rotation_exit", "r_multiple": round(r_mult, 4),
-            })
-            equity_curve.append({"trade": len(all_trades), "value": round(equity, 4)})
-            del positions[sym]
+        # Close rotated-out positions at TODAY OPEN only when all slots are full (v4).
+        if len(positions) >= MAX_CONCURRENT:
+            target_set = {(t["sym"], t["side"]) for t in targets}
+            for sym in list(positions.keys()):
+                pos = positions[sym]
+                if (sym, pos["side"]) in target_set:
+                    continue
+                i = idx_map[sym][date]
+                exit_raw = data_dict[sym].iloc[i]["Open"]
+                fill = exit_raw * (1 - SLIPPAGE_PCT) if pos["side"] == "long" else exit_raw * (1 + SLIPPAGE_PCT)
+                pnl = pos["shares"] * (fill - pos["entry_price"]) - pos["shares"] * fill * COMMISSION_PCT
+                if pos["side"] == "short":
+                    pnl = pos["shares"] * (pos["entry_price"] - fill) - pos["shares"] * fill * COMMISSION_PCT
+                equity += pnl
+                entry_val = pos["shares"] * pos["entry_price"]
+                pnl_pct = (pnl / entry_val * 100) if entry_val else 0.0
+                r_dist = abs(pos["entry_price"] - pos["stop_at_entry"])
+                r_mult = ((fill - pos["entry_price"]) / r_dist) if pos["side"] == "long" and r_dist > 0 else 0.0
+                if pos["side"] == "short" and r_dist > 0:
+                    r_mult = ((pos["entry_price"] - fill) / r_dist)
+                all_trades.append({
+                    "symbol": sym, "entry_time": _iso(pos["entry_date"]), "exit_time": _iso(date),
+                    "pair": _pair_label(sym), "side": "LONG" if pos["side"] == "long" else "SHORT",
+                    "entry_px": round(pos["entry_price"], 6), "exit_px": round(fill, 6),
+                    "pnl": round(pnl, 4), "pnl_pct": round(pnl_pct, 4),
+                    "reason": "rotation_exit", "r_multiple": round(r_mult, 4),
+                })
+                equity_curve.append({"trade": len(all_trades), "value": round(equity, 4)})
+                del positions[sym]
 
         # Open new at today's OPEN (T+1)
         for t in targets:
@@ -488,7 +523,7 @@ def run_backtest(data_dict: dict, initial_capital: float):
                 "side": t["side"], "shares": shares, "entry_price": fill,
                 "entry_date": date, "stop": stop, "stop_at_entry": stop,
                 "peak": fill, "atr": atr_val, "breakeven": False, "partial": False,
-                "rets": t["rets"],
+                "entry_i": date_i, "rets": t["rets"],
             }
             all_trades.append({
                 "symbol": sym, "entry_time": _iso(date), "exit_time": None,
@@ -680,7 +715,6 @@ async def run_backtest_async(config: dict) -> dict:
     # Align to common range so all pairs cover the same bars.
     start = max(df.index[0] for df in data_dict.values())
     end = min(df.index[-1] for df in data_dict.values())
-    years = (end - start).total_seconds() / (365.25 * 24 * 3600)
     for inst in data_dict:
         data_dict[inst] = data_dict[inst].loc[start:end]
 
@@ -689,6 +723,9 @@ async def run_backtest_async(config: dict) -> dict:
     start = end - pd.Timedelta(days=days - 1)
     for inst in data_dict:
         data_dict[inst] = data_dict[inst].loc[start:end]
+
+    # Annualization factor for CAGR = length of the actual backtest window.
+    years = days / 365.25
 
     trades, equity_curve = run_backtest(data_dict, capital)
     metrics = calc_metrics(trades, equity_curve, capital, years, TF_MINUTES[timeframe])
@@ -718,7 +755,8 @@ async def run_backtest_async(config: dict) -> dict:
 
     # Map internal exit reasons to UI display reasons (sl/tp/trail/be/rotation).
     reason_map = {"stop_loss": "sl", "partial_tp": "tp", "trail_stop": "trail",
-                  "rotation_exit": "rotation", "backtest_end": "backtest_end", "open": "open"}
+                  "rotation_exit": "rotation", "roi": "roi",
+                  "backtest_end": "backtest_end", "open": "open"}
     # Only include closed trades (entries tracked as "open" have no exit data).
     trade_list = []
     for t in trades:

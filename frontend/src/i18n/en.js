@@ -71,6 +71,8 @@ const en = {
   'dash.active': 'active',
 
   'dash.momentum_bot': 'Momentum Rotation',
+  'dash.impulse_bot': 'Impulse 1D',
+  'dash.budget': 'Budget',
   'dash.running': 'Running',
   'dash.stopped': 'Stopped',
   'dash.uptime': 'Uptime',

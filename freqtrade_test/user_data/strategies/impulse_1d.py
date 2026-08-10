@@ -27,11 +27,18 @@ class Impulse1D(IStrategy):
 
     timeframe = "1d"
     can_short: bool = True
-    startup_candle_count = 250
+    startup_candle_count = 84
     process_only_new_candles = True
 
+    protections = [
+        {
+            "method": "CooldownPeriod",
+            "stop_duration_candles": 5,
+        }
+    ]
+
     minimal_roi = {"0": 100}
-    stoploss = -0.20
+    stoploss = -0.99
     use_custom_stoploss = True
     trailing_stop = False
     use_exit_signal = True
@@ -43,6 +50,7 @@ class Impulse1D(IStrategy):
     vol_period = 24
     be_pct = 0.005
     add_window_bars = 5
+    cooldown_period = 5
 
     entry_roc = DecimalParameter(low=2.0, high=8.0, default=4.0, decimals=1, space="buy", optimize=True, load=True)
     vol_mult = DecimalParameter(low=1.2, high=2.5, default=1.5, decimals=1, space="buy", optimize=True, load=True)
@@ -98,12 +106,21 @@ class Impulse1D(IStrategy):
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         return dataframe
 
+    def _atr_at_entry(self, analyzed_df, fallback_rate: float) -> float:
+        """ATR с сигнальной свечи (si в кастоме = свеча перед входом).
+
+        В момент входа analyzed_df срезан по сигнальной свече (df_last = день
+        сигнала, см. трассу SOL: df_last=07-21 при now=07-22), поэтому ATR
+        сигнальной свечи — это iloc[-1] (совпадает с кастомным cd["atr"][si]=9.16).
+        """
+        if analyzed_df is None or analyzed_df.empty or "atr" not in analyzed_df:
+            return fallback_rate * 0.04
+        atr = float(analyzed_df["atr"].iloc[-1])
+        return max(atr, fallback_rate * 0.001)
+
     def _init_trade_state(self, trade: Trade) -> None:
         analyzed_df, _ = self.dp.get_analyzed_dataframe(trade.pair, self.timeframe)
-        if analyzed_df is None or analyzed_df.empty or "atr" not in analyzed_df:
-            atr = trade.open_rate * 0.04
-        else:
-            atr = float(analyzed_df["atr"].iloc[-1])
+        atr = self._atr_at_entry(analyzed_df, trade.open_rate)
         trade.set_custom_data("atr", max(atr, trade.open_rate * 0.001))
         trade.set_custom_data("peak", trade.open_rate)
         trade.set_custom_data("be_done", False)
@@ -125,41 +142,62 @@ class Impulse1D(IStrategy):
         lev = trade.leverage or 1.0
         bars = trade.get_custom_data("bars", 0)
 
+        # свеча входа: кастом не управляет позицией на свече входа вообще
+        # (создание в секции 3, управление — со следующего бара), поэтому на свече
+        # входа НЕ применяем be/пик/трейлинг — стоп для следующего бара = initial.
+        entry_candle = current_time == trade.open_date_utc
+        # after_fill происходит в начале свечи (заполнение ордера по open);
+        # в кастоме управление идёт только раз в свечу по exit-check, поэтому
+        # after_fill-вызовы (вход и докупки) тоже не двигают be/пик/стоп —
+        # иначе be-стоп с этой свечи применился бы на этой же свече (без лага).
+        manage = not entry_candle and not after_fill
+
+        # фридж: в backtest current_rate == HIGH (long) / LOW (short), а не close.
+        # для be-триггера берём настоящий close текущей свечи из analyzed_df (без lookahead:
+        # в backtest df срезан до текущей свечи)
+        analyzed_df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        close = float(analyzed_df["close"].iloc[-1]) if (analyzed_df is not None and not analyzed_df.empty and "close" in analyzed_df) else current_rate
+        raw_move = (close - trade.open_rate) / trade.open_rate if not trade.is_short else (trade.open_rate - close) / trade.open_rate
         if not trade.is_short:
-            if current_rate > peak:
+            if manage and current_rate > peak:
                 trade.set_custom_data("peak", current_rate)
                 peak = current_rate
             initial_stop = trade.open_rate - atr * self.sl_atr_mult.value
-            if not trade.get_custom_data("be_done") and current_profit >= self.be_pct:
+            if manage and not trade.get_custom_data("be_done") and raw_move >= self.be_pct:
                 trade.set_custom_data("be_done", True)
             stop_next = trade.open_rate - atr * self.sl_atr_mult.value
-            if trade.get_custom_data("be_done"):
+            if manage and trade.get_custom_data("be_done"):
                 stop_next = max(stop_next, trade.open_rate * 0.999)
-            stop_next = max(stop_next, peak - atr * self.trail_atr_mult.value)
+            if manage:
+                stop_next = max(stop_next, peak - atr * self.trail_atr_mult.value)
         else:
-            if current_rate < peak:
+            if manage and current_rate < peak:
                 trade.set_custom_data("peak", current_rate)
                 peak = current_rate
             initial_stop = trade.open_rate + atr * self.sl_atr_mult.value
-            if not trade.get_custom_data("be_done") and current_profit <= -self.be_pct:
+            if manage and not trade.get_custom_data("be_done") and raw_move >= self.be_pct:
                 trade.set_custom_data("be_done", True)
             stop_next = trade.open_rate + atr * self.sl_atr_mult.value
-            if trade.get_custom_data("be_done"):
+            if manage and trade.get_custom_data("be_done"):
                 stop_next = min(stop_next, trade.open_rate * 1.001)
-            stop_next = min(stop_next, peak + atr * self.trail_atr_mult.value)
+            if manage:
+                stop_next = min(stop_next, peak + atr * self.trail_atr_mult.value)
 
         # лаговый стоп: текущая свеча проверяется по стопу из предыдущей (без same-candle)
         prev_stop = trade.get_custom_data("next_stop")
         if prev_stop is None:
             prev_stop = initial_stop
-        trade.set_custom_data("next_stop", stop_next)
+        if manage:
+            trade.set_custom_data("next_stop", stop_next)
+        else:
+            trade.set_custom_data("next_stop", prev_stop)
         trade.set_custom_data("bars", bars + 1)
 
         if not trade.is_short:
             ratio = lev * (prev_stop / current_rate - 1.0)
         else:
             ratio = -lev * (prev_stop / current_rate - 1.0)
-        return max(ratio, self.stoploss)
+        return ratio
 
     def custom_exit(
         self, pair: str, trade: Trade, current_time: datetime,
@@ -231,7 +269,7 @@ class Impulse1D(IStrategy):
         analyzed_df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
         if analyzed_df is None or analyzed_df.empty or "atr" not in analyzed_df:
             return 1.0
-        atr = float(analyzed_df["atr"].iloc[-1])
+        atr = self._atr_at_entry(analyzed_df, current_rate)
         if atr <= 0 or current_rate <= 0:
             return 1.0
         lev = 1.0 / ((atr / current_rate) * 2.0)
@@ -250,7 +288,7 @@ class Impulse1D(IStrategy):
         if analyzed_df is None or analyzed_df.empty or "atr" not in analyzed_df:
             atr = current_rate * 0.04
         else:
-            atr = float(analyzed_df["atr"].iloc[-1])
+            atr = self._atr_at_entry(analyzed_df, current_rate)
         stop_pct = (atr * self.sl_atr_mult.value) / current_rate if current_rate > 0 else 0.15
         stop_pct = min(max(stop_pct, 0.01), 0.5)
         lev = leverage if leverage and leverage > 0 else 1.0

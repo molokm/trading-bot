@@ -71,16 +71,16 @@ const DEFAULT_IMP_CONFIG = {
   max_hold_bars: 30, max_leverage: 3.0,
 }
 
-// Честный бэктест (Freqtrade, вне выборки) — по каждой стратегии
+// Честный бэктест (Freqtrade) — по каждой стратегии
 const MOM_BACKTEST = {
   years: [
-    { year: '2022', ret: '+23%' },
-    { year: '2023', ret: '+70%' },
-    { year: '2024', ret: '+26%' },
-    { year: '2025', ret: '+13%' },
-    { year: '2026', ret: '+42%' },
+    { year: '2022', ret: '+19.04%' },
+    { year: '2023', ret: '+158.19%' },
+    { year: '2024', ret: '+38.37%' },
+    { year: '2025', ret: '+17.24%' },
+    { year: '2026', ret: '+39.15%' },
   ],
-  summary: { cagr: '33.5%', dd: '38.6%' },
+  summary: { cagr: '45%', dd: '30.3%' },
 }
 const IMP_BACKTEST = {
   years: [

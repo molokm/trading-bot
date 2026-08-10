@@ -72,6 +72,8 @@ const ru = {
 
 
   'dash.momentum_bot': 'Momentum Rotation',
+  'dash.impulse_bot': 'Impulse 1D',
+  'dash.budget': 'Бюджет',
   'dash.running': 'Работает',
   'dash.stopped': 'Остановлен',
   'dash.uptime': 'Время работы',

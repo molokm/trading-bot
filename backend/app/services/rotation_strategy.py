@@ -391,8 +391,8 @@ class RotationStrategy:
         return round(lev, 1)
 
     def _calc_size(self, coin: str, price: float, stop_distance: float, leverage: float) -> float:
-        """Risk-based position sizing: risk_per_trade / (stop_pct x leverage),
-        capped so total margin <= equity * allocation_pct."""
+        """Risk-based position sizing: risk_per_trade / stop_pct,
+        capped so position notional never exceeds the bot budget ($10k) regardless of leverage."""
         ct_val = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         cfg = self.config
@@ -405,12 +405,11 @@ class RotationStrategy:
         # Risk amount in USD
         risk_usd = self._equity * cfg.risk_per_trade
         notional = risk_usd / stop_pct
-        margin = notional / leverage if leverage > 0 else notional
-        # Cap margin at allocation_pct * equity
-        max_margin = self._equity * cfg.allocation_pct
-        if margin > max_margin:
-            margin = max_margin
-            notional = margin * leverage
+        # Budget cap: position notional cannot exceed the bot's budget ($10k),
+        # leverage is NOT used to inflate the position (без учёта плечей).
+        max_notional = min(self._equity, cfg.capital)
+        if notional > max_notional:
+            notional = max_notional
 
         raw_sz = notional / (ct_val * price)
         sz = math.floor(raw_sz / lot + 1e-12) * lot

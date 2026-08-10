@@ -56,6 +56,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [tickers, setTickers] = useState({})
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
+  const [impulseStatus, setImpulseStatus] = useState(null)
+  const [impulseTrades, setImpulseTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -108,12 +110,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, trades, pnlData, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, impStatus, impTrades, trades, pnlData, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
         api.momentumTrades(30).catch(() => null),
+        api.impulseStatus().catch(() => null),
+        api.impulseTrades(30).catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
         Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
@@ -125,6 +129,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         setMomentumStatus(momStatus)
       }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
+      if (impStatus) setImpulseStatus(impStatus)
+      if (impTrades) setImpulseTrades(impTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
       if (priceTickers) {
@@ -730,6 +736,75 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </button>
                   )}
                 </div>
+              )}
+            </div>
+          </div>
+
+          {/* ─── Impulse 1D Bot ─── */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <Zap size={13} className="text-[var(--profit)]" />
+              <span className="flex-1">{t('dash.impulse_bot')}</span>
+              {impulseStatus?.version && (
+                <span className="text-[0.62rem] font-semibold mono text-[var(--profit)] uppercase tracking-wide mr-1">
+                  {impulseStatus.version}
+                </span>
+              )}
+              {impulseStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!impulseStatus?.running && impulseStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+            </div>
+            <div className="p-3 space-y-2">
+              <div className="grid grid-cols-3 gap-1.5">
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(impulseStatus?.config?.capital || 10000).toLocaleString?.()}</div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                  <div className={`mono text-xs font-bold mt-0.5 ${impulseStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    ${impulseStatus?.total_pnl >= 0 ? '+' : ''}{(impulseStatus?.total_pnl || 0).toFixed(2)}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{impulseStatus?.open_positions?.length || 0}/{impulseStatus?.config?.top_k || 4}</div>
+                </div>
+              </div>
+              {impulseStatus?.open_positions?.length > 0 && (
+                <div className="space-y-1">
+                  {impulseStatus.open_positions.map((p, i) => {
+                    const isLong = p.side !== 'short'
+                    return (
+                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
+                        </div>
+                        <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                          {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              {impulseTrades.length > 0 && (
+                <div className="space-y-0.5">
+                  {impulseTrades.slice(0, 4).map((tr, i) => (
+                    <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
+                      <span className="text-[var(--txt)]">{tr.symbol}</span>
+                      <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
+                      </span>
+                      <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {!isGuest && (
+                <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.impulseStop(); loadData() } catch (e) { alert(e.message) } }}>
+                  <Square size={12} /> {t('dash.stop_bot')}
+                </button>
               )}
             </div>
           </div>

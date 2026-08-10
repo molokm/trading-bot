@@ -285,11 +285,11 @@ class ImpulseStrategy:
             stop_pct = stop_distance / price
         risk_usd = self._equity * cfg.risk_per_trade
         notional = risk_usd / stop_pct
-        margin = notional / leverage if leverage > 0 else notional
-        max_margin = self._equity * cfg.max_margin_pct
-        if margin > max_margin:
-            margin = max_margin
-            notional = margin * leverage
+        # Budget cap: notional cannot exceed the bot's budget ($10k),
+        # leverage is NOT used to inflate the position (без учёта плечей).
+        max_notional = min(self._equity, cfg.capital)
+        if notional > max_notional:
+            notional = max_notional
         raw_sz = notional / (ct_val * price)
         sz = math.floor(raw_sz / lot + 1e-12) * lot
         return max(sz, lot)
@@ -297,12 +297,17 @@ class ImpulseStrategy:
     def _add_size(self, pos: ImpPosition, price: float, leverage: float) -> float:
         cfg = self.config
         base = pos.size * cfg.add_size_ratio
-        max_margin = self._equity * cfg.max_margin_pct
         ct = CT_VAL[pos.coin]
         notional = base * ct * price
-        margin = notional / leverage if leverage > 0 else notional
-        if margin > max_margin:
-            base = max_margin * leverage / (ct * price)
+        # Budget cap: adding must not push the total position notional past the
+        # bot's budget ($10k) — leverage is not used to inflate it.
+        max_notional = min(self._equity, cfg.capital)
+        existing_notional = pos.size * ct * price
+        room = max_notional - existing_notional
+        if room <= 0:
+            return 0.0
+        if notional > room:
+            base = room / (ct * price)
         lot = LOT_SZ[pos.coin]
         base = math.floor(base / lot + 1e-12) * lot
         return max(base, lot)
@@ -632,6 +637,9 @@ class ImpulseStrategy:
                 print(f"[Impulse] Set leverage (add) error {coin}: {lev_resp.get('message', '')}",
                       flush=True)
         add_sz = self._add_size(pos, ind["close_today"], lev)
+        if add_sz <= 0:
+            print(f"[Impulse] Add skipped {coin}: budget $10k reached (no room)", flush=True)
+            return
         order_side = "buy" if pos.side == "long" else "sell"
         limit_px = ind["close_today"] * (1 - cfg.limit_offset_pct) if pos.side == "long" \
             else ind["close_today"] * (1 + cfg.limit_offset_pct)
