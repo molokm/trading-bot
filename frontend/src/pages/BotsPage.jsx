@@ -84,13 +84,13 @@ const MOM_BACKTEST = {
 }
 const IMP_BACKTEST = {
   years: [
-    { year: '2022', ret: '+0.4%' },
-    { year: '2023', ret: '+26.9%' },
-    { year: '2024', ret: '+16.6%' },
-    { year: '2025', ret: '−9.7%' },
-    { year: '2026', ret: '+24.9%' },
+    { year: '2022', ret: '+64%' },
+    { year: '2023', ret: '+45%' },
+    { year: '2024', ret: '+61%' },
+    { year: '2025', ret: '+14%' },
+    { year: '2026', ret: '+48%' },
   ],
-  summary: { cagr: '11.9%', dd: '27.1%' },
+  summary: { cagr: '52%', dd: '19.1%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {
