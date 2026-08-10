@@ -57,7 +57,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
-  const [impulseTrades, setImpulseTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -110,14 +109,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, impStatus, impTrades, trades, pnlData, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, impStatus, trades, pnlData, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
         api.momentumTrades(30).catch(() => null),
         api.impulseStatus().catch(() => null),
-        api.impulseTrades(30).catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
         Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
@@ -130,7 +128,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (impStatus) setImpulseStatus(impStatus)
-      if (impTrades) setImpulseTrades(impTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
       if (priceTickers) {
@@ -674,7 +671,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             <div className="p-3 space-y-2">
               {momentumStatus?.running ? (
                 <>
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div className="grid grid-cols-4 gap-1.5">
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
+                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(momentumStatus.config?.capital || 10000).toLocaleString()}</div>
+                    </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
                       <div className={`mono text-xs font-bold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
@@ -682,17 +683,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       </div>
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${momentumStatus.equity?.toLocaleString?.() || '---'}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">Pos</div>
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0}/{momentumStatus.config?.max_positions || 2}</div>
                     </div>
-                  </div>
-                  <div className="flex items-center justify-between text-2xs px-0.5">
-                    <span className="text-[var(--txt-muted)]">{t('dash.budget')}: <span className="mono text-[var(--txt)] font-semibold">${(momentumStatus.config?.capital || 10000).toLocaleString()}</span></span>
-                    <span className="text-[var(--txt-muted)]">{t('dash.leverage')}: <span className="mono text-[var(--info)] font-semibold">×{momentumStatus.config?.max_leverage || 1}</span></span>
+                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
+                      <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{momentumStatus.config?.max_leverage || 1}</div>
+                    </div>
                   </div>
                   {momentumStatus.open_positions?.length > 0 && (
                     <div className="space-y-1">
@@ -710,19 +707,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           </div>
                         )
                       })}
-                    </div>
-                  )}
-                  {momentumTrades.length > 0 && (
-                    <div className="space-y-0.5">
-                      {momentumTrades.slice(0, 4).map((tr, i) => (
-                        <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
-                          <span className="text-[var(--txt)]">{tr.symbol}</span>
-                          <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
-                          </span>
-                          <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
-                        </div>
-                      ))}
                     </div>
                   )}
                   {!isGuest && (
@@ -794,19 +778,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       </div>
                     )
                   })}
-                </div>
-              )}
-              {impulseTrades.length > 0 && (
-                <div className="space-y-0.5">
-                  {impulseTrades.slice(0, 4).map((tr, i) => (
-                    <div key={i} className="flex items-center justify-between text-2xs p-1 rounded bg-[var(--bg)]">
-                      <span className="text-[var(--txt)]">{tr.symbol}</span>
-                      <span className={`mono font-semibold ${tr.pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        {tr.pnl >= 0 ? '+' : ''}{tr.pnl?.toFixed(2)}
-                      </span>
-                      <span className="text-[var(--txt-muted)]">{tr.time ? new Date(tr.time).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : ''}</span>
-                    </div>
-                  ))}
                 </div>
               )}
               {!isGuest && (
