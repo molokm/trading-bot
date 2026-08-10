@@ -690,6 +690,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0}/{momentumStatus.config?.max_positions || 2}</div>
                     </div>
                   </div>
+                  <div className="flex items-center justify-between text-2xs px-0.5">
+                    <span className="text-[var(--txt-muted)]">{t('dash.budget')}: <span className="mono text-[var(--txt)] font-semibold">${(momentumStatus.config?.capital || 10000).toLocaleString()}</span></span>
+                    <span className="text-[var(--txt-muted)]">{t('dash.leverage')}: <span className="mono text-[var(--info)] font-semibold">×{momentumStatus.config?.max_leverage || 1}</span></span>
+                  </div>
                   {momentumStatus.open_positions?.length > 0 && (
                     <div className="space-y-1">
                       {momentumStatus.open_positions.map((p, i) => {
@@ -754,7 +758,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               {!impulseStatus?.running && impulseStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
             <div className="p-3 space-y-2">
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="grid grid-cols-4 gap-1.5">
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
                   <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(impulseStatus?.config?.capital || 10000).toLocaleString?.()}</div>
@@ -768,6 +772,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
                   <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{impulseStatus?.open_positions?.length || 0}/{impulseStatus?.config?.top_k || 4}</div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{impulseStatus?.config?.max_leverage || 1}</div>
                 </div>
               </div>
               {impulseStatus?.open_positions?.length > 0 && (
