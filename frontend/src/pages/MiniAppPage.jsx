@@ -33,6 +33,17 @@ function pnlSign(v) {
   return (v > 0 ? '+' : '') + fmt(v)
 }
 
+/* ═══════ Never let a request hang forever (cold starts, flaky networks) ═══════ */
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error('timeout')), ms)
+    promise.then(
+      v => { clearTimeout(id); resolve(v) },
+      e => { clearTimeout(id); reject(e) }
+    )
+  })
+}
+
 /* ═══════ Compact card ═══════ */
 function Card({ children, className = '' }) {
   return (
@@ -115,13 +126,14 @@ export default function MiniAppPage() {
       try {
         const initData = tg?.initData
         if (initData) {
-          const res = await api.telegramAuth(initData)
+          const res = await withTimeout(api.telegramAuth(initData), 20000)
           localStorage.setItem('auth_token', res.token)
           localStorage.setItem('auth_role', res.role)
         } else if (!localStorage.getItem('auth_token')) {
           setAuthError('not_in_telegram')
         }
       } catch (err) {
+        console.warn('mini auth error', err)
         setAuthError(err.message || 'auth_failed')
       }
       setAuthing(false)
@@ -129,24 +141,29 @@ export default function MiniAppPage() {
     run()
   }, [tgResolved, tg])
 
-  /* ── Load dashboard data (per-request error handling) ── */
+  /* ── Load dashboard data (per-request error handling + timeout) ── */
   const load = useCallback(async () => {
     setLoading(true)
-    const results = await Promise.allSettled([
-      api.health(),
-      api.getPortfolio(),
-      api.rotationStatus(),
-      api.impulseStatus(),
-      api.getPositions('SWAP'),
-      api.getAllTrades(20),
-    ])
-    const [h, pf, rot, imp, pos, tr] = results.map(r => (r.status === 'fulfilled' ? r.value : null))
-    if (h) { setConnected(h.connected); setDemoMode(h.demo) }
-    if (pf) setPortfolio(pf)
-    if (rot) setRotation(rot)
-    if (imp) setImpulse(imp)
-    if (pos) setPositions(pos?.positions || [])
-    if (tr) setTrades(tr?.trades || [])
+    const results = await withTimeout(
+      Promise.allSettled([
+        api.health(),
+        api.getPortfolio(),
+        api.rotationStatus(),
+        api.impulseStatus(),
+        api.getPositions('SWAP'),
+        api.getAllTrades(20),
+      ]),
+      12000
+    ).catch(() => null)
+    if (results) {
+      const [h, pf, rot, imp, pos, tr] = results.map(r => (r.status === 'fulfilled' ? r.value : null))
+      if (h) { setConnected(h.connected); setDemoMode(h.demo) }
+      if (pf) setPortfolio(pf)
+      if (rot) setRotation(rot)
+      if (imp) setImpulse(imp)
+      if (pos) setPositions(pos?.positions || [])
+      if (tr) setTrades(tr?.trades || [])
+    }
     setLoaded(true)
     setLoading(false)
   }, [])
@@ -200,7 +217,7 @@ export default function MiniAppPage() {
     )
   }
 
-  if (authing || (loading && !loaded)) {
+  if (authing) {
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--txt-secondary)]">
         <Loader2 size={28} className="animate-spin text-[var(--info)]" />
@@ -252,6 +269,20 @@ export default function MiniAppPage() {
       </div>
 
       <div className="p-3 space-y-3">
+        {/* ═══ Data unavailable banner ═══ */}
+        {loaded && !portfolio && !rotation && !impulse && (
+          <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--warn-dim)] border border-[var(--warn)]">
+            <span className="text-xs text-[var(--txt)]">{t('mini.data_error')}</span>
+            <button
+              onClick={load}
+              className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[var(--warn)] text-white text-2xs font-bold active:opacity-70"
+            >
+              <RefreshCw size={11} />
+              {t('mini.reload')}
+            </button>
+          </div>
+        )}
+
         {/* ═══ Portfolio ═══ */}
         <Card className="bg-gradient-to-br from-[var(--profit-dim)] to-[var(--info-dim)] border-0">
           <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--txt-secondary)] mb-1">

@@ -528,6 +528,7 @@ const en = {
   'mini.auth_error': 'Login error: open the app from the bot',
   'mini.reload': 'Refresh',
   'mini.loading': 'Loading…',
+  'mini.data_error': 'Failed to load data. Check your connection.',
   'mini.entry': 'Entry',
   'mini.exit': 'Exit',
   'mini.stop': 'Stop',
