@@ -223,41 +223,40 @@ export default function MiniAppPage() {
 
   /* ── Load dashboard data (per-request error handling + timeout) ── */
   const load = useCallback(async () => {
+    miniLog('load', 'starting, token=' + (localStorage.getItem('auth_token') ? 'set' : 'EMPTY'))
     setLoading(true)
-    const results = await withTimeout(
-      Promise.allSettled([
-        api.health(),
-        api.getPortfolio(),
-        api.rotationStatus(),
-        api.impulseStatus(),
-        api.getPositions('SWAP'),
-        api.getAllTrades(20),
-      ]),
-      12000
-    ).catch(() => null)
-    if (results) {
-      const [h, pf, rot, imp, pos, tr] = results.map(r => (r.status === 'fulfilled' ? r.value : null))
-      if (h) { setConnected(h.connected); setDemoMode(h.demo) }
-      if (pf) setPortfolio(pf)
-      if (rot) setRotation(rot)
-      if (imp) setImpulse(imp)
-      if (pos) setPositions(pos?.positions || [])
-      if (tr) setTrades(tr?.trades || [])
-      miniLog('load',
-        'health=' + (h ? 'ok' : 'FAIL'),
-        'portfolio=' + (pf ? '$' + Number(pf.totalEqUsd).toFixed(0) : 'FAIL'),
-        'rotation=' + (rot ? (rot.running ? 'on' : 'off') : 'FAIL'),
-        'impulse=' + (imp ? (imp.running ? 'on' : 'off') : 'FAIL'),
-        'positions=' + (pos ? pos.positions?.length : 'FAIL'),
-        'trades=' + (tr ? tr.trades?.length : 'FAIL'))
-    } else {
-      miniLog('load', 'TIMEOUT after 12s (all requests hung)')
-    }
+    const reqs = [
+      ['health', api.health()],
+      ['portfolio', api.getPortfolio()],
+      ['rotation', api.rotationStatus()],
+      ['impulse', api.impulseStatus()],
+      ['positions', api.getPositions('SWAP')],
+      ['trades', api.getAllTrades(20)],
+    ]
+    const results = await Promise.all(reqs.map(async ([name, p]) => {
+      try {
+        const v = await withTimeout(p, 12000)
+        const len = (JSON.stringify(v) || '').length
+        miniLog('load', name, 'OK len=' + len)
+        return [name, v]
+      } catch (e) {
+        miniLog('load', name, 'ERROR', e.message || String(e))
+        return [name, null]
+      }
+    }))
+    const map = Object.fromEntries(results)
+    if (map.health) { setConnected(map.health.connected); setDemoMode(map.health.demo) }
+    if (map.portfolio) setPortfolio(map.portfolio)
+    if (map.rotation) setRotation(map.rotation)
+    if (map.impulse) setImpulse(map.impulse)
+    if (map.positions) setPositions(map.positions.positions || [])
+    if (map.trades) setTrades(map.trades.trades || [])
     setLoaded(true)
     setLoading(false)
   }, [])
 
   useEffect(() => {
+    miniLog('effect', 'load-effect fired, authing=' + authing + ' authError=' + (authError || '""'))
     if (!authing && !authError) load()
   }, [authing, authError, load])
 
