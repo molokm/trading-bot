@@ -227,6 +227,15 @@ export default function MiniAppPage() {
           setAuthError('not_in_telegram')
           miniLog('auth', 'no initData AND no stored token -> error screen')
         }
+        try {
+          const h = await withTimeout(api.debugServerHits(), 10000)
+          miniLog('server-hits',
+            ((h?.hits || []).slice(-20)
+              .map(x => x.t + ' ' + x.m + ' ' + x.p + '→' + x.c)
+              .join(' | ')) || 'none')
+        } catch (e) {
+          miniLog('server-hits', 'ERR', e.message || e)
+        }
       } catch (err) {
         console.warn('mini auth error', err)
         setAuthError(err.message || 'auth_failed')

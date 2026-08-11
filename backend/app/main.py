@@ -82,15 +82,20 @@ _SERVER_HITS = []
 
 @app.middleware("http")
 async def _server_hit_logger(request: Request, call_next):
-    response = await call_next(request)
+    entry = {
+        "t": _time.strftime("%H:%M:%S"),
+        "p": request.url.path,
+        "c": None,
+        "m": request.method,
+    }
     if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/debug/"):
-        _SERVER_HITS.append({
-            "t": _time.strftime("%H:%M:%S"),
-            "p": request.url.path,
-            "c": response.status_code,
-            "m": request.method,
-        })
+        _SERVER_HITS.append(entry)
         del _SERVER_HITS[:-400]
+    try:
+        response = await call_next(request)
+        entry["c"] = response.status_code
+    except Exception:
+        entry["c"] = "ERR"
     return response
 
 
