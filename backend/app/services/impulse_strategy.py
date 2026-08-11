@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
 STRATEGY_VERSION = "v1"
@@ -125,11 +126,13 @@ class ImpPosition:
 
 class ImpulseStrategy:
     def __init__(self, config: ImpulseConfig, client_manager=None, db=None,
-                 notifier: Optional[TelegramNotifier] = None):
+                 notifier: Optional[TelegramNotifier] = None,
+                 analysis: Optional["AnalysisLogger"] = None):
         self.config = config
         self.client_manager = client_manager
         self.db = db
         self.notifier = notifier or TelegramNotifier()
+        self.analysis = analysis or get_logger()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -349,6 +352,9 @@ class ImpulseStrategy:
             pos.size_synced = pos.size
         print(f"[Impulse] Stop placed {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
               f"sz={pos.size} algoId={algo_id}", flush=True)
+        self.analysis.log("impulse", "stop_placed",
+                          coin=pos.coin, side=pos.side, stop=round(pos.stop_price, 2),
+                          size=pos.size, algo_id=algo_id)
         return algo_id
 
     async def _cancel_exchange_stop(self, client, pos: ImpPosition):
@@ -359,6 +365,8 @@ class ImpulseStrategy:
             print(f"[Impulse] Cancel stop error {pos.coin}: {resp.get('message', '')}", flush=True)
         else:
             print(f"[Impulse] Stop cancelled {pos.coin} algoId={pos.algo_id}", flush=True)
+            self.analysis.log("impulse", "stop_cancelled",
+                              coin=pos.coin, side=pos.side, algo_id=pos.algo_id)
         pos.algo_id = ""
 
     async def _update_exchange_stop(self, client, pos: ImpPosition):
@@ -386,6 +394,9 @@ class ImpulseStrategy:
             pos.size_synced = pos.size
             print(f"[Impulse] Stop updated {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
                   f"sz={pos.size} algoId={new_algo_id}", flush=True)
+            self.analysis.log("impulse", "stop_updated",
+                              coin=pos.coin, side=pos.side, stop=round(pos.stop_price, 2),
+                              size=pos.size, algo_id=new_algo_id)
 
     async def _close_partial(self, client, pos: ImpPosition, frac: float, tag: str):
         """Close `frac` of the remaining position (cascade TP1/TP2)."""
@@ -431,6 +442,12 @@ class ImpulseStrategy:
         print(f"[Impulse] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f} ({tag})", flush=True)
+        self.analysis.log("impulse", "partial", tag=tag,
+                          coin=pos.coin, side=pos.side,
+                          closed_sz=close_sz, remaining_sz=pos.size,
+                          exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
+                          pnl=round(pnl, 2), fee=round(fee, 4),
+                          signal_id=pos.signal_id)
         if self.notifier:
             try:
                 self.notifier.fire(self.notifier.partial_msg(
@@ -486,6 +503,12 @@ class ImpulseStrategy:
         print(f"[Impulse] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
               f"pnl={pnl:+.2f} ({reason})", flush=True)
+        self.analysis.log("impulse", "close",
+                          coin=pos.coin, side=pos.side, reason=reason,
+                          entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          leverage=pos.leverage, adds=pos.adds,
+                          signal_id=pos.signal_id)
         if self.notifier:
             try:
                 self.notifier.fire(self.notifier.close_msg(
@@ -534,6 +557,10 @@ class ImpulseStrategy:
 
         if not self.config.auto_execute:
             print(f"[Impulse] SIGNAL (no execute) {coin} {side} @ {price:.1f} lev={lev}", flush=True)
+            self.analysis.log("impulse", "signal",
+                              coin=coin, side=side, price=round(price, 2),
+                              leverage=lev, atr=round(atr_val, 2), size=sz,
+                              stop=round(stop, 2))
             return
 
         limit_px = price * (1 - self.config.limit_offset_pct) if side == "long" \
@@ -611,6 +638,11 @@ class ImpulseStrategy:
         print(f"[Impulse] OPEN  {now[:19]} {coin:4} {side:5} "
               f"price={fill_px:.1f} stop={stop:.1f} sz={sz} "
               f"lev={lev} atr={atr_val:.1f} fee={fee:.2f}", flush=True)
+        self.analysis.log("impulse", "open",
+                          coin=coin, side=side, price=round(fill_px, 2),
+                          stop=round(stop, 2), size=sz, leverage=lev,
+                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          inst_id=inst_id, signal_id=signal_id)
         if self.notifier:
             try:
                 self.notifier.fire(self.notifier.open_msg(
@@ -681,6 +713,13 @@ class ImpulseStrategy:
         print(f"[Impulse] ADD   {now[:19]} {coin:4} {pos.side:5} "
               f"price={fill_px:.1f} add={add_sz} total={pos.size} "
               f"new_stop={pos.stop_price:.1f} fee={fee:.2f}", flush=True)
+        self.analysis.log("impulse", "add",
+                          coin=coin, side=pos.side, price=round(fill_px, 2),
+                          add_sz=add_sz, total_sz=pos.size,
+                          entry_px=round(pos.entry_price, 2),
+                          new_stop=round(pos.stop_price, 2),
+                          leverage=lev, adds=pos.adds, fee=round(fee, 4),
+                          signal_id=pos.signal_id)
         if self.notifier:
             try:
                 self.notifier.fire(self.notifier.add_msg(
@@ -708,6 +747,9 @@ class ImpulseStrategy:
                 realized_sz = float(p.get("pos", 0))
                 if pos.size != realized_sz:
                     print(f"[Impulse] SYNC {coin} pos size {pos.size} -> {realized_sz}", flush=True)
+                    self.analysis.log("impulse", "sync",
+                                      coin=coin, side=pos.side,
+                                      event="size_drift", old_size=pos.size, new_size=realized_sz)
                     pos.size = realized_sz
                 break
         except Exception as e:
@@ -802,20 +844,36 @@ class ImpulseStrategy:
             trail = pos.peak_price - trail_m * pos.atr
             if trail > pos.stop_price:
                 pos.stop_price = trail
+                self.analysis.log("impulse", "trail",
+                                  coin=pos.coin, side=pos.side,
+                                  price=round(price, 2), peak=round(pos.peak_price, 2),
+                                  new_stop=round(pos.stop_price, 2))
         else:
             pos.peak_price = min(pos.peak_price, price)
             trail = pos.peak_price + trail_m * pos.atr
             if trail < pos.stop_price:
                 pos.stop_price = trail
+                self.analysis.log("impulse", "trail",
+                                  coin=pos.coin, side=pos.side,
+                                  price=round(price, 2), peak=round(pos.peak_price, 2),
+                                  new_stop=round(pos.stop_price, 2))
 
         # breakeven after min profit
         if not pos.breakeven:
             if pos.side == "long" and price >= pos.entry_price * (1 + cfg.be_pct):
                 pos.stop_price = max(pos.stop_price, pos.entry_price)
                 pos.breakeven = True
+                self.analysis.log("impulse", "breakeven",
+                                  coin=pos.coin, side=pos.side,
+                                  price=round(price, 2), entry=round(pos.entry_price, 2),
+                                  stop=round(pos.stop_price, 2))
             if pos.side == "short" and price <= pos.entry_price * (1 - cfg.be_pct):
                 pos.stop_price = min(pos.stop_price, pos.entry_price)
                 pos.breakeven = True
+                self.analysis.log("impulse", "breakeven",
+                                  coin=pos.coin, side=pos.side,
+                                  price=round(price, 2), entry=round(pos.entry_price, 2),
+                                  stop=round(pos.stop_price, 2))
 
         if pos.stop_price != pos.stop_synced or pos.size != pos.size_synced:
             await self._update_exchange_stop(client, pos)
@@ -855,6 +913,11 @@ class ImpulseStrategy:
             if not self.config.auto_execute:
                 print(f"[Impulse] SIGNAL {coin} {side} strength={strength:.1f} "
                       f"roc={ind['roc']:.1f}%", flush=True)
+                self.analysis.log("impulse", "signal",
+                                  coin=coin, side=side, strength=round(strength, 2),
+                                  roc=round(ind["roc"], 2), rsi=round(ind["rsi"], 2),
+                                  price=round(ind["close_today"], 2),
+                                  vol=round(ind["vol"], 2), avg_vol=round(ind["avg_vol"], 2))
                 continue
             await self._open_position(client, coin, side, ind, lev)
 

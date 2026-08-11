@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw } from 'lucide-react'
+import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
@@ -17,6 +17,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
   const [tgStatus, setTgStatus] = useState(null)
+  const [logDownloading, setLogDownloading] = useState(false)
+  const [logStatus, setLogStatus] = useState(null)
   const timersRef = useRef([])
 
   useEffect(() => {
@@ -138,6 +140,26 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       setTgStatus({ ok: r.ok, message: r.message })
     } catch (err) { setTgStatus({ ok: false, message: err.message }) }
     setTgTesting(false)
+  }
+
+  const handleDownloadLog = async () => {
+    setLogDownloading(true); setLogStatus(null)
+    try {
+      const blob = await api.downloadAnalysisLog()
+      const name = blob.name || `analysis_${new Date().toISOString().slice(0, 10)}.jsonl`
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+      setLogStatus({ ok: true, message: t('settings.log_downloaded') })
+    } catch (err) {
+      setLogStatus({ ok: false, message: err.message || t('settings.log_failed') })
+    }
+    setLogDownloading(false)
   }
 
   const tgReady = tg.configured || (tg.token && tg.chat_id)
@@ -324,6 +346,26 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <div className={`flex items-center gap-2 p-3 rounded-lg text-xs ${tgStatus.ok ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                   {tgStatus.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
                   {tgStatus.message}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Analysis Log Download */}
+          <div className="panel">
+            <div className="panel-header">
+              <Download size={13} className="text-[var(--info)]" /> {t('settings.log_title')}
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-2xs text-[var(--txt-muted)]">{t('settings.log_tip')}</p>
+              <button className="btn btn-primary w-full" onClick={handleDownloadLog} disabled={logDownloading}>
+                {logDownloading ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}
+                {t('settings.log_download')}
+              </button>
+              {logStatus && (
+                <div className={`flex items-center gap-2 p-3 rounded-lg text-xs ${logStatus.ok ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                  {logStatus.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
+                  {logStatus.message}
                 </div>
               )}
             </div>

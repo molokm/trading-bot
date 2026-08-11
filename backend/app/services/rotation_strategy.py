@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
 STRATEGY_VERSION = "v4"
@@ -121,11 +122,13 @@ class RotPosition:
 
 class RotationStrategy:
     def __init__(self, config: RotationConfig, client_manager=None, db=None,
-                 notifier: Optional[TelegramNotifier] = None):
+                 notifier: Optional[TelegramNotifier] = None,
+                 analysis: Optional["AnalysisLogger"] = None):
         self.config = config
         self.client_manager = client_manager
         self.db = db
         self.notifier = notifier or TelegramNotifier()
+        self.analysis = analysis or get_logger()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -440,7 +443,11 @@ class RotationStrategy:
             )
             if abs(corr) > self.config.corr_threshold:
                 print(f"[Rotation] Correlation filter: {candidate_coin} corr with {held_coin} = {corr:.2f} > {self.config.corr_threshold} -> SKIP",
-                      flush=True)
+                     flush=True)
+                self.analysis.log("rotation", "filter",
+                                  coin=candidate_coin, filter="correlation",
+                                  with_coin=held_coin, corr=round(corr, 3),
+                                  threshold=self.config.corr_threshold, decision="skip")
                 return False
         return True
 
@@ -489,6 +496,9 @@ class RotationStrategy:
             pos.size_synced = pos.size
         print(f"[Rotation] Stop placed {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
               f"sz={pos.size} algoId={algo_id}", flush=True)
+        self.analysis.log("rotation", "stop_placed",
+                          coin=pos.coin, side=pos.side, stop=round(pos.stop_price, 2),
+                          size=pos.size, algo_id=algo_id)
         return algo_id
 
     async def _cancel_exchange_stop(self, client, pos: RotPosition):
@@ -500,6 +510,8 @@ class RotationStrategy:
             print(f"[Rotation] Cancel stop error {pos.coin}: {resp.get('message', '')}", flush=True)
         else:
             print(f"[Rotation] Stop cancelled {pos.coin} algoId={pos.algo_id}", flush=True)
+            self.analysis.log("rotation", "stop_cancelled",
+                              coin=pos.coin, side=pos.side, algo_id=pos.algo_id)
         pos.algo_id = ""
 
     async def _update_exchange_stop(self, client, pos: RotPosition):
@@ -529,6 +541,9 @@ class RotationStrategy:
             pos.size_synced = pos.size
             print(f"[Rotation] Stop updated {pos.coin} {pos.side} @ {pos.stop_price:.2f} "
                   f"sz={pos.size} algoId={new_algo_id}", flush=True)
+            self.analysis.log("rotation", "stop_updated",
+                              coin=pos.coin, side=pos.side, stop=round(pos.stop_price, 2),
+                              size=pos.size, algo_id=new_algo_id)
 
     async def _close_partial(self, client, inst_id: str, pos: RotPosition, close_ratio: float) -> dict:
         """Close portion of position."""
@@ -572,6 +587,12 @@ class RotationStrategy:
         print(f"[Rotation] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f}", flush=True)
+        self.analysis.log("rotation", "partial",
+                          coin=pos.coin, side=pos.side,
+                          closed_sz=close_sz, remaining_sz=pos.size,
+                          exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
+                          pnl=round(pnl, 2), fee=round(fee, 4), reason="partial_tp",
+                          signal_id=pos.signal_id)
 
         if self.notifier:
             try:
@@ -636,6 +657,11 @@ class RotationStrategy:
         print(f"[Rotation] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
               f"pnl={pnl:+.2f} ({reason})", flush=True)
+        self.analysis.log("rotation", "close",
+                          coin=pos.coin, side=pos.side, reason=reason,
+                          entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          leverage=pos.leverage, signal_id=pos.signal_id)
 
         if self.notifier:
             try:
@@ -689,6 +715,10 @@ class RotationStrategy:
 
         if not self.config.auto_execute:
             print(f"[Rotation] SIGNAL (no execute) {coin} {side} @ {price:.1f} lev={lev}", flush=True)
+            self.analysis.log("rotation", "signal",
+                              coin=coin, side=side, price=round(price, 2),
+                              leverage=lev, atr=round(atr_val, 2), size=sz,
+                              stop=round(stop, 2))
             return
 
         # Try limit order first (0.1% better price)
@@ -772,6 +802,11 @@ class RotationStrategy:
         print(f"[Rotation] OPEN  {now[:19]} {coin:4} {side:5} "
               f"price={fill_px:.1f} stop={stop:.1f} sz={sz} "
               f"lev={lev} atr={atr_val:.1f} fee={fee:.2f}", flush=True)
+        self.analysis.log("rotation", "open",
+                          coin=coin, side=side, price=round(fill_px, 2),
+                          stop=round(stop, 2), size=sz, leverage=lev,
+                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          inst_id=inst_id, signal_id=signal_id)
 
         if self.notifier:
             try:
@@ -846,6 +881,11 @@ class RotationStrategy:
                             print(f"[Rotation] DB reconcile save error: {e}", flush=True)
                     print(f"[Rotation] RECONCILE {now[:19]} {coin:4} {pos.side:5} "
                           f"gone from exchange, booked stop pnl={pnl:+.2f}", flush=True)
+                    self.analysis.log("rotation", "reconcile",
+                                      coin=coin, side=pos.side,
+                                      event="position_gone", reason="exchange_stop",
+                                      entry_px=round(pos.entry_price, 2),
+                                      exit_px=round(fill_px, 2), pnl=round(pnl, 2))
 
                     if self.notifier:
                         try:
@@ -865,6 +905,9 @@ class RotationStrategy:
                     pos.size_synced = 0.0  # force the exchange stop to re-sync
                     print(f"[Rotation] RECONCILE {coin:4} size {old} -> {real_sz} "
                           f"(exchange drift), stop will re-sync", flush=True)
+                    self.analysis.log("rotation", "reconcile",
+                                      coin=coin, side=pos.side,
+                                      event="size_drift", old_size=old, new_size=real_sz)
                     if self.db:
                         await self._sync_positions_db()
         except Exception as e:
@@ -929,10 +972,20 @@ class RotationStrategy:
                 new_stop = pos.peak_price - trail_step
                 if new_stop > pos.stop_price:
                     pos.stop_price = new_stop
+                    self.analysis.log("rotation", "trail",
+                                      coin=pos.coin, side=pos.side,
+                                      price=round(current_price, 2),
+                                      peak=round(pos.peak_price, 2),
+                                      new_stop=round(pos.stop_price, 2))
                 # Breakeven after 3%
                 if not pos.breakeven and current_price >= pos.entry_price * (1 + cfg.breakeven_pct):
                     pos.stop_price = max(pos.stop_price, pos.entry_price * 0.999)
                     pos.breakeven = True
+                    self.analysis.log("rotation", "breakeven",
+                                      coin=pos.coin, side=pos.side,
+                                      price=round(current_price, 2),
+                                      entry=round(pos.entry_price, 2),
+                                      stop=round(pos.stop_price, 2))
                 # Partial TP at +5%
                 if not pos.partial_done and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
@@ -944,9 +997,19 @@ class RotationStrategy:
                 new_stop = pos.peak_price + trail_step
                 if new_stop < pos.stop_price:
                     pos.stop_price = new_stop
+                    self.analysis.log("rotation", "trail",
+                                      coin=pos.coin, side=pos.side,
+                                      price=round(current_price, 2),
+                                      peak=round(pos.peak_price, 2),
+                                      new_stop=round(pos.stop_price, 2))
                 if not pos.breakeven and current_price <= pos.entry_price * (1 - cfg.breakeven_pct):
                     pos.stop_price = min(pos.stop_price, pos.entry_price * 1.001)
                     pos.breakeven = True
+                    self.analysis.log("rotation", "breakeven",
+                                      coin=pos.coin, side=pos.side,
+                                      price=round(current_price, 2),
+                                      entry=round(pos.entry_price, 2),
+                                      stop=round(pos.stop_price, 2))
                 if not pos.partial_done and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
                 if current_price >= pos.stop_price:
@@ -968,10 +1031,15 @@ class RotationStrategy:
                 hold_days = (datetime.now(timezone.utc) - datetime.fromisoformat(pos.opened_at)).days
                 tp = self._roi_target(hold_days)
                 if pnl >= tp and pnl > 0:
+                    self.analysis.log("rotation", "roi_exit",
+                                      coin=pos.coin, side=pos.side,
+                                      price=round(current_price, 2),
+                                      entry=round(pos.entry_price, 2),
+                                      hold_days=hold_days, tp=round(tp, 4),
+                                      pnl_pct=round(pnl * 100, 2))
                     await self._cancel_exchange_stop(client, pos)
                     await self._close_position(client, pos.inst_id, pos, "roi")
                     del self._positions[coin]
-
         # 3. Check if we should rotate
         slots_full = len(self._positions) >= cfg.top_k
         if slots_full and self._last_daily_check == today_str:
@@ -997,19 +1065,37 @@ class RotationStrategy:
                     print(f"[Rotation] Vol filter: {coin} ATR={ind['atr']:.1f} > "
                           f"avg30*{cfg.vol_mult}={ind['avg_atr_30'] * cfg.vol_mult:.1f} -> SKIP",
                           flush=True)
+                    self.analysis.log("rotation", "filter",
+                                      coin=coin, filter="vol",
+                                      atr=round(ind["atr"], 2),
+                                      avg_atr_30=round(ind["avg_atr_30"], 2),
+                                      threshold=round(ind["avg_atr_30"] * cfg.vol_mult, 2),
+                                      decision="skip")
                     continue
 
             # ── FILTER: RSI ──
             if ind["rsi"] > cfg.rsi_long_max and ind["ema_trend"]:
                 print(f"[Rotation] RSI filter: {coin} RSI={ind['rsi']:.1f} > {cfg.rsi_long_max} -> no long", flush=True)
+                self.analysis.log("rotation", "filter",
+                                  coin=coin, filter="rsi",
+                                  rsi=round(ind["rsi"], 2), threshold=cfg.rsi_long_max,
+                                  decision="no_long")
                 continue
             if ind["rsi"] < cfg.rsi_short_min and not ind["ema_trend"]:
                 print(f"[Rotation] RSI filter: {coin} RSI={ind['rsi']:.1f} < {cfg.rsi_short_min} -> no short", flush=True)
+                self.analysis.log("rotation", "filter",
+                                  coin=coin, filter="rsi",
+                                  rsi=round(ind["rsi"], 2), threshold=cfg.rsi_short_min,
+                                  decision="no_short")
                 continue
 
             # ── FILTER: min |roc| ──
             if abs(ind["roc"]) < cfg.min_roc:
                 print(f"[Rotation] min_roc filter: {coin} ROC={ind['roc']:.1f} < {cfg.min_roc} -> SKIP", flush=True)
+                self.analysis.log("rotation", "filter",
+                                  coin=coin, filter="min_roc",
+                                  roc=round(ind["roc"], 2), threshold=cfg.min_roc,
+                                  decision="skip")
                 continue
 
             # ── Weighted score ──
@@ -1054,11 +1140,19 @@ class RotationStrategy:
 
             target_coins.add((coin, side))
 
+        self.analysis.log("rotation", "rotation",
+                          regime=regime, ranked=len(ranked),
+                          targets=[{"coin": c, "side": s} for c, s in target_coins])
+
         # 6. Full rotation: close positions not in target (only on daily check, not when filling slots)
         if slots_full:
             for coin in list(self._positions.keys()):
                 pos = self._positions[coin]
                 if (coin, pos.side) not in target_coins:
+                    self.analysis.log("rotation", "rotation_exit",
+                                      coin=coin, side=pos.side,
+                                      entry_px=round(pos.entry_price, 2),
+                                      size=pos.size, leverage=pos.leverage)
                     await self._close_position(client, pos.inst_id, pos, "rotation_exit")
                     del self._positions[coin]
 

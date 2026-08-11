@@ -20,6 +20,7 @@ from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -165,6 +166,11 @@ async def shutdown():
     if impulse and impulse._running:
         await impulse.stop()
     await db.close()
+    try:
+        from app.services.analysis_logger import get_logger
+        get_logger().close()
+    except Exception:
+        pass
 
 
 async def _okx_call(coro_factory):
@@ -2172,6 +2178,24 @@ async def trade_analysis():
 async def get_db_positions():
     positions = await db.get_all_positions()
     return {"positions": positions}
+
+
+# ── Analysis log download ──
+
+@app.get("/api/analysis/log")
+async def analysis_log_download(request: Request):
+    token = get_token(request)
+    if not validate(token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    p = Path(DEFAULT_PATH)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="Analysis log not found")
+    return FileResponse(
+        str(p),
+        media_type="application/x-ndjson",
+        filename=p.name,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # ── Static files / SPA ──

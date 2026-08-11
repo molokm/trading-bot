@@ -139,4 +139,21 @@ export const api = {
 
   telegramSimulate: (config) =>
     request('/telegram/simulate', { method: 'POST', body: JSON.stringify(config || {}) }),
+
+  // ── Analysis log ──
+  downloadAnalysisLog: async () => {
+    const url = `${BASE}/analysis/log`;
+    const token = getToken();
+    const headers = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const resp = await fetch(url, { headers });
+    if (resp.status === 401) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_role');
+      window.location.href = '/login';
+      throw new Error('Unauthorized');
+    }
+    if (!resp.ok) throw new Error('Failed to download log');
+    return resp.blob();
+  },
 };
