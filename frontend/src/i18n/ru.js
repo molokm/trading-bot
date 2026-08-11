@@ -537,6 +537,10 @@ const ru = {
   'mini.leverage': 'Плечо',
   'mini.time': 'Время',
   'mini.unrealized': 'Нереал. PnL',
+  'mini.diagnostics': 'Диагностика',
+  'mini.clear': 'Очистить',
+  'mini.copy': 'Копировать',
+  'mini.no_logs': 'Логов пока нет',
 }
 
 export default ru

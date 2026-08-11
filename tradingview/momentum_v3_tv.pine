@@ -1,0 +1,166 @@
+//@version=6
+strategy("Momentum Rotation v3 — single-symbol", shorttitle="MRv3 1D", overlay=true, 
+     initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.10, 
+     slippage=0, default_qty_type=strategy.fixed, default_qty_value=0.001,
+     pyramiding=0)
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Momentum Rotation v3 — single-instrument port of the live bot
+//  (backend/app/services/rotation_strategy.py, config: min_roc=2.0, adx_min=22)
+//
+//  RULES (must match the honest engine / live bot):
+//    * Signal on bar T close  -> entry on bar T+1 open (Pine default).
+//    * Long : |roc14|>=2, EMA20>EMA50, ADX>=22, RSI<=75, vol filter
+//    * Short: roc14<=-2, EMA20<EMA50, ADX>=22, RSI>=25, vol filter
+//    * BTC 200-MA regime: longs blocked while BTC close < SMA200 (only when
+//      trading a non-BTC symbol; on BTC itself the regime is the symbol's own).
+//    * Exit: initial stop 3.5*ATR, dynamic trailing 0.1*ATR from peak,
+//      breakeven after +2%, partial TP closes 50% at +10%.
+//  NOTE: correlation filter and top_k rotation are multi-asset — not portable
+//  to a single-symbol Pine strategy; omitted here by design.
+//  NOTE: position sizing is NOT risk-based (Pine uses 100% equity per trade).
+//  This script is for visualizing signal timing / entry-exit levels only —
+//  returns in the Strategy Tester will NOT match the live bot's risk sizing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- Inputs (match live config) ---
+gParams = "Strategy"
+rocPeriod   = input.int(14, "ROC period", group=gParams)
+emaFast     = input.int(20, "EMA fast", group=gParams)
+emaSlow     = input.int(50, "EMA slow", group=gParams)
+adxMin      = input.float(22.0, "ADX min", group=gParams)
+minRoc      = input.float(2.0, "Min |ROC|", group=gParams)
+rsiLen      = input.int(14, "RSI length", group=gParams)
+rsiLongMax  = input.float(75.0, "RSI long max", group=gParams)
+rsiShortMin = input.float(25.0, "RSI short min", group=gParams)
+atrLen      = input.int(14, "ATR length", group=gParams)
+atrStopMult = input.float(3.5, "ATR stop mult", group=gParams)
+trailMult   = input.float(0.1, "Trail ATR mult", group=gParams)
+bePct       = input.float(0.02, "Breakeven after %", group=gParams)
+tpPct       = input.float(0.10, "Partial TP at %", group=gParams)
+tpFrac      = input.float(0.50, "Partial TP fraction", group=gParams)
+volMult     = input.float(1.5, "ATR vol filter mult", group=gParams)
+smaLong     = input.int(200, "BTC regime SMA", group=gParams)
+
+gExits = "Exits"
+useStop     = input.bool(true, "Use initial stop", group=gExits)
+useTrail    = input.bool(true, "Use trailing", group=gExits)
+usePartial  = input.bool(true, "Use partial TP", group=gExits)
+
+gRisk = "Risk"
+cooldownBars = input.int(3, "Cooldown bars after exit (min_hold)", group=gRisk)
+riskPct     = input.float(5.0, "Risk per trade %", group=gRisk)
+
+// --- Indicators (causal, values at bar close) ---
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+emaTrend = emaF > emaS
+
+rocVal = (close - close[rocPeriod]) / close[rocPeriod] * 100
+
+// ADX (Wilder smoothing, length 14 — manual, matches the bot's algorithm)
+adxLen = 14
+upMove  = high - high[1]
+dnMove  = low[1] - low
+plusDM  = upMove > dnMove and upMove > 0 ? upMove : 0.0
+minusDM = dnMove > upMove and dnMove > 0 ? dnMove : 0.0
+tr      = ta.tr(true)
+sPlus   = ta.rma(plusDM, adxLen)
+sMinus  = ta.rma(minusDM, adxLen)
+sTR     = ta.rma(tr, adxLen)
+plusDI  = sTR > 0 ? 100 * sPlus / sTR : 0.0
+minusDI = sTR > 0 ? 100 * sMinus / sTR : 0.0
+dxVal   = plusDI + minusDI > 0 ? 100 * math.abs(plusDI - minusDI) / (plusDI + minusDI) : 0.0
+adxVal  = ta.rma(dxVal, adxLen)
+
+rsiVal = ta.rsi(close, rsiLen)
+
+atrVal = ta.atr(atrLen)
+atrAvg30 = ta.sma(atrVal, 30)
+volOk = na(atrAvg30) or atrAvg30 <= 0 or atrVal <= atrAvg30 * volMult
+
+// 200-MA regime filter (long-only): longs blocked while close < SMA200.
+// Applied to the traded symbol itself — exactly like the honest engine/bot.
+sma200 = ta.sma(close, smaLong)
+above200 = not na(sma200) and sma200 > 0 and close > sma200
+regimeOk = above200
+
+// --- Signal conditions (evaluated on bar close) ---
+// validInd: indicators warmed up (ADX/ROC/RSI/ATR ~ 60 bars; SMA200 only affects BTC regime)
+validInd = not na(rocVal) and not na(adxVal) and not na(rsiVal) and not na(atrVal)
+longCond = validInd and rocVal > minRoc and emaTrend and adxVal >= adxMin and rsiVal <= rsiLongMax and volOk and regimeOk
+shortCond = validInd and rocVal < -minRoc and not emaTrend and adxVal >= adxMin and rsiVal >= rsiShortMin and volOk
+
+// --- Position management ---
+var float entryPx = na
+var float stopPx  = na
+var float peakPx  = na
+
+// Capture entry when position just opened (size changes 0 -> nonzero)
+wasFlat = strategy.position_size[1] == 0 and strategy.position_size != 0
+if wasFlat
+    entryPx := strategy.position_avg_price
+    stopPx := na
+    peakPx := strategy.position_avg_price
+
+// Reset when flat
+if strategy.position_size == 0
+    entryPx := na
+    stopPx := na
+    peakPx := na
+
+// --- Entry (executed on next bar open by Pine default), risk-based sizing ---
+// qty (contracts) = risk_cash / stop_distance  (bot: risk 5% of equity)
+if strategy.position_size == 0
+    stopDist = atrStopMult * atrVal
+    riskCash = strategy.equity * riskPct / 100
+    qtyContracts = stopDist > 0 ? riskCash / stopDist : 0
+    if longCond and qtyContracts > 0
+        strategy.entry("Long", strategy.long, qty=qtyContracts)
+    else if shortCond and qtyContracts > 0
+        strategy.entry("Short", strategy.short, qty=qtyContracts)
+
+// --- Exit management (only while in position) ---
+if strategy.position_size != 0
+    longPos = strategy.position_size > 0
+    // Initial stop from entry
+    if na(stopPx)
+        stopPx := longPos ? entryPx - atrStopMult * atrVal : entryPx + atrStopMult * atrVal
+        peakPx := entryPx
+
+    // Update peak (trailing reference)
+    peakPx := longPos ? math.max(peakPx, high) : math.min(peakPx, low)
+
+    // Dynamic trailing stop (0.1 x ATR — the real profit driver in the bot)
+    trailStop = longPos ? peakPx - trailMult * atrVal : peakPx + trailMult * atrVal
+    stopPx := longPos ? math.max(stopPx, trailStop) : math.min(stopPx, trailStop)
+
+    // Place stop exit each bar (updated stop)
+    if not na(stopPx)
+        strategy.exit("Stop", from_entry="Long", stop=stopPx, comment="SL")
+        strategy.exit("StopS", from_entry="Short", stop=stopPx, comment="SL")
+
+// --- Plots ---
+plot(emaF, "EMA20", color=color.new(color.blue, 0))
+plot(emaS, "EMA50", color=color.new(color.orange, 0))
+plotchar(longCond, "L", "▲", location=location.belowbar, color=color.green, size=size.tiny)
+plotchar(shortCond, "S", "▼", location=location.abovebar, color=color.red, size=size.tiny)
+// Diagnostic overlays (turn off in production): watch signals & filters
+plot(adxVal, "ADX", color=color.new(color.purple, 0), style=plot.style_histogram)
+plot(rocVal, "ROC", color=color.new(color.orange, 0), style=plot.style_area)
+plot(volOk ? 22 : 0, "VolOk(22)", color=color.new(color.aqua, 0), style=plot.style_circles)
+plot(regimeOk ? 24 : 0, "RegimeOk(24)", color=color.new(color.lime, 0), style=plot.style_circles)
+var line stopLine = na
+if not na(stopPx)
+    if na(stopLine)
+        stopLine := line.new(bar_index[1], stopPx, bar_index, stopPx, color=color.red, width=1, style=line.style_dashed)
+    else
+        line.set_xy1(stopLine, bar_index[1], stopPx)
+        line.set_xy2(stopLine, bar_index, stopPx)
+else if not na(stopLine)
+    line.delete(stopLine)
+    stopLine := na
+
+// --- Alerts ---
+alertcondition(longCond, "V3 Long signal", "Momentum V3 LONG: {{ticker}}")
+alertcondition(shortCond, "V3 Short signal", "Momentum V3 SHORT: {{ticker}}")

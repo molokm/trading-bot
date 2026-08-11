@@ -14,7 +14,7 @@ async function request(path, options = {}) {
   if (resp.status === 401) {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_role');
-    window.location.href = '/login';
+    if (!window.__MINI_APP__) window.location.href = '/login';
     throw new Error('Unauthorized');
   }
   if (!resp.ok) {
@@ -156,7 +156,7 @@ export const api = {
     if (resp.status === 401) {
       localStorage.removeItem('auth_token');
       localStorage.removeItem('auth_role');
-      window.location.href = '/login';
+      if (!window.__MINI_APP__) window.location.href = '/login';
       throw new Error('Unauthorized');
     }
     if (!resp.ok) throw new Error('Failed to download log');

@@ -1,0 +1,9 @@
+{
+  "strategy_name": "MomentumRotationV3",
+  "params": {
+    "buy": {"adx_min": 22, "corr_threshold": 0.7, "max_leverage": 2.0, "min_roc": 2.0, "risk_per_trade": 0.05, "rsi_long_max": 75, "rsi_short_min": 25, "vol_mult": 1.5},
+    "sell": {"atr_stop_mult": 3.5, "breakeven_pct": 0.02, "min_hold_days": 3, "partial_tp_pct": 0.10, "trail_atr_mult": 0.1},
+    "roi": {"0": 100}
+  },
+  "ft_stratparam_v": 1
+}

@@ -537,6 +537,10 @@ const en = {
   'mini.leverage': 'Leverage',
   'mini.time': 'Time',
   'mini.unrealized': 'Unrealized PnL',
+  'mini.diagnostics': 'Diagnostics',
+  'mini.clear': 'Clear',
+  'mini.copy': 'Copy',
+  'mini.no_logs': 'No logs yet',
 }
 
 export default en

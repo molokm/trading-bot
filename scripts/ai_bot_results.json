@@ -1,0 +1,229 @@
+{
+  "generated_at": "2026-08-09T16:42:26.339873+00:00",
+  "ml_params": {
+    "horizon": 10,
+    "gap": 40,
+    "min_train": 400,
+    "retrain_every": 90,
+    "p_thresh": 0.55,
+    "use_oi": true,
+    "model": "GradientBoostingClassifier(n=120,depth=3,lr=0.05)"
+  },
+  "model_quality": {
+    "n": 3804,
+    "auc": 0.51,
+    "accuracy": 0.501,
+    "coverage_pct": 86.5
+  },
+  "model_quality_v4": {
+    "n": 3804,
+    "auc": 0.531,
+    "accuracy": 0.509,
+    "coverage_pct": 86.5
+  },
+  "baseline": {
+    "strategy": "Momentum Rotation v3 (live sweep)",
+    "period": "2024-03-02 \u2192 2026-08-08",
+    "years": 2.44,
+    "capital": 10000.0,
+    "final_equity": 33561.85,
+    "total_return_pct": 235.6,
+    "cagr_pct": 64.4,
+    "max_drawdown_pct": 15.6,
+    "max_drawdown_date": "2024-11-08",
+    "sharpe": 2.5,
+    "closed_trades": 301,
+    "exit_reasons": {
+      "trail_stop": 252,
+      "rotation_exit": 49
+    },
+    "wins": 209,
+    "losses": 92,
+    "win_rate": 69.4,
+    "avg_win": 176.74,
+    "avg_loss": -190.57,
+    "gross_profit": 36937.76,
+    "gross_loss": -17532.07,
+    "profit_factor": 2.11,
+    "total_funding_pnl": 69.84,
+    "funding_pct_of_capital": 0.7,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 100.0,
+      "final_equity_p05": 20962.0,
+      "final_equity_median": 29575.0,
+      "final_equity_p95": 39340.0,
+      "maxdd_p05": 6.5,
+      "maxdd_median": 11.5,
+      "maxdd_p95": 22.4
+    },
+    "filters_hit": {
+      "rsi_overbought": 46,
+      "volatility": 53,
+      "correlation": 186,
+      "min_roc": 407,
+      "rsi_oversold": 34,
+      "bear_long": 100
+    },
+    "yearly": [
+      {
+        "year": "2024",
+        "equity": 12023.44,
+        "return_pct": 20.2
+      },
+      {
+        "year": "2025",
+        "equity": 25111.72,
+        "return_pct": 108.9
+      },
+      {
+        "year": "2026",
+        "equity": 33561.85,
+        "return_pct": 33.7
+      }
+    ]
+  },
+  "ml_gated": {
+    "strategy": "Momentum Rotation v3 (live sweep)",
+    "period": "2024-03-02 \u2192 2026-08-08",
+    "years": 2.44,
+    "capital": 10000.0,
+    "final_equity": 13379.17,
+    "total_return_pct": 33.8,
+    "cagr_pct": 12.7,
+    "max_drawdown_pct": 15.2,
+    "max_drawdown_date": "2024-08-11",
+    "sharpe": 1.08,
+    "closed_trades": 104,
+    "exit_reasons": {
+      "trail_stop": 84,
+      "rotation_exit": 20
+    },
+    "wins": 73,
+    "losses": 31,
+    "win_rate": 70.2,
+    "avg_win": 101.35,
+    "avg_loss": -137.41,
+    "gross_profit": 7398.45,
+    "gross_loss": -4259.73,
+    "profit_factor": 1.74,
+    "total_funding_pnl": 8.94,
+    "funding_pct_of_capital": 0.09,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 100.0,
+      "final_equity_p05": 11399.0,
+      "final_equity_median": 14083.0,
+      "final_equity_p95": 16771.0,
+      "maxdd_p05": 3.5,
+      "maxdd_median": 6.5,
+      "maxdd_p95": 13.9
+    },
+    "filters_hit": {
+      "rsi_overbought": 61,
+      "ml_reject_long": 220,
+      "volatility": 63,
+      "correlation": 14,
+      "min_roc": 538,
+      "ml_reject_short": 614,
+      "rsi_oversold": 61,
+      "bear_long": 102
+    },
+    "yearly": [
+      {
+        "year": "2024",
+        "equity": 8877.66,
+        "return_pct": -11.2
+      },
+      {
+        "year": "2025",
+        "equity": 13038.08,
+        "return_pct": 46.9
+      },
+      {
+        "year": "2026",
+        "equity": 13379.17,
+        "return_pct": 2.6
+      }
+    ]
+  },
+  "ml_gated_v4": {
+    "strategy": "Momentum Rotation v4 (proposed)",
+    "period": "2024-03-02 \u2192 2026-08-08",
+    "years": 2.44,
+    "capital": 10000.0,
+    "final_equity": 9337.41,
+    "total_return_pct": -6.6,
+    "cagr_pct": -2.8,
+    "max_drawdown_pct": 11.3,
+    "max_drawdown_date": "2025-09-14",
+    "sharpe": -0.6,
+    "closed_trades": 43,
+    "exit_reasons": {
+      "trail_stop": 18,
+      "rotation_exit": 25
+    },
+    "wins": 13,
+    "losses": 30,
+    "win_rate": 30.2,
+    "avg_win": 71.08,
+    "avg_loss": -66.94,
+    "gross_profit": 924.07,
+    "gross_loss": -2008.2,
+    "profit_factor": 0.46,
+    "total_funding_pnl": 0.0,
+    "funding_pct_of_capital": 0.0,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 1.0,
+      "final_equity_p05": 8101.0,
+      "final_equity_median": 8949.0,
+      "final_equity_p95": 9751.0,
+      "maxdd_p05": 5.0,
+      "maxdd_median": 11.8,
+      "maxdd_p95": 19.7
+    },
+    "filters_hit": {
+      "rsi_overbought": 54,
+      "ml_reject_long": 199,
+      "volatility": 63,
+      "correlation": 7,
+      "min_roc": 717,
+      "rsi_oversold": 61,
+      "bear_long": 94
+    },
+    "yearly": [
+      {
+        "year": "2024",
+        "equity": 9145.09,
+        "return_pct": -8.5
+      },
+      {
+        "year": "2025",
+        "equity": 9337.41,
+        "return_pct": 2.1
+      },
+      {
+        "year": "2026",
+        "equity": 9337.41,
+        "return_pct": 0.0
+      }
+    ]
+  },
+  "btc_buy_hold": {
+    "strategy": "BTC Buy & Hold",
+    "period": "2024-03-02 \u2192 2026-08-08",
+    "years": 2.44,
+    "capital": 10000.0,
+    "final_equity": 10455.04,
+    "total_return_pct": 4.6,
+    "cagr_pct": 1.8,
+    "max_drawdown_pct": 53.3,
+    "sharpe": 0.26,
+    "closed_trades": 1,
+    "win_rate": 100.0
+  }
+}

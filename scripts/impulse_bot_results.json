@@ -1,0 +1,448 @@
+{
+  "generated_at": "2026-08-10T05:49:59.055223+00:00",
+  "config": {
+    "name": "Impulse Bot Daily (1D): moderate entry ROC + pyramiding (1d)",
+    "capital": 10000.0,
+    "top_k": 4,
+    "impulse_bars": 1,
+    "entry_roc": 4.0,
+    "rsi_conf_min": 0.0,
+    "rsi_conf_max": 100.0,
+    "ema_fast": 20,
+    "ema_slow": 50,
+    "adx_min": 0.0,
+    "vol_mult": 1.5,
+    "vol_period": 24,
+    "max_adds": 2,
+    "add_size_ratio": 0.6,
+    "add_window_bars": 5,
+    "add_min_move": 0.0,
+    "add_atr_mult": 0.5,
+    "max_leverage": 3.0,
+    "risk_per_trade": 0.1,
+    "sl_atr_mult": 5.0,
+    "sl_atr_mult_short": 5.0,
+    "trail_atr_mult": 8.0,
+    "trail_atr_mult_short": 8.0,
+    "be_pct": 0.005,
+    "cooldown_bars": 5,
+    "bars_per_day": 1,
+    "tp1_atr": 2.0,
+    "tp1_frac": 0.3,
+    "tp2_atr": 6.0,
+    "tp2_frac": 0.3,
+    "max_hold_bars": 30,
+    "exit_ema_death": false,
+    "allow_short": true,
+    "max_margin_pct": 0.5
+  },
+  "impulse": {
+    "strategy": "Impulse Bot Daily (1D): moderate entry ROC + pyramiding (1d)",
+    "period": "2023-03-18 00:00 \u2192 2026-08-07 00:00",
+    "years": 3.39,
+    "bars": 1239,
+    "capital": 10000.0,
+    "final_equity": 47060.11,
+    "total_return_pct": 370.6,
+    "cagr_pct": 57.9,
+    "max_drawdown_pct": 32.7,
+    "max_drawdown_date": "2024-07-01 00:00",
+    "sharpe": 1.24,
+    "closed_trades": 90,
+    "exit_reasons": {
+      "trail_stop": 68,
+      "time_exit": 22
+    },
+    "wins": 25,
+    "losses": 65,
+    "win_rate": 27.8,
+    "avg_win": 2418.56,
+    "avg_loss": -336.74,
+    "gross_profit": 60464.12,
+    "gross_loss": -21887.9,
+    "profit_factor": 2.76,
+    "total_funding_pnl": -52.53,
+    "funding_pct_of_capital": -0.53,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 99.2,
+      "final_equity_p05": 25120.0,
+      "final_equity_median": 51311.0,
+      "final_equity_p95": 82491.0,
+      "maxdd_p05": 8.8,
+      "maxdd_median": 24.5,
+      "maxdd_p95": 61.9
+    },
+    "filters_hit": {
+      "vol_surge": 3098,
+      "cooldown": 450,
+      "adds_made": 58,
+      "add_no_vol": 18
+    },
+    "yearly": [
+      {
+        "year": "2023",
+        "equity": 23466.97,
+        "return_pct": 134.7
+      },
+      {
+        "year": "2024",
+        "equity": 36267.36,
+        "return_pct": 54.5
+      },
+      {
+        "year": "2025",
+        "equity": 44568.83,
+        "return_pct": 22.9
+      },
+      {
+        "year": "2026",
+        "equity": 47060.11,
+        "return_pct": 5.6
+      }
+    ]
+  },
+  "no_adds": {
+    "strategy": "Impulse Bot Daily (1D): moderate entry ROC + pyramiding (1d) (no adds)",
+    "period": "2023-03-18 00:00 \u2192 2026-08-07 00:00",
+    "years": 3.39,
+    "bars": 1239,
+    "capital": 10000.0,
+    "final_equity": 30114.04,
+    "total_return_pct": 201.1,
+    "cagr_pct": 38.4,
+    "max_drawdown_pct": 17.5,
+    "max_drawdown_date": "2024-07-01 00:00",
+    "sharpe": 1.27,
+    "closed_trades": 89,
+    "exit_reasons": {
+      "trail_stop": 63,
+      "time_exit": 26
+    },
+    "wins": 36,
+    "losses": 53,
+    "win_rate": 40.4,
+    "avg_win": 941.52,
+    "avg_loss": -245.55,
+    "gross_profit": 33894.55,
+    "gross_loss": -13014.3,
+    "profit_factor": 2.6,
+    "total_funding_pnl": -9.05,
+    "funding_pct_of_capital": -0.09,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 99.6,
+      "final_equity_p05": 19955.0,
+      "final_equity_median": 31778.0,
+      "final_equity_p95": 42924.0,
+      "maxdd_p05": 8.1,
+      "maxdd_median": 19.2,
+      "maxdd_p95": 42.3
+    },
+    "filters_hit": {
+      "vol_surge": 3007,
+      "cooldown": 445
+    },
+    "yearly": [
+      {
+        "year": "2023",
+        "equity": 16246.23,
+        "return_pct": 62.5
+      },
+      {
+        "year": "2024",
+        "equity": 23907.97,
+        "return_pct": 47.2
+      },
+      {
+        "year": "2025",
+        "equity": 28778.17,
+        "return_pct": 20.4
+      },
+      {
+        "year": "2026",
+        "equity": 30114.04,
+        "return_pct": 4.6
+      }
+    ]
+  },
+  "no_tp": {
+    "strategy": "Impulse Bot Daily (1D): moderate entry ROC + pyramiding (1d) (no partial TP)",
+    "period": "2023-03-18 00:00 \u2192 2026-08-07 00:00",
+    "years": 3.39,
+    "bars": 1239,
+    "capital": 10000.0,
+    "final_equity": 4052.41,
+    "total_return_pct": -59.5,
+    "cagr_pct": -23.4,
+    "max_drawdown_pct": 63.2,
+    "max_drawdown_date": "2026-06-07 00:00",
+    "sharpe": -0.77,
+    "closed_trades": 84,
+    "exit_reasons": {
+      "trail_stop": 72,
+      "time_exit": 12
+    },
+    "wins": 2,
+    "losses": 82,
+    "win_rate": 2.4,
+    "avg_win": 101.23,
+    "avg_loss": -69.31,
+    "gross_profit": 202.47,
+    "gross_loss": -5683.36,
+    "profit_factor": 0.04,
+    "total_funding_pnl": -0.24,
+    "funding_pct_of_capital": -0.0,
+    "monte_carlo": {
+      "n": 500,
+      "block_size": 5,
+      "profit_pct": 0.0,
+      "final_equity_p05": 2566.0,
+      "final_equity_median": 4734.0,
+      "final_equity_p95": 6843.0,
+      "maxdd_p05": 32.1,
+      "maxdd_median": 52.8,
+      "maxdd_p95": 74.6
+    },
+    "filters_hit": {
+      "vol_surge": 3317,
+      "cooldown": 420,
+      "adds_made": 50,
+      "add_no_vol": 19
+    },
+    "yearly": [
+      {
+        "year": "2023",
+        "equity": 8212.74,
+        "return_pct": -17.9
+      },
+      {
+        "year": "2024",
+        "equity": 6370.99,
+        "return_pct": -22.4
+      },
+      {
+        "year": "2025",
+        "equity": 4798.56,
+        "return_pct": -24.7
+      },
+      {
+        "year": "2026",
+        "equity": 4052.41,
+        "return_pct": -15.5
+      }
+    ]
+  },
+  "btc_buy_hold": {
+    "strategy": "BTC Buy & Hold (15m)",
+    "period": "2022-10-19 00:00 \u2192 2026-08-07 00:00",
+    "years": 3.8,
+    "capital": 10000.0,
+    "final_equity": 33825.48,
+    "total_return_pct": 238.3,
+    "cagr_pct": 37.8,
+    "max_drawdown_pct": 53.0,
+    "sharpe": 0.92,
+    "closed_trades": 1,
+    "win_rate": 100.0
+  },
+  "recent_trades": [
+    {
+      "date": "2025-11-06 00:00",
+      "coin": "SOL",
+      "side": "short",
+      "pnl": -41.04,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 161.74537771954914,
+      "exit": 161.9881,
+      "size": 1014.01,
+      "closed": true,
+      "adds": 1
+    },
+    {
+      "date": "2025-12-05 00:00",
+      "coin": "ETH",
+      "side": "short",
+      "pnl": 1130.98,
+      "funding_pnl": 0.0,
+      "reason": "time_exit",
+      "entry": 3283.5873850000003,
+      "exit": 3021.6701,
+      "size": 24.509999999999998,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2025-12-05 00:00",
+      "coin": "BTC",
+      "side": "short",
+      "pnl": 2229.63,
+      "funding_pnl": 0.0,
+      "reason": "time_exit",
+      "entry": 101385.6818,
+      "exit": 89328.642,
+      "size": 14.520000000000003,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2025-12-20 00:00",
+      "coin": "SOL",
+      "side": "short",
+      "pnl": -30.83,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 123.128405,
+      "exit": 123.3132,
+      "size": 1000.8100000000001,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2025-12-22 00:00",
+      "coin": "BNB",
+      "side": "short",
+      "pnl": -419.23,
+      "funding_pnl": 0.0,
+      "reason": "time_exit",
+      "entry": 829.7849000000001,
+      "exit": 858.529,
+      "size": 141.62,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2026-01-27 00:00",
+      "coin": "BTC",
+      "side": "short",
+      "pnl": -78.2,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 88343.10635,
+      "exit": 88475.6652,
+      "size": 35.38,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2026-02-03 00:00",
+      "coin": "SOL",
+      "side": "short",
+      "pnl": -49.55,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 103.61566932239974,
+      "exit": 103.7711,
+      "size": 1911.23,
+      "closed": true,
+      "adds": 1
+    },
+    {
+      "date": "2026-02-03 00:00",
+      "coin": "BNB",
+      "side": "short",
+      "pnl": -81.47,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 771.9016924140057,
+      "exit": 773.0599,
+      "size": 421.83,
+      "closed": true,
+      "adds": 1
+    },
+    {
+      "date": "2026-02-03 00:00",
+      "coin": "BTC",
+      "side": "short",
+      "pnl": -55.28,
+      "funding_pnl": 0.0,
+      "reason": "trail_stop",
+      "entry": 78660.25020000001,
+      "exit": 78778.2799,
+      "size": 28.09,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2026-03-01 00:00",
+      "coin": "ETH",
+      "side": "short",
+      "pnl": 9425.63,
+      "funding_pnl": 0.0,
+      "reason": "time_exit",
+      "entry": 2653.7339806549608,
+      "exit": 1939.4592,
+      "size": 82.95000000000002,
+      "closed": true,
+      "adds": 2
+    },
+    {
+      "date": "2026-05-03 00:00",
+      "coin": "BNB",
+      "side": "short",
+      "pnl": -1674.81,
+      "funding_pnl": 0.0,
+      "reason": "time_exit",
+      "entry": 582.9084,
+      "exit": 617.3085,
+      "size": 478.28000000000003,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2026-06-04 00:00",
+      "coin": "BNB",
+      "side": "long",
+      "pnl": -5230.32,
+      "funding_pnl": -5.21,
+      "reason": "trail_stop",
+      "entry": 718.7592,
+      "exit": 606.7357,
+      "size": 464.38,
+      "closed": true,
+      "adds": 0
+    },
+    {
+      "date": "2026-06-15 00:00",
+      "coin": "SOL",
+      "side": "short",
+      "pnl": 561.28,
+      "funding_pnl": -30.06,
+      "reason": "trail_stop",
+      "entry": 71.52110052274894,
+      "exit": 73.2782,
+      "size": 5208.400000000001,
+      "closed": true,
+      "adds": 2
+    },
+    {
+      "date": "2026-06-15 00:00",
+      "coin": "ETH",
+      "side": "short",
+      "pnl": 789.29,
+      "funding_pnl": -17.57,
+      "reason": "trail_stop",
+      "entry": 1813.7550890887485,
+      "exit": 1843.2996,
+      "size": 235.6,
+      "closed": true,
+      "adds": 2
+    },
+    {
+      "date": "2026-06-15 00:00",
+      "coin": "BTC",
+      "side": "short",
+      "pnl": -672.49,
+      "funding_pnl": 0.32,
+      "reason": "trail_stop",
+      "entry": 63943.83592239735,
+      "exit": 65811.5398,
+      "size": 84.35999999999999,
+      "closed": true,
+      "adds": 2
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time as _time
 import uuid
@@ -7,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
+
+logger = logging.getLogger("app")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
@@ -318,18 +322,25 @@ async def auth_telegram(data: dict):
     matching TELEGRAM_CHAT_ID is granted an admin session — no password needed.
     """
     init_data = (data or {}).get("initData", "")
+    logger.info("mini auth: initData present=%s len=%s", bool(init_data), len(init_data))
     if not init_data:
         raise HTTPException(status_code=400, detail="Missing initData")
     if not telegram.token:
+        logger.warning("mini auth: bot token not configured")
         raise HTTPException(status_code=400, detail="Telegram bot not configured")
     payload = telegram.verify_init_data(init_data)
     if payload is None:
+        logger.warning("mini auth: initData signature INVALID")
         raise HTTPException(status_code=401, detail="Invalid Telegram initData")
     user = payload.get("user") or {}
     uid = str(user.get("id", ""))
+    logger.info("mini auth: signature OK, user.id=%s (%s), chat_id=%s",
+                uid, user.get("username"), telegram.chat_id)
     if not telegram.chat_id or uid != telegram.chat_id:
+        logger.warning("mini auth: user %s != allowed chat %s -> 403", uid, telegram.chat_id)
         raise HTTPException(status_code=403, detail="Telegram user not authorized")
     token = grant_admin()
+    logger.info("mini auth: admin token granted for user %s", uid)
     return {
         "token": token,
         "role": "admin",

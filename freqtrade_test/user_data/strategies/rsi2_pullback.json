@@ -1,0 +1,8 @@
+{
+  "strategy_name": "Rsi2Pullback",
+  "params": {
+    "buy": {"rsi2_enter": 10, "risk_per_trade": 0.14, "max_leverage": 2.0},
+    "sell": {"rsi2_exit": 55, "max_hold": 5, "atr_stop_mult": 3.0}
+  },
+  "ft_stratparam_v": 1
+}

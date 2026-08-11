@@ -6,6 +6,25 @@ import {
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
+/* ═══════ Mini App diagnostics log (survives reload, shown in panel) ═══════ */
+const MINI_LOGS = []
+try {
+  const saved = localStorage.getItem('mini_logs')
+  if (saved) MINI_LOGS.push(...JSON.parse(saved))
+} catch { /* ignore */ }
+
+function miniLog(tag, ...args) {
+  const line = `[${new Date().toISOString().slice(11, 19)}] ${tag}: ${args.map(a => {
+    try { return typeof a === 'string' ? a : JSON.stringify(a) } catch { return String(a) }
+  }).join(' ')}`
+  MINI_LOGS.push(line)
+  if (MINI_LOGS.length > 300) MINI_LOGS.splice(0, MINI_LOGS.length - 300)
+  try { localStorage.setItem('mini_logs', JSON.stringify(MINI_LOGS.slice(-150))) } catch { /* ignore */ }
+  console.log(line)
+}
+
+window.__MINI_APP__ = true
+
 /* ═══════ Number formatting ═══════ */
 function fmt(n, digits = 2) {
   if (n == null || isNaN(n)) return '—'
@@ -78,20 +97,30 @@ export default function MiniAppPage() {
 
   const [tg, setTg] = useState(null)
   const [tgResolved, setTgResolved] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
+
+  const copyLogs = () => {
+    try {
+      navigator.clipboard.writeText(MINI_LOGS.slice(-150).join('\n'))
+    } catch { /* ignore */ }
+  }
 
   /* ── Wait for Telegram WebApp SDK + initData (up to ~5s) ── */
   useEffect(() => {
     let tries = 0
+    miniLog('sdk', 'waiting for window.Telegram.WebApp...', typeof window.Telegram?.WebApp)
     const interval = setInterval(() => {
       const wa = window.Telegram?.WebApp
       if (wa) {
         clearInterval(interval)
         setTg(wa)
         setTgResolved(true)
+        miniLog('sdk', 'found after', tries, 'ticks; initData length =', (wa.initData || '').length)
       } else if (++tries > 25) {
         clearInterval(interval)
         setTg(null)
         setTgResolved(true)
+        miniLog('sdk', 'NOT found after 5s (SDK script blocked/absent)')
       }
     }, 200)
     return () => clearInterval(interval)
@@ -116,7 +145,8 @@ export default function MiniAppPage() {
       }
       tg.setHeaderColor?.(tg.themeParams?.header_bg_color || tg.themeParams?.bg_color || '#0b0e14')
       tg.BackButton?.hide()
-    } catch { /* ignore SDK errors outside Telegram */ }
+      miniLog('env', 'theme applied, colorScheme =', scheme)
+    } catch (e) { miniLog('env', 'error', e.message) }
   }, [tg])
 
   /* ── Auth via Telegram initData ── */
@@ -126,15 +156,21 @@ export default function MiniAppPage() {
       try {
         const initData = tg?.initData
         if (initData) {
+          miniLog('auth', 'initData present, verifying signature...')
           const res = await withTimeout(api.telegramAuth(initData), 20000)
           localStorage.setItem('auth_token', res.token)
           localStorage.setItem('auth_role', res.role)
-        } else if (!localStorage.getItem('auth_token')) {
+          miniLog('auth', 'OK role=' + res.role, 'user=' + (res.user?.username || res.user?.id || '?'))
+        } else if (localStorage.getItem('auth_token')) {
+          miniLog('auth', 'no initData, using stored session token')
+        } else {
           setAuthError('not_in_telegram')
+          miniLog('auth', 'no initData AND no stored token -> error screen')
         }
       } catch (err) {
         console.warn('mini auth error', err)
         setAuthError(err.message || 'auth_failed')
+        miniLog('auth', 'ERROR', err.message || err)
       }
       setAuthing(false)
     }
@@ -163,6 +199,15 @@ export default function MiniAppPage() {
       if (imp) setImpulse(imp)
       if (pos) setPositions(pos?.positions || [])
       if (tr) setTrades(tr?.trades || [])
+      miniLog('load',
+        'health=' + (h ? 'ok' : 'FAIL'),
+        'portfolio=' + (pf ? '$' + Number(pf.totalEqUsd).toFixed(0) : 'FAIL'),
+        'rotation=' + (rot ? (rot.running ? 'on' : 'off') : 'FAIL'),
+        'impulse=' + (imp ? (imp.running ? 'on' : 'off') : 'FAIL'),
+        'positions=' + (pos ? pos.positions?.length : 'FAIL'),
+        'trades=' + (tr ? tr.trades?.length : 'FAIL'))
+    } else {
+      miniLog('load', 'TIMEOUT after 12s (all requests hung)')
     }
     setLoaded(true)
     setLoading(false)
@@ -421,6 +466,34 @@ export default function MiniAppPage() {
         {/* ═══ Footer ═══ */}
         <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
           OKX Terminal • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+        </div>
+
+        {/* ═══ Diagnostics panel ═══ */}
+        <div className="pb-2">
+          <button
+            onClick={() => setShowLogs(s => !s)}
+            className="w-full flex items-center justify-center gap-1 py-2 text-2xs text-[var(--txt-muted)] active:opacity-70"
+          >
+            {showLogs ? '▾' : '▸'} {t('mini.diagnostics')} ({MINI_LOGS.length})
+          </button>
+          {showLogs && (
+            <Card className="p-0 overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--surface-overlay)]">
+                <span className="text-2xs font-semibold text-[var(--txt-muted)]">{t('mini.diagnostics')}</span>
+                <div className="flex gap-1.5">
+                  <button onClick={() => { MINI_LOGS.length = 0; setShowLogs(false) }} className="px-2 py-0.5 rounded bg-[var(--loss-dim)] text-[var(--loss)] text-2xs font-bold">
+                    {t('mini.clear')}
+                  </button>
+                  <button onClick={copyLogs} className="px-2 py-0.5 rounded bg-[var(--info-dim)] text-[var(--info)] text-2xs font-bold">
+                    {t('mini.copy')}
+                  </button>
+                </div>
+              </div>
+              <pre className="p-3 text-2xs leading-relaxed text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
+                {MINI_LOGS.slice(-60).join('\n') || t('mini.no_logs')}
+              </pre>
+            </Card>
+          )}
         </div>
       </div>
     </div>
