@@ -1,6 +1,3 @@
-import asyncio
-import base64
-import hashlib
 import os
 import time
 import uuid
@@ -17,16 +14,18 @@ TOKEN_TTL = timedelta(hours=24)
 
 # ── Rate limiting ──
 _attempts: dict[str, list[float]] = defaultdict(list)
+_guest_attempts: dict[str, list[float]] = defaultdict(list)
 MAX_ATTEMPTS = 3
 WINDOW_SEC = 60
-DELAY_SEC = 1.0
+GUEST_MAX_PER_MIN = 10
 
-def check_rate_limit(ip: str) -> Optional[float]:
+def check_rate_limit(ip: str) -> bool:
+    """True if this IP has too many recent failed login attempts."""
     now = time.time()
     _attempts[ip] = [t for t in _attempts[ip] if now - t < WINDOW_SEC]
-    if len(_attempts[ip]) >= MAX_ATTEMPTS:
-        return DELAY_SEC
-    return None
+    if len(_attempts) > 10000:
+        _attempts.clear()
+    return len(_attempts[ip]) >= MAX_ATTEMPTS
 
 def record_attempt(ip: str, success: bool):
     if success:
@@ -34,14 +33,30 @@ def record_attempt(ip: str, success: bool):
     else:
         _attempts[ip].append(time.time())
 
+def guest_rate_limited(ip: str) -> bool:
+    """True if this IP is minting guest tokens too fast (memory DoS guard)."""
+    now = time.time()
+    _guest_attempts[ip] = [t for t in _guest_attempts[ip] if now - t < WINDOW_SEC]
+    if len(_guest_attempts) > 10000:
+        _guest_attempts.clear()
+    return len(_guest_attempts[ip]) >= GUEST_MAX_PER_MIN
+
+def record_guest(ip: str):
+    _guest_attempts[ip].append(time.time())
+
 # ── Token encryption ──
 def _get_fernet() -> Fernet:
-    key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "")
+    key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
     if key_b64:
-        return Fernet(key_b64.encode() if not key_b64.endswith("=") else key_b64)
-    password = PASSWORD or "insecure-default-key-for-dev"
-    key_bytes = hashlib.sha256(password.encode()).digest()
-    return Fernet(base64.urlsafe_b64encode(key_bytes))
+        try:
+            return Fernet(key_b64.encode())
+        except Exception:
+            pass
+    # Fallback: per-process random key (tokens are in-memory only, so a
+    # restart invalidates sessions regardless of the key).
+    if not hasattr(_get_fernet, "_fallback_key"):
+        _get_fernet._fallback_key = Fernet.generate_key()
+    return Fernet(_get_fernet._fallback_key)
 
 def _encrypt(raw: str) -> str:
     return _get_fernet().encrypt(raw.encode()).decode()

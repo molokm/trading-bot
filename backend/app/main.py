@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time as _time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager
 from app.services.backtest_service import run_backtest_async
 from app.database import db
-from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, check_rate_limit, record_attempt
+from app.services.auth import (
+    login, guest, validate, logout, is_admin, PASSWORD,
+    check_rate_limit, record_attempt, guest_rate_limited, record_guest,
+)
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.telegram_notifier import TelegramNotifier
@@ -27,11 +31,26 @@ MOM_BOT_ID = "momentum_strategy"
 
 load_dotenv()
 
-app = FastAPI(title="OKX Trading Bot", version="3.0.0")
+_docs_enabled = os.getenv("ENABLE_DOCS", "false").lower() in ("1", "true")
+app = FastAPI(
+    title="OKX Trading Bot",
+    version="3.0.0",
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
+)
 
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+if not _cors_origins:
+    _cors_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -200,29 +219,79 @@ def get_token(request: Request):
     return ""
 
 
+# ── Access control ──
+
+PUBLIC_API_PATHS = {
+    "/api/health",
+    "/api/auth/login",
+    "/api/auth/guest",
+    "/api/auth/status",
+    "/api/auth/logout",
+}
+
+ADMIN_ONLY_PATHS = {
+    "/api/credentials/status",
+    "/api/credentials/test",
+    "/api/credentials/init",
+    "/api/trade/order",
+    "/api/positions/close",
+    "/api/momentum/start",
+    "/api/momentum/stop",
+    "/api/momentum/config",
+    "/api/rotation/start",
+    "/api/rotation/stop",
+    "/api/rotation/reset",
+    "/api/rotation/config",
+    "/api/impulse/start",
+    "/api/impulse/stop",
+    "/api/impulse/config",
+    "/api/impulse/reset",
+    "/api/db/reset-all",
+    "/api/db/positions",
+    "/api/telegram/status",
+    "/api/telegram/config",
+    "/api/telegram/test",
+    "/api/telegram/simulate",
+    "/api/analysis/log",
+}
+
+ADMIN_ONLY_PREFIXES = ("/api/debug/",)
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if request.method in ("POST", "PUT", "DELETE") and request.url.path.startswith("/api/"):
-        skip = ("/api/auth/login", "/api/auth/guest", "/api/auth/logout")
-        if request.url.path not in skip:
-            token = get_token(request)
-            if not validate(token):
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    if not request.url.path.startswith("/api/") or request.url.path in PUBLIC_API_PATHS:
+        return await call_next(request)
+    role = validate(get_token(request))
+    if role is None:
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    if request.url.path in ADMIN_ONLY_PATHS or request.url.path.startswith(ADMIN_ONLY_PREFIXES):
+        if role != "admin":
+            return JSONResponse(status_code=403, content={"detail": "Forbidden"})
     return await call_next(request)
 
 
 # ── Auth ──
 
 @app.post("/api/auth/login")
-async def auth_login(data: dict):
+async def auth_login(request: Request, data: dict):
+    ip = request.client.host if request.client else "unknown"
+    if check_rate_limit(ip):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again later.")
     token = login(data.get("password", ""))
     if token:
+        record_attempt(ip, True)
         return {"token": token, "role": "admin"}
+    record_attempt(ip, False)
     raise HTTPException(status_code=401, detail="Invalid password")
 
 
 @app.post("/api/auth/guest")
-async def auth_guest():
+async def auth_guest(request: Request):
+    ip = request.client.host if request.client else "unknown"
+    if guest_rate_limited(ip):
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    record_guest(ip)
     token = guest()
     return {"token": token, "role": "guest"}
 
@@ -457,16 +526,49 @@ async def get_candles(inst_id: str = "BTC-USDT-SWAP", bar: str = "1H", limit: in
 
 # ── Backtest ──
 
+_backtest_sem: Optional[asyncio.Semaphore] = None
+_freqtrade_sem: Optional[asyncio.Semaphore] = None
+_bt_attempts: dict[str, list[float]] = {}
+_BT_MAX_ATTEMPTS = 3
+_BT_WINDOW_SEC = 600.0
+
+
+def _get_backtest_sem() -> asyncio.Semaphore:
+    global _backtest_sem
+    if _backtest_sem is None:
+        _backtest_sem = asyncio.Semaphore(2)
+    return _backtest_sem
+
+
+def _get_freqtrade_sem() -> asyncio.Semaphore:
+    global _freqtrade_sem
+    if _freqtrade_sem is None:
+        _freqtrade_sem = asyncio.Semaphore(1)
+    return _freqtrade_sem
+
+
+def _freqtrade_rate_limited(ip: str) -> bool:
+    now = _time.time()
+    _bt_attempts[ip] = [t for t in _bt_attempts[ip] if now - t < _BT_WINDOW_SEC]
+    if len(_bt_attempts) > 10000:
+        _bt_attempts.clear()
+    if len(_bt_attempts[ip]) >= _BT_MAX_ATTEMPTS:
+        return True
+    _bt_attempts[ip].append(now)
+    return False
+
+
 @app.post("/api/backtest/run")
 async def backtest_run(data: dict):
     """Run a real-data momentum backtest on OKX candles. Public market data."""
-    try:
-        result = await run_backtest_async(data or {})
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        print(f"[backtest] ERROR: {e}", flush=True)
-        raise HTTPException(status_code=500, detail=f"Ошибка бэктеста: {e}")
+    async with _get_backtest_sem():
+        try:
+            result = await run_backtest_async(data or {})
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            print(f"[backtest] ERROR: {e}", flush=True)
+            raise HTTPException(status_code=500, detail=f"Ошибка бэктеста: {e}")
 
     # Persist as the "last backtest" so it survives reloads / other devices.
     try:
@@ -477,14 +579,20 @@ async def backtest_run(data: dict):
 
 
 @app.post("/api/backtest/freqtrade")
-async def backtest_freqtrade(data: dict):
+async def backtest_freqtrade(request: Request, data: dict):
     """Run a backtest on the independent freqtrade engine (momentum / impulse)."""
     import re
     import subprocess
 
+    ip = request.client.host if request.client else "unknown"
+    if _freqtrade_rate_limited(ip):
+        raise HTTPException(status_code=429, detail="Слишком много запросов к freqtrade. Подождите.")
+
     strategy = (data or {}).get("strategy", "momentum")
     start = str((data or {}).get("start", "20220101"))
     end = str((data or {}).get("end", "20260809"))
+    if not re.fullmatch(r"\d{8}", start) or not re.fullmatch(r"\d{8}", end):
+        raise HTTPException(status_code=400, detail="Неверный формат дат. Используйте YYYYMMDD.")
     repo = Path(__file__).resolve().parents[2]
     ft = repo / "freqtrade_test" / "venv" / "bin" / "freqtrade"
     if strategy == "impulse":
@@ -495,13 +603,17 @@ async def backtest_freqtrade(data: dict):
         strat_name = "MomentumRotation"
     userdir = repo / "freqtrade_test" / "user_data"
 
-    try:
-        p = subprocess.run(
+    def _run_ft():
+        return subprocess.run(
             [str(ft), "backtesting", "--config", str(cfg), "--strategy", strat_name,
              "--userdir", str(userdir), "--timerange", f"{start}-{end}",
              "--cache", "none"],
             capture_output=True, text=True, timeout=900,
         )
+
+    try:
+        async with _get_freqtrade_sem():
+            p = await asyncio.to_thread(_run_ft)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Freqtrade не запустился: {e}")
 
@@ -1182,10 +1294,12 @@ async def impulse_reset():
 async def telegram_status():
     """Return Telegram notification config status (token masked)."""
     masked_token = (telegram.token[:10] + "…" + telegram.token[-4:]) if telegram.token else ""
+    masked_chat = (telegram.chat_id[:2] + "…" + telegram.chat_id[-3:]) if telegram.chat_id else ""
     return {
         "configured": telegram.configured,
         "status": telegram.status,
-        "chat_id": telegram.chat_id,
+        "chat_id": masked_chat,
+        "chat_id_masked": masked_chat,
         "token_masked": masked_token,
     }
 
@@ -1388,8 +1502,6 @@ async def chart_trades(inst_id: str = "BTC-USDT-SWAP"):
         }
     }
 
-
-import time as _time
 
 SWAP_INSTRUMENTS = ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "BNB-USDT-SWAP", "SOL-USDT-SWAP"]
 

@@ -23,6 +23,8 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: TELEGRAM_BOT_TOKEN
