@@ -250,17 +250,18 @@ export default function MiniAppPage() {
   const load = useCallback(async () => {
     miniLog('load', 'starting, token=' + (localStorage.getItem('auth_token') ? 'set' : 'EMPTY'))
     setLoading(true)
-    const reqs = [
-      ['health', api.health()],
-      ['portfolio', api.getPortfolio()],
-      ['rotation', api.rotationStatus()],
-      ['impulse', api.impulseStatus()],
-      ['positions', api.getPositions('SWAP')],
-      ['trades', api.getAllTrades(20)],
-    ]
-    const results = await Promise.all(reqs.map(async ([name, p]) => {
+    const callers = {
+      health: () => api.health(),
+      portfolio: () => api.getPortfolio(),
+      rotation: () => api.rotationStatus(),
+      impulse: () => api.impulseStatus(),
+      positions: () => api.getPositions('SWAP'),
+      trades: () => api.getAllTrades(20),
+    }
+    const names = Object.keys(callers)
+    const results = await Promise.all(names.map(async (name) => {
       try {
-        const v = await withTimeout(p, 12000)
+        const v = await withTimeout(callers[name](), 12000)
         const len = (JSON.stringify(v) || '').length
         miniLog('load', name, 'OK len=' + len)
         return [name, v]
@@ -276,6 +277,15 @@ export default function MiniAppPage() {
     if (map.impulse) setImpulse(map.impulse)
     if (map.positions) setPositions(map.positions.positions || [])
     if (map.trades) setTrades(map.trades.trades || [])
+    try {
+      const h = await withTimeout(api.debugServerHits(), 10000)
+      miniLog('server-hits',
+        ((h?.hits || []).slice(-12)
+          .map(x => x.t + ' ' + x.m + ' ' + x.p + '→' + x.c)
+          .join(' | ')) || 'none')
+    } catch (e) {
+      miniLog('server-hits', 'ERR', e.message || e)
+    }
     setLoaded(true)
     setLoading(false)
   }, [])

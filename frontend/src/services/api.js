@@ -98,6 +98,8 @@ export const api = {
 
   momentumTrades: (limit = 20) => request(`/momentum/trades?limit=${limit}`),
 
+  rotationStatus: () => request('/rotation/status'),
+
   // ── Impulse 1D Strategy ──
   impulseStatus: () => request('/impulse/status'),
 
