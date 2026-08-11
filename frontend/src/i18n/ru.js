@@ -525,7 +525,6 @@ const ru = {
   'mini.last_trades': 'Последние сделки',
   'mini.no_trades': 'Сделок пока нет',
   'mini.open': 'Открыть',
-  'mini.full_dashboard': 'Открыть полный дашборд',
   'mini.auth_error': 'Ошибка входа: откройте приложение через бота',
   'mini.reload': 'Обновить',
   'mini.loading': 'Загрузка…',

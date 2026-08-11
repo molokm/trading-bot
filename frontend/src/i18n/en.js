@@ -525,7 +525,6 @@ const en = {
   'mini.last_trades': 'Recent trades',
   'mini.no_trades': 'No trades yet',
   'mini.open': 'Open',
-  'mini.full_dashboard': 'Open full dashboard',
   'mini.auth_error': 'Login error: open the app from the bot',
   'mini.reload': 'Refresh',
   'mini.loading': 'Loading…',

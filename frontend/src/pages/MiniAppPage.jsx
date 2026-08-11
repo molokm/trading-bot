@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
-  Wallet, RefreshCw, Bot, TrendingUp, TrendingDown, ArrowUpRight,
-  ArrowDownRight, LayoutDashboard, Shield, User, Loader2, Zap
+  Wallet, RefreshCw, Bot, ArrowUpRight,
+  ArrowDownRight, Shield, Loader2, Zap
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -56,6 +56,7 @@ export default function MiniAppPage() {
   const [authing, setAuthing] = useState(true)
   const [authError, setAuthError] = useState('')
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [portfolio, setPortfolio] = useState(null)
@@ -64,14 +65,34 @@ export default function MiniAppPage() {
   const [positions, setPositions] = useState([])
   const [trades, setTrades] = useState([])
 
-  const tg = window.Telegram?.WebApp
+  const [tg, setTg] = useState(null)
+  const [tgResolved, setTgResolved] = useState(false)
+
+  /* ── Wait for Telegram WebApp SDK + initData (up to ~5s) ── */
+  useEffect(() => {
+    let tries = 0
+    const interval = setInterval(() => {
+      const wa = window.Telegram?.WebApp
+      if (wa) {
+        clearInterval(interval)
+        setTg(wa)
+        setTgResolved(true)
+      } else if (++tries > 25) {
+        clearInterval(interval)
+        setTg(null)
+        setTgResolved(true)
+      }
+    }, 200)
+    return () => clearInterval(interval)
+  }, [])
 
   /* ── Telegram environment setup ── */
   useEffect(() => {
+    if (!tg) return
     try {
-      tg?.ready()
-      tg?.expand()
-      const scheme = tg?.colorScheme
+      tg.ready()
+      tg.expand()
+      const scheme = tg.colorScheme
       if (scheme === 'light') {
         document.documentElement.classList.add('light')
         localStorage.setItem('theme', 'light')
@@ -79,64 +100,68 @@ export default function MiniAppPage() {
         document.documentElement.classList.remove('light')
         localStorage.setItem('theme', 'dark')
       }
-      if (tg?.themeParams?.bg_color) {
+      if (tg.themeParams?.bg_color) {
         document.body.style.background = tg.themeParams.bg_color
       }
-      tg?.setHeaderColor?.(tg.themeParams?.header_bg_color || tg.themeParams?.bg_color || '#0b0e14')
-      tg?.BackButton?.hide()
+      tg.setHeaderColor?.(tg.themeParams?.header_bg_color || tg.themeParams?.bg_color || '#0b0e14')
+      tg.BackButton?.hide()
     } catch { /* ignore SDK errors outside Telegram */ }
   }, [tg])
 
   /* ── Auth via Telegram initData ── */
   useEffect(() => {
+    if (!tgResolved) return
     const run = async () => {
-      const initData = tg?.initData
-      if (!initData) {
-        setAuthing(false)
-        setAuthError('not_in_telegram')
-        return
-      }
       try {
-        const res = await api.telegramAuth(initData)
-        localStorage.setItem('auth_token', res.token)
-        localStorage.setItem('auth_role', res.role)
-        setAuthError('')
+        const initData = tg?.initData
+        if (initData) {
+          const res = await api.telegramAuth(initData)
+          localStorage.setItem('auth_token', res.token)
+          localStorage.setItem('auth_role', res.role)
+        } else if (!localStorage.getItem('auth_token')) {
+          setAuthError('not_in_telegram')
+        }
       } catch (err) {
         setAuthError(err.message || 'auth_failed')
       }
       setAuthing(false)
     }
     run()
-  }, [tg])
+  }, [tgResolved, tg])
 
-  /* ── Load dashboard data ── */
+  /* ── Load dashboard data (per-request error handling) ── */
   const load = useCallback(async () => {
     setLoading(true)
-    try {
-      const [h, pf, rot, imp, pos, tr] = await Promise.all([
-        api.health(),
-        api.getPortfolio(),
-        api.rotationStatus(),
-        api.impulseStatus(),
-        api.getPositions('SWAP'),
-        api.getAllTrades(20),
-      ])
-      setConnected(h.connected)
-      setDemoMode(h.demo)
-      setPortfolio(pf)
-      setRotation(rot)
-      setImpulse(imp)
-      setPositions(pos?.positions || [])
-      setTrades(tr?.trades || [])
-    } catch (err) {
-      console.error('mini load error', err)
-    }
+    const results = await Promise.allSettled([
+      api.health(),
+      api.getPortfolio(),
+      api.rotationStatus(),
+      api.impulseStatus(),
+      api.getPositions('SWAP'),
+      api.getAllTrades(20),
+    ])
+    const [h, pf, rot, imp, pos, tr] = results.map(r => (r.status === 'fulfilled' ? r.value : null))
+    if (h) { setConnected(h.connected); setDemoMode(h.demo) }
+    if (pf) setPortfolio(pf)
+    if (rot) setRotation(rot)
+    if (imp) setImpulse(imp)
+    if (pos) setPositions(pos?.positions || [])
+    if (tr) setTrades(tr?.trades || [])
+    setLoaded(true)
     setLoading(false)
   }, [])
 
   useEffect(() => {
     if (!authing && !authError) load()
   }, [authing, authError, load])
+
+  /* ── Auto-refresh every 30s ── */
+  useEffect(() => {
+    if (authing || authError) return
+    const id = setInterval(load, 30000)
+    return () => clearInterval(id)
+  }, [authing, authError, load])
+
 
   /* ── Bot status card ── */
   const botCard = (name, s, iconColor) => {
@@ -175,7 +200,7 @@ export default function MiniAppPage() {
     )
   }
 
-  if (authing) {
+  if (authing || (loading && !loaded)) {
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--txt-secondary)]">
         <Loader2 size={28} className="animate-spin text-[var(--info)]" />
@@ -189,13 +214,13 @@ export default function MiniAppPage() {
       <div className="h-screen flex flex-col items-center justify-center gap-4 p-6 bg-[var(--bg)] text-center">
         <Shield size={40} className="text-[var(--warn)]" />
         <div className="text-sm font-semibold text-[var(--txt)]">{t('mini.auth_error')}</div>
-        <a
-          href="/"
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold"
+        <button
+          onClick={() => window.location.reload()}
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold active:opacity-70"
         >
-          <LayoutDashboard size={15} />
-          {t('mini.full_dashboard')}
-        </a>
+          <RefreshCw size={15} />
+          {t('mini.reload')}
+        </button>
       </div>
     )
   }
@@ -363,13 +388,9 @@ export default function MiniAppPage() {
         </div>
 
         {/* ═══ Footer ═══ */}
-        <a
-          href="/"
-          className="flex items-center justify-center gap-2 w-full py-3 rounded-xl bg-[var(--surface)] border border-[var(--border)] text-sm font-semibold text-[var(--info)] active:opacity-70"
-        >
-          <LayoutDashboard size={15} />
-          {t('mini.full_dashboard')}
-        </a>
+        <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
+          OKX Terminal • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+        </div>
       </div>
     </div>
   )
