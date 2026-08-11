@@ -1342,7 +1342,7 @@ async def telegram_simulate(data: dict = None):
     """Send sample trade-signal messages to Telegram to preview the real format.
 
     No real order is placed — just the exact open / partial-TP / close messages
-    the rotation bot would send, with sample data.
+    (rotation bot) plus a pyramid add-on message (impulse bot), with sample data.
     """
     d = data or {}
     token = d.get("token", "") or telegram.token
@@ -1364,9 +1364,13 @@ async def telegram_simulate(data: dict = None):
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
         pnl=201.75, reason="trail_stop",
     )
+    msg_add = notifier.add_msg(
+        coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
+    )
 
     results = {}
-    for name, text in (("open", msg_open), ("partial", msg_partial), ("close", msg_close)):
+    for name, text in (("open", msg_open), ("partial", msg_partial),
+                       ("close", msg_close), ("add", msg_add)):
         ok = await notifier.send(text)
         results[name] = ok
         print(f"[telegram/simulate] {name}: sent={ok}", flush=True)
@@ -1374,7 +1378,7 @@ async def telegram_simulate(data: dict = None):
     ok_all = all(results.values())
     return {
         "ok": ok_all,
-        "message": "Все 3 сигнала отправлены" if ok_all else f"Частичная отправка: {results}",
+        "message": "Все 4 сигнала отправлены" if ok_all else f"Частичная отправка: {results}",
         "results": results,
     }
 
