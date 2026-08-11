@@ -76,6 +76,29 @@ rotation: Optional[RotationStrategy] = None
 impulse: Optional[ImpulseStrategy] = None
 telegram = TelegramNotifier()
 
+# ── Server-side request hit logger (diagnostics for Telegram Mini App) ──
+_SERVER_HITS = []
+
+
+@app.middleware("http")
+async def _server_hit_logger(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/debug/"):
+        _SERVER_HITS.append({
+            "t": _time.strftime("%H:%M:%S"),
+            "p": request.url.path,
+            "c": response.status_code,
+            "m": request.method,
+        })
+        del _SERVER_HITS[:-400]
+    return response
+
+
+@app.get("/api/debug/server-hits")
+async def debug_server_hits():
+    """Return the most recent server-side API hits (for Mini App diagnostics)."""
+    return {"hits": _SERVER_HITS[-80:]}
+
 
 @app.on_event("startup")
 async def startup():

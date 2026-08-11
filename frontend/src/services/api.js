@@ -149,6 +149,8 @@ export const api = {
   debugMiniLog: (logs) =>
     request('/debug/mini-log', { method: 'POST', body: JSON.stringify({ logs }) }),
 
+  debugServerHits: () => request('/debug/server-hits'),
+
   // ── Analysis log ──
   downloadAnalysisLog: async () => {
     const url = `${BASE}/analysis/log`;

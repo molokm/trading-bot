@@ -543,6 +543,8 @@ const en = {
   'mini.copied': 'Copied',
   'mini.send': 'Send',
   'mini.sent': 'Sent',
+  'mini.server': 'Server hits:',
+  'mini.no_server_hits': 'No server hits yet (server did not receive or not yet answered)',
   'mini.no_logs': 'No logs yet',
 }
 

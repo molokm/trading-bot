@@ -99,6 +99,22 @@ export default function MiniAppPage() {
   const [tgResolved, setTgResolved] = useState(false)
   const [showLogs, setShowLogs] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [serverHits, setServerHits] = useState([])
+  const [hitsStatus, setHitsStatus] = useState('')
+
+  useEffect(() => {
+    if (!showLogs) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await withTimeout(api.debugServerHits(), 10000)
+        if (!cancelled) { setServerHits(res?.hits || []); setHitsStatus('') }
+      } catch (e) {
+        if (!cancelled) setHitsStatus('ERR ' + (e.message || e))
+      }
+    })()
+    return () => { cancelled = true }
+  }, [showLogs])
 
   const copyLogs = async () => {
     const text = MINI_LOGS.slice(-150).join('\n')
@@ -538,6 +554,14 @@ export default function MiniAppPage() {
               <pre className="p-3 text-2xs leading-relaxed text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-h-64 overflow-y-auto">
                 {MINI_LOGS.slice(-60).join('\n') || t('mini.no_logs')}
               </pre>
+              <div className="px-3 py-1.5 bg-[var(--surface-overlay)] border-t border-[var(--border)]">
+                <div className="text-2xs font-semibold text-[var(--txt-muted)] mb-1">{t('mini.server')} {hitsStatus}</div>
+                <pre className="text-2xs leading-relaxed text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+                  {serverHits.length
+                    ? serverHits.slice(-25).map(h => `${h.t} ${h.m} ${h.p} → ${h.c}`).join('\n')
+                    : t('mini.no_server_hits')}
+                </pre>
+              </div>
             </Card>
           )}
         </div>
