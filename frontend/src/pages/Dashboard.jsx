@@ -8,10 +8,10 @@ import { api } from '../services/api'
 import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-const PAIRS = ['Все', 'BTC', 'ETH', 'SOL', 'BNB']
+const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 // Coins the bot actively trades — shown as live price cards on the dashboard
-const PRICE_COINS = ['BTC', 'ETH', 'SOL', 'BNB']
+const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
 function AnimatedValue({ children, className = '' }) {

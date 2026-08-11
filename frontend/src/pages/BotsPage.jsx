@@ -7,7 +7,7 @@ import { api } from '../services/api'
 import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-const SYMBOL_OPTIONS = ['BTC', 'ETH', 'SOL', 'BNB']
+const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 /** Params that map 1:1 to RotationConfig on the backend */
 const ROTATION_PARAMS = [
@@ -374,12 +374,12 @@ export default function BotsPage({ connected, isGuest }) {
   const formRef = useRef(null)
 
   const [momLocal, setMomLocal] = useState(() => loadSavedConfig('bot_config_momentum', {
-    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
+    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
     config: DEFAULT_MOM_CONFIG,
   }))
 
   const [impLocal, setImpLocal] = useState(() => loadSavedConfig('bot_config_impulse', {
-    symbols: ['BTC', 'ETH', 'SOL', 'BNB'],
+    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
     config: DEFAULT_IMP_CONFIG,
   }))
 
@@ -638,13 +638,13 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
   const PARAM_META = useMemo(() => getParamMeta(t, isImpulse ? IMPULSE_PARAM_BASE : PARAM_BASE), [t, isImpulse])
 
   const [form, setForm] = useState({
-    symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
+    symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
     config: { ...defaultConfig, ...config },
   })
 
   useEffect(() => {
     setForm({
-      symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'SOL', 'BNB'],
+      symbols: symbols?.length ? [...symbols] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
       config: { ...defaultConfig, ...config },
     })
   }, [botType, symbols, config])

@@ -27,11 +27,16 @@ IMP_BOT_ID = "impulse_strategy"
 STRATEGY_VERSION = "v1"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
-CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.1, "SOL": 0.1}
-LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 0.01, "SOL": 0.01}
+CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
+          "DOGE": 1000, "ADA": 100, "TRX": 1000, "AVAX": 1, "LTC": 1}
+LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 1, "SOL": 0.01, "XRP": 0.01,
+          "DOGE": 0.01, "ADA": 0.1, "TRX": 0.01, "AVAX": 0.1, "LTC": 0.1}
 SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
-            "BNB": "BNB-USDT-SWAP", "SOL": "SOL-USDT-SWAP"}
-COINS = ["BTC", "ETH", "BNB", "SOL"]
+            "BNB": "BNB-USDT-SWAP", "SOL": "SOL-USDT-SWAP",
+            "XRP": "XRP-USDT-SWAP", "DOGE": "DOGE-USDT-SWAP",
+            "ADA": "ADA-USDT-SWAP", "TRX": "TRX-USDT-SWAP",
+            "AVAX": "AVAX-USDT-SWAP", "LTC": "LTC-USDT-SWAP"}
+COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
     "Бот ежедневно сканирует BTC, ETH, BNB, SOL на дневных барах и входит в сильные "
@@ -91,7 +96,7 @@ class ImpulseConfig:
 
     def __post_init__(self):
         if self.symbols is None:
-            self.symbols = ["BTC", "ETH", "BNB", "SOL"]
+            self.symbols = list(COINS)
 
 
 @dataclass

@@ -148,7 +148,7 @@ async def startup():
         print("[startup] 4/6 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
-                symbols=["BTC", "ETH", "BNB", "SOL"],
+                symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
                 top_k=2,
                 roc_period=14,
@@ -179,7 +179,7 @@ async def startup():
         print("[startup] 4/6 Impulse 1D auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             imp_config = ImpulseConfig(
-                symbols=["BTC", "ETH", "BNB", "SOL"],
+                symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
                 top_k=4,
                 entry_roc=4.0,
@@ -808,7 +808,7 @@ async def momentum_start(data: dict = None):
         return {"message": "Rotation already running", **rotation.get_status()}
     d = data or {}
     config = RotationConfig(
-        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]),
         capital=float(d.get("capital", 10000.0)),
         top_k=int(d.get("top_k", d.get("max_positions", 2))),
         roc_period=int(d.get("roc_period", 14)),
@@ -1125,7 +1125,7 @@ async def rotation_start(data: dict = None):
         return {"message": "Rotation already running"}
     d = data or {}
     cfg = RotationConfig(
-        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]),
         capital=d.get("capital", 10000.0),
         top_k=d.get("top_k", 2),
         roc_period=d.get("roc_period", 14),
@@ -1260,7 +1260,7 @@ async def impulse_start(data: dict = None):
         return {"message": "Impulse already running", **impulse.get_status()}
     d = data or {}
     cfg = ImpulseConfig(
-        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "SOL"]),
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]),
         capital=float(d.get("capital", 10000.0)),
         top_k=int(d.get("top_k", 4)),
         entry_roc=float(d.get("entry_roc", 4.0)),
