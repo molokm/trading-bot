@@ -97,6 +97,7 @@ export default function MiniAppPage() {
 
   const [tg, setTg] = useState(null)
   const [tgResolved, setTgResolved] = useState(false)
+  const [isAdmin, setIsAdmin] = useState(localStorage.getItem('auth_role') === 'admin')
   const [showLogs, setShowLogs] = useState(false)
   const [copied, setCopied] = useState(false)
   const [serverHits, setServerHits] = useState([])
@@ -220,6 +221,7 @@ export default function MiniAppPage() {
           const res = await withTimeout(api.telegramAuth(initData), 20000)
           localStorage.setItem('auth_token', res.token)
           localStorage.setItem('auth_role', res.role)
+          setIsAdmin(res.role === 'admin')
           miniLog('auth', 'OK role=' + res.role, 'user=' + (res.user?.username || res.user?.id || '?'))
         } else if (localStorage.getItem('auth_token')) {
           miniLog('auth', 'no initData, using stored session token')
@@ -546,7 +548,8 @@ export default function MiniAppPage() {
           OKX Terminal • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
         </div>
 
-        {/* ═══ Diagnostics panel ═══ */}
+        {/* ═══ Diagnostics panel (admin only) ═══ */}
+        {isAdmin && (
         <div className="pb-2">
           <button
             onClick={() => setShowLogs(s => !s)}
@@ -584,6 +587,7 @@ export default function MiniAppPage() {
             </Card>
           )}
         </div>
+        )}
       </div>
     </div>
   )
