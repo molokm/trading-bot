@@ -86,6 +86,10 @@ def login(password: str) -> Optional[str]:
 def guest() -> str:
     return _new_token("guest")
 
+def grant_admin() -> str:
+    """Mint an admin session token (used by verified Telegram Mini App logins)."""
+    return _new_token("admin")
+
 def _resolve(token_enc: str) -> Optional[str]:
     return _decrypt(token_enc)
 

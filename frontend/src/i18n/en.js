@@ -512,6 +512,31 @@ const en = {
   'onboarding.metrics_desc': '"Golden zone" — your main portfolio metrics. Balance, open positions and PnL update in real time.',
   'onboarding.chart_filters': 'Chart & Filters',
   'onboarding.chart_desc': 'Candlestick chart with bot trade overlay. Use filter chips to quickly search by instrument, time and result.',
+
+  // ── Telegram Mini App ──
+  'mini.portfolio': 'Portfolio',
+  'mini.balance': 'Balance',
+  'mini.positions': 'Open positions',
+  'mini.no_positions': 'No open positions',
+  'mini.bots': 'Bots',
+  'mini.running': 'Running',
+  'mini.stopped': 'Stopped',
+  'mini.pnl': 'PnL',
+  'mini.last_trades': 'Recent trades',
+  'mini.no_trades': 'No trades yet',
+  'mini.open': 'Open',
+  'mini.full_dashboard': 'Open full dashboard',
+  'mini.auth_error': 'Login error: open the app from the bot',
+  'mini.reload': 'Refresh',
+  'mini.loading': 'Loading…',
+  'mini.entry': 'Entry',
+  'mini.exit': 'Exit',
+  'mini.stop': 'Stop',
+  'mini.side': 'Side',
+  'mini.size': 'Size',
+  'mini.leverage': 'Leverage',
+  'mini.time': 'Time',
+  'mini.unrealized': 'Unrealized PnL',
 }
 
 export default en

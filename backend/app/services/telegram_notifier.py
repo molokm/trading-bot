@@ -6,10 +6,15 @@ updated at runtime through the dashboard settings endpoint.
 """
 
 import asyncio
+import hashlib
+import hmac
 import html
+import json
 import os
 import threading
+import time
 from typing import Optional
+from urllib.parse import parse_qsl
 
 import httpx
 
@@ -90,6 +95,69 @@ class TelegramNotifier:
             threading.Thread(target=_run, daemon=True).start()
         except Exception:
             pass
+
+    # ─── Mini App helpers ───
+
+    def verify_init_data(self, init_data: str, max_age: int = 86400) -> Optional[dict]:
+        """Verify a Telegram WebApp initData string against the bot token.
+
+        Returns the parsed payload (incl. ``user``) on success, or None if the
+        signature is invalid / expired. Uses the standard Telegram algorithm:
+        secret = HMAC_SHA256("WebAppData", bot_token);
+        signature = HMAC_SHA256(secret, data_check_string).
+        """
+        if not init_data or not self.token:
+            return None
+        try:
+            params = dict(parse_qsl(init_data, keep_blank_values=True))
+        except Exception:
+            return None
+        got_hash = params.pop("hash", "")
+        if not got_hash:
+            return None
+        data_check_string = "\n".join(
+            f"{k}={v}" for k, v in sorted(params.items())
+        )
+        secret_key = hmac.new(
+            b"WebAppData", self.token.encode(), hashlib.sha256
+        ).digest()
+        computed = hmac.new(
+            secret_key, data_check_string.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(computed, got_hash):
+            return None
+        auth_date = params.get("auth_date")
+        try:
+            if auth_date and time.time() - int(auth_date) > max_age:
+                return None
+        except (ValueError, TypeError):
+            return None
+        user = params.get("user")
+        if user:
+            try:
+                params["user"] = json.loads(user)
+            except Exception:
+                pass
+        return params
+
+    async def set_chat_menu_button(self, web_app_url: str, text: str = "Торговый бот") -> bool:
+        """Set the bot's chat menu button to open the Mini App. Returns True on success."""
+        if not self.token:
+            return False
+        url = f"https://api.telegram.org/bot{self.token}/setChatMenuButton"
+        payload = {
+            "menu_button": {
+                "type": "web_app",
+                "text": text,
+                "web_app": {"url": web_app_url},
+            }
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, json=payload)
+                return bool(resp.json().get("ok"))
+        except Exception:
+            return False
 
     # ─── Message builders ───
 

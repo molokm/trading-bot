@@ -140,6 +140,12 @@ export const api = {
   telegramSimulate: (config) =>
     request('/telegram/simulate', { method: 'POST', body: JSON.stringify(config || {}) }),
 
+  telegramMenu: (config) =>
+    request('/telegram/menu', { method: 'POST', body: JSON.stringify(config || {}) }),
+
+  telegramAuth: (initData) =>
+    request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
+
   // ── Analysis log ──
   downloadAnalysisLog: async () => {
     const url = `${BASE}/analysis/log`;

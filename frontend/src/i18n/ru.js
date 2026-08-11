@@ -512,6 +512,31 @@ const ru = {
   'onboarding.metrics_desc': '«Золотая зона» — основные показатели вашего портфеля. Баланс, открытые позиции и PnL обновляются в реальном времени.',
   'onboarding.chart_filters': 'График и фильтры',
   'onboarding.chart_desc': 'Свечной график с наложением сделок бота. Используйте фильтры-чипсы для быстрого поиска по инструменту, времени и результату.',
+
+  // ── Telegram Mini App ──
+  'mini.portfolio': 'Портфель',
+  'mini.balance': 'Баланс',
+  'mini.positions': 'Открытые позиции',
+  'mini.no_positions': 'Нет открытых позиций',
+  'mini.bots': 'Боты',
+  'mini.running': 'Работает',
+  'mini.stopped': 'Остановлен',
+  'mini.pnl': 'PnL',
+  'mini.last_trades': 'Последние сделки',
+  'mini.no_trades': 'Сделок пока нет',
+  'mini.open': 'Открыть',
+  'mini.full_dashboard': 'Открыть полный дашборд',
+  'mini.auth_error': 'Ошибка входа: откройте приложение через бота',
+  'mini.reload': 'Обновить',
+  'mini.loading': 'Загрузка…',
+  'mini.entry': 'Вход',
+  'mini.exit': 'Выход',
+  'mini.stop': 'Стоп',
+  'mini.side': 'Напр.',
+  'mini.size': 'Размер',
+  'mini.leverage': 'Плечо',
+  'mini.time': 'Время',
+  'mini.unrealized': 'Нереал. PnL',
 }
 
 export default ru

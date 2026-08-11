@@ -14,6 +14,7 @@ const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
+const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
 import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
@@ -183,6 +184,7 @@ export default function App() {
           <AuthContext.Provider value={{ auth, setAuth }}>
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
+              <Route path="/mini" element={<MiniAppPage />} />
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>

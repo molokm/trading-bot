@@ -18,7 +18,7 @@ from app.services.okx_client import OKXClientManager
 from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import (
-    login, guest, validate, logout, is_admin, PASSWORD,
+    login, guest, validate, logout, is_admin, PASSWORD, grant_admin,
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
 )
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
@@ -227,6 +227,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/guest",
     "/api/auth/status",
     "/api/auth/logout",
+    "/api/auth/telegram",
 }
 
 ADMIN_ONLY_PATHS = {
@@ -252,6 +253,7 @@ ADMIN_ONLY_PATHS = {
     "/api/telegram/config",
     "/api/telegram/test",
     "/api/telegram/simulate",
+    "/api/telegram/menu",
     "/api/analysis/log",
 }
 
@@ -305,6 +307,37 @@ async def auth_status(request: Request):
         "authenticated": valid,
         "role": "admin" if admin else ("guest" if valid else "none"),
         "has_password": bool(PASSWORD),
+    }
+
+
+@app.post("/api/auth/telegram")
+async def auth_telegram(data: dict):
+    """Authenticate a Telegram Mini App user via WebApp initData.
+
+    The initData signature is verified with the bot token; only the chat
+    matching TELEGRAM_CHAT_ID is granted an admin session — no password needed.
+    """
+    init_data = (data or {}).get("initData", "")
+    if not init_data:
+        raise HTTPException(status_code=400, detail="Missing initData")
+    if not telegram.token:
+        raise HTTPException(status_code=400, detail="Telegram bot not configured")
+    payload = telegram.verify_init_data(init_data)
+    if payload is None:
+        raise HTTPException(status_code=401, detail="Invalid Telegram initData")
+    user = payload.get("user") or {}
+    uid = str(user.get("id", ""))
+    if not telegram.chat_id or uid != telegram.chat_id:
+        raise HTTPException(status_code=403, detail="Telegram user not authorized")
+    token = grant_admin()
+    return {
+        "token": token,
+        "role": "admin",
+        "user": {
+            "id": user.get("id"),
+            "username": user.get("username"),
+            "first_name": user.get("first_name"),
+        },
     }
 
 
@@ -1380,6 +1413,25 @@ async def telegram_simulate(data: dict = None):
         "ok": ok_all,
         "message": "Все 4 сигнала отправлены" if ok_all else f"Частичная отправка: {results}",
         "results": results,
+    }
+
+
+@app.post("/api/telegram/menu")
+async def telegram_menu(request: Request, data: dict = None):
+    """Set the bot's chat menu button to open the Mini App (/mini)."""
+    if not (telegram.token and telegram.chat_id):
+        return {"ok": False, "message": "Telegram не настроен: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID"}
+    d = data or {}
+    url = (d.get("url") or "").strip()
+    if not url:
+        origin = str(request.base_url).rstrip("/")
+        url = f"{origin}/mini"
+    ok = await telegram.set_chat_menu_button(url)
+    print(f"[telegram/menu] url={url} ok={ok}", flush=True)
+    return {
+        "ok": ok,
+        "url": url,
+        "message": "Кнопка меню установлена" if ok else "Ошибка установки кнопки меню",
     }
 
 
