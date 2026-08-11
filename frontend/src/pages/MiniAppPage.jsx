@@ -98,11 +98,55 @@ export default function MiniAppPage() {
   const [tg, setTg] = useState(null)
   const [tgResolved, setTgResolved] = useState(false)
   const [showLogs, setShowLogs] = useState(false)
+  const [copied, setCopied] = useState(false)
 
-  const copyLogs = () => {
+  const copyLogs = async () => {
+    const text = MINI_LOGS.slice(-150).join('\n')
+    const done = () => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }
     try {
-      navigator.clipboard.writeText(MINI_LOGS.slice(-150).join('\n'))
-    } catch { /* ignore */ }
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+        done()
+        return
+      }
+      throw new Error('no clipboard API')
+    } catch {
+      try {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.focus()
+        ta.select()
+        const ok = document.execCommand('copy')
+        document.body.removeChild(ta)
+        if (ok) { done(); return }
+        throw new Error('execCommand failed')
+      } catch {
+        miniLog('copy', 'clipboard blocked, use "Отправить" button instead')
+        try {
+          tg?.showAlert?.('Буфер обмена недоступен. Используйте кнопку «Отправить».')
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  const [sentLogs, setSentLogs] = useState(false)
+  const sendLogs = async () => {
+    setSentLogs(false)
+    try {
+      const res = await withTimeout(api.debugMiniLog(MINI_LOGS.slice(-150)), 15000)
+      miniLog('send', res?.saved ? 'logs saved to server' : 'unexpected response')
+      setSentLogs(true)
+      try { tg?.HapticFeedback?.notificationOccurred?.('success') } catch { /* ignore */ }
+    } catch (err) {
+      miniLog('send', 'ERROR', err.message || err)
+      try { tg?.showAlert?.('Не удалось отправить: ' + (err.message || err)) } catch { /* ignore */ }
+    }
   }
 
   /* ── Wait for Telegram WebApp SDK + initData (up to ~5s) ── */
@@ -485,7 +529,10 @@ export default function MiniAppPage() {
                     {t('mini.clear')}
                   </button>
                   <button onClick={copyLogs} className="px-2 py-0.5 rounded bg-[var(--info-dim)] text-[var(--info)] text-2xs font-bold">
-                    {t('mini.copy')}
+                    {copied ? t('mini.copied') : t('mini.copy')}
+                  </button>
+                  <button onClick={sendLogs} className="px-2 py-0.5 rounded bg-[var(--success-dim)] text-[var(--success)] text-2xs font-bold">
+                    {sentLogs ? t('mini.sent') : t('mini.send')}
                   </button>
                 </div>
               </div>

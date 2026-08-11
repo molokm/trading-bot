@@ -540,6 +540,9 @@ const ru = {
   'mini.diagnostics': 'Диагностика',
   'mini.clear': 'Очистить',
   'mini.copy': 'Копировать',
+  'mini.copied': 'Скопировано',
+  'mini.send': 'Отправить',
+  'mini.sent': 'Отправлено',
   'mini.no_logs': 'Логов пока нет',
 }
 

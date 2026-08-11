@@ -146,6 +146,9 @@ export const api = {
   telegramAuth: (initData) =>
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
 
+  debugMiniLog: (logs) =>
+    request('/debug/mini-log', { method: 'POST', body: JSON.stringify({ logs }) }),
+
   // ── Analysis log ──
   downloadAnalysisLog: async () => {
     const url = `${BASE}/analysis/log`;

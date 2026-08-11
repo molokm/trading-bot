@@ -2405,6 +2405,30 @@ if STATIC_DIR.exists():
         )
 
 
+# ── Mini App client logs ──
+
+_MINI_LOG_RING = []
+
+
+@app.post("/api/debug/mini-log")
+async def mini_log_collect(data: dict):
+    """Collect client-side logs from the Telegram Mini App (admin-only)."""
+    logs = (data or {}).get("logs") or []
+    if isinstance(logs, list):
+        lines = [str(l)[:2000] for l in logs]
+        _MINI_LOG_RING.extend(lines)
+        del _MINI_LOG_RING[:-500]
+        for line in lines:
+            logger.info("MINI %s", line)
+    return {"saved": len(logs)}
+
+
+@app.get("/api/debug/mini-log")
+async def mini_log_read():
+    """Return the most recent Mini App client logs."""
+    return {"count": len(_MINI_LOG_RING), "logs": _MINI_LOG_RING[-150:]}
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("BACKEND_PORT", "8000"))

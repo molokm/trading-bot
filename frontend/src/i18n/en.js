@@ -540,6 +540,9 @@ const en = {
   'mini.diagnostics': 'Diagnostics',
   'mini.clear': 'Clear',
   'mini.copy': 'Copy',
+  'mini.copied': 'Copied',
+  'mini.send': 'Send',
+  'mini.sent': 'Sent',
   'mini.no_logs': 'No logs yet',
 }
 
