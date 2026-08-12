@@ -57,8 +57,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
-  const [validationStatus, setValidationStatus] = useState(null)
-  const [validationTrades, setValidationTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -122,10 +120,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.getPnl().catch(() => null),
         Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
       ])
-      const [valStatus, valTrades] = await Promise.all([
-        api.validationStatus().catch(() => null),
-        api.validationTrades(50).catch(() => null),
-      ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
@@ -135,8 +129,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (impStatus) setImpulseStatus(impStatus)
       if (trades) setTradeLog(trades.trades || [])
-      if (valStatus) setValidationStatus(valStatus)
-      if (valTrades) setValidationTrades(valTrades.trades || [])
       if (pnlData) setPnl(pnlData)
       if (priceTickers) {
         const byCoin = {}
@@ -200,38 +192,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         })
       }
     }
-    // Validation bot trades — own source, dedupe on signal_id to avoid the
-    // "two entries" bug (was leaking into momentum paired DB fallback).
-    for (const vt of validationTrades) {
-      const instId = vt.inst_id || vt.symbol || ''
-      const dup = combined.some(c =>
-        (c.signal_id != null && c.signal_id === vt.signal_id) ||
-        (c.inst_id === instId && c.entry_time === vt.time))
-      if (dup) continue
-      if (vt.pnl != null && parseFloat(vt.pnl) !== 0) {
-        combined.push({
-          entry_time: vt.time, exit_time: vt.time, inst_id: instId,
-          side: (vt.pos_side === 'short' || vt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: vt.entry_price || vt.entry || null, exit_px: vt.exit_price || null,
-          pnl: vt.pnl, reason: vt.reason || 'closed', signal_id: vt.signal_id,
-          bot: 'Validation',
-        })
-      } else if (vt.reason === 'open' || (vt.entry_price && !vt.exit_price)) {
-        combined.push({
-          entry_time: vt.time, exit_time: null, inst_id: instId,
-          side: (vt.pos_side === 'short' || vt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: vt.entry_price || vt.entry || null, exit_px: null, pnl: null,
-          reason: 'open', signal_id: vt.signal_id, bot: 'Validation',
-        })
-      }
-    }
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog, momentumTrades, validationTrades])
+  }, [tradeLog, momentumTrades])
 
   // Active trades — one row per position (open from live status, closed from trade log)
   const activeTrades = useMemo(() => {
@@ -241,7 +208,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
     const allOpen = [
       ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
-      ...(validationStatus?.open_positions || []).map(p => ({ ...p, bot: 'Validation' })),
       ...(impulseStatus?.open_positions || []).map(p => ({ ...p, bot: 'Impulse 1D' })),
     ]
     for (const p of allOpen) {
@@ -299,7 +265,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, validationStatus?.open_positions, impulseStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -609,11 +575,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
                     const botBadge = tr.bot === 'Momentum'
                       ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      : tr.bot === 'Validation'
-                        ? { label: 'VAL', cls: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' }
-                        : tr.bot === 'Impulse 1D'
-                          ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
-                          : null
+                      : tr.bot === 'Impulse 1D'
+                        ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
+                        : null
                     const mark = parseFloat(tr.mark || 0)
                     const upnl = parseFloat(tr.unrealized_pnl || 0)
                     return (

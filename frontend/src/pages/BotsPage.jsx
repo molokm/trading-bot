@@ -651,37 +651,39 @@ export default function BotsPage({ connected, isGuest }) {
           t={t}
         />
 
-        <BotCard
-          id="validation"
-          name={t('dash.validation_bot')}
-          stratId={valStatus?.strategy || 'momentum_validation'}
-          version={valStatus?.version}
-          icon={FlaskConical}
-          accentDim="bg-[var(--warn-dim)]"
-          accentTxt="text-[var(--warn)]"
-          statusMode={valRunning ? 'live' : 'stopped'}
-          statusLabel={valRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={valStatus?.config?.symbols || valLocal.symbols}
-          description={valStatus?.description || t('bots.validation_desc')}
-          tags={valTags}
-          tagline={t('bots.tagline_validation')}
-          pnl={valStatus?.total_pnl || 0}
-          trades={valStatus?.total_trades || 0}
-          winRate={valStatus?.win_rate}
-          sparklinePnl={valStatus?.total_pnl || 0}
-          startedAt={valRunning ? valStartedAt : null}
-          openPositions={valStatus?.open_positions || []}
-          onToggle={valToggle}
-          onReset={() => {
-            if (window.confirm(t('bots.validation_reset_confirm'))) {
-              api.validationReset().then(refreshStatus).catch(e => alert(e.message))
-            }
-          }}
-          onEdit={() => { setEditingBot('validation'); setSliderOpen(true) }}
-          isGuest={isGuest}
-          loading={valLoading}
-          t={t}
-        />
+        {!isGuest && (
+          <BotCard
+            id="validation"
+            name={t('dash.validation_bot')}
+            stratId={valStatus?.strategy || 'momentum_validation'}
+            version={valStatus?.version}
+            icon={FlaskConical}
+            accentDim="bg-[var(--warn-dim)]"
+            accentTxt="text-[var(--warn)]"
+            statusMode={valRunning ? 'live' : 'stopped'}
+            statusLabel={valRunning ? t('bots.status_running') : t('bots.status_stopped')}
+            coins={valStatus?.config?.symbols || valLocal.symbols}
+            description={valStatus?.description || t('bots.validation_desc')}
+            tags={valTags}
+            tagline={t('bots.tagline_validation')}
+            pnl={valStatus?.total_pnl || 0}
+            trades={valStatus?.total_trades || 0}
+            winRate={valStatus?.win_rate}
+            sparklinePnl={valStatus?.total_pnl || 0}
+            startedAt={valRunning ? valStartedAt : null}
+            openPositions={valStatus?.open_positions || []}
+            onToggle={valToggle}
+            onReset={() => {
+              if (window.confirm(t('bots.validation_reset_confirm'))) {
+                api.validationReset().then(refreshStatus).catch(e => alert(e.message))
+              }
+            }}
+            onEdit={() => { setEditingBot('validation'); setSliderOpen(true) }}
+            isGuest={isGuest}
+            loading={valLoading}
+            t={t}
+          />
+        )}
       </div>
 
       <SliderPanel

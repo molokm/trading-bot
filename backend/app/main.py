@@ -198,10 +198,9 @@ async def startup():
             global impulse
             impulse = imp
             await impulse.start()
-        print("[startup] 4/6 Validation (demo) auto-start ...", flush=True)
-        # Валидатор исполнительного механизма на демо-счёте. Ослабленные фильтры
-        # принудительно открывают сделки. Отключается env VALIDATION_BOT=0.
-        if os.getenv("VALIDATION_BOT", "1").lower() not in ("0", "false", "no"):
+        print("[startup] 4/6 Validation auto-start (disabled by default) ...", flush=True)
+        # Тестовый бот-валидатор. ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН. Включить: env VALIDATION_BOT=1.
+        if os.getenv("VALIDATION_BOT", "0").lower() in ("1", "true", "yes"):
             if _env_key and _env_secret and _env_pass:
                 val_config = make_validation_config(
                     capital=float(os.getenv("VALIDATION_CAPITAL", "300")),
@@ -296,6 +295,9 @@ ADMIN_ONLY_PATHS = {
     "/api/validation/stop",
     "/api/validation/reset",
     "/api/validation/config",
+    "/api/validation/status",
+    "/api/validation/trades",
+    "/api/validation/indicators",
     "/api/db/reset-all",
     "/api/db/positions",
     "/api/telegram/status",
