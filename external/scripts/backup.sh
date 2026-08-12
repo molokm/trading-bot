@@ -5,14 +5,14 @@ set -euo pipefail
 # backup.sh — полный бэкап торгового бота (локальное хранение)
 # ════════════════════════════════════════════════════════════
 # Использование:
-#   ./scripts/backup.sh                         # обычный бэкап
-#   ./scripts/backup.sh --with-backtests        # включая 1.7G backtest-результатов
-#   DATABASE_URL="postgresql://..." ./scripts/backup.sh  # + pg_dump Neon
+#   ./external/scripts/backup.sh                         # обычный бэкап
+#   ./external/scripts/backup.sh --with-backtests        # включая 1.7G backtest-результатов
+#   DATABASE_URL="postgresql://..." ./external/scripts/backup.sh  # + pg_dump Neon
 #
 # Бэкапы сохраняются в: ~/trading-bot-backups/YYYY-MM-DD_HHMMSS/
 # ════════════════════════════════════════════════════════════
 
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 BACKUP_ROOT="$HOME/trading-bot-backups"
 TIMESTAMP=$(date '+%Y-%m-%d_%H%M%S')
 BACKUP_DIR="$BACKUP_ROOT/$TIMESTAMP"

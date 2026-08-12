@@ -3,9 +3,9 @@
 import json, subprocess, sys, os, re
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-FT = os.path.join(REPO, "freqtrade_test", "venv", "bin", "freqtrade")
-CFG = os.path.join(REPO, "freqtrade_test", "config_breakout.json")
-USERDIR = os.path.join(REPO, "freqtrade_test", "user_data")
+FT = os.path.join(REPO, "external", "freqtrade_test", "venv", "bin", "freqtrade")
+CFG = os.path.join(REPO, "external", "freqtrade_test", "config_breakout.json")
+USERDIR = os.path.join(REPO, "external", "freqtrade_test", "user_data")
 STRAT = "Rsi2Pullback"
 PARAMS_PATH = os.path.join(USERDIR, "strategies", "rsi2_pullback.json")
 

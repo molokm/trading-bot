@@ -41,9 +41,9 @@ PARAMS_B64 = (
 
 WHITELIST = ["BTC/USDT:USDT", "ETH/USDT:USDT", "BNB/USDT:USDT", "SOL/USDT:USDT"]
 TIMEFRAME = "1d"
-USERDIR = os.path.join(REPO, "freqtrade_test", "user_data")
+USERDIR = os.path.join(REPO, "external", "freqtrade_test", "user_data")
 STRATEGY = "MomentumRotation"
-CONFIG = os.path.join(REPO, "freqtrade_test", "config.json")
+CONFIG = os.path.join(REPO, "external", "freqtrade_test", "config.json")
 
 
 def decode_params() -> dict:
@@ -52,7 +52,7 @@ def decode_params() -> dict:
 
 def find_freqtrade() -> str:
     candidates = [
-        os.path.join(REPO, "freqtrade_test", "venv", "bin", "freqtrade"),
+        os.path.join(REPO, "external", "freqtrade_test", "venv", "bin", "freqtrade"),
         "freqtrade",
     ]
     for c in candidates:

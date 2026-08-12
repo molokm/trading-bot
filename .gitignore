@@ -19,8 +19,9 @@ backend/backtests_data/
 
 # External (research/backtest workbench)
 external/scripts/__pycache__/
-external/scripts/honest_3y_cache.json
-external/scripts/honest_3y_results.json
+external/scripts/*_cache.json
+external/scripts/*_funding_cache.json
+external/scripts/*_results.json
 external/freqtrade_test/venv/
 external/freqtrade_test/user_data/data/
 external/freqtrade_test/user_data/backtest_results/

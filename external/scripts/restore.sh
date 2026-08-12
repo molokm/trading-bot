@@ -5,12 +5,12 @@ set -euo pipefail
 # restore.sh — восстановление из бэкапа
 # ════════════════════════════════════════════════════════════
 # Использование:
-#   ./scripts/restore.sh ~/trading-bot-backups/2026-06-13_190000
+#   ./external/scripts/restore.sh ~/trading-bot-backups/2026-06-13_190000
 # ════════════════════════════════════════════════════════════
 
 if [[ $# -lt 1 ]]; then
   echo "Ошибка: укажи директорию с бэкапом"
-  echo "  ./scripts/restore.sh ~/trading-bot-backups/2026-06-13_190000"
+  echo "  ./external/scripts/restore.sh ~/trading-bot-backups/2026-06-13_190000"
   echo ""
   echo "Доступные бэкапы:"
   ls -1d "$HOME/trading-bot-backups/"*/ 2>/dev/null || echo "(нет бэкапов)"
@@ -18,7 +18,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 BACKUP_DIR="$1"
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 
 if [[ ! -d "$BACKUP_DIR" ]]; then
   echo "Ошибка: директория не найдена: $BACKUP_DIR"
