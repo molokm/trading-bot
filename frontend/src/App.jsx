@@ -15,6 +15,7 @@ const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
+const TrackerPage = lazy(() => import('./pages/TrackerPage'))
 import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
@@ -185,6 +186,7 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniAppPage />} />
+              <Route path="/tracker" element={<TrackerPage />} />
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>

@@ -32,6 +32,7 @@ from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BO
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.telegram_bot import TelegramBotPoller, PRICE_STARS, PLAN_DAYS, INVITE_DAYS, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
+from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -81,6 +82,7 @@ impulse: Optional[ImpulseStrategy] = None
 validation: Optional[ValidationStrategy] = None
 telegram = TelegramNotifier()
 bot_poller: Optional[TelegramBotPoller] = None
+equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
@@ -213,7 +215,7 @@ async def startup():
         print(f"[startup] ERROR: {e}", flush=True)
         raise
     # Telegram paid-signals poller: start last, only when a bot token exists.
-    global bot_poller
+    global bot_poller, equity_tracker
     try:
         if telegram.token:
             bot_poller = TelegramBotPoller(notifier=telegram, db=db)
@@ -223,10 +225,23 @@ async def startup():
             print("[startup] 6/6 Telegram poller skipped (no bot token)", flush=True)
     except Exception as e:
         print(f"[startup] Telegram poller error: {e}", flush=True)
+    # Public equity tracker: snapshot owner portfolio for the /tracker page.
+    try:
+        if client_manager.get_client():
+            equity_tracker = EquityTracker(client_manager=client_manager, db=db)
+            equity_tracker.start()
+            print("[startup] 6b/6 Equity tracker started", flush=True)
+    except Exception as e:
+        print(f"[startup] Equity tracker error: {e}", flush=True)
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    if equity_tracker:
+        try:
+            equity_tracker.stop()
+        except Exception:
+            pass
     if bot_poller:
         try:
             bot_poller.stop()
@@ -277,6 +292,7 @@ def get_token(request: Request):
 
 PUBLIC_API_PATHS = {
     "/api/health",
+    "/api/tracker",
     "/api/auth/login",
     "/api/auth/guest",
     "/api/auth/status",
@@ -891,6 +907,92 @@ async def me_pnl(request: Request):
         "trades": count,
         "unrealized": 0.0,
         "source": "user_bots",
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# PUBLIC EQUITY TRACKER (no auth — trust page for selling subscriptions)
+# ══════════════════════════════════════════════════════════════
+
+_BACKTEST_SUMMARY = {
+    "note": "Результаты бэктестов — вне выборки (walk-forward). Не гарантия будущей доходности.",
+    "periods": [
+        {"label": "Momentum Rotation 2024–2026 (OOS)", "return_pct": 102.0, "max_dd_pct": 38.6},
+        {"label": "Momentum Rotation 2022–2023 (OOS)", "return_pct": 109.0, "max_dd_pct": 27.0},
+        {"label": "Портфель 50/50 2024–2026", "return_pct": 112.0, "max_dd_pct": 16.4, "cagr_pct": 36.2, "sharpe": 1.42},
+        {"label": "Impulse 1D 2024–2026", "return_pct": 105.2, "max_dd_pct": 24.2, "cagr_pct": 34.3},
+    ],
+    "win_rate_backtest_pct": 55.0,
+    "liquidations": 0,
+}
+
+
+@app.get("/api/tracker")
+async def public_tracker():
+    """Public live performance of the owner's bots (read-only, no auth)."""
+    # 1. Current equity
+    current_eq = 0.0
+    try:
+        eq_result = await _okx_call(lambda c: c.get_balance())
+        if not eq_result.get("error") and eq_result.get("data"):
+            acct = eq_result["data"][0]
+            current_eq = float(acct.get("totalEq", 0) or 0)
+    except Exception:
+        pass
+
+    # 2. Equity curve from snapshots
+    curve = []
+    try:
+        rows = await db.get_metrics(bot_id="portfolio", limit=500)
+        curve = [{"t": r["timestamp"], "equity": r["equity"]} for r in reversed(rows)]
+    except Exception:
+        pass
+
+    # 3. Realized PnL + per-bot breakdown
+    pnl = {"total": 0, "1d": 0, "7d": 0, "30d": 0, "per_bot": {}, "fees": 0, "unrealized": 0}
+    try:
+        pnl = await get_pnl()
+    except Exception:
+        pass
+
+    # 4. Trade stats (owner)
+    stats = {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+             "profit_factor": 0.0, "avg_win": 0.0, "avg_loss": 0.0, "best": 0.0, "worst": 0.0}
+    recent = []
+    try:
+        resp = await get_paired_trades(limit=2000)
+        trades = resp.get("trades", [])
+        closed = [t for t in trades
+                  if (t.get("reason") or "").lower() not in ("open", "add")
+                  and t.get("pnl") is not None]
+        wins = [float(t["pnl"]) for t in closed if float(t["pnl"]) > 0]
+        losses = [float(t["pnl"]) for t in closed if float(t["pnl"]) <= 0]
+        stats["trades"] = len(closed)
+        stats["wins"] = len(wins)
+        stats["losses"] = len(losses)
+        stats["win_rate"] = round(len(wins) / len(closed) * 100, 1) if closed else 0.0
+        gross_p = sum(wins)
+        gross_l = abs(sum(losses))
+        stats["profit_factor"] = round(gross_p / gross_l, 2) if gross_l else (gross_p > 0)
+        stats["avg_win"] = round(gross_p / len(wins), 2) if wins else 0.0
+        stats["avg_loss"] = round(gross_l / len(losses), 2) if losses else 0.0
+        stats["best"] = round(max(wins), 2) if wins else 0.0
+        stats["worst"] = round(min(losses), 2) if losses else 0.0
+        recent = closed[:10]
+    except Exception:
+        pass
+
+    return {
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "demo": _env_demo,
+        "connected": client_manager.get_client() is not None,
+        "equity": round(current_eq, 2),
+        "equity_curve": curve[-200:],
+        "pnl": pnl,
+        "stats": stats,
+        "recent_trades": recent,
+        "backtest": _BACKTEST_SUMMARY,
+        "snapshot_interval_sec": SNAPSHOT_INTERVAL,
     }
 
 

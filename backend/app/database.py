@@ -374,6 +374,28 @@ class Database:
 
     # ── Bots ──
 
+    async def ensure_bot(self, bot_id: str, strategy_id: str = "portfolio",
+                         strategy_code: str = "equity_tracker", symbol: str = "MULTI",
+                         timeframe: str = "1D", capital: float = 0.0,
+                         name: str = None) -> None:
+        """Idempotent bot insert (INSERT OR IGNORE / ON CONFLICT DO NOTHING)."""
+        now = datetime.utcnow().isoformat()
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
+                "capital, params, status, mode, signal_type, created_at, name) "
+                "VALUES ($1, $2, $3, $4, $5, $6, '{}', 'running', 'demo', 'portfolio', $7, $8) "
+                "ON CONFLICT (id) DO NOTHING",
+                (bot_id, strategy_id, strategy_code, symbol, timeframe, capital, now, name)
+            )
+        else:
+            await self._execute(
+                "INSERT OR IGNORE INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
+                "capital, params, status, mode, signal_type, created_at, name) "
+                "VALUES (?, ?, ?, ?, ?, ?, '{}', 'running', 'demo', 'portfolio', ?, ?)",
+                (bot_id, strategy_id, strategy_code, symbol, timeframe, capital, now, name)
+            )
+
     async def save_bot(self, bot_id: str, strategy_id: str, strategy_code: str,
                        symbol: str, timeframe: str, capital: float,
                        params: dict, mode: str = "demo", signal_type: str = "diff",

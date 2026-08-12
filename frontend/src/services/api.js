@@ -39,6 +39,9 @@ export const api = {
 
   health: () => request('/health'),
 
+  // ── Public equity tracker (no auth) ──
+  getTracker: () => request('/tracker'),
+
   // ── Credentials ──
   testCredentials: (creds) =>
     request('/credentials/test', { method: 'POST', body: JSON.stringify(creds) }),
