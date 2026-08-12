@@ -1029,6 +1029,66 @@ class RotationStrategy:
         except Exception as e:
             print(f"[Rotation] Reconcile error: {e}", flush=True)
 
+    async def _sync_exchange_stops(self, client):
+        """Verify exchange-side conditional stops and deduplicate them.
+
+        Problems solved:
+         * a trailing/breakeven re-place can briefly leave TWO live SLs on the
+           same instrument+side (old not yet cancelled) — keep only the closest
+           one and cancel the rest;
+         * after a crash/restart there may be orphan stops for instruments that
+           are no longer tracked — cancel them too so they never re-fire.
+        """
+        if not self._positions:
+            return
+        try:
+            result = await client.get_algo_orders(ord_type="conditional", state="live")
+            if result.get("error"):
+                return
+            stops = result.get("data", [])
+
+            # Group live stops by instrument+side.
+            by_key: dict = {}
+            for s in stops:
+                inst_id = s.get("instId", "")
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in self.config.symbols:
+                    continue
+                key = (inst_id, s.get("posSide", ""), s.get("side", ""))
+                by_key.setdefault(key, []).append(s)
+
+            for (inst_id, pos_side, side), group in by_key.items():
+                if len(group) < 2:
+                    continue
+                # Keep the stop that protects the position most tightly.
+                # For longs (sell stop) the highest trigger is the closest;
+                # for shorts (buy stop) the lowest trigger is the closest.
+                def _trigger(s):
+                    try:
+                        return float(s.get("slTriggerPx") or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                keep = max(group, key=_trigger) if side == "sell" else min(group, key=_trigger)
+                keep_id = keep.get("algoId", "")
+                for s in group:
+                    if s.get("algoId") == keep_id:
+                        continue
+                    resp = await client.cancel_algo_order(inst_id, s.get("algoId", ""))
+                    coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    if resp.get("error"):
+                        print(f"[Rotation] Duplicate stop cancel error {coin}: "
+                              f"{resp.get('message', '')}", flush=True)
+                    else:
+                        print(f"[Rotation] Cancelled duplicate stop {coin} "
+                              f"sl={s.get('slTriggerPx', '')} (kept sl={keep.get('slTriggerPx', '')})",
+                              flush=True)
+                        self.analysis.log("rotation", "stop_dedup",
+                                          coin=coin, pos_side=pos_side, side=side,
+                                          cancelled_sl=float(_trigger(s) or 0),
+                                          kept_sl=float(_trigger(keep) or 0))
+        except Exception as e:
+            print(f"[Rotation] Sync exchange stops error: {e}", flush=True)
+
     async def _check_and_trade(self):
         """Main logic: indicators, filters, ranking, rotate, manage stops."""
         client = await self._get_client()
@@ -1038,6 +1098,8 @@ class RotationStrategy:
 
         # 0. Reconcile with real exchange state before touching positions.
         await self._reconcile_exchange_positions(client)
+        # 0b. Verify + dedupe exchange-side stops (crash leftovers / trailing races).
+        await self._sync_exchange_stops(client)
 
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -1643,6 +1705,8 @@ class RotationStrategy:
                 await self._place_exchange_stop(client, pos)
                 print(f"[Rotation] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
                       f"stop={stop_price:.2f}", flush=True)
+            # Dedupe any leftover/duplicate stops from before the restart.
+            await self._sync_exchange_stops(client)
         except Exception as e:
             print(f"[Rotation] Sync open positions error: {e}", flush=True)
 # Deploy trigger 2026-08-03T20:19:04Z
