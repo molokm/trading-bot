@@ -2167,9 +2167,10 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Realized from OKX account bills
-    (sum of trade-type bill `pnl`, covering up to 3 months via archive),
-    unrealized from OKX positions."""
+    """PNL for Dashboard metric cards. Realized PnL is summed ONLY from trades
+    executed by this app's bots (persisted in DB with bot_id=rotation/impulse/
+    validation). OKX bills/fills are used only as a fallback when the DB is
+    empty. Unrealized PnL comes from OKX positions."""
     from datetime import datetime as dt, timezone as tz, timedelta as td
 
     realized_1d = 0.0
@@ -2180,53 +2181,104 @@ async def get_pnl():
     total_fees = 0.0
     source = "none"
 
-    # ── 1. Primary: OKX account bills (trade type) — matches exchange exactly ──
+    # ── 1. Primary: trades persisted by OUR bots (DB) ──
+    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
     try:
-        bills = await _fetch_all_trade_bills()
-        if bills:
-            source = "okx_bills"
-            now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            for b in bills:
+        now = dt.now(tz.utc)
+        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        count = 0
+        for bid in bot_ids:
+            rows = await db.get_trades(bot_id=bid, limit=10000)
+            for t in rows:
                 try:
-                    b_pnl = float(b.get("pnl") or 0)
+                    pnl = float(t.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
-                    b_pnl = 0.0
+                    continue
+                if pnl == 0:
+                    continue  # opening fill, not a realized PnL
+                total_realized += pnl
+                count += 1
                 try:
-                    b_fee = abs(float(b.get("fee") or 0))
+                    fee = abs(float(t.get("fee", 0) or 0))
                 except (TypeError, ValueError):
-                    b_fee = 0.0
-                total_realized += b_pnl
-                total_fees += b_fee
-                ts_str = b.get("ts", "")
-                if ts_str:
+                    fee = 0.0
+                total_fees += fee
+                time_str = t.get("timestamp", "")
+                if time_str:
                     try:
-                        b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                        age_sec = (now - b_time).total_seconds()
+                        t_time = dt.fromisoformat(time_str)
+                        if t_time.tzinfo is None:
+                            t_time = t_time.replace(tzinfo=tz.utc)
+                        age_sec = (now - t_time).total_seconds()
                         if age_sec <= 86400:
-                            realized_1d += b_pnl
+                            realized_1d += pnl
                         if age_sec <= 604800:
-                            realized_7d += b_pnl
+                            realized_7d += pnl
                         if age_sec <= 2592000:
-                            realized_30d += b_pnl
-                        if b_time >= week_start:
-                            realized_week += b_pnl
+                            realized_30d += pnl
+                        if t_time >= week_start:
+                            realized_week += pnl
                     except (ValueError, OSError, TypeError):
-                        realized_30d += b_pnl
+                        realized_30d += pnl
                 else:
-                    realized_30d += b_pnl
-            print(f"[pnl] OKX bills: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                    realized_30d += pnl
+        if count > 0:
+            source = "db"
+            print(f"[pnl] DB bots: total={total_realized:.2f} 1d={realized_1d:.2f} "
                   f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} bills={len(bills)}", flush=True)
+                  f"fees={total_fees:.2f} closed_trades={count}", flush=True)
     except Exception as e:
         import traceback
-        print(f"[pnl] OKX bills error: {e}", flush=True)
+        print(f"[pnl] DB bots error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX fills pairing (if bills unavailable) ──
+    # ── 2. Fallback: OKX account bills (only if no bot trades in DB) ──
     if source == "none":
         try:
-            global _fills_cache_ts
+            bills = await _fetch_all_trade_bills()
+            if bills:
+                source = "okx_bills"
+                now = dt.now(tz.utc)
+                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+                for b in bills:
+                    try:
+                        b_pnl = float(b.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        b_pnl = 0.0
+                    try:
+                        b_fee = abs(float(b.get("fee") or 0))
+                    except (TypeError, ValueError):
+                        b_fee = 0.0
+                    total_realized += b_pnl
+                    total_fees += b_fee
+                    ts_str = b.get("ts", "")
+                    if ts_str:
+                        try:
+                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                            age_sec = (now - b_time).total_seconds()
+                            if age_sec <= 86400:
+                                realized_1d += b_pnl
+                            if age_sec <= 604800:
+                                realized_7d += b_pnl
+                            if age_sec <= 2592000:
+                                realized_30d += b_pnl
+                            if b_time >= week_start:
+                                realized_week += b_pnl
+                        except (ValueError, OSError, TypeError):
+                            realized_30d += b_pnl
+                    else:
+                        realized_30d += b_pnl
+                print(f"[pnl] OKX bills: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                      f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                      f"fees={total_fees:.2f} bills={len(bills)}", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"[pnl] OKX bills error: {e}", flush=True)
+            traceback.print_exc()
+
+    # ── 3. Fallback: OKX fills pairing (if neither DB nor bills) ──
+    if source == "none":
+        try:
             _fills_cache_ts = 0  # bypass cache
             raw_fills = await _fetch_okx_fills(limit=300)
             paired = await _pair_fills(raw_fills)
@@ -2274,7 +2326,7 @@ async def get_pnl():
             print(f"[pnl] OKX fills error: {e}", flush=True)
             traceback.print_exc()
 
-    # ── 2. Fallback: in-memory from running bots ──
+    # ── 4. Last fallback: in-memory from running bots ──
     if source == "none":
         now = dt.now(tz.utc)
         week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
