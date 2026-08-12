@@ -27,6 +27,7 @@ from app.services.auth import (
 )
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
+from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.analysis_logger import DEFAULT_PATH
 
@@ -74,6 +75,7 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 trade_log: list = []
 rotation: Optional[RotationStrategy] = None
 impulse: Optional[ImpulseStrategy] = None
+validation: Optional[ValidationStrategy] = None
 telegram = TelegramNotifier()
 
 # ── Server-side request hit logger (diagnostics for Telegram Mini App) ──
@@ -204,6 +206,23 @@ async def startup():
             global impulse
             impulse = imp
             await impulse.start()
+        print("[startup] 4/6 Validation (demo) auto-start ...", flush=True)
+        # Валидатор исполнительного механизма на демо-счёте. Ослабленные фильтры
+        # принудительно открывают сделки. Отключается env VALIDATION_BOT=0.
+        if os.getenv("VALIDATION_BOT", "1").lower() not in ("0", "false", "no"):
+            if _env_key and _env_secret and _env_pass:
+                val_config = make_validation_config(
+                    capital=float(os.getenv("VALIDATION_CAPITAL", "300")),
+                    top_k=int(os.getenv("VALIDATION_TOP_K", "1")),
+                    min_roc=float(os.getenv("VALIDATION_MIN_ROC", "1.5")),
+                    adx_min=float(os.getenv("VALIDATION_ADX_MIN", "18")),
+                    auto_execute=os.getenv("VALIDATION_AUTO_EXECUTE", "1") != "0",
+                )
+                v = ValidationStrategy(config=val_config, client_manager=client_manager, db=db,
+                                       notifier=telegram)
+                global validation
+                validation = v
+                await validation.start()
         print("[startup] 5/6 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -216,6 +235,8 @@ async def shutdown():
         await rotation.stop()
     if impulse and impulse._running:
         await impulse.stop()
+    if validation and validation._running:
+        await validation.stop()
     await db.close()
     try:
         from app.services.analysis_logger import get_logger
@@ -279,6 +300,10 @@ ADMIN_ONLY_PATHS = {
     "/api/impulse/stop",
     "/api/impulse/config",
     "/api/impulse/reset",
+    "/api/validation/start",
+    "/api/validation/stop",
+    "/api/validation/reset",
+    "/api/validation/config",
     "/api/db/reset-all",
     "/api/db/positions",
     "/api/telegram/status",
@@ -531,6 +556,8 @@ def _db_bot_name(bot_id: str) -> str:
         return "Momentum"
     if bot_id in ("impulse_strategy", IMP_BOT_ID):
         return "Impulse 1D"
+    if bot_id == VAL_BOT_ID:
+        return "Validation"
     return ""
 
 
@@ -911,6 +938,25 @@ async def momentum_trades(limit: int = 20):
         global _fills_cache_ts
         _fills_cache_ts = 0  # bypass cache
         raw_fills = await _fetch_okx_fills(limit=300)
+        # Exclude fills that belong to the demo validation bot (its ordIds are
+        # persisted with bot_id=validation_strategy). Otherwise its demo trades
+        # leak into the Momentum window on the dashboard.
+        try:
+            val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
+                "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
+                " AND ord_id != ''"
+                if not db._pg_mode else
+                "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
+                " AND ord_id != ''",
+                (VAL_BOT_ID,)) if r.get("ord_id")}
+        except Exception:
+            val_ord_ids = set()
+        if val_ord_ids:
+            raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
+        # Also drop fills whose client order id marks them as the demo validator
+        # (CL_ORD_PREFIX="val"). New orders from the validator carry clOrdId=val<ts>.
+        raw_fills = [f for f in raw_fills
+                     if not str(f.get("clOrdId", "")).startswith("val")]
         paired = await _pair_fills(raw_fills)
         if paired:
             # Enrich with algo orders (TP/SL) for open positions
@@ -971,7 +1017,7 @@ async def momentum_trades(limit: int = 20):
 
     # 3. Last resort: DB paired trades
     try:
-        db_trades = await db.get_paired_trades(limit=limit)
+        db_trades = await db.get_paired_trades(limit=limit, bot_ids=[ROT_BOT_ID, MOM_BOT_ID])
         result = []
         for t in db_trades:
             entry_side = t.get("entry_side", "buy")
@@ -1356,6 +1402,114 @@ async def impulse_reset():
             await conn.execute("DELETE FROM bots WHERE id = $1", IMP_BOT_ID)
     impulse = None
     return {"message": "Impulse reset complete - PNL = 0"}
+
+
+# ══════════════════════════════════════════════════════════════
+# VALIDATION STRATEGY ENDPOINTS (демо-проверка исполнения)
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/validation/status")
+async def validation_status():
+    if not validation:
+        return {"running": False, "strategy": "momentum_validation",
+                "equity": 0, "open_positions": [], "total_trades": 0,
+                "total_pnl": 0, "config": {}}
+    return validation.get_status()
+
+
+@app.post("/api/validation/start")
+async def validation_start(data: dict = None):
+    """Start the demo validation bot (relaxed filters → forces trades)."""
+    global validation
+    if validation and validation._running:
+        return {"message": "Validation already running", **validation.get_status()}
+    d = data or {}
+    cfg = make_validation_config(
+        capital=float(d.get("capital", 300.0)),
+        top_k=int(d.get("top_k", 1)),
+        min_roc=float(d.get("min_roc", 1.5)),
+        adx_min=float(d.get("adx_min", 18.0)),
+        min_hold_days=int(d.get("min_hold_days", 1)),
+        max_leverage=float(d.get("max_leverage", 2.0)),
+        risk_per_trade=float(d.get("risk_per_trade", 0.14)),
+        allocation_pct=float(d.get("allocation_pct", 0.15)),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
+        auto_execute=d.get("auto_execute", True),
+    )
+    validation = ValidationStrategy(config=cfg, client_manager=client_manager, db=db,
+                                    notifier=telegram)
+    await validation.start()
+    return {"message": "Validation started", **validation.get_status()}
+
+
+@app.post("/api/validation/stop")
+async def validation_stop():
+    global validation
+    if not validation:
+        return {"message": "Validation not running"}
+    await validation.stop()
+    return {"message": "Validation stopped"}
+
+
+@app.post("/api/validation/reset")
+async def validation_reset():
+    """Reset all trades, signals, positions, PNL for the validation bot."""
+    global validation
+    if validation and validation._running:
+        await validation.stop()
+    if db._conn:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (VAL_BOT_ID,))
+            except Exception as e:
+                print(f"[validation/reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = ?", (VAL_BOT_ID,))
+        except Exception as e:
+            print(f"[validation/reset] Error clearing bots: {e}", flush=True)
+    else:
+        import asyncpg
+        async with db._pool.acquire() as conn:
+            for table in ["trades", "signals", "positions", "performance_metrics"]:
+                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", VAL_BOT_ID)
+            await conn.execute("DELETE FROM bots WHERE id = $1", VAL_BOT_ID)
+    validation = None
+    return {"message": "Validation reset complete - PNL = 0"}
+
+
+@app.get("/api/validation/trades")
+async def validation_trades(limit: int = 50):
+    if not validation:
+        return {"trades": []}
+    trades = [dict(t) for t in validation._trade_log[-limit:]]
+    for t in trades:
+        t.setdefault("bot", "Validation")
+    return {"trades": trades}
+
+
+@app.get("/api/validation/indicators")
+async def validation_indicators():
+    if not validation:
+        return {"indicators": {}}
+    return {"indicators": validation._latest_indicators}
+
+
+@app.post("/api/validation/config")
+async def validation_update_config(data: dict = None):
+    global validation
+    if not validation:
+        return {"message": "Validation not running"}
+    if not data:
+        return {"message": "No config provided"}
+    cfg = validation.config
+    for key in ("symbols", "top_k", "roc_period", "ema_fast", "ema_slow",
+                "atr_period", "atr_stop_mult", "trail_pct", "breakeven_pct",
+                "adx_min", "min_roc", "min_hold_days", "max_leverage",
+                "risk_per_trade", "allocation_pct", "poll_interval_sec",
+                "auto_execute", "capital"):
+        if key in data:
+            setattr(cfg, key, data[key])
+    return {"message": "Config updated", "config": asdict(cfg)}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2134,6 +2288,25 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         global _fills_cache_ts
         _fills_cache_ts = 0
         raw_fills = await _fetch_okx_fills(limit=300)
+        # Exclude fills that belong to the demo validation bot (its ordIds are
+        # persisted with bot_id=validation_strategy). Otherwise its demo trades
+        # leak into the Momentum window on the dashboard.
+        try:
+            val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
+                "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
+                " AND ord_id != ''"
+                if not db._pg_mode else
+                "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
+                " AND ord_id != ''",
+                (VAL_BOT_ID,)) if r.get("ord_id")}
+        except Exception:
+            val_ord_ids = set()
+        if val_ord_ids:
+            raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
+        # Also drop fills whose client order id marks them as the demo validator
+        # (CL_ORD_PREFIX="val"). New orders from the validator carry clOrdId=val<ts>.
+        raw_fills = [f for f in raw_fills
+                     if not str(f.get("clOrdId", "")).startswith("val")]
         paired = await _pair_fills(raw_fills)
         if paired:
             result = []
@@ -2167,7 +2340,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
 
     # 3. Last resort: DB paired trades
     try:
-        db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end)
+        db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end, bot_ids=[ROT_BOT_ID, MOM_BOT_ID])
         result = []
         for t in db_trades:
             entry_side = t.get("entry_side", "buy")
@@ -2222,7 +2395,7 @@ async def debug_trades_db():
             r["px"] = str(r.get("px", ""))
 
         # Try paired trades query
-        paired = await db.get_paired_trades(limit=5)
+        paired = await db.get_paired_trades(limit=5, bot_ids=[ROT_BOT_ID, MOM_BOT_ID])
 
         return {
             "total_trades": total,

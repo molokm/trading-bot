@@ -431,15 +431,15 @@ class Database:
             (limit,)
         )
 
-    async def get_paired_trades(self, limit: int = 20, begin: str = None, end: str = None) -> list[dict]:
-        return await self._get_paired_trades_impl(limit, begin, end)
+    async def get_paired_trades(self, limit: int = 20, begin: str = None, end: str = None, bot_ids: list = None) -> list[dict]:
+        return await self._get_paired_trades_impl(limit, begin, end, bot_ids)
 
-    async def _get_paired_trades_impl(self, limit: int = 20, begin: str = None, end: str = None) -> list[dict]:
+    async def _get_paired_trades_impl(self, limit: int = 20, begin: str = None, end: str = None, bot_ids: list = None) -> list[dict]:
         if self._pg_mode:
-            return await self._get_paired_pg(limit, begin, end)
-        return await self._get_paired_sqlite(limit, begin, end)
+            return await self._get_paired_pg(limit, begin, end, bot_ids)
+        return await self._get_paired_sqlite(limit, begin, end, bot_ids)
 
-    async def _paired_pg_query(self, limit, begin, end):
+    async def _paired_pg_query(self, limit, begin, end, bot_ids=None):
         where = "1=1"
         params = []
         idx = 0
@@ -451,6 +451,12 @@ class Database:
             idx += 1
             where += f" AND timestamp <= ${idx}"
             params.append(end)
+        if bot_ids:
+            idx += 1
+            placeholders = ", ".join([f"${i}" for i in range(idx, idx + len(bot_ids))])
+            where += f" AND bot_id IN ({placeholders})"
+            params.extend(bot_ids)
+            idx += len(bot_ids)
         idx += 1
         params.append(limit)
 
@@ -474,11 +480,11 @@ class Database:
             tuple(params)
         )
 
-    async def _get_paired_pg(self, limit, begin, end):
-        rows = await self._paired_pg_query(limit, begin, end)
+    async def _get_paired_pg(self, limit, begin, end, bot_ids=None):
+        rows = await self._paired_pg_query(limit, begin, end, bot_ids)
         return await self._format_paired(rows, begin, end, limit)
 
-    async def _get_paired_sqlite(self, limit, begin, end):
+    async def _get_paired_sqlite(self, limit, begin, end, bot_ids=None):
         where = "1=1"
         params = []
         if begin:
@@ -487,6 +493,9 @@ class Database:
         if end:
             where += " AND timestamp <= ?"
             params.append(end)
+        if bot_ids:
+            where += " AND bot_id IN (" + ", ".join(["?"] * len(bot_ids)) + ")"
+            params.extend(bot_ids)
         params.append(limit)
 
         rows = await self._fetchall(

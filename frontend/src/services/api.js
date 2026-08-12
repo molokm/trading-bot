@@ -117,6 +117,21 @@ export const api = {
   impulseReset: () =>
     request('/impulse/reset', { method: 'POST' }),
 
+  // ── Validation Strategy (demo) ──
+  validationStatus: () => request('/validation/status'),
+
+  validationStart: (config = {}) =>
+    request('/validation/start', { method: 'POST', body: JSON.stringify(config) }),
+
+  validationStop: () =>
+    request('/validation/stop', { method: 'POST' }),
+
+  validationReset: () =>
+    request('/validation/reset', { method: 'POST' }),
+
+  validationTrades: (limit = 50) =>
+    request(`/validation/trades?limit=${limit}`),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

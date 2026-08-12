@@ -57,6 +57,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
+  const [validationStatus, setValidationStatus] = useState(null)
+  const [validationTrades, setValidationTrades] = useState([])
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -120,6 +122,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.getPnl().catch(() => null),
         Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
       ])
+      const [valStatus, valTrades] = await Promise.all([
+        api.validationStatus().catch(() => null),
+        api.validationTrades(50).catch(() => null),
+      ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
@@ -129,6 +135,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (impStatus) setImpulseStatus(impStatus)
       if (trades) setTradeLog(trades.trades || [])
+      if (valStatus) setValidationStatus(valStatus)
+      if (valTrades) setValidationTrades(valTrades.trades || [])
       if (pnlData) setPnl(pnlData)
       if (priceTickers) {
         const byCoin = {}
@@ -192,13 +200,38 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         })
       }
     }
+    // Validation bot trades — own source, dedupe on signal_id to avoid the
+    // "two entries" bug (was leaking into momentum paired DB fallback).
+    for (const vt of validationTrades) {
+      const instId = vt.inst_id || vt.symbol || ''
+      const dup = combined.some(c =>
+        (c.signal_id != null && c.signal_id === vt.signal_id) ||
+        (c.inst_id === instId && c.entry_time === vt.time))
+      if (dup) continue
+      if (vt.pnl != null && parseFloat(vt.pnl) !== 0) {
+        combined.push({
+          entry_time: vt.time, exit_time: vt.time, inst_id: instId,
+          side: (vt.pos_side === 'short' || vt.side === 'sell') ? 'sell' : 'buy',
+          entry_px: vt.entry_price || vt.entry || null, exit_px: vt.exit_price || null,
+          pnl: vt.pnl, reason: vt.reason || 'closed', signal_id: vt.signal_id,
+          bot: 'Validation',
+        })
+      } else if (vt.reason === 'open' || (vt.entry_price && !vt.exit_price)) {
+        combined.push({
+          entry_time: vt.time, exit_time: null, inst_id: instId,
+          side: (vt.pos_side === 'short' || vt.side === 'sell') ? 'sell' : 'buy',
+          entry_px: vt.entry_price || vt.entry || null, exit_px: null, pnl: null,
+          reason: 'open', signal_id: vt.signal_id, bot: 'Validation',
+        })
+      }
+    }
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog, momentumTrades])
+  }, [tradeLog, momentumTrades, validationTrades])
 
   // Active trades — one row per position (open from live status, closed from trade log)
   const activeTrades = useMemo(() => {
@@ -208,6 +241,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
     const allOpen = [
       ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
+      ...(validationStatus?.open_positions || []).map(p => ({ ...p, bot: 'Validation' })),
+      ...(impulseStatus?.open_positions || []).map(p => ({ ...p, bot: 'Impulse 1D' })),
     ]
     for (const p of allOpen) {
       const isLong = p.side !== 'short'
@@ -215,19 +250,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         type: 'open',
         time: p.opened_at || '',
         symbol: p.symbol,
-        inst_id: p.inst_id,
+        inst_id: p.inst_id || p.symbol,
         side: isLong ? 'buy' : 'sell',
         pos_side: p.side,
-        entry: p.entry,
-        stop: p.stop ?? p.stop_price,
-        tp1: p.tp1 ?? (isLong ? p.entry * (1 + tp1Pct) : p.entry * (1 - tp1Pct)),
-        be: p.be_price ?? (isLong ? p.entry * 0.999 : p.entry * 1.001),
-        size: p.size,
-        size_remaining: p.size_remaining,
+        entry: p.entry_price ?? p.entry,
+        stop: p.stop_price ?? p.stop,
+        tp1: p.tp1,
+        tp2: p.tp2,
+        be: p.be_price ?? (isLong ? (p.entry_price ?? p.entry) * 0.999 : (p.entry_price ?? p.entry) * 1.001),
+        mark: p.mark_px,
+        size: p.size_original ?? p.size,
+        size_remaining: p.size_remaining ?? p.size,
         stage: p.stage,
         pos_mode: p.pos_mode,
         breakeven: p.breakeven,
         partial_done: p.partial_done,
+        unrealized_pnl: p.unrealized_pnl,
         pnl: null,
         reason: 'open',
         bot: p.bot,
@@ -261,7 +299,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, validationStatus?.open_positions, impulseStatus?.open_positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -549,9 +587,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     <th>{t('dash.pair')}</th>
                     <th>{t('dash.direction')}</th>
                     <th className="text-right">{t('dash.entry')}</th>
-                    <th className="text-right">TP</th>
-                    <th className="text-right">SL</th>
+                    <th className="text-right">{t('dash.mark')}</th>
                     <th className="text-right">{t('dash.size')}</th>
+                    <th className="text-right">TP1</th>
+                    <th className="text-right">TP2</th>
+                    <th className="text-right">SL</th>
                     <th className="text-right">PnL</th>
                   </tr>
                 </thead>
@@ -560,16 +600,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     const isOpen = tr.type === 'open'
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const isLong = tr.side === 'buy'
-                    // Level status: SL is moved up to BE once breakeven hits (profit protected),
-                    // TP1 is considered hit when partial close already happened (partial/trailing stage)
+                    // Level status: SL moved to BE once breakeven hits; TP1/TP2 hit when partial closes
                     const beHit = isOpen && !!tr.breakeven
-                    const tpHit = isOpen && !!tr.partial_done
+                    const tp1Hit = isOpen && (tr.stage === 'partial' || tr.stage === 'trailing' || tr.stage === 'tp1_done' || tr.stage === 'tp2_done' || !!tr.partial_done)
+                    const tp2Hit = isOpen && (tr.stage === 'trailing' || tr.stage === 'tp2_done')
                     const stageInfo = isOpen
                       ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
                     const botBadge = tr.bot === 'Momentum'
                       ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      : null
+                      : tr.bot === 'Validation'
+                        ? { label: 'VAL', cls: 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30' }
+                        : tr.bot === 'Impulse 1D'
+                          ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
+                          : null
+                    const mark = parseFloat(tr.mark || 0)
+                    const upnl = parseFloat(tr.unrealized_pnl || 0)
                     return (
                       <tr key={`${tr.type}_${tr.inst_id || tr.symbol}_${i}`}
                         style={isOpen ? {
@@ -579,7 +625,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           boxShadow: `inset 2px 0 0 ${isLong ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
                         } : undefined}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.time)}</td>
-                        <td className="text-[var(--txt)] font-medium">
+                        <td className="text-[var(--txt)] font-medium whitespace-nowrap">
                           {tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}
                           {botBadge && (
                             <span className={`ml-1 text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
@@ -592,33 +638,53 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         </td>
                         <td className="text-right mono text-2xs">{tr.entry ? `$${Number(tr.entry).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
                         <td className="text-right mono text-2xs">
+                          {mark > 0 ? (
+                            <span className="text-[var(--txt)]">
+                              ${mark.toLocaleString(undefined, {maximumFractionDigits: 2})}
+                            </span>
+                          ) : '—'}
+                        </td>
+                        <td className="text-right mono text-2xs">
+                          {isOpen ? (
+                            <span title={`изначально ${tr.size}`}>
+                              <span className="text-[var(--txt)]">{Number(tr.size_remaining || tr.size).toFixed(2)}</span>
+                              {tr.size && tr.size !== tr.size_remaining ? (
+                                <span className="text-[var(--txt-muted)]">/{Number(tr.size).toFixed(2)}</span>
+                              ) : null}
+                            </span>
+                          ) : '—'}
+                        </td>
+                        <td className="text-right mono text-2xs">
                           {isOpen && tr.tp1 != null ? (
-                            <span className={`${tpHit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
-                              ${Number(tr.tp1).toLocaleString(undefined, {maximumFractionDigits: 2})}{tpHit ? ' ✓' : ''}
+                            <span className={`${tp1Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
+                              ${Number(tr.tp1).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp1Hit ? ' ✓' : ''}
+                            </span>
+                          ) : '—'}
+                        </td>
+                        <td className="text-right mono text-2xs">
+                          {isOpen && tr.tp2 != null ? (
+                            <span className={`${tp2Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
+                              ${Number(tr.tp2).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp2Hit ? ' ✓' : ''}
                             </span>
                           ) : '—'}
                         </td>
                         <td className="text-right mono text-2xs">
                           {isOpen && tr.stop != null ? (
                             <span className={`${beHit ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
-                              ${Number(tr.stop).toLocaleString(undefined, {maximumFractionDigits: 2})}
+                              ${Number(tr.stop).toLocaleString(undefined, {maximumFractionDigits: 2})}{beHit ? ' ✓' : ''}
                             </span>
                           ) : (tr.type === 'closed' && tr.exit) ? (
                             <span className="text-[var(--txt-muted)]">${parseFloat(tr.exit).toLocaleString()}</span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen ? (
-                            <span>
-                              <span className="text-[var(--txt)]">{tr.size_remaining?.toFixed(2)}</span>
-                              <span className="text-[var(--txt-muted)]">/{tr.size?.toFixed(2)}</span>
-                            </span>
                           ) : '—'}
                         </td>
                         <td className="text-right">
                           {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
+                            </span>
+                          ) : isOpen && upnl !== 0 ? (
+                            <span className={`mono text-2xs font-bold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
                             </span>
                           ) : (
                             <span className={`text-2xs font-medium ${stageInfo.color}`}>{stageInfo.label}</span>

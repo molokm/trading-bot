@@ -72,6 +72,7 @@ const en = {
 
   'dash.momentum_bot': 'Momentum Rotation',
   'dash.impulse_bot': 'Impulse 1D',
+  'dash.validation_bot': 'Validation (demo)',
   'dash.budget': 'Budget',
   'dash.leverage': 'Leverage',
   'dash.running': 'Running',
@@ -243,6 +244,9 @@ const en = {
   'bots.fee_note': 'Fee depends on your exchange tier (taker/maker, volume). Numbers above use 0.05%/side.',
   'bots.tagline': 'Rotation of the strongest trends on daily candles: long in bull regime, short in bear, cash in uncertainty.',
   'bots.tagline_impulse': 'Impulse entry on a strong daily move with volume surge, pyramiding up to 2 adds and cascade take-profit.',
+  'bots.tagline_validation': 'Demo executor validator: a copy of Momentum with relaxed filters to force trades and verify orders, stops, trailing and exits.',
+  'bots.validation_desc': 'Test bot to verify the execution engine on the demo account. Relaxed filters (min_roc=1.5, adx_min=18) force it to open trades. Demo only, not for real trading.',
+  'bots.validation_reset_confirm': 'Reset Validation (demo) trade history?',
   'bots.tag_timeframe': 'daily candles',
   'bots.tag_positions': 'up to {n} positions',
   'bots.tag_leverage': 'up to {x}x leverage',

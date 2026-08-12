@@ -825,6 +825,21 @@ class ImpulseStrategy:
         # 4) New entries
         await self._new_entries(client, indicators)
 
+        # 4b) Cycle heartbeat for diagnostics (bot is alive even with no signals)
+        summary = []
+        for coin in self.config.symbols:
+            ind = indicators.get(coin) or {}
+            summary.append({
+                "coin": coin,
+                "close": round(ind.get("close_today", 0), 2),
+                "roc": round(ind.get("roc", 0), 2),
+                "atr": round(ind.get("atr", 0), 2),
+                "vol_ok": ind.get("avg_vol", 0) and ind.get("vol", 0) >= ind.get("avg_vol", 0) * self.config.vol_mult,
+            })
+        self.analysis.log("impulse", "cycle",
+                          positions=list(self._positions.keys()),
+                          coins=summary)
+
     async def _check_exit(self, client, pos: ImpPosition, ind: dict, price: float) -> bool:
         """Check stop / time-exit / breakeven / trailing. Returns True if fully closed."""
         cfg = self.config
@@ -1095,13 +1110,22 @@ class ImpulseStrategy:
                 upnl = pos.size * ct * (cur - pos.entry_price)
             else:
                 upnl = pos.size * ct * (pos.entry_price - cur)
+            tp1_price = pos.entry_price * (1 + pos.tp1_atr_pct) if pos.side == "long" \
+                else pos.entry_price * (1 - pos.tp1_atr_pct)
+            tp2_price = pos.entry_price * (1 + pos.tp2_atr_pct) if pos.side == "long" \
+                else pos.entry_price * (1 - pos.tp2_atr_pct)
             positions.append({
                 "coin": coin, "side": pos.side, "size": round(pos.size, 4),
+                "size_remaining": round(pos.size, 4),
+                "size_original": round(pos.size, 4),
                 "entry_price": round(pos.entry_price, 2),
                 "stop_price": round(pos.stop_price, 2),
+                "tp1": round(tp1_price, 2), "tp2": round(tp2_price, 2),
+                "mark_px": round(cur, 2),
                 "leverage": pos.leverage, "adds": pos.adds,
                 "opened_at": pos.opened_at,
                 "unrealized_pnl": round(upnl, 2),
+                "breakeven": pos.breakeven, "partial_done": pos.tp1_done or pos.tp2_done,
                 "stage": "tp1_done" if pos.tp1_done else "tp2_done" if pos.tp2_done else "running",
             })
 

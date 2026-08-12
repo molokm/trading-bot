@@ -73,7 +73,14 @@ class OKXClient:
                     resp = await _client.post(url, headers=headers, content=body_str)
             data = resp.json()
             if data.get("code") != "0":
-                return {"error": True, "message": data.get("msg", "Unknown error")}
+                detail = data.get("msg", "Unknown error")
+                sdata = data.get("data") or []
+                if sdata:
+                    scode = sdata[0].get("sCode", "")
+                    smsg = sdata[0].get("sMsg", "")
+                    if scode or smsg:
+                        detail = f"{detail} [{scode}: {smsg}]"
+                return {"error": True, "message": detail, "data": sdata}
             return {"error": False, "data": data.get("data", [])}
         except Exception as e:
             return {"error": True, "message": str(e)}
@@ -81,9 +88,11 @@ class OKXClient:
     async def get_balance(self) -> dict:
         return await self._request("GET", "/api/v5/account/balance")
 
-    async def get_positions(self, inst_type: str = "SWAP") -> dict:
-        return await self._request("GET", "/api/v5/account/positions",
-                                    params={"instType": inst_type})
+    async def get_positions(self, inst_type: str = "SWAP", inst_id: str = None) -> dict:
+        params = {"instType": inst_type}
+        if inst_id:
+            params["instId"] = inst_id
+        return await self._request("GET", "/api/v5/account/positions", params=params)
 
     async def get_ticker(self, inst_id: str) -> dict:
         return await self._request("GET", "/api/v5/market/ticker",
@@ -106,7 +115,7 @@ class OKXClient:
     async def place_order(self, inst_id: str, side: str, ord_type: str,
                            sz: str, px: str = None, td_mode: str = "cash",
                            pos_side: str = None, reduce_only: bool = False,
-                           tgt_ccy: str = None) -> dict:
+                           tgt_ccy: str = None, cl_ord_id: str = None) -> dict:
         body = {
             "instId": inst_id,
             "tdMode": td_mode,
@@ -122,6 +131,8 @@ class OKXClient:
             body["reduceOnly"] = True
         if tgt_ccy:
             body["tgtCcy"] = tgt_ccy
+        if cl_ord_id:
+            body["clOrdId"] = cl_ord_id
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:
