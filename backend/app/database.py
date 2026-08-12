@@ -423,13 +423,25 @@ class Database:
                          state: str = "filled", signal_id: int = None) -> str:
         trade_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
+        # sz/px/fee columns are TEXT: normalize to string so both SQLite and
+        # asyncpg (Postgres) accept them (asyncpg rejects float for TEXT).
+        def _to_str(v):
+            if v is None:
+                return ""
+            if isinstance(v, float) or isinstance(v, int):
+                # avoid ugly float artifacts (e.g. 10.200000000000001)
+                return str(round(v, 8))
+            return str(v)
+        sz_s = _to_str(sz)
+        px_s = _to_str(px)
+        fee_s = _to_str(fee)
         if self._pg_mode:
             await self._execute(
                 "INSERT INTO trades (id, bot_id, signal_id, ord_id, inst_id, side, "
                 "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                 (trade_id, bot_id, signal_id, ord_id, inst_id or "", side,
-                 ord_type, sz or "", px or "", fee or "", fee_ccy or "",
+                 ord_type, sz_s, px_s, fee_s, fee_ccy or "",
                  pnl, state, now)
             )
         else:
@@ -438,7 +450,7 @@ class Database:
                 "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (trade_id, bot_id, signal_id, ord_id, inst_id or "", side,
-                 ord_type, sz or "", px or "", fee or "", fee_ccy or "",
+                 ord_type, sz_s, px_s, fee_s, fee_ccy or "",
                  pnl, state, now)
             )
         return trade_id
