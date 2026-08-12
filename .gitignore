@@ -16,9 +16,24 @@ frontend/dist/
 strategies/*.pyc
 backtests_data/
 backend/backtests_data/
-scripts/__pycache__/
-scripts/honest_3y_cache.json
-scripts/honest_3y_results.json
+
+# External (research/backtest workbench)
+external/scripts/__pycache__/
+external/scripts/honest_3y_cache.json
+external/scripts/honest_3y_results.json
+external/freqtrade_test/venv/
+external/freqtrade_test/user_data/data/
+external/freqtrade_test/user_data/backtest_results/
+external/freqtrade_test/user_data/hyperopt_results/
+external/freqtrade_test/user_data/hyperopts/
+external/freqtrade_test/user_data/notebooks/
+external/freqtrade_test/user_data/strategies/__pycache__/
+external/freqtrade_test/user_data/*.json
+external/freqtrade_test/*.lock
+
+# Python virtualenvs
+.freqtrade-venv/
+backend/.venv/
 
 # Database
 backend/data/
@@ -26,17 +41,6 @@ backend/trading_bot.db
 
 # Backups
 trading-bot-backups/
-
-# Freqtrade test (local backtests only)
-freqtrade_test/venv/
-freqtrade_test/user_data/data/
-freqtrade_test/user_data/backtest_results/
-freqtrade_test/user_data/hyperopt_results/
-freqtrade_test/user_data/hyperopts/
-freqtrade_test/user_data/notebooks/
-freqtrade_test/user_data/strategies/__pycache__/
-freqtrade_test/user_data/*.json
-freqtrade_test/*.lock
 
 # OS
 .DS_Store

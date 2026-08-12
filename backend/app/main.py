@@ -666,14 +666,14 @@ async def backtest_freqtrade(request: Request, data: dict):
     if not re.fullmatch(r"\d{8}", start) or not re.fullmatch(r"\d{8}", end):
         raise HTTPException(status_code=400, detail="Неверный формат дат. Используйте YYYYMMDD.")
     repo = Path(__file__).resolve().parents[2]
-    ft = repo / "freqtrade_test" / "venv" / "bin" / "freqtrade"
+    ft = repo / "external" / "freqtrade_test" / "venv" / "bin" / "freqtrade"
     if strategy == "impulse":
-        cfg = repo / "freqtrade_test" / "config_impulse.json"
+        cfg = repo / "external" / "freqtrade_test" / "config_impulse.json"
         strat_name = "Impulse1D"
     else:
-        cfg = repo / "freqtrade_test" / "config.json"
+        cfg = repo / "external" / "freqtrade_test" / "config.json"
         strat_name = "MomentumRotation"
-    userdir = repo / "freqtrade_test" / "user_data"
+    userdir = repo / "external" / "freqtrade_test" / "user_data"
 
     def _run_ft():
         return subprocess.run(
