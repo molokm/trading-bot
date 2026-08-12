@@ -31,10 +31,8 @@ class Database:
             last_err = None
             for attempt in range(1, 4):
                 try:
-                    self._pool = await asyncio.wait_for(
-                        asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3),
-                        timeout=30
-                    )
+                    conn = await asyncio.wait_for(
+                        asyncpg.connect(DATABASE_URL), timeout=30)
                     break
                 except (asyncio.TimeoutError, OSError, Exception) as e:
                     last_err = e
@@ -44,8 +42,10 @@ class Database:
             else:
                 raise last_err  # type: ignore
             print("[db] Connected, running migrations ...", flush=True)
-            async with self._pool.acquire() as conn:
+            try:
                 await self._migrate_pg(conn)
+            finally:
+                await conn.close()
             print("[db] PG init done", flush=True)
         else:
             import aiosqlite
@@ -57,9 +57,9 @@ class Database:
             await self._migrate_sqlite()
 
     async def close(self):
-        if self._pg_mode and self._pool:
-            await self._pool.close()
-        elif self._conn:
+        # PG mode opens a fresh connection per operation (no persistent pool to
+        # close); SQLite keeps one connection that must be closed.
+        if not self._pg_mode and self._conn:
             await self._conn.close()
 
     # ── SQLite schema ──
@@ -250,37 +250,58 @@ class Database:
 
     # ── Query helpers ──
 
+    async def _pg_connect(self):
+        """Create a fresh asyncpg connection for one operation.
+
+        Strategies run in their own threads with separate event loops; a shared
+        pool bound to uvicorn's loop breaks with "attached to a different loop".
+        So, like OKXClient, we open a fresh connection per request."""
+        import asyncpg
+        return await asyncpg.connect(DATABASE_URL)
+
     async def _fetchone(self, sql: str, params: tuple = ()) -> Optional[dict]:
         if self._pg_mode:
-            async with self._pool.acquire() as conn:
+            conn = await self._pg_connect()
+            try:
                 row = await conn.fetchrow(sql, *params)
                 return dict(row) if row else None
+            finally:
+                await conn.close()
         cur = await self._conn.execute(sql, params)
         row = await cur.fetchone()
         return dict(row) if row else None
 
     async def _fetchall(self, sql: str, params: tuple = ()) -> list[dict]:
         if self._pg_mode:
-            async with self._pool.acquire() as conn:
+            conn = await self._pg_connect()
+            try:
                 rows = await conn.fetch(sql, *params)
                 return [dict(r) for r in rows]
+            finally:
+                await conn.close()
         cur = await self._conn.execute(sql, params)
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
     async def _execute(self, sql: str, params: tuple = ()):
         if self._pg_mode:
-            async with self._pool.acquire() as conn:
+            conn = await self._pg_connect()
+            try:
                 await conn.execute(sql, *params)
+            finally:
+                await conn.close()
         else:
             await self._conn.execute(sql, params)
             await self._conn.commit()
 
     async def _execute_returning(self, sql: str, params: tuple = ()) -> int:
         if self._pg_mode:
-            async with self._pool.acquire() as conn:
+            conn = await self._pg_connect()
+            try:
                 val = await conn.fetchval(sql, *params)
                 return val
+            finally:
+                await conn.close()
         cur = await self._conn.execute(sql, params)
         await self._conn.commit()
         return cur.lastrowid

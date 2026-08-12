@@ -121,29 +121,21 @@ async def startup():
         # Checks trades table for old bot_id - most reliable signal.
         needs_cleanup = False
         try:
-            if db._conn:
+            if db._pg_mode:
+                row = await db._fetchone(
+                    "SELECT 1 FROM trades WHERE bot_id = $1 LIMIT 1", (MOM_BOT_ID,))
+            else:
                 row = await db._fetchone(
                     "SELECT 1 FROM trades WHERE bot_id = ? LIMIT 1", (MOM_BOT_ID,))
-                if row:
-                    needs_cleanup = True
-            elif db._pool:
-                import asyncpg
-                async with db._pool.acquire() as conn:
-                    row = await conn.fetchrow(
-                        "SELECT 1 FROM trades WHERE bot_id = $1 LIMIT 1", MOM_BOT_ID)
-                    if row:
-                        needs_cleanup = True
+            if row:
+                needs_cleanup = True
         except Exception:
             pass  # table might not exist yet on very first run
         if needs_cleanup:
             print("[startup]   Old momentum data found - one-time cleanup ...", flush=True)
             for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
                 try:
-                    if db._conn:
-                        await db._execute(f"DELETE FROM {table}")
-                    elif db._pool:
-                        async with db._pool.acquire() as conn:
-                            await conn.execute(f"DELETE FROM {table}")
+                    await db._execute(f"DELETE FROM {table}")
                 except Exception as e:
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
@@ -1211,7 +1203,17 @@ async def rotation_reset():
     if rotation and rotation._running:
         await rotation.stop()
     # Delete all data for rotation bot
-    if db._conn:
+    if db._pg_mode:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = $1", (ROT_BOT_ID,))
+            except Exception as e:
+                print(f"[reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = $1", (ROT_BOT_ID,))
+        except Exception as e:
+            print(f"[reset] Error clearing bots: {e}", flush=True)
+    elif db._conn:
         for table in ["trades", "signals", "positions", "performance_metrics"]:
             try:
                 await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (ROT_BOT_ID,))
@@ -1221,12 +1223,6 @@ async def rotation_reset():
             await db._execute("DELETE FROM bots WHERE id = ?", (ROT_BOT_ID,))
         except Exception as e:
             print(f"[reset] Error clearing bots: {e}", flush=True)
-    elif db._pool:
-        import asyncpg
-        async with db._pool.acquire() as conn:
-            for table in ["trades", "signals", "positions", "performance_metrics"]:
-                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", ROT_BOT_ID)
-            await conn.execute("DELETE FROM bots WHERE id = $1", ROT_BOT_ID)
     # Reset in-memory
     rotation = None
     return {"message": "Rotation reset complete - PNL = 0"}
@@ -1241,11 +1237,7 @@ async def db_reset_all():
     rotation = None
     for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
         try:
-            if db._conn:
-                await db._execute(f"DELETE FROM {table}")
-            elif db._pool:
-                async with db._pool.acquire() as conn:
-                    await conn.execute(f"DELETE FROM {table}")
+            await db._execute(f"DELETE FROM {table}")
         except Exception as e:
             print(f"[reset-all] Error clearing {table}: {e}", flush=True)
     return {"message": "All data reset - clean slate"}
@@ -1384,7 +1376,17 @@ async def impulse_reset():
     global impulse
     if impulse and impulse._running:
         await impulse.stop()
-    if db._conn:
+    if db._pg_mode:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = $1", (IMP_BOT_ID,))
+            except Exception as e:
+                print(f"[impulse/reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = $1", (IMP_BOT_ID,))
+        except Exception as e:
+            print(f"[impulse/reset] Error clearing bots: {e}", flush=True)
+    elif db._conn:
         for table in ["trades", "signals", "positions", "performance_metrics"]:
             try:
                 await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (IMP_BOT_ID,))
@@ -1394,12 +1396,6 @@ async def impulse_reset():
             await db._execute("DELETE FROM bots WHERE id = ?", (IMP_BOT_ID,))
         except Exception as e:
             print(f"[impulse/reset] Error clearing bots: {e}", flush=True)
-    elif db._pool:
-        import asyncpg
-        async with db._pool.acquire() as conn:
-            for table in ["trades", "signals", "positions", "performance_metrics"]:
-                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", IMP_BOT_ID)
-            await conn.execute("DELETE FROM bots WHERE id = $1", IMP_BOT_ID)
     impulse = None
     return {"message": "Impulse reset complete - PNL = 0"}
 
@@ -1457,7 +1453,17 @@ async def validation_reset():
     global validation
     if validation and validation._running:
         await validation.stop()
-    if db._conn:
+    if db._pg_mode:
+        for table in ["trades", "signals", "positions", "performance_metrics"]:
+            try:
+                await db._execute(f"DELETE FROM {table} WHERE bot_id = $1", (VAL_BOT_ID,))
+            except Exception as e:
+                print(f"[validation/reset] Error clearing {table}: {e}", flush=True)
+        try:
+            await db._execute("DELETE FROM bots WHERE id = $1", (VAL_BOT_ID,))
+        except Exception as e:
+            print(f"[validation/reset] Error clearing bots: {e}", flush=True)
+    elif db._conn:
         for table in ["trades", "signals", "positions", "performance_metrics"]:
             try:
                 await db._execute(f"DELETE FROM {table} WHERE bot_id = ?", (VAL_BOT_ID,))
@@ -1467,12 +1473,6 @@ async def validation_reset():
             await db._execute("DELETE FROM bots WHERE id = ?", (VAL_BOT_ID,))
         except Exception as e:
             print(f"[validation/reset] Error clearing bots: {e}", flush=True)
-    else:
-        import asyncpg
-        async with db._pool.acquire() as conn:
-            for table in ["trades", "signals", "positions", "performance_metrics"]:
-                await conn.execute(f"DELETE FROM {table} WHERE bot_id = $1", VAL_BOT_ID)
-            await conn.execute("DELETE FROM bots WHERE id = $1", VAL_BOT_ID)
     validation = None
     return {"message": "Validation reset complete - PNL = 0"}
 
