@@ -181,6 +181,11 @@ class OKXClient:
         params = {"instType": inst_type, "limit": limit, **kwargs}
         return await self._request("GET", "/api/v5/account/bills", params=params)
 
+    async def get_bills_archive(self, inst_type: str = "SWAP", limit: int = 100, **kwargs) -> dict:
+        """Account bills older than 7 days (up to 3 months)."""
+        params = {"instType": inst_type, "limit": limit, **kwargs}
+        return await self._request("GET", "/api/v5/account/bills-archive", params=params)
+
     async def get_algo_orders(self, ord_type: str = "conditional", inst_type: str = "SWAP",
                               state: str = "live", limit: int = 50, **kwargs) -> dict:
         """Get algo orders (TP/SL/conditional). OKX /api/v5/trade/orders-algo-pending."""

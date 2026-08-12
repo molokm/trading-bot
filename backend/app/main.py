@@ -2098,9 +2098,55 @@ async def _get_okx_realized_pnl() -> dict:
     return pnl
 
 
+async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
+    """Fetch OKX account bills of trade type (type=2) for the whole available
+    history: recent 7 days via /account/bills, older up to 3 months via
+    /account/bills-archive, paginated backwards by billId."""
+    bills: list = []
+    seen: set = set()
+    try:
+        for endpoint, fn in (
+            ("bills", lambda c, **kw: c.get_bills(inst_type="SWAP", **kw)),
+            ("archive", lambda c, **kw: c.get_bills_archive(inst_type="SWAP", **kw)),
+        ):
+            after = ""
+            for _ in range(10):
+                kw = {"limit": limit_per_page}
+                if after:
+                    kw["after"] = after
+                resp = await _okx_call(lambda c, e=fn, k=kw: e(c, **k))
+                if resp.get("error"):
+                    print(f"[bills] {endpoint} error: {resp.get('message', '')}", flush=True)
+                    break
+                data = resp.get("data", [])
+                if not data:
+                    break
+                added = 0
+                for b in data:
+                    bid = b.get("billId", "")
+                    if bid in seen:
+                        continue
+                    seen.add(bid)
+                    # Trade fills only (type=2). Some demo fills carry pnl=0 for
+                    # the opening fill and the real pnl on the closing fill.
+                    if str(b.get("type", "")) == "2":
+                        bills.append(b)
+                        added += 1
+                after = data[-1].get("billId", "")
+                if added == 0 or len(data) < limit_per_page:
+                    break
+    except Exception as e:
+        import traceback
+        print(f"[bills] fetch error: {e}", flush=True)
+        traceback.print_exc()
+    return bills
+
+
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Realized from OKX fills, unrealized from OKX positions."""
+    """PNL for Dashboard metric cards. Realized from OKX account bills
+    (sum of trade-type bill `pnl`, covering up to 3 months via archive),
+    unrealized from OKX positions."""
     from datetime import datetime as dt, timezone as tz, timedelta as td
 
     realized_1d = 0.0
@@ -2111,62 +2157,99 @@ async def get_pnl():
     total_fees = 0.0
     source = "none"
 
-    # ── 1. Primary: OKX fills-history (matches exchange data) ──
+    # ── 1. Primary: OKX account bills (trade type) — matches exchange exactly ──
     try:
-        global _fills_cache_ts
-        _fills_cache_ts = 0  # bypass cache
-        raw_fills = await _fetch_okx_fills(limit=300)
-        paired = await _pair_fills(raw_fills)
-
-        if paired:
-            source = "okx"
+        bills = await _fetch_all_trade_bills()
+        if bills:
+            source = "okx_bills"
             now = dt.now(tz.utc)
             week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-
-            for t in paired:
-                if t.get("reason") != "closed":
-                    continue
+            for b in bills:
                 try:
-                    trade_pnl = float(t.get("pnl", 0) or 0)
-                except (ValueError, TypeError):
-                    continue
-                total_realized += trade_pnl
-
-                # Subtract fees if PnL was calculated from prices (not from OKX fillPnl)
-                fee_str = t.get("fee", "0")
+                    b_pnl = float(b.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    b_pnl = 0.0
                 try:
-                    total_fees += abs(float(fee_str))
-                except (ValueError, TypeError):
-                    pass
-
-                # Time-based periods
-                time_str = t.get("time", "")
-                if time_str:
+                    b_fee = abs(float(b.get("fee") or 0))
+                except (TypeError, ValueError):
+                    b_fee = 0.0
+                total_realized += b_pnl
+                total_fees += b_fee
+                ts_str = b.get("ts", "")
+                if ts_str:
                     try:
-                        t_time = dt.fromisoformat(time_str)
-                        if t_time.tzinfo is None:
-                            t_time = t_time.replace(tzinfo=tz.utc)
-                        age_sec = (now - t_time).total_seconds()
+                        b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                        age_sec = (now - b_time).total_seconds()
                         if age_sec <= 86400:
-                            realized_1d += trade_pnl
+                            realized_1d += b_pnl
                         if age_sec <= 604800:
-                            realized_7d += trade_pnl
+                            realized_7d += b_pnl
                         if age_sec <= 2592000:
-                            realized_30d += trade_pnl
-                        # Calendar week: Monday 00:00 UTC → now
-                        if t_time >= week_start:
-                            realized_week += trade_pnl
+                            realized_30d += b_pnl
+                        if b_time >= week_start:
+                            realized_week += b_pnl
                     except (ValueError, OSError, TypeError):
-                        realized_30d += trade_pnl
+                        realized_30d += b_pnl
                 else:
-                    realized_30d += trade_pnl
-
-            print(f"[pnl] OKX source: total={total_realized:.2f} 1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} fees={total_fees:.2f}",
-                  flush=True)
+                    realized_30d += b_pnl
+            print(f"[pnl] OKX bills: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                  f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                  f"fees={total_fees:.2f} bills={len(bills)}", flush=True)
     except Exception as e:
         import traceback
-        print(f"[pnl] OKX fills error: {e}", flush=True)
+        print(f"[pnl] OKX bills error: {e}", flush=True)
         traceback.print_exc()
+
+    # ── 2. Fallback: OKX fills pairing (if bills unavailable) ──
+    if source == "none":
+        try:
+            global _fills_cache_ts
+            _fills_cache_ts = 0  # bypass cache
+            raw_fills = await _fetch_okx_fills(limit=300)
+            paired = await _pair_fills(raw_fills)
+            if paired:
+                source = "okx_fills"
+                now = dt.now(tz.utc)
+                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+                for t in paired:
+                    if t.get("reason") != "closed":
+                        continue
+                    try:
+                        trade_pnl = float(t.get("pnl", 0) or 0)
+                    except (ValueError, TypeError):
+                        continue
+                    total_realized += trade_pnl
+                    fee_str = t.get("fee", "0")
+                    try:
+                        total_fees += abs(float(fee_str))
+                    except (ValueError, TypeError):
+                        pass
+                    time_str = t.get("time", "")
+                    if time_str:
+                        try:
+                            t_time = dt.fromisoformat(time_str)
+                            if t_time.tzinfo is None:
+                                t_time = t_time.replace(tzinfo=tz.utc)
+                            age_sec = (now - t_time).total_seconds()
+                            if age_sec <= 86400:
+                                realized_1d += trade_pnl
+                            if age_sec <= 604800:
+                                realized_7d += trade_pnl
+                            if age_sec <= 2592000:
+                                realized_30d += trade_pnl
+                            if t_time >= week_start:
+                                realized_week += trade_pnl
+                        except (ValueError, OSError, TypeError):
+                            realized_30d += trade_pnl
+                    else:
+                        realized_30d += trade_pnl
+                print(f"[pnl] OKX fills: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                      f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                      f"fees={total_fees:.2f}", flush=True)
+        except Exception as e:
+            import traceback
+            print(f"[pnl] OKX fills error: {e}", flush=True)
+            traceback.print_exc()
 
     # ── 2. Fallback: in-memory from running bots ──
     if source == "none":
