@@ -2183,6 +2183,7 @@ async def get_pnl():
 
     # ── 1. Primary: trades persisted by OUR bots (DB) ──
     bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
+    per_bot = {}  # bot_id -> realized PnL from that bot's trades
     try:
         now = dt.now(tz.utc)
         week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -2197,6 +2198,7 @@ async def get_pnl():
                 if pnl == 0:
                     continue  # opening fill, not a realized PnL
                 total_realized += pnl
+                per_bot[bid] = per_bot.get(bid, 0.0) + pnl
                 count += 1
                 try:
                     fee = abs(float(t.get("fee", 0) or 0))
@@ -2376,6 +2378,7 @@ async def get_pnl():
         "unrealized": round(unrealized, 2),
         "source": source,
         "fees": round(total_fees, 2),
+        "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
     }
 
 

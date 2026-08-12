@@ -154,6 +154,20 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlWeek = pnl?.week || 0
   const pnlMonth = pnl?.['30d'] || 0
 
+  // Per-strategy realized PnL breakdown (from /api/pnl per_bot)
+  const botNameMap = {
+    rotation_strategy: 'Momentum',
+    momentum_strategy: 'Momentum',
+    impulse_strategy: 'Impulse 1D',
+    validation_strategy: 'Validation',
+  }
+  const pnlByBot = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    return Object.entries(per)
+      .map(([bid, val]) => ({ name: botNameMap[bid] || bid, val }))
+      .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
+  }, [pnl])
+
     // Raw trades from DB + bot log (used as source for activeTrades)
   const allTrades = useMemo(() => {
     const combined = [...tradeLog]
@@ -393,9 +407,23 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         <MetricCard
           label={t('dash.total_pnl')}
           value={
-            <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
-            </AnimatedValue>
+            <div className="flex flex-col gap-0.5">
+              <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+                {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
+              </AnimatedValue>
+              {pnlByBot.length > 0 && (
+                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
+                  {pnlByBot.map((b, i) => (
+                    <div key={b.name} className="flex items-center gap-1">
+                      <span className="text-[var(--txt-secondary)]">{b.name}:</span>
+                      <span className={`mono font-medium ${b.val >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {b.val >= 0 ? '+' : ''}{b.val.toFixed(2)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           }
           changeType={pnlTotal >= 0 ? 'positive' : 'negative'}
           mono
@@ -536,6 +564,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 </span>
                 <span className="text-[var(--txt-muted)]">
                   {t('dash.total_pnl')} <span className={`mono font-bold ${pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{pnlTotal >= 0 ? '+' : ''}{pnlTotal.toFixed(2)}</span>
+                  {pnlByBot.length > 0 && (
+                    <span className="ml-1 text-[0.6rem] text-[var(--txt-muted)]">
+                      {pnlByBot.map((b, i) => (
+                        <span key={b.name} className={i > 0 ? 'ml-1.5' : ''}>
+                          <span className="text-[var(--txt-secondary)]">{b.name}:</span>{' '}
+                          <span className={`mono font-medium ${b.val >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {b.val >= 0 ? '+' : ''}{b.val.toFixed(2)}
+                          </span>
+                        </span>
+                      ))}
+                    </span>
+                  )}
                 </span>
                 <span className="text-[var(--txt-muted)]">
                   {t('dash.win_count')} <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
