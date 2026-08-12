@@ -31,7 +31,7 @@ export default function HistoryPage() {
 
   useEffect(() => {
     setLoading(true)
-    api.getPairedTrades(500).then(data => {
+    api.getPairedTrades(5000).then(data => {
       setTrades(data.trades || [])
       setLoading(false)
     }).catch(() => {

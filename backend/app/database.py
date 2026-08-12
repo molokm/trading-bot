@@ -477,7 +477,7 @@ class Database:
     async def _paired_pg_query(self, limit, begin, end, bot_ids=None):
         where = "1=1"
         params = []
-        idx = 0
+        idx = 0  # number of positional params used so far
         if begin:
             idx += 1
             where += f" AND timestamp >= ${idx}"
@@ -487,8 +487,7 @@ class Database:
             where += f" AND timestamp <= ${idx}"
             params.append(end)
         if bot_ids:
-            idx += 1
-            placeholders = ", ".join([f"${i}" for i in range(idx, idx + len(bot_ids))])
+            placeholders = ", ".join([f"${i}" for i in range(idx + 1, idx + 1 + len(bot_ids))])
             where += f" AND bot_id IN ({placeholders})"
             params.extend(bot_ids)
             idx += len(bot_ids)

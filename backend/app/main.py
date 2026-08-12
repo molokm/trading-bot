@@ -2353,55 +2353,122 @@ async def get_all_trades(limit: int = 100):
 
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
-    """Paired entry+exit trades — in-memory from running bot, fallback to DB."""
-    # 1. Try in-memory rotation trade log
-    if rotation and len(rotation._trade_log) > 0:
-        trades = rotation._trade_log
+    """Paired entry+exit trades — all bots, all time, sourced from the DB
+    (persisted) plus live in-memory logs. Fallback to OKX fills only when
+    nothing is stored yet."""
+    # 1. Gather all raw trade records: persisted (DB) + live (in-memory).
+    raw = []
+    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
+    if db:
+        try:
+            for bid in bot_ids:
+                rows = await db.get_trades(bot_id=bid, limit=5000)
+                for t in rows:
+                    px = float(t.get("px", 0) or 0)
+                    pnl = float(t.get("pnl", 0) or 0)
+                    inst = t.get("inst_id", "")
+                    raw.append({
+                        "time": t.get("timestamp", ""),
+                        "side": t.get("side", ""),
+                        "symbol": inst,
+                        "inst_id": inst,
+                        "entry_price": px,
+                        "exit_price": None,
+                        "pnl": pnl,
+                        "reason": "open" if pnl == 0 else "closed",
+                        "pos_side": "long" if t.get("side") == "buy" else "short",
+                        "signal_id": t.get("signal_id", 0),
+                        "bot_id": bid,
+                    })
+        except Exception as e:
+            print(f"[trades/paired] DB read error: {e}", flush=True)
+
+    # Live in-memory logs (they may include entries not yet flushed to DB).
+    live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation)]
+    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "Validation"}
+    for key, bot in live_bots:
+        if bot and bot._trade_log:
+            for t in bot._trade_log:
+                raw.append({
+                    "time": t.get("time", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("symbol", ""),
+                    "inst_id": t.get("symbol", "") or t.get("inst_id", ""),
+                    "entry_price": t.get("entry_price") or t.get("entry", 0),
+                    "exit_price": t.get("exit_price", None),
+                    "pnl": t.get("pnl", 0),
+                    "reason": t.get("reason", "open"),
+                    "pos_side": t.get("pos_side", "long"),
+                    "signal_id": t.get("signal_id", 0),
+                    "bot_id": t.get("bot_id", ""),
+                })
+
+    if raw:
+        # 2. Pair entries with exits per (inst_id) in chronological order.
+        raw.sort(key=lambda t: (t.get("time") or "", t.get("side") or ""))
+        open_map = {}
         paired = []
-        entry_map = {}
-        for t in trades:
-            coin = t.get("coin", "")
-            if t.get("reason") == "open" or t.get("pnl", 0) == 0:
-                entry_map[coin] = t
-            elif t.get("pnl", 0) != 0:
-                entry = entry_map.pop(coin, None)
+        for t in raw:
+            inst = t.get("inst_id") or t.get("symbol", "")
+            pnl = float(t.get("pnl", 0) or 0)
+            reason = (t.get("reason") or "").lower()
+            is_entry = reason in ("open", "add") or (pnl == 0 and t.get("side") == "buy")
+            if is_entry:
+                open_map.setdefault(inst, []).append(t)
+            elif pnl != 0 or reason in ("closed", "close", "manual_close", "exchange_stop", "rotation_exit", "stop", "tp", "trail", "breakeven", "roi"):
+                entries = open_map.get(inst, [])
+                entry = entries.pop(0) if entries else None
+                bot_name = _db_bot_name(t.get("bot_id", "")) or "Momentum"
                 paired.append({
                     "time": t.get("time", ""),
                     "entry_time": entry.get("time", "") if entry else t.get("time", ""),
                     "exit_time": t.get("time", ""),
-                    "side": "buy" if t.get("pos_side") == "long" else "sell",
+                    "side": "buy" if (t.get("pos_side") == "long" or entry and entry.get("pos_side") == "long") else "sell",
                     "symbol": t.get("symbol", ""),
-                    "inst_id": t.get("symbol", ""),
-                    "entry": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
-                    "entry_px": entry.get("entry_price") or entry.get("entry", 0) if entry else 0,
-                    "exit_price": t.get("exit_price", 0),
-                    "exit_px": t.get("exit_price", 0),
-                    "pnl": t.get("pnl", 0),
-                    "reason": t.get("reason", ""),
-                    "pos_side": t.get("pos_side", ""),
+                    "inst_id": t.get("inst_id", "") or t.get("symbol", ""),
+                    "entry": entry.get("entry_price", 0) if entry else 0,
+                    "entry_px": entry.get("entry_price", 0) if entry else 0,
+                    "exit_price": t.get("exit_price", 0) or float(t.get("entry_price", 0) or 0),
+                    "exit_px": t.get("exit_price", 0) or float(t.get("entry_price", 0) or 0),
+                    "pnl": pnl,
+                    "reason": reason,
+                    "pos_side": t.get("pos_side", "long"),
                     "signal_id": t.get("signal_id", ""),
-                    "bot": "Momentum",
+                    "bot": bot_name,
                 })
-        for coin, entry in entry_map.items():
-            paired.append({
-                "time": entry.get("time", ""),
-                "entry_time": entry.get("time", ""),
-                "exit_time": None,
-                "side": "buy" if entry.get("pos_side") == "long" else "sell",
-                "symbol": entry.get("symbol", ""),
-                "inst_id": entry.get("symbol", ""),
-                "entry": entry.get("entry_price") or entry.get("entry", 0),
-                "entry_px": entry.get("entry_price") or entry.get("entry", 0),
-                "exit_price": None,
-                "exit_px": None,
-                "pnl": None,
-                "reason": "open",
-                "pos_side": entry.get("pos_side", ""),
-                "signal_id": entry.get("signal_id", ""),
-                "bot": "Momentum",
-            })
-        paired = paired[-limit:]
-        return {"trades": paired}
+        # 3. Still-open entries.
+        for inst, entries in open_map.items():
+            for entry in entries:
+                bot_name = _db_bot_name(entry.get("bot_id", "")) or "Momentum"
+                paired.append({
+                    "time": entry.get("time", ""),
+                    "entry_time": entry.get("time", ""),
+                    "exit_time": None,
+                    "side": "buy" if entry.get("pos_side") == "long" else "sell",
+                    "symbol": entry.get("symbol", ""),
+                    "inst_id": entry.get("inst_id", "") or entry.get("symbol", ""),
+                    "entry": entry.get("entry_price", 0),
+                    "entry_px": entry.get("entry_price", 0),
+                    "exit_price": None,
+                    "exit_px": None,
+                    "pnl": None,
+                    "reason": "open",
+                    "pos_side": entry.get("pos_side", "long"),
+                    "signal_id": entry.get("signal_id", ""),
+                    "bot": bot_name,
+                })
+        paired.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
+        # dedupe by (inst_id, exit_time, pnl)
+        seen = set()
+        dedup = []
+        for t in paired:
+            key = (t.get("inst_id"), t.get("exit_time") or t.get("entry_time"), round(float(t.get("pnl") or 0), 4))
+            if key in seen:
+                continue
+            seen.add(key)
+            dedup.append(t)
+        print(f"[trades/paired] DB+memory: {len(dedup)} trades", flush=True)
+        return {"trades": dedup[-limit:]}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:

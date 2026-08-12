@@ -339,7 +339,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   // Summary stats for visible trades (closed only for PnL counts)
   const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 10)
+    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5)
     const withPnl = visible.filter(t => t.pnl != null)
     const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
     const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
@@ -596,7 +596,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 10).map((tr, i) => {
+                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5).map((tr, i) => {
                     const isOpen = tr.type === 'open'
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const isLong = tr.side === 'buy'
