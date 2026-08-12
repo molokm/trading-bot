@@ -2167,10 +2167,10 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Realized PnL is summed ONLY from trades
-    executed by this app's bots (persisted in DB with bot_id=rotation/impulse/
-    validation). OKX bills/fills are used only as a fallback when the DB is
-    empty. Unrealized PnL comes from OKX positions."""
+    """PNL for Dashboard metric cards. Realized PnL is summed from the SAME
+    trade list shown in the History page (get_paired_trades): bot trades from
+    DB + OKX fills history. per_bot breaks the total down by strategy.
+    Unrealized PnL comes from OKX positions."""
     from datetime import datetime as dt, timezone as tz, timedelta as td
 
     realized_1d = 0.0
@@ -2180,32 +2180,35 @@ async def get_pnl():
     total_realized = 0.0
     total_fees = 0.0
     source = "none"
+    per_bot = {}
 
-    # ── 1. Primary: trades persisted by OUR bots (DB) ──
-    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
-    per_bot = {}  # bot_id -> realized PnL from that bot's trades
+    # ── 1. Primary: same trade list as the History page ──
     try:
-        now = dt.now(tz.utc)
-        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        count = 0
-        for bid in bot_ids:
-            rows = await db.get_trades(bot_id=bid, limit=10000)
-            for t in rows:
+        resp = await get_paired_trades(limit=5000)
+        trades = resp.get("trades", [])
+        if trades:
+            source = "history"
+            now = dt.now(tz.utc)
+            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            count = 0
+            for t in trades:
+                reason = (t.get("reason") or "").lower()
+                if reason == "open":
+                    continue
                 try:
                     pnl = float(t.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-                if pnl == 0:
-                    continue  # opening fill, not a realized PnL
                 total_realized += pnl
-                per_bot[bid] = per_bot.get(bid, 0.0) + pnl
                 count += 1
+                bot = t.get("bot") or "Прочие"
+                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                 try:
                     fee = abs(float(t.get("fee", 0) or 0))
                 except (TypeError, ValueError):
                     fee = 0.0
                 total_fees += fee
-                time_str = t.get("timestamp", "")
+                time_str = t.get("time", "") or t.get("exit_time", "")
                 if time_str:
                     try:
                         t_time = dt.fromisoformat(time_str)
@@ -2224,17 +2227,15 @@ async def get_pnl():
                         realized_30d += pnl
                 else:
                     realized_30d += pnl
-        if count > 0:
-            source = "db"
-            print(f"[pnl] DB bots: total={total_realized:.2f} 1d={realized_1d:.2f} "
+            print(f"[pnl] History: total={total_realized:.2f} 1d={realized_1d:.2f} "
                   f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed_trades={count}", flush=True)
+                  f"fees={total_fees:.2f} closed_trades={count} per_bot={per_bot}", flush=True)
     except Exception as e:
         import traceback
-        print(f"[pnl] DB bots error: {e}", flush=True)
+        print(f"[pnl] History source error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX account bills (only if no bot trades in DB) ──
+    # ── 2. Fallback: OKX account bills (if history list is empty) ──
     if source == "none":
         try:
             bills = await _fetch_all_trade_bills()
@@ -2278,7 +2279,7 @@ async def get_pnl():
             print(f"[pnl] OKX bills error: {e}", flush=True)
             traceback.print_exc()
 
-    # ── 3. Fallback: OKX fills pairing (if neither DB nor bills) ──
+    # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
     if source == "none":
         try:
             _fills_cache_ts = 0  # bypass cache
