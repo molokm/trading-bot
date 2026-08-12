@@ -964,7 +964,14 @@ class RotationStrategy:
                         close_reason = "manual_close"
                     # Whatever the cause (stop or manual), do NOT instantly
                     # re-enter the same coin on the next poll.
-                    self._cooldowns[coin] = time.time() + self.MANUAL_CLOSE_COOLDOWN_SEC
+                    cd_until = time.time() + self.MANUAL_CLOSE_COOLDOWN_SEC
+                    self._cooldowns[coin] = cd_until
+                    if self.db:
+                        try:
+                            await self.db.set_setting(
+                                f"cooldown:{self.BOT_ID}:{coin}", str(int(cd_until)))
+                        except Exception as e:
+                            print(f"[Rotation] Cooldown persist error {coin}: {e}", flush=True)
                     print(f"[Rotation] Position gone {coin} ({close_reason} @ {fill_px:.4f}) "
                           f"— cooldown {self.MANUAL_CLOSE_COOLDOWN_SEC/3600:.1f}h",
                           flush=True)
@@ -1428,11 +1435,36 @@ class RotationStrategy:
         if self.db:
             await self._ensure_bot()
             await self._reload_equity()
+            await self._load_cooldowns()
         await self._sync_open_positions()
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
         print(f"[Rotation v3] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
               flush=True)
+
+    async def _load_cooldowns(self):
+        """Restore persisted manual-close cooldowns after a restart."""
+        if not self.db:
+            return
+        try:
+            rows = await self.db._fetchall(
+                "SELECT key, value FROM settings WHERE key LIKE $1"
+                if self.db._pg_mode else
+                "SELECT key, value FROM settings WHERE key LIKE ?",
+                (f"cooldown:{self.BOT_ID}:%",))
+            for r in rows:
+                coin = (r.get("key") or "").rsplit(":", 1)[-1]
+                try:
+                    until = float(r.get("value") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if until > time.time():
+                    self._cooldowns[coin] = until
+                    print(f"[Rotation] Restored cooldown {coin} until "
+                          f"{datetime.fromtimestamp(until, tz=timezone.utc).strftime('%H:%M')}",
+                          flush=True)
+        except Exception as e:
+            print(f"[Rotation] Load cooldowns error: {e}", flush=True)
 
     async def stop(self):
         self._running = False

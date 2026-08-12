@@ -1245,9 +1245,27 @@ async def db_reset_all():
 
 @app.get("/api/rotation/trades")
 async def rotation_trades(limit: int = 50):
-    if not rotation:
-        return {"trades": []}
-    trades = [dict(t) for t in rotation._trade_log[-limit:]]
+    trades = []
+    if rotation and rotation._trade_log:
+        trades = [dict(t) for t in rotation._trade_log[-limit:]]
+    elif db:
+        try:
+            rows = await db.get_trades(bot_id=ROT_BOT_ID, limit=limit)
+            for t in reversed(rows):
+                trades.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "inst_id": t.get("inst_id", ""),
+                    "coin": (t.get("inst_id", "") or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "pnl": float(t.get("pnl", 0) or 0),
+                    "entry_price": float(t.get("px", 0) or 0),
+                    "reason": "closed",
+                    "signal_id": t.get("signal_id", 0),
+                })
+        except Exception as e:
+            print(f"[rotation/trades] DB fallback error: {e}", flush=True)
     for t in trades:
         t.setdefault("bot", "Momentum")
     return {"trades": trades}
@@ -1479,9 +1497,28 @@ async def validation_reset():
 
 @app.get("/api/validation/trades")
 async def validation_trades(limit: int = 50):
-    if not validation:
-        return {"trades": []}
-    trades = [dict(t) for t in validation._trade_log[-limit:]]
+    trades = []
+    if validation and validation._trade_log:
+        trades = [dict(t) for t in validation._trade_log[-limit:]]
+    elif db:
+        # Fallback: restore from Postgres/SQLite after a restart (in-memory empty).
+        try:
+            rows = await db.get_trades(bot_id=VAL_BOT_ID, limit=limit)
+            for t in reversed(rows):
+                trades.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "inst_id": t.get("inst_id", ""),
+                    "coin": (t.get("inst_id", "") or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", ""),
+                    "size": float(t.get("sz", 0) or 0),
+                    "pnl": float(t.get("pnl", 0) or 0),
+                    "entry_price": float(t.get("px", 0) or 0),
+                    "reason": "closed",
+                    "signal_id": t.get("signal_id", 0),
+                })
+        except Exception as e:
+            print(f"[validation/trades] DB fallback error: {e}", flush=True)
     for t in trades:
         t.setdefault("bot", "Validation")
     return {"trades": trades}
@@ -2423,7 +2460,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
 
     # 3. Last resort: DB paired trades
     try:
-        db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end, bot_ids=[ROT_BOT_ID, MOM_BOT_ID])
+        db_trades = await db.get_paired_trades(limit=limit, begin=begin, end=end, bot_ids=[ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID])
         result = []
         for t in db_trades:
             entry_side = t.get("entry_side", "buy")
