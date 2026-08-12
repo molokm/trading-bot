@@ -142,7 +142,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   }
 
   // Derived values (declared early — before any useMemo that depends on them)
-  const btcChange = ticker ? parseFloat(ticker.change24h || 0).toFixed(2) : '0.00'
+  const change24hPct = (tk) => {
+    if (!tk || !tk.last || !tk.open24h || parseFloat(tk.open24h) <= 0) return 0
+    return ((parseFloat(tk.last) - parseFloat(tk.open24h)) / parseFloat(tk.open24h)) * 100
+  }
+  const btcChange = ticker ? change24hPct(ticker).toFixed(2) : '0.00'
   const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
   const unrealizedPnl = pnl?.unrealized || 0
   const pnlTotal = pnl?.total || 0
@@ -413,7 +417,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           {PRICE_COINS.map((coin) => {
             const tk = coin === 'BTC' ? ticker : tickers[coin]
             const price = tk ? parseFloat(tk.last) : 0
-            const change = tk ? parseFloat(tk.change24h || 0) : 0
+            const change = tk ? change24hPct(tk) : 0
             const isUp = change >= 0
             const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
             const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
