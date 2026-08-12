@@ -198,22 +198,6 @@ async def startup():
             global impulse
             impulse = imp
             await impulse.start()
-        print("[startup] 4/6 Validation auto-start (disabled by default) ...", flush=True)
-        # Тестовый бот-валидатор. ПО УМОЛЧАНИЮ ВЫКЛЮЧЕН. Включить: env VALIDATION_BOT=1.
-        if os.getenv("VALIDATION_BOT", "0").lower() in ("1", "true", "yes"):
-            if _env_key and _env_secret and _env_pass:
-                val_config = make_validation_config(
-                    capital=float(os.getenv("VALIDATION_CAPITAL", "300")),
-                    top_k=int(os.getenv("VALIDATION_TOP_K", "1")),
-                    min_roc=float(os.getenv("VALIDATION_MIN_ROC", "1.5")),
-                    adx_min=float(os.getenv("VALIDATION_ADX_MIN", "18")),
-                    auto_execute=os.getenv("VALIDATION_AUTO_EXECUTE", "1") != "0",
-                )
-                v = ValidationStrategy(config=val_config, client_manager=client_manager, db=db,
-                                       notifier=telegram)
-                global validation
-                validation = v
-                await validation.start()
         print("[startup] 5/6 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
