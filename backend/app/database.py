@@ -117,7 +117,7 @@ class Database:
 
             CREATE TABLE IF NOT EXISTS positions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                bot_id          TEXT NOT NULL UNIQUE,
+                bot_id          TEXT NOT NULL,
                 inst_id         TEXT NOT NULL,
                 side            TEXT NOT NULL,
                 size            REAL NOT NULL,
@@ -126,6 +126,7 @@ class Database:
                 unrealized_pnl  REAL DEFAULT 0,
                 opened_at       TEXT NOT NULL,
                 updated_at      TEXT,
+                UNIQUE (bot_id, inst_id, side),
                 FOREIGN KEY (bot_id) REFERENCES bots(id)
             );
 
@@ -213,7 +214,7 @@ class Database:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS positions (
                 id              SERIAL PRIMARY KEY,
-                bot_id          TEXT NOT NULL UNIQUE REFERENCES bots(id),
+                bot_id          TEXT NOT NULL REFERENCES bots(id),
                 inst_id         TEXT NOT NULL,
                 side            TEXT NOT NULL,
                 size            DOUBLE PRECISION NOT NULL,
@@ -221,7 +222,8 @@ class Database:
                 current_price   DOUBLE PRECISION,
                 unrealized_pnl  DOUBLE PRECISION DEFAULT 0,
                 opened_at       TEXT NOT NULL,
-                updated_at      TEXT
+                updated_at      TEXT,
+                UNIQUE (bot_id, inst_id, side)
             )
         """)
 
@@ -681,19 +683,23 @@ class Database:
                             size: float, entry_price: float,
                             current_price: float = None):
         now = datetime.utcnow().isoformat()
-        existing = await self._fetchone("SELECT id FROM positions WHERE bot_id = $1" if self._pg_mode else "SELECT id FROM positions WHERE bot_id = ?", (bot_id,))
+        existing = await self._fetchone(
+            "SELECT id FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+            if self._pg_mode else
+            "SELECT id FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?",
+            (bot_id, inst_id, side))
         if existing:
             if self._pg_mode:
                 await self._execute(
-                    "UPDATE positions SET inst_id=$1, side=$2, size=$3, entry_price=$4, "
-                    "current_price=$5, updated_at=$6 WHERE bot_id=$7",
-                    (inst_id, side, size, entry_price, current_price or entry_price, now, bot_id)
+                    "UPDATE positions SET size=$1, entry_price=$2, "
+                    "current_price=$3, updated_at=$4 WHERE bot_id=$5 AND inst_id=$6 AND side=$7",
+                    (size, entry_price, current_price or entry_price, now, bot_id, inst_id, side)
                 )
             else:
                 await self._execute(
-                    "UPDATE positions SET inst_id=?, side=?, size=?, entry_price=?, "
-                    "current_price=?, updated_at=? WHERE bot_id=?",
-                    (inst_id, side, size, entry_price, current_price or entry_price, now, bot_id)
+                    "UPDATE positions SET size=?, entry_price=?, "
+                    "current_price=?, updated_at=? WHERE bot_id=? AND inst_id=? AND side=?",
+                    (size, entry_price, current_price or entry_price, now, bot_id, inst_id, side)
                 )
         else:
             if self._pg_mode:
