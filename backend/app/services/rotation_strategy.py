@@ -163,6 +163,12 @@ class RotationStrategy:
         self._last_daily_check: str = ""
         self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
         self._regime: str = "unknown"        # market regime: bull/bear/chop
+        # cooldowns[coin] = epoch seconds until which the bot must not reopen
+        # that coin (set after a manual/external close so it doesn't instantly
+        # re-enter the same position the user just closed).
+        self._cooldowns: dict[str, float] = {}
+        # Manual close cooldown in seconds (overridable per subclass).
+        self.MANUAL_CLOSE_COOLDOWN_SEC: float = 4 * 3600.0
 
     # ─── Indicators (no look-ahead) ───
 
@@ -525,6 +531,28 @@ class RotationStrategy:
             return False
         except Exception:
             return False
+
+    async def _last_close_fill_px(self, client, inst_id: str, pos_side: str) -> float:
+        """Best-effort: return the actual fill price of the most recent closing
+        fill for this instrument+side (e.g. a manual/external close). Returns
+        0.0 if it cannot be determined."""
+        try:
+            result = await client.get_fills_history(inst_type="SWAP",
+                                                    instId=inst_id, limit=20)
+            if result.get("error"):
+                return 0.0
+            close_side = "sell" if pos_side == "long" else "buy"
+            fills = result.get("data", [])
+            fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
+            for f in fills:
+                if f.get("side") == close_side:
+                    try:
+                        return float(f.get("fillPx", 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+            return 0.0
+        except Exception:
+            return 0.0
 
     # ─── Exchange-side stop orders ───
 
@@ -926,9 +954,21 @@ class RotationStrategy:
                 real_sz = actual.get((coin, pos.side))
                 if real_sz is None:
                     # Position vanished from the exchange -> its SL fired (or was
-                    # closed manually). Book the PnL conservatively at stop price.
+                    # closed manually/externally). Try to book PnL at the REAL
+                    # close price from fills; fall back to the stop price.
+                    fill_px = await self._last_close_fill_px(client, pos.inst_id, pos.side)
+                    close_reason = "exchange_stop"
+                    if fill_px <= 0:
+                        fill_px = pos.stop_price
+                    else:
+                        close_reason = "manual_close"
+                    # Whatever the cause (stop or manual), do NOT instantly
+                    # re-enter the same coin on the next poll.
+                    self._cooldowns[coin] = time.time() + self.MANUAL_CLOSE_COOLDOWN_SEC
+                    print(f"[Rotation] Position gone {coin} ({close_reason} @ {fill_px:.4f}) "
+                          f"— cooldown {self.MANUAL_CLOSE_COOLDOWN_SEC/3600:.1f}h",
+                          flush=True)
                     ct = self.CT_VAL.get(coin, 0.01)
-                    fill_px = pos.stop_price
                     if pos.side == "long":
                         pnl = pos.size * ct * (fill_px - pos.entry_price)
                     else:
@@ -940,7 +980,7 @@ class RotationStrategy:
                         "symbol": pos.inst_id, "size": pos.size,
                         "pnl": round(pnl, 2),
                         "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
-                        "reason": "exchange_stop", "pos_side": pos.side, "coin": coin,
+                        "reason": close_reason, "pos_side": pos.side, "coin": coin,
                         "signal_id": pos.signal_id,
                     })
                     if self.db:
@@ -956,10 +996,10 @@ class RotationStrategy:
                         except Exception as e:
                             print(f"[Rotation] DB reconcile save error: {e}", flush=True)
                     print(f"[Rotation] RECONCILE {now[:19]} {coin:4} {pos.side:5} "
-                          f"gone from exchange, booked stop pnl={pnl:+.2f}", flush=True)
+                          f"gone from exchange, booked {close_reason} pnl={pnl:+.2f}", flush=True)
                     self.analysis.log("rotation", "reconcile",
                                       coin=coin, side=pos.side,
-                                      kind="position_gone", reason="exchange_stop",
+                                      kind="position_gone", reason=close_reason,
                                       entry_px=round(pos.entry_price, 2),
                                       exit_px=round(fill_px, 2), pnl=round(pnl, 2))
 
@@ -969,7 +1009,7 @@ class RotationStrategy:
                                 coin=coin, side=pos.side,
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
-                                reason="exchange_stop",
+                                reason=close_reason,
                             ))
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
@@ -1314,6 +1354,18 @@ class RotationStrategy:
 
             # ── FILTER: Correlation ──
             if not self._check_correlation(coin, indicators):
+                continue
+
+            # ── FILTER: Manual-close cooldown ──
+            cd_until = self._cooldowns.get(coin, 0.0)
+            if cd_until > time.time():
+                print(f"[Rotation] Cooldown filter: {coin} — "
+                      f"won't reopen until "
+                      f"{datetime.fromtimestamp(cd_until, tz=timezone.utc).strftime('%H:%M')} "
+                      f"(manual close)", flush=True)
+                self.analysis.log("rotation", "filter",
+                                  coin=coin, filter="cooldown",
+                                  until=round(cd_until), decision="skip")
                 continue
 
             target_coins.add((coin, side))
