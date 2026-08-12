@@ -30,7 +30,7 @@ STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
           "DOGE": 1000, "ADA": 100, "TRX": 1000, "AVAX": 1, "LTC": 1}
 LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 1, "SOL": 0.01, "XRP": 0.01,
-          "DOGE": 0.01, "ADA": 0.1, "TRX": 0.01, "AVAX": 0.1, "LTC": 0.1}
+          "DOGE": 0.01, "ADA": 0.01, "TRX": 0.01, "AVAX": 0.1, "LTC": 0.1}
 SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
             "BNB": "BNB-USDT-SWAP", "SOL": "SOL-USDT-SWAP",
             "XRP": "XRP-USDT-SWAP", "DOGE": "DOGE-USDT-SWAP",
@@ -488,8 +488,10 @@ class RotationStrategy:
         return self.client_manager.get_client()
 
     def _fmt_px(self, px: float) -> str:
-        """Format an order price with enough decimals for the instrument tick size."""
-        return str(round(px, self.PRICE_DECIMALS))
+        """Format an order price with enough decimals for the instrument tick
+        size. Uses fixed-point formatting (f-string) — never scientific notation,
+        which OKX rejects for small prices like PEPE (1e-9 tick)."""
+        return f"{px:.{self.PRICE_DECIMALS}f}"
 
     def _fmt_sz(self, coin: str, sz: float) -> str:
         """Format order size to exact lot decimals (avoid float artifacts like

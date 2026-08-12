@@ -33,7 +33,7 @@ VAL_CT_VAL = {
 }
 VAL_LOT_SZ = {
     "ARB": 0.1, "OP": 1, "FIL": 1, "SUI": 1,
-    "ATOM": 1, "LINK": 0.1, "DOT": 1, "NEAR": 0.1, "PEPE": 0.1,
+    "ATOM": 1, "LINK": 0.01, "DOT": 0.1, "NEAR": 0.1, "PEPE": 0.1,
 }
 VAL_SWAP_MAP = {
     coin: f"{coin}-USDT-SWAP" for coin in VAL_COINS
