@@ -2467,12 +2467,68 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 continue
             seen.add(key)
             dedup.append(t)
-        print(f"[trades/paired] DB+memory: {len(dedup)} trades", flush=True)
+
+        # Also include trades from OKX fills history (full account history up to
+        # 3 months, including ones made before Postgres was connected) that are
+        # not already present in the DB result.
+        try:
+            _fills_cache_ts = 0  # bypass fills cache
+            raw_fills = await _fetch_okx_fills(limit=300)
+            # drop demo-validator fills so they do not double up with DB entries
+            try:
+                val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
+                    "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
+                    " AND ord_id != ''"
+                    if not db._pg_mode else
+                    "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
+                    " AND ord_id != ''",
+                    (VAL_BOT_ID,)) if r.get("ord_id")}
+            except Exception:
+                val_ord_ids = set()
+            if val_ord_ids:
+                raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
+            raw_fills = [f for f in raw_fills
+                         if not str(f.get("clOrdId", "")).startswith("val")]
+            fills_paired = await _pair_fills(raw_fills)
+            for t in fills_paired:
+                inst = t.get("inst_id", "") or t.get("symbol", "")
+                is_open = t.get("reason") == "open"
+                key = (inst,
+                       t.get("time", "") if not is_open else t.get("entry_time", ""),
+                       round(float(t.get("pnl") or 0), 4))
+                if key in seen:
+                    continue
+                seen.add(key)
+                entry_px = t.get("entry", 0) or t.get("entry_price", 0)
+                exit_px = t.get("exit_price", 0)
+                dedup.append({
+                    "time": t.get("time", ""),
+                    "entry_time": t.get("entry_time", ""),
+                    "exit_time": t.get("time", "") if not is_open else None,
+                    "side": "buy" if t.get("pos_side") == "long" else "sell",
+                    "symbol": inst,
+                    "inst_id": inst,
+                    "entry": entry_px,
+                    "entry_px": entry_px,
+                    "exit_price": exit_px,
+                    "exit_px": exit_px,
+                    "pnl": t.get("pnl", 0) if not is_open else None,
+                    "reason": t.get("reason", ""),
+                    "pos_side": t.get("pos_side", "long"),
+                    "signal_id": t.get("ord_id", ""),
+                    "bot": _tag_trade_bot(t),
+                })
+            dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
+        except Exception as e:
+            import traceback
+            print(f"[trades/paired] OKX merge error: {e}", flush=True)
+            traceback.print_exc()
+
+        print(f"[trades/paired] DB+memory+OKX: {len(dedup)} trades", flush=True)
         return {"trades": dedup[-limit:]}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
-        global _fills_cache_ts
         _fills_cache_ts = 0
         raw_fills = await _fetch_okx_fills(limit=300)
         # Exclude fills that belong to the demo validation bot (its ordIds are
