@@ -67,10 +67,22 @@ def _decrypt(token: str) -> Optional[str]:
     except Exception:
         return None
 
+def encrypt_str(raw: str) -> str:
+    """Public wrapper — encrypt a secret for DB storage (e.g. per-user OKX keys)."""
+    if not raw:
+        return ""
+    return _encrypt(raw)
+
+def decrypt_str(cipher: str) -> str:
+    """Public wrapper — decrypt a secret from DB storage. Returns '' on failure."""
+    if not cipher:
+        return ""
+    return _decrypt(cipher) or ""
+
 # ── Session management ──
-def _new_token(role: str) -> str:
+def _new_token(role: str, user_id: str = None) -> str:
     raw = f"{role}_{uuid.uuid4().hex}"
-    tokens[raw] = {"role": role, "created": datetime.now()}
+    tokens[raw] = {"role": role, "created": datetime.now(), "user_id": user_id}
     return _encrypt(raw)
 
 def _expired(token_data: dict) -> bool:
@@ -87,8 +99,12 @@ def guest() -> str:
     return _new_token("guest")
 
 def grant_admin() -> str:
-    """Mint an admin session token (used by verified Telegram Mini App logins)."""
+    """Mint an admin session token (owner, no user binding)."""
     return _new_token("admin")
+
+def grant_user(user_id) -> str:
+    """Mint a session token bound to a Telegram user account (multi-tenant)."""
+    return _new_token("user", str(user_id))
 
 def _resolve(token_enc: str) -> Optional[str]:
     return _decrypt(token_enc)
@@ -103,16 +119,27 @@ def validate(token_enc: str) -> Optional[str]:
         return None
     return data["role"]
 
-def logout(token_enc: str):
+def get_user_id(token_enc: str) -> Optional[str]:
+    """Return the Telegram user_id bound to the token, or None (owner/guest)."""
     raw = _resolve(token_enc)
-    if raw:
-        tokens.pop(raw, None)
+    if raw is None or raw not in tokens:
+        return None
+    data = tokens[raw]
+    if _expired(data):
+        del tokens[raw]
+        return None
+    return data.get("user_id")
 
 def is_admin(token_enc: str) -> bool:
     return validate(token_enc) == "admin"
 
 def is_authenticated(token_enc: str) -> bool:
     return validate(token_enc) is not None
+
+def logout(token_enc: str):
+    raw = _resolve(token_enc)
+    if raw:
+        tokens.pop(raw, None)
 
 def cleanup():
     now = datetime.now()

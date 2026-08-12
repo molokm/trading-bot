@@ -160,6 +160,37 @@ export const api = {
   telegramMenu: (config) =>
     request('/telegram/menu', { method: 'POST', body: JSON.stringify(config || {}) }),
 
+  // ── Paid signal subscriptions (Telegram Stars) ──
+  subsList: () => request('/subs'),
+  subsConfig: () => request('/subs/config'),
+  subsActivate: (payload) =>
+    request('/subs/activate', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  subsDeactivate: (payload) =>
+    request('/subs/deactivate', { method: 'POST', body: JSON.stringify(payload || {}) }),
+
+  // ── Multi-tenant /api/me/* (mini-app user accounts) ──
+  me: () => request('/me'),
+  meCredentials: (creds) =>
+    request('/me/credentials', { method: 'POST', body: JSON.stringify(creds || {}) }),
+  meCredentialsTest: (creds) =>
+    request('/me/credentials/test', { method: 'POST', body: JSON.stringify(creds || {}) }),
+  mePortfolio: () => request('/me/portfolio'),
+  mePositions: () => request('/me/positions?inst_type=SWAP'),
+  meClosePosition: (instId, posSide, mgnMode = 'cross') =>
+    request('/me/positions/close', {
+      method: 'POST',
+      body: JSON.stringify({ instId, posSide, mgnMode }),
+    }),
+  meStatus: () => request('/me/status'),
+  meRotationStart: (config = {}) =>
+    request('/me/rotation/start', { method: 'POST', body: JSON.stringify(config) }),
+  meRotationStop: () => request('/me/rotation/stop', { method: 'POST' }),
+  meImpulseStart: (config = {}) =>
+    request('/me/impulse/start', { method: 'POST', body: JSON.stringify(config) }),
+  meImpulseStop: () => request('/me/impulse/stop', { method: 'POST' }),
+  meTrades: (limit = 30) => request(`/me/trades?limit=${limit}`),
+  mePnl: () => request('/me/pnl'),
+
   telegramAuth: (initData) =>
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
 

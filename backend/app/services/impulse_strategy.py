@@ -130,6 +130,9 @@ class ImpPosition:
 
 
 class ImpulseStrategy:
+    # Module-level default, overridable per instance (multi-tenant per-user bots).
+    BOT_ID: str = IMP_BOT_ID
+
     def __init__(self, config: ImpulseConfig, client_manager=None, db=None,
                  notifier: Optional[TelegramNotifier] = None,
                  analysis: Optional["AnalysisLogger"] = None):
@@ -494,7 +497,7 @@ class ImpulseStrategy:
         if self.db:
             try:
                 await self.db.save_trade(
-                    bot_id=IMP_BOT_ID, side=close_side, sz=pos.size,
+                    bot_id=self.BOT_ID, side=close_side, sz=pos.size,
                     px=round(fill_px, 2),
                     ord_id=fills[0].get("ordId", "") if fills else "",
                     inst_id=pos.inst_id, ord_type="market",
@@ -552,7 +555,7 @@ class ImpulseStrategy:
         if self.db:
             try:
                 signal_id = await self.db.save_signal(
-                    bot_id=IMP_BOT_ID,
+                    bot_id=self.BOT_ID,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                     side=order_side, price=price, size=sz,
                     ord_type="limit", status="pending",
@@ -630,7 +633,7 @@ class ImpulseStrategy:
                 if signal_id:
                     await self.db.update_signal_status(signal_id, "filled", ord_id)
                 await self.db.save_trade(
-                    bot_id=IMP_BOT_ID, side=order_side, sz=sz,
+                    bot_id=self.BOT_ID, side=order_side, sz=sz,
                     px=round(fill_px, 2), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
                     fee=round(fee, 4), fee_ccy="USDT",
@@ -988,12 +991,12 @@ class ImpulseStrategy:
             return
         try:
             if self.db._pg_mode:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (IMP_BOT_ID,))
+                await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (self.BOT_ID,))
             else:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (IMP_BOT_ID,))
+                await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
             for coin, pos in self._positions.items():
                 await self.db.save_position(
-                    bot_id=IMP_BOT_ID, inst_id=pos.inst_id,
+                    bot_id=self.BOT_ID, inst_id=pos.inst_id,
                     side=pos.side, size=pos.size,
                     entry_price=round(pos.entry_price, 2),
                     current_price=pos.peak_price,
@@ -1014,7 +1017,7 @@ class ImpulseStrategy:
                     "VALUES ($1, 'impulse', $2, 'MULTI', '1D', "
                     "$3, $4, 'running', 'demo', 'momentum', $5, 'Impulse 1D v1') "
                     "ON CONFLICT (id) DO NOTHING",
-                    (IMP_BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
+                    (self.BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
                 )
             else:
                 await self.db._execute(
@@ -1022,7 +1025,7 @@ class ImpulseStrategy:
                     "capital, params, status, mode, signal_type, created_at, name) "
                     "VALUES (?, 'impulse', ?, 'MULTI', '1D', "
                     "?, ?, 'running', 'demo', 'momentum', ?, 'Impulse 1D v1')",
-                    (IMP_BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
+                    (self.BOT_ID, STRATEGY_NAME, self._equity, str(params), now),
                 )
         except Exception as e:
             print(f"[Impulse] DB ensure bot error: {e}", flush=True)
@@ -1077,7 +1080,7 @@ class ImpulseStrategy:
             self._thread = None
         if self.db:
             try:
-                await self.db.update_bot_stopped(IMP_BOT_ID)
+                await self.db.update_bot_stopped(self.BOT_ID)
             except Exception:
                 pass
         print("[Impulse] Stopped", flush=True)

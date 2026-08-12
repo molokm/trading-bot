@@ -147,6 +147,37 @@ class Database:
                 key            TEXT PRIMARY KEY,
                 value          TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       TEXT NOT NULL UNIQUE,
+                username      TEXT,
+                first_name    TEXT,
+                plan          TEXT DEFAULT 'monthly',
+                status        TEXT DEFAULT 'active',
+                active_until  TEXT,
+                last_payment  TEXT,
+                payment_id    TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id   TEXT NOT NULL UNIQUE,
+                username      TEXT,
+                first_name    TEXT,
+                plan          TEXT DEFAULT 'free',
+                status        TEXT DEFAULT 'active',
+                capital       REAL DEFAULT 10000,
+                okx_key_enc   TEXT,
+                okx_secret_enc TEXT,
+                okx_pass_enc  TEXT,
+                okx_demo      INTEGER DEFAULT 1,
+                active_until  TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT
+            );
         """)
         await self._conn.commit()
 
@@ -245,6 +276,41 @@ class Database:
             CREATE TABLE IF NOT EXISTS settings (
                 key            TEXT PRIMARY KEY,
                 value          TEXT
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id            SERIAL PRIMARY KEY,
+                user_id       TEXT NOT NULL UNIQUE,
+                username      TEXT,
+                first_name    TEXT,
+                plan          TEXT DEFAULT 'monthly',
+                status        TEXT DEFAULT 'active',
+                active_until  TEXT,
+                last_payment  TEXT,
+                payment_id    TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT
+            )
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            SERIAL PRIMARY KEY,
+                telegram_id   TEXT NOT NULL UNIQUE,
+                username      TEXT,
+                first_name    TEXT,
+                plan          TEXT DEFAULT 'free',
+                status        TEXT DEFAULT 'active',
+                capital       DOUBLE PRECISION DEFAULT 10000,
+                okx_key_enc   TEXT,
+                okx_secret_enc TEXT,
+                okx_pass_enc  TEXT,
+                okx_demo      INTEGER DEFAULT 1,
+                active_until  TEXT,
+                created_at    TEXT NOT NULL,
+                updated_at    TEXT
             )
         """)
 
@@ -810,6 +876,140 @@ class Database:
             "SELECT * FROM performance_metrics WHERE bot_id = ? ORDER BY id DESC LIMIT ?",
             (bot_id, limit)
         )
+
+    # ── Subscriptions (paid Telegram signals) ──
+
+    async def get_subscription(self, user_id: str) -> Optional[dict]:
+        return await self._fetchone(
+            "SELECT * FROM subscriptions WHERE user_id = $1" if self._pg_mode
+            else "SELECT * FROM subscriptions WHERE user_id = ?",
+            (str(user_id),)
+        )
+
+    async def save_subscription(self, user_id: str, username: str = None,
+                                first_name: str = None, active_until: str = None,
+                                payment_id: str = None, plan: str = "monthly",
+                                status: str = "active") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        existing = await self.get_subscription(user_id)
+        if existing:
+            if self._pg_mode:
+                await self._execute(
+                    "UPDATE subscriptions SET username=$1, first_name=$2, plan=$3, "
+                    "status=$4, active_until=$5, payment_id=$6, updated_at=$7 "
+                    "WHERE user_id=$8",
+                    (username, first_name, plan, status, active_until, payment_id, now, str(user_id))
+                )
+            else:
+                await self._execute(
+                    "UPDATE subscriptions SET username=?, first_name=?, plan=?, "
+                    "status=?, active_until=?, payment_id=?, updated_at=? "
+                    "WHERE user_id=?",
+                    (username, first_name, plan, status, active_until, payment_id, now, str(user_id))
+                )
+        else:
+            if self._pg_mode:
+                await self._execute(
+                    "INSERT INTO subscriptions (user_id, username, first_name, plan, status, "
+                    "active_until, last_payment, payment_id, created_at, updated_at) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                    (str(user_id), username, first_name, plan, status, active_until, now, payment_id, now, now)
+                )
+            else:
+                await self._execute(
+                    "INSERT INTO subscriptions (user_id, username, first_name, plan, status, "
+                    "active_until, last_payment, payment_id, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(user_id), username, first_name, plan, status, active_until, now, payment_id, now, now)
+                )
+
+    async def list_subscriptions(self) -> list[dict]:
+        return await self._fetchall(
+            "SELECT * FROM subscriptions ORDER BY updated_at DESC"
+        )
+
+    async def delete_subscription(self, user_id: str) -> None:
+        if self._pg_mode:
+            await self._execute("DELETE FROM subscriptions WHERE user_id = $1", (str(user_id),))
+        else:
+            await self._execute("DELETE FROM subscriptions WHERE user_id = ?", (str(user_id),))
+
+    # ── Users (multi-tenant accounts) ──
+
+    async def get_user_by_telegram(self, telegram_id) -> Optional[dict]:
+        return await self._fetchone(
+            "SELECT * FROM users WHERE telegram_id = $1" if self._pg_mode
+            else "SELECT * FROM users WHERE telegram_id = ?",
+            (str(telegram_id),)
+        )
+
+    async def get_user_by_id(self, user_id: int) -> Optional[dict]:
+        return await self._fetchone(
+            "SELECT * FROM users WHERE id = $1" if self._pg_mode
+            else "SELECT * FROM users WHERE id = ?",
+            (user_id,)
+        )
+
+    async def find_or_create_user(self, telegram_id, username=None,
+                                  first_name=None) -> dict:
+        existing = await self.get_user_by_telegram(telegram_id)
+        if existing:
+            return existing
+        now = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO users (telegram_id, username, first_name, plan, status, "
+                "capital, okx_demo, created_at, updated_at) "
+                "VALUES ($1, $2, $3, 'free', 'active', 10000, 1, $4, $4) "
+                "ON CONFLICT (telegram_id) DO NOTHING",
+                (str(telegram_id), username, first_name, now)
+            )
+        else:
+            await self._execute(
+                "INSERT OR IGNORE INTO users (telegram_id, username, first_name, plan, "
+                "status, capital, okx_demo, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'free', 'active', 10000, 1, ?, ?)",
+                (str(telegram_id), username, first_name, now, now)
+            )
+        return await self.get_user_by_telegram(telegram_id)
+
+    async def update_user(self, telegram_id, **fields) -> None:
+        """Update user columns (safe whitelist). Fields: username, first_name,
+        plan, status, capital, okx_key_enc, okx_secret_enc, okx_pass_enc,
+        okx_demo, active_until."""
+        allowed = {"username", "first_name", "plan", "status", "capital",
+                   "okx_key_enc", "okx_secret_enc", "okx_pass_enc",
+                   "okx_demo", "active_until"}
+        cols = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not cols:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        cols["updated_at"] = now
+        if self._pg_mode:
+            sets = ", ".join(f"{k}=${i}" for i, k in enumerate(cols.keys(), start=1))
+            params = list(cols.values())
+            params.append(str(telegram_id))
+            await self._execute(
+                f"UPDATE users SET {sets} WHERE telegram_id=${len(params)}",
+                tuple(params)
+            )
+        else:
+            sets = ", ".join(f"{k}=?" for k in cols.keys())
+            params = list(cols.values())
+            params.append(str(telegram_id))
+            await self._execute(
+                f"UPDATE users SET {sets} WHERE telegram_id=?",
+                tuple(params)
+            )
+
+    async def list_users(self) -> list[dict]:
+        return await self._fetchall("SELECT * FROM users ORDER BY created_at DESC")
+
+    async def delete_user(self, telegram_id) -> None:
+        if self._pg_mode:
+            await self._execute("DELETE FROM users WHERE telegram_id = $1", (str(telegram_id),))
+        else:
+            await self._execute("DELETE FROM users WHERE telegram_id = ?", (str(telegram_id),))
 
     # ── Settings (key-value) ──
 

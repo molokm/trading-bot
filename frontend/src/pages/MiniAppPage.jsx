@@ -98,10 +98,17 @@ export default function MiniAppPage() {
   const [tg, setTg] = useState(null)
   const [tgResolved, setTgResolved] = useState(false)
   const [isAdmin, setIsAdmin] = useState(localStorage.getItem('auth_role') === 'admin')
+  const [role, setRole] = useState(localStorage.getItem('auth_role') || '')
+  const [me, setMe] = useState(null)
   const [showLogs, setShowLogs] = useState(false)
   const [copied, setCopied] = useState(false)
   const [serverHits, setServerHits] = useState([])
   const [hitsStatus, setHitsStatus] = useState('')
+  // User account: connect OKX keys + start/stop bots
+  const [creds, setCreds] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
+  const [credsSaving, setCredsSaving] = useState(false)
+  const [credsStatus, setCredsStatus] = useState(null)
+  const [botAction, setBotAction] = useState(null)
 
   useEffect(() => {
     if (!showLogs) return
@@ -222,6 +229,14 @@ export default function MiniAppPage() {
           localStorage.setItem('auth_token', res.token)
           localStorage.setItem('auth_role', res.role)
           setIsAdmin(res.role === 'admin')
+          setRole(res.role)
+          if (res.role === 'user') {
+            try {
+              const m = await withTimeout(api.me(), 10000)
+              setMe(m)
+              setDemoMode(m.demo !== false)
+            } catch (e) { miniLog('auth', 'me profile ERR', e.message || e) }
+          }
           miniLog('auth', 'OK role=' + res.role, 'user=' + (res.user?.username || res.user?.id || '?'))
         } else if (localStorage.getItem('auth_token')) {
           miniLog('auth', 'no initData, using stored session token')
@@ -252,13 +267,14 @@ export default function MiniAppPage() {
   const load = useCallback(async () => {
     miniLog('load', 'starting, token=' + (localStorage.getItem('auth_token') ? 'set' : 'EMPTY'))
     setLoading(true)
+    const isUser = role === 'user'
     const callers = {
       health: () => api.health(),
-      portfolio: () => api.getPortfolio(),
-      rotation: () => api.rotationStatus(),
-      impulse: () => api.impulseStatus(),
-      positions: () => api.getPositions('SWAP'),
-      trades: () => api.getAllTrades(20),
+      portfolio: () => isUser ? api.mePortfolio() : api.getPortfolio(),
+      rotation: () => isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus(),
+      impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
+      positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
+      trades: () => isUser ? api.meTrades(20) : api.getAllTrades(20),
     }
     const names = Object.keys(callers)
     const results = await Promise.all(names.map(async (name) => {
@@ -279,6 +295,12 @@ export default function MiniAppPage() {
     if (map.impulse) setImpulse(map.impulse)
     if (map.positions) setPositions(map.positions.positions || [])
     if (map.trades) setTrades(map.trades.trades || [])
+    if (isUser) {
+      try {
+        const m = await withTimeout(api.me(), 10000)
+        setMe(m)
+      } catch (e) { /* ignore */ }
+    }
     try {
       const h = await withTimeout(api.debugServerHits(), 10000)
       miniLog('server-hits',
@@ -290,7 +312,7 @@ export default function MiniAppPage() {
     }
     setLoaded(true)
     setLoading(false)
-  }, [])
+  }, [role])
 
   useEffect(() => {
     miniLog('effect', 'load-effect fired, authing=' + authing + ' authError=' + (authError || '""'))
@@ -303,6 +325,45 @@ export default function MiniAppPage() {
     const id = setInterval(load, 30000)
     return () => clearInterval(id)
   }, [authing, authError, load])
+
+  /* ── User account: connect own OKX keys ── */
+  const saveCreds = async () => {
+    setCredsSaving(true); setCredsStatus(null)
+    try {
+      const r = await withTimeout(api.meCredentials({
+        apiKey: creds.api_key, secretKey: creds.secret_key,
+        passphrase: creds.passphrase, demo: creds.demo,
+      }), 20000)
+      setCreds({ api_key: '', secret_key: '', passphrase: '', demo: true })
+      setCredsStatus({ ok: true, message: r.message || 'OK' })
+      await load()
+    } catch (e) {
+      setCredsStatus({ ok: false, message: e.message || 'Ошибка' })
+    }
+    setCredsSaving(false)
+  }
+
+  /* ── User account: start / stop a bot on their account ── */
+  const toggleBot = async (which) => {
+    const running = which === 'rotation' ? (rotation?.running) : (impulse?.running)
+    setBotAction(which)
+    try {
+      if (running) {
+        if (which === 'rotation') await withTimeout(api.meRotationStop(), 15000)
+        else await withTimeout(api.meImpulseStop(), 15000)
+      } else {
+        const cfg = { capital: me?.capital || 10000 }
+        if (which === 'rotation') await withTimeout(api.meRotationStart(cfg), 15000)
+        else await withTimeout(api.meImpulseStart(cfg), 15000)
+      }
+      await load()
+    } catch (e) {
+      setCredsStatus({ ok: false, message: e.message || 'Ошибка' })
+    }
+    setBotAction(null)
+  }
+
+  const proActive = role === 'user' && me?.plan === 'pro' && me?.active
 
 
   /* ── Bot status card ── */
@@ -382,6 +443,13 @@ export default function MiniAppPage() {
             <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)]' : 'bg-[var(--loss)]'}`} />
             {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
           </span>
+          {role === 'user' && me?.plan && (
+            <span className={`ml-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${
+              me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
+            }`}>
+              {me?.plan === 'pro' ? '💎 PRO' : me?.plan === 'signals' ? '📡 Сигналы' : 'FREE'}
+            </span>
+          )}
         </div>
         <button
           className="btn-icon"
@@ -406,6 +474,101 @@ export default function MiniAppPage() {
               {t('mini.reload')}
             </button>
           </div>
+        )}
+
+        {/* ═══ User account panel (non-owner) ═══ */}
+        {role === 'user' && (
+          <>
+            {me && !me.creds_configured && (
+              <Card className="border-[var(--warn)]/40">
+                <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--warn)] mb-2">
+                  <Shield size={13} /> {t('mini.connect_title')}
+                </div>
+                <p className="text-2xs text-[var(--txt-muted)] mb-3">{t('mini.connect_tip')}</p>
+                <div className="space-y-2">
+                  <input
+                    className="w-full input mono text-2xs"
+                    placeholder="API Key"
+                    value={creds.api_key}
+                    onChange={e => setCreds({ ...creds, api_key: e.target.value })}
+                  />
+                  <input
+                    className="w-full input mono text-2xs"
+                    type="password"
+                    placeholder="Secret Key"
+                    value={creds.secret_key}
+                    onChange={e => setCreds({ ...creds, secret_key: e.target.value })}
+                  />
+                  <input
+                    className="w-full input mono text-2xs"
+                    type="password"
+                    placeholder="Passphrase"
+                    value={creds.passphrase}
+                    onChange={e => setCreds({ ...creds, passphrase: e.target.value })}
+                  />
+                  <div className="flex items-center gap-2 text-2xs text-[var(--txt-secondary)]">
+                    <input
+                      type="checkbox"
+                      checked={creds.demo}
+                      onChange={e => setCreds({ ...creds, demo: e.target.checked })}
+                    />
+                    {t('mini.demo_mode')}
+                  </div>
+                  <button
+                    className="w-full btn btn-primary"
+                    onClick={saveCreds}
+                    disabled={credsSaving}
+                  >
+                    {credsSaving ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
+                    {t('mini.connect_btn')}
+                  </button>
+                  {credsStatus && (
+                    <div className={`text-2xs ${credsStatus.ok ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {credsStatus.message}
+                    </div>
+                  )}
+                </div>
+              </Card>
+            )}
+
+            {me && me.creds_configured && (
+              <Card>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--profit)]">
+                    <Key size={13} /> {t('mini.connected_keys')}
+                  </div>
+                  <span className={`text-2xs font-semibold px-1.5 py-0.5 rounded-md ${
+                    proActive ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
+                  }`}>
+                    {proActive ? t('mini.pro_active') : t('mini.no_pro')}
+                  </span>
+                </div>
+                {!proActive && (
+                  <p className="text-2xs text-[var(--txt-muted)] mt-1">{t('mini.no_pro_tip')}</p>
+                )}
+                {proActive && (
+                  <div className="flex gap-2 mt-3">
+                    <button
+                      className={`btn flex-1 ${rotation?.running ? 'btn-ghost' : 'btn-primary'}`}
+                      onClick={() => toggleBot('rotation')}
+                      disabled={botAction !== null}
+                    >
+                      {botAction === 'rotation' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
+                      {rotation?.running ? t('mini.stop_rotation') : t('mini.start_rotation')}
+                    </button>
+                    <button
+                      className={`btn flex-1 ${impulse?.running ? 'btn-ghost' : 'btn-primary'}`}
+                      onClick={() => toggleBot('impulse')}
+                      disabled={botAction !== null}
+                    >
+                      {botAction === 'impulse' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
+                      {impulse?.running ? t('mini.stop_impulse') : t('mini.start_impulse')}
+                    </button>
+                  </div>
+                )}
+              </Card>
+            )}
+          </>
         )}
 
         {/* ═══ Portfolio ═══ */}

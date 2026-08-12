@@ -31,3 +31,15 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: SIGNAL_PRICE_STARS
+        value: "100"
+      - key: SIGNAL_PLAN_DAYS
+        value: "30"
+      - key: SIGNAL_INVITE_DAYS
+        value: "3"
+      - key: PRO_PRICE_STARS
+        value: "500"
+      - key: PRO_PLAN_DAYS
+        value: "30"

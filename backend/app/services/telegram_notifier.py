@@ -20,6 +20,7 @@ import httpx
 
 ENV_TOKEN = "TELEGRAM_BOT_TOKEN"
 ENV_CHAT = "TELEGRAM_CHAT_ID"
+ENV_CHANNEL = "TELEGRAM_CHANNEL_ID"
 
 _ESCAPE = {ord("<"): "&lt;", ord(">"): "&gt;", ord("&"): "&amp;"}
 
@@ -30,28 +31,35 @@ def _esc(value) -> str:
 
 
 class TelegramNotifier:
-    def __init__(self, token: str = "", chat_id: str = ""):
+    def __init__(self, token: str = "", chat_id: str = "", channel_id: str = ""):
         self.token = token or os.getenv(ENV_TOKEN, "")
         self.chat_id = chat_id or os.getenv(ENV_CHAT, "")
+        self.channel_id = channel_id or os.getenv(ENV_CHANNEL, "")
 
-    def configure(self, token: str = "", chat_id: str = "") -> None:
+    def configure(self, token: str = "", chat_id: str = "", channel_id: str = "") -> None:
         """Update credentials at runtime (used by dashboard settings)."""
         if token:
             self.token = token.strip()
         if chat_id:
             self.chat_id = chat_id.strip()
+        if channel_id:
+            self.channel_id = channel_id.strip()
         os.environ[ENV_TOKEN] = self.token
         os.environ[ENV_CHAT] = self.chat_id
+        os.environ[ENV_CHANNEL] = self.channel_id
 
     async def load_from_db(self, db) -> None:
         """Restore credentials persisted in the settings table (survives restarts)."""
         try:
             token = await db.get_setting(ENV_TOKEN)
             chat_id = await db.get_setting(ENV_CHAT)
+            channel_id = await db.get_setting(ENV_CHANNEL)
             if token:
                 self.token = token
             if chat_id:
                 self.chat_id = chat_id
+            if channel_id:
+                self.channel_id = channel_id
         except Exception:
             pass
 
@@ -83,18 +91,42 @@ class TelegramNotifier:
             return False
 
     def fire(self, text: str, parse_mode: str = "HTML") -> None:
-        """Fire-and-forget send — never blocks the trading loop or raises."""
+        """Fire-and-forget send — never blocks the trading loop or raises.
+
+        Posts to the owner chat AND, when TELEGRAM_CHANNEL_ID is configured, to
+        the paid signals channel (broadcast to subscribers)."""
         if not self.configured:
             return
+        targets = [self.chat_id]
+        if self.channel_id:
+            targets.append(self.channel_id)
+        for target in targets:
+            self._fire_send(target, text, parse_mode)
+
+    def _fire_send(self, chat_id: str, text: str, parse_mode: str) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(self.send(text, parse_mode))
+            loop.create_task(self._send_to(chat_id, text, parse_mode))
         except RuntimeError:
             def _run():
-                asyncio.run(self.send(text, parse_mode))
+                asyncio.run(self._send_to(chat_id, text, parse_mode))
             threading.Thread(target=_run, daemon=True).start()
         except Exception:
             pass
+
+    async def _send_to(self, chat_id: str, text: str, parse_mode: str) -> bool:
+        if not self.token:
+            return False
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, json=payload)
+                return bool(resp.json().get("ok"))
+        except Exception:
+            return False
 
     # ─── Mini App helpers ───
 

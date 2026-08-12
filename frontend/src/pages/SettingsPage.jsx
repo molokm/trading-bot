@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download } from 'lucide-react'
+import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download, Users, Star, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
@@ -13,12 +13,16 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [status, setStatus] = useState(null)
   const [testSteps, setTestSteps] = useState([])
   const [dangerConfirm, setDangerConfirm] = useState(false)
-  const [tg, setTg] = useState({ token: '', chat_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
+  const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
   const [tgStatus, setTgStatus] = useState(null)
   const [logDownloading, setLogDownloading] = useState(false)
   const [logStatus, setLogStatus] = useState(null)
+  const [subs, setSubs] = useState(null)
+  const [subsConfig, setSubsConfig] = useState(null)
+  const [subsLoading, setSubsLoading] = useState(false)
+  const [subsAction, setSubsAction] = useState(null)
   const timersRef = useRef([])
 
   useEffect(() => {
@@ -40,6 +44,21 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       setTg({ ...s, loaded: true })
     }).catch(() => {})
   }, [])
+
+  const loadSubs = async () => {
+    setSubsLoading(true)
+    try {
+      const [s, c] = await Promise.all([
+        api.subsList().catch(() => null),
+        api.subsConfig().catch(() => null),
+      ])
+      setSubs(s)
+      setSubsConfig(c)
+    } catch (e) { /* admin-only, ignore */ }
+    setSubsLoading(false)
+  }
+
+  useEffect(() => { loadSubs() }, [])
 
   const clearTimers = () => {
     timersRef.current.forEach(t => clearTimeout(t))
@@ -111,11 +130,37 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const handleSaveTelegram = async () => {
     setTgSaving(true); setTgStatus(null)
     try {
-      const s = await api.telegramConfig({ token: tg.token, chat_id: tg.chat_id })
+      const s = await api.telegramConfig({
+        token: tg.token, chat_id: tg.chat_id, channel_id: tg.channel_id || undefined,
+      })
       setTg({ ...tg, token: '', chat_id: '', ...s, loaded: true })
       setTgStatus({ ok: true, message: t('settings.tg_saved') })
+      loadSubs()
     } catch (err) { setTgStatus({ ok: false, message: err.message }) }
     setTgSaving(false)
+  }
+
+  const handleSubsActivate = async (userId) => {
+    if (!userId) return
+    setSubsAction(userId)
+    const days = prompt(t('settings.subs_activate_prompt'), subsConfig?.plan_days || 30)
+    if (!days) { setSubsAction(null); return }
+    try {
+      await api.subsActivate({ user_id: userId, days: parseInt(days, 10) || 30 })
+      await loadSubs()
+    } catch (err) { alert(err.message) }
+    setSubsAction(null)
+  }
+
+  const handleSubsDeactivate = async (userId) => {
+    if (!userId) return
+    if (!window.confirm(t('settings.subs_deactivate_confirm'))) return
+    setSubsAction(userId)
+    try {
+      await api.subsDeactivate({ user_id: userId })
+      await loadSubs()
+    } catch (err) { alert(err.message) }
+    setSubsAction(null)
   }
 
   const handleTestTelegram = async () => {
@@ -315,6 +360,18 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 />
               </div>
 
+              <div>
+                <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider">
+                  {t('settings.tg_channel')} <Tip text={t('settings.tg_channel_tip')} />
+                </label>
+                <input
+                  className="w-full mt-1.5 mono text-2xs"
+                  placeholder="-1001234567890"
+                  value={tg.channel_id || ''}
+                  onChange={e => setTg({ ...tg, channel_id: e.target.value })}
+                />
+              </div>
+
               {tg.configured && (
                 <div className="flex items-center gap-3 p-3 rounded-lg bg-[var(--info-dim)] border border-[var(--info)]/20">
                   <CheckCircle size={16} className="text-[var(--info)] shrink-0" />
@@ -346,6 +403,132 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <div className={`flex items-center gap-2 p-3 rounded-lg text-xs ${tgStatus.ok ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                   {tgStatus.ok ? <CheckCircle size={14} /> : <XCircle size={14} />}
                   {tgStatus.message}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Paid Signal Subscriptions */}
+          <div className="panel">
+            <div className="panel-header">
+              <Users size={13} className="text-[var(--profit)]" /> {t('settings.subs_title')}
+              <button className="ml-auto btn btn-ghost btn-sm" onClick={loadSubs} disabled={subsLoading}>
+                <RefreshCw size={12} className={subsLoading ? 'animate-spin' : ''} /> {t('settings.subs_refresh')}
+              </button>
+            </div>
+            <div className="p-4 space-y-4">
+              <p className="text-2xs text-[var(--txt-muted)]">{t('settings.subs_tip')}</p>
+
+              {subsConfig && (
+                <div className="flex flex-wrap items-center gap-2 text-2xs">
+                  <span className={`status-badge ${subsConfig.poller_running ? 'status-live' : 'status-off'}`}>
+                    <span className="dot" />
+                    {subsConfig.poller_running ? t('settings.subs_poller_on') : t('settings.subs_poller_off')}
+                  </span>
+                  <span className={`status-badge ${subsConfig.channel_configured ? 'status-live' : 'status-off'}`}>
+                    <span className="dot" />
+                    {subsConfig.channel_configured ? t('settings.subs_channel_on') : t('settings.subs_channel_off')}
+                  </span>
+                  <span className="status-badge status-live">
+                    <Star size={10} /> {subsConfig.price_stars} ⭐ / {subsConfig.plan_days} {t('settings.subs_days')}
+                  </span>
+                  <span className="status-badge status-live">
+                    <Star size={10} /> PRO {subsConfig.pro_price_stars} ⭐ / {subsConfig.pro_plan_days} {t('settings.subs_days')}
+                  </span>
+                </div>
+              )}
+
+              {subs?.stats && (
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <MetricCard
+                    label={t('settings.subs_active')}
+                    value={subs.stats.active}
+                    icon={<Users size={14} />}
+                  />
+                  <MetricCard
+                    label={t('settings.subs_total')}
+                    value={subs.stats.total}
+                    icon={<RefreshCw size={14} />}
+                  />
+                  <MetricCard
+                    label={t('settings.subs_revenue')}
+                    value={`${subs.stats.revenue_stars} ⭐`}
+                    icon={<Star size={14} />}
+                  />
+                  <MetricCard
+                    label="PRO"
+                    value={`${subs.stats.revenue_pro ?? 0} ⭐`}
+                    icon={<Star size={14} />}
+                  />
+                </div>
+              )}
+
+              {subs?.subscribers?.length > 0 ? (
+                <div className="space-y-2">
+                  {subs.subscribers.map(s => (
+                    <div key={s.user_id} className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-xs font-medium text-[var(--txt)]">
+                          <span className="truncate">{s.username ? '@' + s.username : s.first_name || s.user_id}</span>
+                          <span className={`status-badge ${s.status === 'active' ? 'status-live' : 'status-off'}`}>
+                            <span className="dot" /> {s.status === 'active' ? t('settings.subs_active_short') : t('settings.subs_expired')}
+                          </span>
+                        </div>
+                        <div className="text-2xs text-[var(--txt-muted)] mt-0.5 truncate">
+                          {t('settings.subs_until')} {s.active_until || '—'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => handleSubsActivate(s.user_id)}
+                          disabled={subsAction === s.user_id}
+                        >
+                          {t('settings.subs_extend')}
+                        </button>
+                        <button
+                          className="btn btn-ghost btn-sm text-[var(--loss)]"
+                          onClick={() => handleSubsDeactivate(s.user_id)}
+                          disabled={subsAction === s.user_id}
+                        >
+                          {t('settings.subs_off')}
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-2xs text-[var(--txt-muted)] text-center py-4">
+                  {t('settings.subs_empty')}
+                </div>
+              )}
+
+              {(subs?.users?.length > 0) && (
+                <div>
+                  <div className="text-2xs font-semibold uppercase tracking-wider text-[var(--txt-muted)] mb-2">
+                    {t('settings.subs_users')}
+                  </div>
+                  <div className="space-y-2">
+                    {subs.users.map(u => (
+                      <div key={u.telegram_id} className="flex items-center justify-between gap-3 p-3 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 text-xs font-medium text-[var(--txt)]">
+                            <span className="truncate">{u.username ? '@' + u.username : u.first_name || u.telegram_id}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-2xs font-bold ${
+                              u.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' :
+                              u.plan === 'signals' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
+                            }`}>
+                              {u.plan}
+                            </span>
+                          </div>
+                          <div className="text-2xs text-[var(--txt-muted)] mt-0.5 truncate">
+                            {u.creds_configured ? t('settings.subs_keys_on') : t('settings.subs_keys_off')}
+                            {u.active_until ? ` • ${t('settings.subs_until')} ${u.active_until}` : ''}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

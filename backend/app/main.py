@@ -18,17 +18,20 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from app.services.okx_client import OKXClientManager
+from app.services.okx_client import OKXClientManager, OKXClient
 from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import (
-    login, guest, validate, logout, is_admin, PASSWORD, grant_admin,
+    login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user,
+    get_user_id, encrypt_str, decrypt_str,
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
 )
+from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.telegram_bot import TelegramBotPoller, PRICE_STARS, PLAN_DAYS, INVITE_DAYS, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -77,6 +80,12 @@ rotation: Optional[RotationStrategy] = None
 impulse: Optional[ImpulseStrategy] = None
 validation: Optional[ValidationStrategy] = None
 telegram = TelegramNotifier()
+bot_poller: Optional[TelegramBotPoller] = None
+
+# Multi-tenant: per-user bots + their own OKX clients.
+strategy_mgr = StrategyManager(db=db, notifier=telegram)
+_user_clients: dict[str, OKXClient] = {}
+PLANS_PRICE = {"signals": PRICE_STARS, "pro": PRO_PRICE_STARS}
 
 # ── Server-side request hit logger (diagnostics for Telegram Mini App) ──
 _SERVER_HITS = []
@@ -96,9 +105,10 @@ async def _server_hit_logger(request: Request, call_next):
     try:
         response = await call_next(request)
         entry["c"] = response.status_code
+        return response
     except Exception:
         entry["c"] = "ERR"
-    return response
+        raise
 
 
 @app.get("/api/debug/server-hits")
@@ -202,10 +212,26 @@ async def startup():
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
         raise
+    # Telegram paid-signals poller: start last, only when a bot token exists.
+    global bot_poller
+    try:
+        if telegram.token:
+            bot_poller = TelegramBotPoller(notifier=telegram, db=db)
+            bot_poller.start()
+            print("[startup] 6/6 Telegram poller started", flush=True)
+        else:
+            print("[startup] 6/6 Telegram poller skipped (no bot token)", flush=True)
+    except Exception as e:
+        print(f"[startup] Telegram poller error: {e}", flush=True)
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    if bot_poller:
+        try:
+            bot_poller.stop()
+        except Exception:
+            pass
     if rotation and rotation._running:
         await rotation.stop()
     if impulse and impulse._running:
@@ -290,6 +316,10 @@ ADMIN_ONLY_PATHS = {
     "/api/telegram/simulate",
     "/api/telegram/menu",
     "/api/analysis/log",
+    "/api/subs",
+    "/api/subs/activate",
+    "/api/subs/deactivate",
+    "/api/subs/config",
 }
 
 ADMIN_ONLY_PREFIXES = ("/api/debug/",)
@@ -338,9 +368,19 @@ async def auth_status(request: Request):
     token = get_token(request)
     valid = validate(token)
     admin = is_admin(token) if valid else False
+    user_id = get_user_id(token) if valid else None
+    plan = None
+    if user_id:
+        try:
+            u = await db.get_user_by_telegram(user_id)
+            plan = u.get("plan") if u else None
+        except Exception:
+            plan = None
     return {
         "authenticated": valid,
-        "role": "admin" if admin else ("guest" if valid else "none"),
+        "role": "admin" if admin else ("user" if (valid and user_id) else ("guest" if valid else "none")),
+        "user_id": user_id,
+        "plan": plan,
         "has_password": bool(PASSWORD),
     }
 
@@ -349,8 +389,9 @@ async def auth_status(request: Request):
 async def auth_telegram(data: dict):
     """Authenticate a Telegram Mini App user via WebApp initData.
 
-    The initData signature is verified with the bot token; only the chat
-    matching TELEGRAM_CHAT_ID is granted an admin session — no password needed.
+    The initData signature is verified with the bot token. The chat matching
+    TELEGRAM_CHAT_ID is granted an admin session; every other verified user is
+    auto-provisioned with their own account (role=user, their own OKX creds).
     """
     init_data = (data or {}).get("initData", "")
     logger.info("mini auth: initData present=%s len=%s", bool(init_data), len(init_data))
@@ -365,21 +406,40 @@ async def auth_telegram(data: dict):
         raise HTTPException(status_code=401, detail="Invalid Telegram initData")
     user = payload.get("user") or {}
     uid = str(user.get("id", ""))
-    logger.info("mini auth: signature OK, user.id=%s (%s), chat_id=%s",
-                uid, user.get("username"), telegram.chat_id)
-    if not telegram.chat_id or uid != telegram.chat_id:
-        logger.warning("mini auth: user %s != allowed chat %s -> 403", uid, telegram.chat_id)
-        raise HTTPException(status_code=403, detail="Telegram user not authorized")
-    token = grant_admin()
-    logger.info("mini auth: admin token granted for user %s", uid)
+    logger.info("mini auth: signature OK, user.id=%s (%s)", uid, user.get("username"))
+
+    if telegram.chat_id and uid == telegram.chat_id:
+        # Owner -> full admin session on env creds (existing behavior).
+        token = grant_admin()
+        logger.info("mini auth: admin token granted for owner %s", uid)
+        return {
+            "token": token,
+            "role": "admin",
+            "user": {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "first_name": user.get("first_name"),
+            },
+        }
+
+    # Any other verified Telegram user -> own account (multi-tenant).
+    try:
+        u = await db.find_or_create_user(
+            uid, user.get("username"), user.get("first_name"))
+    except Exception as e:
+        logger.warning("mini auth: user provision error: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to create account")
+    token = grant_user(uid)
+    logger.info("mini auth: user account %s (plan=%s)", uid, u.get("plan"))
     return {
         "token": token,
-        "role": "admin",
+        "role": "user",
         "user": {
             "id": user.get("id"),
             "username": user.get("username"),
             "first_name": user.get("first_name"),
         },
+        "plan": u.get("plan"),
     }
 
 
@@ -387,6 +447,451 @@ async def auth_telegram(data: dict):
 async def auth_logout(request: Request):
     token = get_token(request)
     return logout(token)
+
+
+# ══════════════════════════════════════════════════════════════
+# MULTI-TENANT /api/me/* — per-user mini-app account
+# ══════════════════════════════════════════════════════════════
+
+async def _me_ctx(request: Request):
+    """Resolve the authenticated user context.
+
+    Returns (role, user_id, user_row_or_None). Owner (admin) has user_id=None
+    and keeps using env creds + global bots. 'user' role maps to their own
+    account. Guests are rejected.
+    """
+    token = get_token(request)
+    role = validate(token)
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user_id = get_user_id(token)
+    user_row = None
+    if user_id:
+        try:
+            user_row = await db.get_user_by_telegram(user_id)
+        except Exception:
+            user_row = None
+    return role, user_id, user_row
+
+
+async def _user_okx_client(user_id: str) -> Optional[OKXClient]:
+    """Return (and cache) the user's OKXClient from their encrypted creds."""
+    global _user_clients
+    existing = _user_clients.get(user_id)
+    if existing:
+        return existing
+    try:
+        u = await db.get_user_by_telegram(user_id)
+    except Exception:
+        return None
+    if not u:
+        return None
+    key = decrypt_str(u.get("okx_key_enc") or "")
+    secret = decrypt_str(u.get("okx_secret_enc") or "")
+    passphrase = decrypt_str(u.get("okx_pass_enc") or "")
+    if not (key and secret and passphrase):
+        return None
+    client = OKXClient(key, secret, passphrase, bool(u.get("okx_demo", 1)))
+    _user_clients[user_id] = client
+    strategy_mgr.set_user_client(user_id, client)
+    return client
+
+
+def _clear_user_client(user_id: str):
+    global _user_clients
+    old = _user_clients.pop(user_id, None)
+    if old:
+        try:
+            asyncio.get_event_loop().create_task(old.close())
+        except Exception:
+            pass
+
+
+def _user_notifier(user_id: str):
+    """Notifier that delivers a user's bot signals to THEIR chat (not the channel)."""
+    if not telegram.token:
+        return telegram
+    return TelegramNotifier(token=telegram.token, chat_id=str(user_id), channel_id="")
+
+
+def _has_active_plan(user_row: dict) -> bool:
+    """Pro users need a currently-active subscription to run bots."""
+    if not user_row:
+        return False
+    plan = user_row.get("plan")
+    if plan not in ("signals", "pro"):
+        return False
+    return _is_active(user_row)
+
+
+@app.get("/api/me")
+async def me_profile(request: Request):
+    """Current user profile: plan, subscription status, creds state."""
+    role, user_id, user_row = await _me_ctx(request)
+    if user_id is None:
+        # Owner: show env creds state.
+        return {
+            "role": "admin", "plan": "owner",
+            "creds_configured": bool(_env_key and _env_secret and _env_pass),
+            "demo": _env_demo, "owner": True,
+        }
+    creds = bool(user_row and user_row.get("okx_key_enc"))
+    return {
+        "role": "user",
+        "telegram_id": user_id,
+        "username": (user_row or {}).get("username"),
+        "first_name": (user_row or {}).get("first_name"),
+        "plan": (user_row or {}).get("plan", "free"),
+        "active": _has_active_plan(user_row) if user_row else False,
+        "active_until": (user_row or {}).get("active_until"),
+        "creds_configured": creds,
+        "demo": bool((user_row or {}).get("okx_demo", 1)),
+        "capital": (user_row or {}).get("capital", 10000),
+    }
+
+
+@app.post("/api/me/credentials")
+async def me_credentials(request: Request, data: dict = None):
+    """Connect the user's own OKX API keys (encrypted at rest)."""
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="Owner uses env credentials")
+    d = data or {}
+    key = str(d.get("apiKey", "")).strip()
+    secret = str(d.get("secretKey", "")).strip()
+    passphrase = str(d.get("passphrase", "")).strip()
+    demo = bool(d.get("demo", True))
+    if not (key and secret and passphrase):
+        raise HTTPException(status_code=400, detail="All credentials required")
+    # Test before saving.
+    test = OKXClient(key, secret, passphrase, demo)
+    try:
+        result = await test.get_balance()
+    finally:
+        try:
+            await test.close()
+        except Exception:
+            pass
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+    await db.update_user(
+        user_id, okx_key_enc=encrypt_str(key), okx_secret_enc=encrypt_str(secret),
+        okx_pass_enc=encrypt_str(passphrase), okx_demo=1 if demo else 0,
+    )
+    # Stop running bots so they re-init with the new client on next start.
+    strategy_mgr.stop_all(user_id)
+    _clear_user_client(user_id)
+    return {"message": "OKX keys connected", "demo": demo}
+
+
+@app.post("/api/me/credentials/test")
+async def me_credentials_test(request: Request, data: dict = None):
+    """Test provided (or saved) OKX credentials."""
+    role, user_id, _ = await _me_ctx(request)
+    d = data or {}
+    key = str(d.get("apiKey", "")).strip()
+    secret = str(d.get("secretKey", "")).strip()
+    passphrase = str(d.get("passphrase", "")).strip()
+    demo = bool(d.get("demo", True))
+    if user_id and not (key or secret or passphrase):
+        u = await db.get_user_by_telegram(user_id)
+        key = decrypt_str((u or {}).get("okx_key_enc") or "")
+        secret = decrypt_str((u or {}).get("okx_secret_enc") or "")
+        passphrase = decrypt_str((u or {}).get("okx_pass_enc") or "")
+        demo = bool((u or {}).get("okx_demo", 1))
+    if not (key and secret and passphrase):
+        return {"ok": False, "message": "Укажите API Key, Secret Key и Passphrase"}
+    test = OKXClient(key, secret, passphrase, demo)
+    try:
+        result = await test.get_balance()
+    finally:
+        try:
+            await test.close()
+        except Exception:
+            pass
+    if result.get("error"):
+        return {"ok": False, "message": result.get("message", "Connection failed")}
+    return {"ok": True, "message": "Connected successfully", "demo": demo}
+
+
+@app.get("/api/me/portfolio")
+async def me_portfolio(request: Request):
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await get_portfolio()
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail="Подключите ключи OKX в настройках")
+    result = await client.get_balance()
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    data = result.get("data", [])
+    if not data:
+        return {"totalEqUsd": 0, "details": []}
+    acct = data[0] if isinstance(data, list) else data
+    details = []
+    for d in acct.get("details", []):
+        details.append({
+            "ccy": d.get("ccy"),
+            "eq": float(d.get("eq", 0)),
+            "eqUsd": float(d.get("eqUsd", 0)),
+            "availBal": float(d.get("availBal", 0)),
+            "frozenBal": float(d.get("frozenBal", 0)),
+        })
+    return {"totalEqUsd": float(acct.get("totalEq", 0)), "details": details}
+
+
+@app.get("/api/me/positions")
+async def me_positions(request: Request, inst_type: str = "SWAP"):
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await get_positions(inst_type)
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail="Подключите ключи OKX в настройках")
+    result = await client.get_positions(inst_type)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    return {"positions": result.get("data", [])}
+
+
+@app.post("/api/me/positions/close")
+async def me_positions_close(request: Request, data: dict = None):
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await close_position(data or {})
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail="Подключите ключи OKX в настройках")
+    d = data or {}
+    inst_id = d.get("instId")
+    if not inst_id:
+        raise HTTPException(status_code=400, detail="instId required")
+    pos_side = d.get("posSide") or "net"
+    mgn_mode = d.get("mgnMode", "cross")
+    result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result.get("message", ""))
+    return {"message": "Position closed", "data": result.get("data")}
+
+
+def _user_strategy_statuses(ub):
+    rot_status = ub.rotation.get_status() if ub.rotation else {
+        "running": False, "strategy": "momentum_rotation", "equity": 0,
+        "open_positions": {}, "total_trades": 0, "total_pnl": 0,
+    }
+    imp_status = ub.impulse.get_status() if ub.impulse else {
+        "running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
+        "equity": 0, "open_positions": [], "closed_trades": 0,
+    }
+    return rot_status, imp_status
+
+
+@app.get("/api/me/status")
+async def me_status(request: Request):
+    role, user_id, user_row = await _me_ctx(request)
+    if user_id is None:
+        return {
+            "role": "admin",
+            "plan": "owner",
+            "rotation": rotation.get_status() if rotation else {"running": False},
+            "impulse": impulse.get_status() if impulse else {"running": False},
+        }
+    ub = strategy_mgr.get_or_create(user_id)
+    rot_status, imp_status = _user_strategy_statuses(ub)
+    return {
+        "role": "user",
+        "plan": (user_row or {}).get("plan", "free"),
+        "active": _has_active_plan(user_row) if user_row else False,
+        "rotation": rot_status,
+        "impulse": imp_status,
+    }
+
+
+def _require_pro(request, user_row) -> None:
+    """Users must have an active Pro plan to run bots on their own account."""
+    if not _has_active_plan(user_row):
+        raise HTTPException(status_code=403, detail="Тариф Pro неактивен — оплатите подписку")
+
+
+@app.post("/api/me/rotation/start")
+async def me_rotation_start(request: Request, data: dict = None):
+    role, user_id, user_row = await _me_ctx(request)
+    if user_id is None:
+        return await rotation_start(data)
+    _require_pro(request, user_row)
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail="Подключите ключи OKX в настройках")
+    ub = strategy_mgr.get_or_create(user_id)
+    if ub.rotation and ub.rotation._running:
+        return {"message": "Rotation already running", **ub.rotation.get_status()}
+    d = data or {}
+    cfg = RotationConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]),
+        capital=float(d.get("capital", 10000.0)),
+        top_k=int(d.get("top_k", 2)),
+        roc_period=int(d.get("roc_period", 14)),
+        ema_fast=int(d.get("ema_fast", 20)),
+        ema_slow=int(d.get("ema_slow", 50)),
+        atr_period=int(d.get("atr_period", 14)),
+        breakeven_pct=float(d.get("breakeven_pct", 0.05)),
+        adx_min=float(d.get("adx_min", 29.0)),
+        min_hold_days=int(d.get("min_hold_days", 11)),
+        max_leverage=float(d.get("max_leverage", 2.0)),
+        risk_per_trade=float(d.get("risk_per_trade", 0.14)),
+        atr_stop_mult=float(d.get("atr_stop_mult", 2.7)),
+        trail_atr_mult=float(d.get("trail_atr_mult", 0.2)),
+        partial_tp_pct=float(d.get("partial_tp_pct", 0.08)),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
+        auto_execute=d.get("auto_execute", True),
+    )
+    bot = RotationStrategy(config=cfg, client_manager=ub.client_holder, db=db,
+                           notifier=_user_notifier(user_id))
+    bot.BOT_ID = ub.rot_bot_id
+    ub.rotation = bot
+    await bot.start()
+    return {"message": "Rotation started", **bot.get_status()}
+
+
+@app.post("/api/me/rotation/stop")
+async def me_rotation_stop(request: Request):
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await rotation_stop()
+    ub = strategy_mgr.get_or_create(user_id)
+    if not ub.rotation:
+        return {"message": "Rotation not running"}
+    await ub.rotation.stop()
+    ub.rotation = None
+    return {"message": "Rotation stopped"}
+
+
+@app.post("/api/me/impulse/start")
+async def me_impulse_start(request: Request, data: dict = None):
+    role, user_id, user_row = await _me_ctx(request)
+    if user_id is None:
+        return await impulse_start(data)
+    _require_pro(request, user_row)
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail="Подключите ключи OKX в настройках")
+    ub = strategy_mgr.get_or_create(user_id)
+    if ub.impulse and ub.impulse._running:
+        return {"message": "Impulse already running", **ub.impulse.get_status()}
+    d = data or {}
+    cfg = ImpulseConfig(
+        symbols=d.get("symbols", ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]),
+        capital=float(d.get("capital", 10000.0)),
+        top_k=int(d.get("top_k", 4)),
+        entry_roc=float(d.get("entry_roc", 4.0)),
+        max_adds=int(d.get("max_adds", 2)),
+        risk_per_trade=float(d.get("risk_per_trade", 0.10)),
+        sl_atr_mult=float(d.get("sl_atr_mult", 5.0)),
+        sl_atr_mult_short=float(d.get("sl_atr_mult_short", 5.0)),
+        trail_atr_mult=float(d.get("trail_atr_mult", 8.0)),
+        trail_atr_mult_short=float(d.get("trail_atr_mult_short", 8.0)),
+        cooldown_bars=int(d.get("cooldown_bars", 5)),
+        tp1_atr=float(d.get("tp1_atr", 2.0)),
+        tp1_frac=float(d.get("tp1_frac", 0.3)),
+        tp2_atr=float(d.get("tp2_atr", 6.0)),
+        tp2_frac=float(d.get("tp2_frac", 0.3)),
+        max_hold_bars=int(d.get("max_hold_bars", 30)),
+        max_leverage=float(d.get("max_leverage", 3.0)),
+        poll_interval_sec=int(d.get("poll_interval_sec", 300)),
+        auto_execute=d.get("auto_execute", True),
+    )
+    bot = ImpulseStrategy(config=cfg, client_manager=ub.client_holder, db=db,
+                          notifier=_user_notifier(user_id))
+    bot.BOT_ID = ub.imp_bot_id
+    ub.impulse = bot
+    await bot.start()
+    return {"message": "Impulse started", **bot.get_status()}
+
+
+@app.post("/api/me/impulse/stop")
+async def me_impulse_stop(request: Request):
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await impulse_stop()
+    ub = strategy_mgr.get_or_create(user_id)
+    if not ub.impulse:
+        return {"message": "Impulse not running"}
+    await ub.impulse.stop()
+    ub.impulse = None
+    return {"message": "Impulse stopped"}
+
+
+@app.get("/api/me/trades")
+async def me_trades(request: Request, limit: int = 50):
+    """Trade history for the authenticated user's bots."""
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        # Owner: rotation + impulse trade logs.
+        trades = []
+        if rotation:
+            trades += list(rotation._trade_log)
+        if impulse:
+            trades += list(impulse._trade_log)
+        trades.sort(key=lambda t: t.get("time", ""), reverse=True)
+        return {"trades": trades[:limit]}
+    ub = strategy_mgr.get_or_create(user_id)
+    trades = []
+    if ub.rotation and ub.rotation._trade_log:
+        trades += list(ub.rotation._trade_log)
+    if ub.impulse and ub.impulse._trade_log:
+        trades += list(ub.impulse._trade_log)
+    # Include persisted trades from DB for this user's bots.
+    try:
+        for bid in (ub.rot_bot_id, ub.imp_bot_id):
+            rows = await db.get_trades(bot_id=bid, limit=200)
+            for t in reversed(rows):
+                trades.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": t.get("inst_id", ""),
+                    "pnl": float(t.get("pnl", 0) or 0),
+                    "entry_price": float(t.get("px", 0) or 0),
+                    "reason": "closed",
+                })
+    except Exception:
+        pass
+    trades.sort(key=lambda t: t.get("time", ""), reverse=True)
+    return {"trades": trades[:limit]}
+
+
+@app.get("/api/me/pnl")
+async def me_pnl(request: Request):
+    """Realized PnL from the user's own trades (their bots only)."""
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await get_pnl()
+    ub = strategy_mgr.get_or_create(user_id)
+    total = 0.0
+    count = 0
+    try:
+        for bid in (ub.rot_bot_id, ub.imp_bot_id):
+            rows = await db.get_trades(bot_id=bid, limit=5000)
+            for t in rows:
+                pnl = float(t.get("pnl", 0) or 0)
+                if pnl != 0:
+                    total += pnl
+                    count += 1
+    except Exception:
+        pass
+    for bot in (ub.rotation, ub.impulse):
+        if bot and bot._trade_log:
+            for t in bot._trade_log:
+                pnl = float(t.get("pnl", 0) or 0)
+                if pnl != 0:
+                    total += pnl
+                    count += 1
+    return {
+        "total": round(total, 2),
+        "trades": count,
+        "unrealized": 0.0,
+        "source": "user_bots",
+    }
 
 
 # ── Health ──
@@ -529,12 +1034,15 @@ def _tag_trade_bot(trade: dict) -> str:
 
 
 def _db_bot_name(bot_id: str) -> str:
-    """Map DB bot_id -> UI bot name."""
-    if bot_id in ("momentum_strategy", "rotation_strategy", MOM_BOT_ID, ROT_BOT_ID):
+    """Map DB bot_id -> UI bot name. Handles per-user suffixed ids."""
+    if not bot_id:
+        return ""
+    base = str(bot_id).split(":")[0]
+    if base in ("momentum_strategy", "rotation_strategy", MOM_BOT_ID, ROT_BOT_ID):
         return "Momentum"
-    if bot_id in ("impulse_strategy", IMP_BOT_ID):
+    if base in ("impulse_strategy", IMP_BOT_ID):
         return "Impulse 1D"
-    if bot_id == VAL_BOT_ID:
+    if base == VAL_BOT_ID:
         return "Validation"
     return ""
 
@@ -1555,17 +2063,29 @@ async def telegram_status():
 
 @app.post("/api/telegram/config")
 async def telegram_config(data: dict = None):
-    """Set/update Telegram bot token and chat id at runtime."""
+    """Set/update Telegram bot token, chat id and signals channel at runtime."""
     d = data or {}
-    telegram.configure(token=d.get("token", ""), chat_id=d.get("chat_id", ""))
+    telegram.configure(token=d.get("token", ""), chat_id=d.get("chat_id", ""),
+                       channel_id=d.get("channel_id", ""))
     # Persist to DB so the config survives restarts/redeploys.
     try:
         if telegram.token:
             await db.set_setting("TELEGRAM_BOT_TOKEN", telegram.token)
         if telegram.chat_id:
             await db.set_setting("TELEGRAM_CHAT_ID", telegram.chat_id)
+        if telegram.channel_id:
+            await db.set_setting("TELEGRAM_CHANNEL_ID", telegram.channel_id)
     except Exception as e:
         print(f"[telegram/config] DB persist error: {e}", flush=True)
+    # Make sure the paid-signals poller is running if a token appeared.
+    global bot_poller
+    if telegram.token and (bot_poller is None or not bot_poller._running):
+        try:
+            bot_poller = TelegramBotPoller(notifier=telegram, db=db)
+            bot_poller.start()
+            print("[telegram/config] poller started", flush=True)
+        except Exception as e:
+            print(f"[telegram/config] poller start error: {e}", flush=True)
     return await telegram_status()
 
 
@@ -1648,6 +2168,138 @@ async def telegram_menu(request: Request, data: dict = None):
         "ok": ok,
         "url": url,
         "message": "Кнопка меню установлена" if ok else "Ошибка установки кнопки меню",
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# PAID SIGNAL SUBSCRIPTIONS (Telegram Stars)
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/subs")
+async def subs_list():
+    """List all subscribers with status + revenue stats (admin)."""
+    rows = await db.list_subscriptions()
+    subscribers = []
+    revenue = {"signals": 0, "pro": 0}
+    active = 0
+    for r in rows:
+        active_until = r.get("active_until", "")
+        is_active = _is_active(r)
+        if is_active:
+            active += 1
+        plan = r.get("plan", "signals")
+        # Every saved subscription row with a payment_id is a paid month.
+        if r.get("payment_id"):
+            revenue[plan if plan in revenue else "signals"] += PLANS_PRICE[plan if plan in PLANS_PRICE else "signals"]
+        subscribers.append({
+            "user_id": r.get("user_id"),
+            "username": r.get("username") or "",
+            "first_name": r.get("first_name") or "",
+            "plan": plan,
+            "status": "active" if is_active else "expired",
+            "active_until": active_until,
+            "last_payment": r.get("last_payment"),
+            "payment_id": r.get("payment_id"),
+        })
+    # Registered mini-app users (may not have paid yet).
+    users = []
+    try:
+        for u in await db.list_users():
+            users.append({
+                "telegram_id": u.get("telegram_id"),
+                "username": u.get("username") or "",
+                "first_name": u.get("first_name") or "",
+                "plan": u.get("plan"),
+                "active": _is_active(u),
+                "active_until": u.get("active_until"),
+                "creds_configured": bool(u.get("okx_key_enc")),
+            })
+    except Exception:
+        pass
+    return {
+        "subscribers": subscribers,
+        "users": users,
+        "stats": {
+            "total": len(subscribers),
+            "active": active,
+            "expired": len(subscribers) - active,
+            "revenue_stars": sum(revenue.values()),
+            "revenue_signals": revenue["signals"],
+            "revenue_pro": revenue["pro"],
+            "price_stars": PRICE_STARS,
+            "pro_price_stars": PRO_PRICE_STARS,
+        },
+    }
+
+
+@app.post("/api/subs/activate")
+async def subs_activate(data: dict = None):
+    """Manually grant/extend a subscription (e.g. cash payment or admin test)."""
+    d = data or {}
+    user_id = str(d.get("user_id", "")).strip()
+    days = int(d.get("days", PLAN_DAYS))
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    from datetime import timedelta as _td
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    try:
+        cur = await db.get_subscription(user_id)
+        base = now
+        if cur and cur.get("active_until"):
+            try:
+                base = _dt.strptime(cur["active_until"], "%Y-%m-%d %H:%M")
+            except ValueError:
+                base = now
+    except Exception:
+        base = now
+    until = (base + _td(days=days)).strftime("%Y-%m-%d %H:%M")
+    await db.save_subscription(
+        user_id=user_id,
+        username=d.get("username", ""),
+        first_name=d.get("first_name", ""),
+        active_until=until,
+        payment_id=d.get("payment_id", "") or f"manual_{int(_time.time())}",
+        plan="monthly", status="active",
+    )
+    # Optionally notify the user directly in Telegram.
+    if d.get("notify") and telegram.token and user_id.isdigit():
+        try:
+            await telegram._send_to(
+                user_id,
+                f"✅ Подписка активирована администратором до <b>{until}</b> (UTC).",
+                "HTML",
+            )
+        except Exception:
+            pass
+    return {"message": "Subscription activated", "active_until": until}
+
+
+@app.post("/api/subs/deactivate")
+async def subs_deactivate(data: dict = None):
+    """Immediately deactivate a user's subscription."""
+    d = data or {}
+    user_id = str(d.get("user_id", "")).strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    await db.delete_subscription(user_id)
+    return {"message": "Subscription deactivated"}
+
+
+@app.get("/api/subs/config")
+async def subs_config():
+    """Subscription product config + poller/channel readiness (admin)."""
+    return {
+        "price_stars": PRICE_STARS,
+        "plan_days": PLAN_DAYS,
+        "invite_days": INVITE_DAYS,
+        "pro_price_stars": PRO_PRICE_STARS,
+        "pro_plan_days": PRO_PLAN_DAYS,
+        "channel_id": telegram.channel_id or "",
+        "channel_configured": bool(telegram.channel_id),
+        "bot_configured": bool(telegram.token),
+        "poller_running": bool(bot_poller and bot_poller._running),
+        "notify_hint": "Сделайте бота админом приватного канала с правом приглашать",
     }
 
 
