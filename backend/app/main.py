@@ -294,6 +294,7 @@ PUBLIC_API_PATHS = {
     "/api/health",
     "/api/tracker",
     "/api/debug/client-error",
+    "/api/debug/client-errors",
     "/api/auth/login",
     "/api/auth/guest",
     "/api/auth/status",
@@ -3667,12 +3668,20 @@ async def mini_log_collect(data: dict):
 @app.post("/api/debug/client-error")
 async def client_error_collect(data: dict):
     """Collect frontend JS errors (public — no auth, for WebView diagnostics)."""
-    err = (data or {}).get("error") or {}
-    line = "CLIENT-ERR: " + str(err)[:2000]
+    err = (data or {}).get("error") or data or {}
+    msg = str(err.get("message") or err)[:2000]
+    stack = str(err.get("stack") or "")[:3000]
+    line = f"CLIENT-ERR: {msg}\n{stack}"
     _MINI_LOG_RING.append(line)
     del _MINI_LOG_RING[:-500]
-    logger.error("CLIENT-ERR %s", str(err)[:2000])
+    logger.error("CLIENT-ERR %s %s", msg, stack[:500])
     return {"ok": True}
+
+
+@app.get("/api/debug/client-errors")
+async def client_errors_read():
+    """Read recent captured client errors (public, for diagnostics)."""
+    return {"errors": [l for l in _MINI_LOG_RING if l.startswith("CLIENT-ERR")][-20:]}
 
 
 @app.get("/api/debug/mini-log")

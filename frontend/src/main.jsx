@@ -18,6 +18,7 @@ window.addEventListener('error', (e) => {
   reportClientError({
     type: 'error',
     message: String(e.message || ''),
+    stack: String(e.error?.stack || '').slice(0, 3000),
     source: String(e.filename || ''),
     line: e.lineno,
     col: e.colno,
@@ -26,8 +27,10 @@ window.addEventListener('error', (e) => {
 })
 window.addEventListener('unhandledrejection', (e) => {
   let reason = ''
+  let stack = ''
   try { reason = String(e.reason && e.reason.message ? e.reason.message : e.reason) } catch { reason = String(e.reason) }
-  reportClientError({ type: 'unhandledrejection', message: reason, href: window.location.href })
+  try { stack = String(e.reason?.stack || '') } catch { stack = '' }
+  reportClientError({ type: 'unhandledrejection', message: reason, stack: stack.slice(0, 3000), href: window.location.href })
 })
 
 ReactDOM.createRoot(document.getElementById('root')).render(

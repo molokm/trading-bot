@@ -29,17 +29,26 @@ export const useAuth = () => useContext(AuthContext)
 class MiniErrorBoundary extends React.Component {
   constructor(props) {
     super(props)
-    this.state = { error: null }
+    this.state = { error: null, stack: '', compStack: '' }
   }
   static getDerivedStateFromError(error) {
-    return { error: String(error && error.message ? error.message : error) }
+    return {
+      error: String(error && error.message ? error.message : error),
+      stack: String(error && error.stack ? error.stack : '').slice(0, 1200),
+    }
   }
   componentDidCatch(error, info) {
+    this.setState({ compStack: String(info?.componentStack || '').slice(0, 800) })
     try {
       fetch('/api/debug/client-error', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'react', message: String(error), component: String(info?.componentStack || '').slice(0, 1500) }),
+        body: JSON.stringify({
+          type: 'react',
+          message: String(error && error.message ? error.message : error),
+          stack: String(error?.stack || '').slice(0, 3000),
+          component: String(info?.componentStack || '').slice(0, 1500),
+        }),
       }).catch(() => {})
     } catch { /* ignore */ }
   }
@@ -49,7 +58,10 @@ class MiniErrorBoundary extends React.Component {
         <div className="h-screen flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-center">
           <div className="text-3xl">⚠️</div>
           <div className="text-sm font-semibold text-[var(--loss)]">Произошла ошибка</div>
-          <pre className="text-2xs text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-w-full">{this.state.error}</pre>
+          <pre className="text-2xs text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-w-full max-h-64 overflow-y-auto">{this.state.error}</pre>
+          {this.state.stack && (
+            <pre className="text-2xs text-[var(--txt-muted)] whitespace-pre-wrap break-words max-w-full max-h-64 overflow-y-auto text-left border border-[var(--border)] rounded p-2">{this.state.stack}</pre>
+          )}
           <button className="btn btn-primary" onClick={() => window.location.reload()}>Перезагрузить</button>
         </div>
       )
