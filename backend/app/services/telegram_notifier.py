@@ -214,10 +214,11 @@ class TelegramNotifier:
         }.get(reason, reason)
 
     def open_msg(self, coin: str, side: str, price: float, stop: float,
-                 size: float, leverage: float) -> str:
+                 size: float, leverage: float, bot_name: str = "") -> str:
         return (
             f"{self._arrow(side)} <b>ОТКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
+            f"Бот: <b>{_esc(bot_name)}</b>\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: <b>{self._side_label(side)}</b>\n"
             f"Вход: {_esc(price)}\n"
@@ -227,12 +228,13 @@ class TelegramNotifier:
         )
 
     def close_msg(self, coin: str, side: str, entry: float, exit_px: float,
-                  pnl: float, reason: str) -> str:
+                  pnl: float, reason: str, bot_name: str = "") -> str:
         icon = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
         return (
             f"{icon} <b>ЗАКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
+            f"Бот: <b>{_esc(bot_name)}</b>\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: {self._side_label(side)}\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
@@ -241,11 +243,13 @@ class TelegramNotifier:
         )
 
     def partial_msg(self, coin: str, side: str, entry: float, exit_px: float,
-                    pnl: float, closed_sz: float, remaining_sz: float) -> str:
+                    pnl: float, closed_sz: float, remaining_sz: float,
+                    bot_name: str = "") -> str:
         sign = "+" if pnl >= 0 else ""
         return (
             f"📌 <b>ЧАСТИЧНЫЙ ТЕЙК</b>\n"
             f"━━━━━━━━━━━━━━━\n"
+            f"Бот: <b>{_esc(bot_name)}</b>\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Закрыто: {_esc(closed_sz)} (осталось {_esc(remaining_sz)})\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
@@ -253,10 +257,11 @@ class TelegramNotifier:
         )
 
     def add_msg(self, coin: str, side: str, price: float, size: float,
-                total: float) -> str:
+                total: float, bot_name: str = "") -> str:
         return (
             f"⬆️ <b>ДОКУПКА (PYRAMID)</b>\n"
             f"━━━━━━━━━━━━━━━\n"
+            f"Бот: <b>{_esc(bot_name)}</b>\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: {self._side_label(side)}\n"
             f"Цена: {_esc(price)}\n"
