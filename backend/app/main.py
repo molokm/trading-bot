@@ -2228,18 +2228,21 @@ async def telegram_simulate(data: dict = None):
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
         size=0.03, leverage=3.0, bot_name="Momentum Rotation v4",
+        signal_id=123,
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
-        pnl=76.50, closed_sz=0.015, remaining_sz=0.015, bot_name="Momentum Rotation v4",
+        pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
+        bot_name="Momentum Rotation v4", signal_id=123,
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
         pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v4",
+        signal_id=123,
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
-        bot_name="Impulse 1D v1",
+        bot_name="Impulse 1D v1", signal_id=124,
     )
 
     results = {}

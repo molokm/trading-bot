@@ -482,7 +482,7 @@ class ImpulseStrategy:
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG partial notify error: {e}", flush=True)
@@ -545,7 +545,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
@@ -680,7 +680,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG open notify error: {e}", flush=True)
@@ -758,7 +758,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.add_msg(
                     coin=coin, side=pos.side, price=round(fill_px, 2),
                     size=round(add_sz, 4), total=round(pos.size, 4),
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG add notify error: {e}", flush=True)

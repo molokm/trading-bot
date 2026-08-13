@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import parse_qsl
 
@@ -121,12 +122,22 @@ class TelegramNotifier:
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, json=payload)
-                return bool(resp.json().get("ok"))
-        except Exception:
-            return False
+        # Retry transient failures (network/429/5xx) so a single Telegram hiccup
+        # does not silently drop a trade signal. Log any final failure.
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(url, json=payload)
+                    data = resp.json()
+                if data.get("ok"):
+                    return True
+                if attempt < 2:
+                    await asyncio.sleep(1 + attempt)
+            except Exception:
+                if attempt < 2:
+                    await asyncio.sleep(1 + attempt)
+        print(f"[TG] send FAILED chat={chat_id} text={text[:80]!r}", flush=True)
+        return False
 
     # ─── Mini App helpers ───
 
@@ -202,6 +213,29 @@ class TelegramNotifier:
         return "LONG" if side == "long" else "SHORT"
 
     @staticmethod
+    def _trade_line(signal_id) -> str:
+        """Link message to a trade. Entry/exit/partial/adds of the SAME trade
+        share the same signal_id, so Telegram messages can be matched."""
+        try:
+            sid = int(signal_id or 0)
+        except (TypeError, ValueError):
+            sid = 0
+        return f"Сделка №<b>{sid}</b>" if sid else ""
+
+    @staticmethod
+    def _ts_line() -> str:
+        return datetime.now(timezone.utc).strftime("🕐 %d.%m %H:%M:%S UTC")
+
+    def _footer(self, signal_id) -> str:
+        """Trailing lines shared by every trade message: trade number + time."""
+        lines = []
+        sid = self._trade_line(signal_id)
+        if sid:
+            lines.append(sid)
+        lines.append(self._ts_line())
+        return "\n" + "\n".join(lines)
+
+    @staticmethod
     def _reason_label(reason: str) -> str:
         return {
             "trail_stop": "стоп по трейлингу",
@@ -214,7 +248,8 @@ class TelegramNotifier:
         }.get(reason, reason)
 
     def open_msg(self, coin: str, side: str, price: float, stop: float,
-                 size: float, leverage: float, bot_name: str = "") -> str:
+                 size: float, leverage: float, bot_name: str = "",
+                 signal_id: int = 0) -> str:
         return (
             f"{self._arrow(side)} <b>ОТКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -224,11 +259,12 @@ class TelegramNotifier:
             f"Вход: {_esc(price)}\n"
             f"Стоп: {_esc(stop)}\n"
             f"Размер: {_esc(size)}\n"
-            f"Плечо: {_esc(leverage)}x"
+            f"Плечо: {_esc(leverage)}x{self._footer(signal_id)}"
         )
 
     def close_msg(self, coin: str, side: str, entry: float, exit_px: float,
-                  pnl: float, reason: str, bot_name: str = "") -> str:
+                  pnl: float, reason: str, bot_name: str = "",
+                  signal_id: int = 0) -> str:
         icon = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
         return (
@@ -239,12 +275,12 @@ class TelegramNotifier:
             f"Направление: {self._side_label(side)}\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
             f"PnL: <b>{sign}{_esc(pnl)} USDT</b>\n"
-            f"Причина: {self._reason_label(reason)}"
+            f"Причина: {self._reason_label(reason)}{self._footer(signal_id)}"
         )
 
     def partial_msg(self, coin: str, side: str, entry: float, exit_px: float,
                     pnl: float, closed_sz: float, remaining_sz: float,
-                    bot_name: str = "") -> str:
+                    bot_name: str = "", signal_id: int = 0) -> str:
         sign = "+" if pnl >= 0 else ""
         return (
             f"📌 <b>ЧАСТИЧНЫЙ ТЕЙК</b>\n"
@@ -253,11 +289,11 @@ class TelegramNotifier:
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Закрыто: {_esc(closed_sz)} (осталось {_esc(remaining_sz)})\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
-            f"PnL: {sign}{_esc(pnl)} USDT"
+            f"PnL: {sign}{_esc(pnl)} USDT{self._footer(signal_id)}"
         )
 
     def add_msg(self, coin: str, side: str, price: float, size: float,
-                total: float, bot_name: str = "") -> str:
+                total: float, bot_name: str = "", signal_id: int = 0) -> str:
         return (
             f"⬆️ <b>ДОКУПКА (PYRAMID)</b>\n"
             f"━━━━━━━━━━━━━━━\n"
@@ -265,5 +301,5 @@ class TelegramNotifier:
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: {self._side_label(side)}\n"
             f"Цена: {_esc(price)}\n"
-            f"Докупка: {_esc(size)} (всего {_esc(total)})"
+            f"Докупка: {_esc(size)} (всего {_esc(total)}){self._footer(signal_id)}"
         )
