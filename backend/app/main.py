@@ -1414,7 +1414,11 @@ async def momentum_status():
             "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0,
             "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC,
         }
-    return rotation.get_status()
+    status = rotation.get_status()
+    stats = (await _bot_history_stats()).get("Momentum")
+    if stats:
+        status.update(stats)
+    return status
 
 
 @app.post("/api/momentum/start")
@@ -1903,7 +1907,11 @@ async def impulse_status():
         return {"running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
                 "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
                 "config": None, "description": IMPULSE_DESC}
-    return impulse.get_status()
+    status = impulse.get_status()
+    stats = (await _bot_history_stats()).get("Impulse 1D")
+    if stats:
+        status.update(stats)
+    return status
 
 
 @app.post("/api/impulse/start")
@@ -3185,6 +3193,52 @@ async def get_pnl():
         "fees": round(total_fees, 2),
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
     }
+
+
+_bot_stats_cache = {"ts": 0, "data": {}}  # {"Momentum": {...}, "Impulse 1D": {...}}
+_BOT_STATS_TTL = 60  # seconds
+
+
+async def _bot_history_stats() -> dict:
+    """Per-bot cumulative stats (Momentum / Impulse 1D) from the same
+    OKX-history source as /api/pnl, so bot cards survive restarts instead of
+    resetting to 0 when the in-memory trade log is empty.
+
+    Cached for _BOT_STATS_TTL seconds because the status endpoints are polled
+    every ~10s by the dashboard."""
+    now_s = _time.time()
+    if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL:
+        return _bot_stats_cache["data"]
+    stats = {}
+    try:
+        resp = await get_paired_trades(limit=5000)
+        for t in resp.get("trades", []):
+            bot = t.get("bot") or ""
+            if bot not in ("Momentum", "Impulse 1D"):
+                continue
+            if (t.get("reason") or "").lower() == "open":
+                continue
+            try:
+                pnl = float(t.get("pnl", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            s = stats.setdefault(
+                bot, {"total_pnl": 0.0, "total_trades": 0, "wins": 0, "losses": 0})
+            s["total_pnl"] += pnl
+            s["total_trades"] += 1
+            if pnl > 0:
+                s["wins"] += 1
+            else:
+                s["losses"] += 1
+        for bot, s in stats.items():
+            total = s["total_trades"]
+            s["total_pnl"] = round(s["total_pnl"], 2)
+            s["win_rate"] = round(s["wins"] / total * 100, 1) if total else 0.0
+    except Exception as e:
+        print(f"[bot_stats] error: {e}", flush=True)
+    _bot_stats_cache["ts"] = now_s
+    _bot_stats_cache["data"] = stats
+    return stats
 
 
 # ── Trades ──
