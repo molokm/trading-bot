@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap
+  ArrowDownRight, Shield, Loader2, Zap, Key
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
