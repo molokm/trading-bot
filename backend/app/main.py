@@ -293,6 +293,7 @@ def get_token(request: Request):
 PUBLIC_API_PATHS = {
     "/api/health",
     "/api/tracker",
+    "/api/debug/client-error",
     "/api/auth/login",
     "/api/auth/guest",
     "/api/auth/status",
@@ -3661,6 +3662,17 @@ async def mini_log_collect(data: dict):
         for line in lines:
             logger.info("MINI %s", line)
     return {"saved": len(logs)}
+
+
+@app.post("/api/debug/client-error")
+async def client_error_collect(data: dict):
+    """Collect frontend JS errors (public — no auth, for WebView diagnostics)."""
+    err = (data or {}).get("error") or {}
+    line = "CLIENT-ERR: " + str(err)[:2000]
+    _MINI_LOG_RING.append(line)
+    del _MINI_LOG_RING[:-500]
+    logger.error("CLIENT-ERR %s", str(err)[:2000])
+    return {"ok": True}
 
 
 @app.get("/api/debug/mini-log")

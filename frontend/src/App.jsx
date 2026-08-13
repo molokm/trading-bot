@@ -25,6 +25,39 @@ import { GlossaryModal, OnboardingTour } from './components/ui'
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
 
+/* ═══ ErrorBoundary — показать ошибку вместо белого экрана ═══ */
+class MiniErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error: String(error && error.message ? error.message : error) }
+  }
+  componentDidCatch(error, info) {
+    try {
+      fetch('/api/debug/client-error', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'react', message: String(error), component: String(info?.componentStack || '').slice(0, 1500) }),
+      }).catch(() => {})
+    } catch { /* ignore */ }
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="h-screen flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-center">
+          <div className="text-3xl">⚠️</div>
+          <div className="text-sm font-semibold text-[var(--loss)]">Произошла ошибка</div>
+          <pre className="text-2xs text-[var(--txt-secondary)] whitespace-pre-wrap break-words max-w-full">{this.state.error}</pre>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>Перезагрузить</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
 function AppRouter() {
   const { auth, setAuth } = useAuth()
   if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
@@ -185,7 +218,7 @@ export default function App() {
           <AuthContext.Provider value={{ auth, setAuth }}>
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
-              <Route path="/mini" element={<MiniAppPage />} />
+              <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
               <Route path="/tracker" element={<TrackerPage />} />
               <Route path="/*" element={<AppRouter />} />
             </Routes>
