@@ -2869,6 +2869,130 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
     return paired
 
 
+def _pair_bills(bills: list) -> list:
+    """Pair OKX trade bills into entry+close rows using subType and exact pnl.
+
+    Authoritative source: unlike fills, every trade bill carries subType
+    (3/4 = open, 5/6 = close) plus exact pnl/fee/px/sz, so it stays correct on
+    demo accounts where fills lack fillPnl/posSide and sequential tracking breaks
+    under rapid open/close churn. Close bills sharing one ordId (partial fills)
+    are aggregated into a single row."""
+    by_inst: dict[str, list] = {}
+    for b in bills:
+        by_inst.setdefault(b.get("instId", ""), []).append(b)
+
+    rows = []
+
+    def _flush_close(pending: dict, cur: dict):
+        """Emit the aggregated close row and reduce the open position."""
+        avg_entry = 0.0
+        pos_side = "short" if pending["side"] == "buy" else "long"
+        if cur is not None and cur["size"] > 0:
+            avg_entry = cur["cost"] / cur["size"]
+            pos_side = cur["pos_side"]
+            close_sz = min(pending["size"], cur["size"])
+            cur["size"] -= close_sz
+            cur["cost"] = avg_entry * cur["size"] if cur["size"] > 0 else 0.0
+            cur["fee"] += pending["fee"]
+        rows.append({
+            "time": _ms_to_iso(pending["time"]),
+            "entry_time": _ms_to_iso(pending["entry_time"]),
+            "side": pending["side"],
+            "symbol": pending["inst_id"], "inst_id": pending["inst_id"],
+            "size": round(pending["size"], 4),
+            "pnl": round(pending["pnl"], 4),
+            "ord_id": pending["ord_id"], "fee": round(pending["fee"], 4),
+            "entry": round(avg_entry, 4), "entry_price": round(avg_entry, 4),
+            "exit_price": round(pending["px"], 4),
+            "reason": "closed", "pos_side": pos_side, "source": "okx_bills",
+        })
+
+    for inst_id, inst_bills in by_inst.items():
+        inst_bills.sort(key=lambda x: x.get("ts", "0"))
+        cur = None  # accumulated open: {size,cost,time,ord_id,side,pos_side,fee}
+        pending = None  # aggregated close for the current ordId
+        for b in inst_bills:
+            sub = str(b.get("subType", "") or "")
+            try:
+                sz = float(b.get("sz", 0) or 0)
+                px = float(b.get("px", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            try:
+                pnl = float(b.get("pnl", 0) or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            fee = abs(float(b.get("fee", 0) or 0))
+            ts = str(b.get("ts", "") or "")
+            ord_id = str(b.get("ordId", "") or "").strip()
+            side = b.get("side", "")
+
+            if sub in ("3", "4"):
+                # Entry (open). Flush any pending close, then accumulate.
+                if pending is not None:
+                    _flush_close(pending, cur)
+                    if cur is not None and cur["size"] <= 1e-9:
+                        cur = None
+                    pending = None
+                if cur is None:
+                    cur = {
+                        "size": 0.0, "cost": 0.0, "time": ts, "ord_id": ord_id,
+                        "side": side,
+                        "pos_side": "short" if side == "sell" else "long",
+                        "fee": 0.0,
+                    }
+                cur["size"] += sz
+                cur["cost"] += sz * px
+                cur["fee"] += fee
+                continue
+
+            if sub in ("5", "6"):
+                # Close (realized PnL).
+                if pending is None:
+                    pending = {
+                        "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
+                        "time": ts, "px": px, "side": side,
+                        "entry_time": cur["time"] if cur else ts,
+                        "inst_id": inst_id,
+                    }
+                elif pending["ord_id"] == ord_id:
+                    pending["px"] = px
+                    pending["time"] = ts
+                else:
+                    _flush_close(pending, cur)
+                    if cur is not None and cur["size"] <= 1e-9:
+                        cur = None
+                    pending = {
+                        "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
+                        "time": ts, "px": px, "side": side,
+                        "entry_time": cur["time"] if cur else ts,
+                        "inst_id": inst_id,
+                    }
+                pending["size"] += sz
+                pending["pnl"] += pnl
+                pending["fee"] += fee
+                continue
+
+        if pending is not None:
+            _flush_close(pending, cur)
+        if cur is not None and cur["size"] > 0:
+            avg_entry = cur["cost"] / cur["size"] if cur["size"] > 0 else 0.0
+            rows.append({
+                "time": _ms_to_iso(cur["time"]),
+                "entry_time": _ms_to_iso(cur["time"]),
+                "side": cur["side"],
+                "symbol": inst_id, "inst_id": inst_id,
+                "size": round(cur["size"], 4), "pnl": None, "ord_id": cur["ord_id"],
+                "fee": round(cur["fee"], 4),
+                "entry": round(avg_entry, 4), "entry_price": round(avg_entry, 4),
+                "exit_price": None,
+                "reason": "open", "pos_side": cur["pos_side"], "source": "okx_bills",
+            })
+
+    rows.sort(key=lambda t: (t.get("time") or ""), reverse=True)
+    return rows
+
+
 # ── PnL from OKX bills ──
 
 async def _get_okx_realized_pnl() -> dict:
@@ -3392,13 +3516,13 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         return b if b in ("Momentum", "Impulse 1D") else ""
 
     try:
-        fills_paired = await _pair_fills(raw_fills)
+        fills_paired = _pair_bills(bills) if bills else await _pair_fills(raw_fills)
         for t in fills_paired:
             inst = t.get("inst_id", "") or t.get("symbol", "")
             is_open = t.get("reason") == "open"
             ord_id = str(t.get("ord_id", "") or "").strip()
             bill = bill_by_ord.get(ord_id)
-            if bill:
+            if bill and t.get("source") != "okx_bills":
                 t = dict(t)
                 t["pnl"] = bill["pnl"]
                 t["fee"] = str(bill["fee"])
