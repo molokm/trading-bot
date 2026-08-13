@@ -2941,130 +2941,133 @@ async def get_pnl():
     per_bot = {}
     account_total = 0.0  # realized PnL of the WHOLE account (all fills)
 
-    # ── 1. Primary: OKX bills — realized PnL source of truth ──
-    # Sums closing fills (pnl != 0) of the account. The `total` card and periods
-    # count ONLY the bot's strategies (rotation/impulse), attributed via the
-    # clOrdId prefix (rot/imp) with a fallback to ordId persisted in the trades
-    # table (covers orders placed before clOrdId was introduced). Every other
-    # fill (demo-validator, manual MCP, untouched) still contributes to
-    # `account_total`, shown as an "all-time on account" footnote on the card.
+    # ── 1. Primary: corrected History rows (get_paired_trades) ──
+    # get_paired_trades now builds every trade from OKX fills/bills (exact
+    # realized PnL and fee per ord_id, real prices, bot attribution), so this
+    # is the single source for BOTH the cards and the History page.
+    # `total`/periods/per_bot count ONLY the bot strategies (Momentum/Impulse 1D);
+    # `account_total` covers every closed trade on the account (demo-validator,
+    # manual MCP, etc.) and is shown as an "all-time on account" footnote.
     try:
-        bills = await _fetch_all_trade_bills()
-        if bills:
-            source = "okx_bills"
+        resp = await get_paired_trades(limit=5000)
+        trades = resp.get("trades", [])
+        closed = [t for t in trades if (t.get("reason") or "").lower() != "open"]
+        if closed:
+            source = "history"
             now = dt.now(tz.utc)
             week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            try:
-                _rows = await db._fetchall(
-                    "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-                )
-                ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0] for r in _rows if r.get("ord_id")}
-            except Exception:
-                ord_to_bot = {}
-            count = 0
-            strat_count = 0
-            for b in bills:
+            for t in closed:
                 try:
-                    b_pnl = float(b.get("pnl") or 0)
+                    pnl = float(t.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
-                    b_pnl = 0.0
-                ts_str = b.get("ts", "")
-                if b_pnl != 0:
-                    account_total += b_pnl
-                    count += 1
-                cid = str(b.get("clOrdId", "")).strip()
-                if cid.startswith("rot"):
-                    bot = "Momentum"
-                elif cid.startswith("imp"):
-                    bot = "Impulse 1D"
-                else:
-                    bid = ord_to_bot.get(str(b.get("ordId", "")).strip())
-                    bot = _db_bot_name(bid) if bid else ""
-                    if bot not in ("Momentum", "Impulse 1D"):
-                        continue  # demo-validator / manual / unmatched: not a strategy trade
-                total_realized += b_pnl
-                strat_count += 1
-                per_bot[bot] = per_bot.get(bot, 0.0) + b_pnl
+                    continue
+                bot = t.get("bot") or ""
+                strat = bot in ("Momentum", "Impulse 1D")
+                account_total += pnl
+                if not strat:
+                    continue
+                total_realized += pnl
+                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                 try:
-                    b_fee = abs(float(b.get("fee") or 0))
+                    fee = abs(float(t.get("fee", 0) or 0))
                 except (TypeError, ValueError):
-                    b_fee = 0.0
-                total_fees += b_fee
-                if ts_str:
+                    fee = 0.0
+                total_fees += fee
+                time_str = t.get("time", "") or t.get("exit_time", "")
+                if time_str:
                     try:
-                        b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                        age_sec = (now - b_time).total_seconds()
+                        t_time = dt.fromisoformat(time_str)
+                        if t_time.tzinfo is None:
+                            t_time = t_time.replace(tzinfo=tz.utc)
+                        age_sec = (now - t_time).total_seconds()
                         if age_sec <= 86400:
-                            realized_1d += b_pnl
+                            realized_1d += pnl
                         if age_sec <= 604800:
-                            realized_7d += b_pnl
+                            realized_7d += pnl
                         if age_sec <= 2592000:
-                            realized_30d += b_pnl
-                        if b_time >= week_start:
-                            realized_week += b_pnl
+                            realized_30d += pnl
+                        if t_time >= week_start:
+                            realized_week += pnl
                     except (ValueError, OSError, TypeError):
-                        realized_30d += b_pnl
-            print(f"[pnl] OKX bills: strat_total={total_realized:.2f} account_total={account_total:.2f} "
+                        realized_30d += pnl
+                else:
+                    realized_30d += pnl
+            print(f"[pnl] History (primary): total={total_realized:.2f} account_total={account_total:.2f} "
                   f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closing_fills={count} strat_fills={strat_count} per_bot={per_bot}", flush=True)
+                  f"fees={total_fees:.2f} closed={len(closed)} per_bot={per_bot}", flush=True)
     except Exception as e:
         import traceback
-        print(f"[pnl] OKX bills error: {e}", flush=True)
+        print(f"[pnl] History source error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: sum PnL of every closed trade from the History list ──
-    # Uses the SAME trade list as the History page (get_paired_trades), which is
-    # deduplicated by ord_id. Used only when no bills are available.
+    # ── 2. Fallback: OKX bills — realized PnL source of truth ──
+    # Used when the History rows are unavailable. Sums closing fills (pnl != 0)
+    # of the account; strategy attribution via the clOrdId prefix (rot/imp) with
+    # a fallback to ordId persisted in the trades table. Cross-checks the rows
+    # path against the bills so any future divergence is caught loudly.
     if source == "none":
         try:
-            resp = await get_paired_trades(limit=5000)
-            trades = resp.get("trades", [])
-            if trades:
-                source = "history"
+            bills = await _fetch_all_trade_bills()
+            if bills:
+                source = "okx_bills"
                 now = dt.now(tz.utc)
                 week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                for t in trades:
-                    reason = (t.get("reason") or "").lower()
-                    if reason == "open":
-                        continue
+                try:
+                    _rows = await db._fetchall(
+                        "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+                    )
+                    ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0] for r in _rows if r.get("ord_id")}
+                except Exception:
+                    ord_to_bot = {}
+                count = 0
+                strat_count = 0
+                for b in bills:
                     try:
-                        pnl = float(t.get("pnl", 0) or 0)
+                        b_pnl = float(b.get("pnl") or 0)
                     except (TypeError, ValueError):
-                        continue
-                    total_realized += pnl
-                    account_total += pnl
-                    bot = t.get("bot") or "Прочие"
-                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                    try:
-                        fee = abs(float(t.get("fee", 0) or 0))
-                    except (TypeError, ValueError):
-                        fee = 0.0
-                    total_fees += fee
-                    time_str = t.get("time", "") or t.get("exit_time", "")
-                    if time_str:
-                        try:
-                            t_time = dt.fromisoformat(time_str)
-                            if t_time.tzinfo is None:
-                                t_time = t_time.replace(tzinfo=tz.utc)
-                            age_sec = (now - t_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += pnl
-                            if age_sec <= 604800:
-                                realized_7d += pnl
-                            if age_sec <= 2592000:
-                                realized_30d += pnl
-                            if t_time >= week_start:
-                                realized_week += pnl
-                        except (ValueError, OSError, TypeError):
-                            realized_30d += pnl
+                        b_pnl = 0.0
+                    ts_str = b.get("ts", "")
+                    if b_pnl != 0:
+                        account_total += b_pnl
+                        count += 1
+                    cid = str(b.get("clOrdId", "")).strip()
+                    if cid.startswith("rot"):
+                        bot = "Momentum"
+                    elif cid.startswith("imp"):
+                        bot = "Impulse 1D"
                     else:
-                        realized_30d += pnl
-                print(f"[pnl] History: total={total_realized:.2f} account_total={account_total:.2f} "
+                        bid = ord_to_bot.get(str(b.get("ordId", "")).strip())
+                        bot = _db_bot_name(bid) if bid else ""
+                        if bot not in ("Momentum", "Impulse 1D"):
+                            continue  # demo-validator / manual / unmatched: not a strategy trade
+                    total_realized += b_pnl
+                    strat_count += 1
+                    per_bot[bot] = per_bot.get(bot, 0.0) + b_pnl
+                    try:
+                        b_fee = abs(float(b.get("fee") or 0))
+                    except (TypeError, ValueError):
+                        b_fee = 0.0
+                    total_fees += b_fee
+                    if ts_str:
+                        try:
+                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                            age_sec = (now - b_time).total_seconds()
+                            if age_sec <= 86400:
+                                realized_1d += b_pnl
+                            if age_sec <= 604800:
+                                realized_7d += b_pnl
+                            if age_sec <= 2592000:
+                                realized_30d += b_pnl
+                            if b_time >= week_start:
+                                realized_week += b_pnl
+                        except (ValueError, OSError, TypeError):
+                            realized_30d += b_pnl
+                print(f"[pnl] OKX bills (fallback): strat_total={total_realized:.2f} account_total={account_total:.2f} "
                       f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                      f"fees={total_fees:.2f} per_bot={per_bot}", flush=True)
+                      f"fees={total_fees:.2f} closing_fills={count} strat_fills={strat_count} per_bot={per_bot}", flush=True)
         except Exception as e:
             import traceback
-            print(f"[pnl] History source error: {e}", flush=True)
+            print(f"[pnl] OKX bills error: {e}", flush=True)
             traceback.print_exc()
 
     # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
@@ -3236,12 +3239,189 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "bot_id": t.get("bot_id", ""),
                 })
 
-    if raw:
-        # 2. Pair entries with exits per (inst_id) in chronological order.
+    # 2. OKX authoritative rows FIRST (bills = exact realized PnL/fee per ord_id,
+    #    fills = real prices + open/close pairing). A local ledger row is trusted
+    #    only when OKX does not cover the same trade — this keeps the pushed
+    #    rows faithful to the exchange (the ledger may carry pnl=0 / placeholder
+    #    prices, e.g. XRP closes, which previously broke the History cards).
+    okx_rows = []
+    okx_ord_ids = set()
+    okx_close_key = set()  # (inst_id, close-time floored to the minute)
+    okx_open_keys = {}     # inst_id -> set(ord_id) for open rows
+    bill_by_ord = {}
+    flag_raw = bool(raw)
+    try:
+        bills = await _fetch_all_trade_bills()
+        for b in bills:
+            bid = str(b.get("ordId", "")).strip()
+            if not bid:
+                continue
+            try:
+                bp = float(b.get("pnl") or 0)
+            except (TypeError, ValueError):
+                bp = 0.0
+            try:
+                bf = abs(float(b.get("fee") or 0))
+            except (TypeError, ValueError):
+                bf = 0.0
+            prev = bill_by_ord.get(bid)
+            if prev is None or (bp != 0 and prev.get("pnl") == 0):
+                bill_by_ord[bid] = {"pnl": bp, "fee": bf,
+                                    "ts": b.get("ts", ""),
+                                    "clOrdId": str(b.get("clOrdId", "") or "").strip()}
+    except Exception as e:
+        print(f"[trades/paired] bills fetch error: {e}", flush=True)
+
+    try:
+        _fills_cache_ts = 0  # bypass fills cache
+        raw_fills = await _fetch_okx_fills(limit=300)
+    except Exception as e:
+        print(f"[trades/paired] fills fetch error: {e}", flush=True)
+        raw_fills = []
+    raw_fills = [f for f in raw_fills
+                 if not str(f.get("clOrdId", "") or "").startswith("val")]
+    try:
+        val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
+            "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
+            " AND ord_id != ''"
+            if not db._pg_mode else
+            "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
+            " AND ord_id != ''",
+            (VAL_BOT_ID,)) if r.get("ord_id")}
+    except Exception:
+        val_ord_ids = set()
+    if val_ord_ids:
+        raw_fills = [f for f in raw_fills
+                     if str(f.get("ordId", "")).strip() not in val_ord_ids]
+
+    # ord_id -> bot (attribution fallback for orders without clOrdId)
+    try:
+        _rows = await db._fetchall(
+            "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+        )
+        ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0]
+                      for r in _rows if r.get("ord_id")}
+    except Exception:
+        ord_to_bot = {}
+    fill_clord = {str(f.get("ordId", "")).strip(): str(f.get("clOrdId", "") or "").strip()
+                  for f in raw_fills}
+
+    def _okx_bot(ord_id: str) -> str:
+        cid = fill_clord.get(ord_id, "") or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
+        if cid.startswith("rot"):
+            return "Momentum"
+        if cid.startswith("imp"):
+            return "Impulse 1D"
+        b = _db_bot_name(ord_to_bot.get(ord_id, ""))
+        return b if b in ("Momentum", "Impulse 1D") else ""
+
+    try:
+        fills_paired = await _pair_fills(raw_fills)
+        for t in fills_paired:
+            inst = t.get("inst_id", "") or t.get("symbol", "")
+            is_open = t.get("reason") == "open"
+            ord_id = str(t.get("ord_id", "") or "").strip()
+            bill = bill_by_ord.get(ord_id)
+            if bill:
+                t = dict(t)
+                t["pnl"] = bill["pnl"]
+                t["fee"] = str(bill["fee"])
+            if is_open:
+                okx_open_keys.setdefault(inst, set()).add(ord_id)
+            else:
+                okx_ord_ids.add(ord_id)
+                try:
+                    okx_close_key.add((inst, (t.get("time") or "")[:16]))
+                except Exception:
+                    pass
+            entry_px = t.get("entry", 0) or t.get("entry_price", 0)
+            exit_px = t.get("exit_price", 0)
+            okx_rows.append({
+                "time": t.get("time", ""),
+                "entry_time": t.get("entry_time", ""),
+                "exit_time": t.get("time", "") if not is_open else None,
+                "side": "buy" if t.get("pos_side") == "long" else "sell",
+                "symbol": inst,
+                "inst_id": inst,
+                "ord_id": ord_id,
+                "entry": entry_px,
+                "entry_px": entry_px,
+                "exit_price": exit_px,
+                "exit_px": exit_px,
+                "pnl": t.get("pnl", 0) if not is_open else None,
+                "reason": t.get("reason", ""),
+                "pos_side": t.get("pos_side", "long"),
+                "signal_id": t.get("signal_id", 0) or ord_id,
+                "bot": _okx_bot(ord_id),
+                "fee": t.get("fee", "0"),
+            })
+    except Exception as e:
+        import traceback
+        print(f"[trades/paired] OKX pairing error: {e}", flush=True)
+        traceback.print_exc()
+
+    # Dedupe. Open pairs: only one live position per instrument exists at a time
+    # (cooldown + single-position-per-bot), so collapsing by inst+minute is safe
+    # and merges DB/live copies with the OKX row (OKX rows are added first, so
+    # they win — real prices/PnL, corrupt ledger rows collapse away).
+    def _dedup_key(t):
+        oid = str(t.get("ord_id") or "").strip()
+        ts = t.get("exit_time") or t.get("entry_time") or t.get("time") or ""
+        if oid:
+            return ("oid", oid)
+        try:
+            ts_floored = ts[:16]
+        except Exception:
+            ts_floored = ts
+        reason = (t.get("reason") or "").lower()
+        if reason in ("open", "add") or t.get("pnl") is None:
+            return ("open", t.get("inst_id") or "", ts_floored)
+        pnl = t.get("pnl")
+        try:
+            pnl_r = round(float(pnl or 0), 4)
+        except (TypeError, ValueError):
+            pnl_r = 0.0
+        return ("fb", t.get("inst_id") or "", pnl_r, ts_floored)
+
+    seen = set()
+    dedup = []
+    for t in okx_rows:
+        key = _dedup_key(t)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(t)
+
+    # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
+    #    cover (older than the fills window, or missing ord_id with no matching
+    #    OKX close). Corrupt ledger closes (pnl=0 with an OKX close in the same
+    #    minute, or an ord_id OKX already accounted for) are skipped.
+    if flag_raw:
         raw.sort(key=lambda t: (t.get("time") or "", t.get("side") or ""))
+        legacy = []
+        for t in raw:
+            inst = t.get("inst_id") or t.get("symbol", "")
+            reason = (t.get("reason") or "").lower()
+            oid = str(t.get("ord_id", "") or "").strip()
+            if oid and oid in okx_ord_ids:
+                continue  # OKX already has this close (real data wins)
+            try:
+                close_key = (inst, (t.get("time") or "")[:16])
+            except Exception:
+                close_key = None
+            if close_key and close_key in okx_close_key:
+                continue  # corrupt ledger close (pnl=0) with a real OKX close nearby
+            is_entry = reason in ("open", "add") or (t.get("pnl") in (None, 0) and t.get("side") == "buy")
+            if is_entry:
+                # Live open rows that OKX already reports as open are redundant.
+                if okx_open_keys.get(inst):
+                    continue
+                legacy.append(t)
+                continue
+            legacy.append(t)
         open_map = {}
         paired = []
-        for t in raw:
+        for t in legacy:
             inst = t.get("inst_id") or t.get("symbol", "")
             pnl = float(t.get("pnl", 0) or 0)
             reason = (t.get("reason") or "").lower()
@@ -3293,34 +3473,8 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "bot": bot_name,
                 })
         paired.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
-        # dedupe by ord_id when available (DB + live memory + OKX fills share
-        # the same exchange ordId for one closed fill), else fall back to
-        # (inst_id, pnl, time floored to the minute) so DB and in-memory copies
-        # of the same close (timestamps microseconds apart) collapse into one.
-        def _dedup_key(t):
-            oid = str(t.get("ord_id") or "").strip()
-            ts = t.get("exit_time") or t.get("entry_time") or t.get("time") or ""
-            if oid:
-                return ("oid", oid)
-            try:
-                ts_floored = ts[:16]
-            except Exception:
-                ts_floored = ts
-            reason = (t.get("reason") or "").lower()
-            # Open pairs: only one live position per instrument exists at a time
-            # (cooldown + single-position-per-bot), so collapsing by inst+minute
-            # is safe and merges the DB and in-memory copies (whose pnl differs
-            # because memory opens carry -fee while DB opens carry 0).
-            if reason in ("open", "add") or t.get("pnl") is None:
-                return ("open", t.get("inst_id") or "", ts_floored)
-            pnl = t.get("pnl")
-            try:
-                pnl_r = round(float(pnl or 0), 4)
-            except (TypeError, ValueError):
-                pnl_r = 0.0
-            return ("fb", t.get("inst_id") or "", pnl_r, ts_floored)
-        seen = set()
-        dedup = []
+        # Merge legacy rows into the OKX-first dedup (OKX rows already in `seen`
+        # win by ord_id / inst+minute, so corrupt ledger closes collapse away).
         for t in paired:
             key = _dedup_key(t)
             if key in seen:
@@ -3328,69 +3482,25 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
             seen.add(key)
             dedup.append(t)
 
-        # Also include trades from OKX fills history (full account history up to
-        # 3 months, including ones made before Postgres was connected) that are
-        # not already present in the DB result.
-        try:
-            _fills_cache_ts = 0  # bypass fills cache
-            raw_fills = await _fetch_okx_fills(limit=300)
-            # drop fills already persisted in the DB (all bots: rotation, impulse
-            # and demo-validator) so they do not double up with the DB result.
-            try:
-                db_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
-                    "SELECT ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-                    if not db._pg_mode else
-                    "SELECT ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-                ) if r.get("ord_id")}
-            except Exception:
-                db_ord_ids = set()
-            if db_ord_ids:
-                raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in db_ord_ids]
-            raw_fills = [f for f in raw_fills
-                         if not str(f.get("clOrdId", "")).startswith("val")]
-            fills_paired = await _pair_fills(raw_fills)
-            for t in fills_paired:
-                inst = t.get("inst_id", "") or t.get("symbol", "")
-                is_open = t.get("reason") == "open"
-                key = _dedup_key({
-                    "ord_id": t.get("ord_id", ""),
-                    "inst_id": inst,
-                    "time": t.get("time", ""),
-                    "exit_time": t.get("time", "") if not is_open else None,
-                    "entry_time": t.get("entry_time", ""),
-                    "pnl": t.get("pnl", 0) if not is_open else None,
-                })
-                if key in seen:
-                    continue
-                seen.add(key)
-                entry_px = t.get("entry", 0) or t.get("entry_price", 0)
-                exit_px = t.get("exit_price", 0)
-                dedup.append({
-                    "time": t.get("time", ""),
-                    "entry_time": t.get("entry_time", ""),
-                    "exit_time": t.get("time", "") if not is_open else None,
-                    "side": "buy" if t.get("pos_side") == "long" else "sell",
-                    "symbol": inst,
-                    "inst_id": inst,
-                    "ord_id": str(t.get("ord_id", "") or "").strip(),
-                    "entry": entry_px,
-                    "entry_px": entry_px,
-                    "exit_price": exit_px,
-                    "exit_px": exit_px,
-                    "pnl": t.get("pnl", 0) if not is_open else None,
-                    "reason": t.get("reason", ""),
-                    "pos_side": t.get("pos_side", "long"),
-                    "signal_id": t.get("ord_id", ""),
-                    "bot": _tag_trade_bot(t),
-                })
-            dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
-        except Exception as e:
-            import traceback
-            print(f"[trades/paired] OKX merge error: {e}", flush=True)
-            traceback.print_exc()
+    # 4. Last-mile: enrich any surviving closed row with the exact OKX bill PnL
+    #    and fee (covers closes whose fills fell outside the fill window but
+    #    whose ord_id is present in the account bills).
+    try:
+        for t in dedup:
+            if (t.get("reason") or "").lower() != "closed":
+                continue
+            oid = str(t.get("ord_id") or "").strip()
+            bill = bill_by_ord.get(oid) if oid else None
+            if bill:
+                t["pnl"] = bill["pnl"]
+                t["fee"] = str(bill["fee"])
+    except Exception:
+        pass
 
-        print(f"[trades/paired] DB+memory+OKX: {len(dedup)} trades", flush=True)
-        return {"trades": dedup[-limit:]}
+    dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
+    print(f"[trades/paired] OKX+bills+DB: {len(dedup)} trades "
+          f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
+    return {"trades": dedup[-limit:]}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
