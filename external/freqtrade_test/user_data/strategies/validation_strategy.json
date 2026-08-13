@@ -5,7 +5,7 @@
       "adx_min": 18,
       "corr_threshold": 0.99,
       "max_leverage": 2.0,
-      "min_roc": 2.5,
+      "min_roc": 1.5,
       "risk_per_trade": 0.14,
       "rsi_long_max": 82,
       "rsi_short_min": 21,
