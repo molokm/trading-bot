@@ -2939,105 +2939,132 @@ async def get_pnl():
     total_fees = 0.0
     source = "none"
     per_bot = {}
+    account_total = 0.0  # realized PnL of the WHOLE account (all fills)
 
-    # ── 1. Primary: sum PnL of every closed trade from the History list ──
-    # Uses the SAME trade list as the History page (get_paired_trades), which is
-    # deduplicated by ord_id, so the card total equals the sum of the history
-    # and per_bot breaks it down by bot (Momentum / Impulse 1D / Validation).
+    # ── 1. Primary: OKX bills — realized PnL source of truth ──
+    # Sums closing fills (pnl != 0) of the account. The `total` card and periods
+    # count ONLY the bot's strategies (rotation/impulse), attributed via the
+    # clOrdId prefix (rot/imp) with a fallback to ordId persisted in the trades
+    # table (covers orders placed before clOrdId was introduced). Every other
+    # fill (demo-validator, manual MCP, untouched) still contributes to
+    # `account_total`, shown as an "all-time on account" footnote on the card.
     try:
-        resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", [])
-        if trades:
-            source = "history"
+        bills = await _fetch_all_trade_bills()
+        if bills:
+            source = "okx_bills"
             now = dt.now(tz.utc)
             week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            try:
+                _rows = await db._fetchall(
+                    "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+                )
+                ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0] for r in _rows if r.get("ord_id")}
+            except Exception:
+                ord_to_bot = {}
             count = 0
-            for t in trades:
-                reason = (t.get("reason") or "").lower()
-                if reason == "open":
-                    continue
+            strat_count = 0
+            for b in bills:
                 try:
-                    pnl = float(t.get("pnl", 0) or 0)
+                    b_pnl = float(b.get("pnl") or 0)
                 except (TypeError, ValueError):
-                    continue
-                total_realized += pnl
-                count += 1
-                bot = t.get("bot") or "Прочие"
-                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                try:
-                    fee = abs(float(t.get("fee", 0) or 0))
-                except (TypeError, ValueError):
-                    fee = 0.0
-                total_fees += fee
-                time_str = t.get("time", "") or t.get("exit_time", "")
-                if time_str:
-                    try:
-                        t_time = dt.fromisoformat(time_str)
-                        if t_time.tzinfo is None:
-                            t_time = t_time.replace(tzinfo=tz.utc)
-                        age_sec = (now - t_time).total_seconds()
-                        if age_sec <= 86400:
-                            realized_1d += pnl
-                        if age_sec <= 604800:
-                            realized_7d += pnl
-                        if age_sec <= 2592000:
-                            realized_30d += pnl
-                        if t_time >= week_start:
-                            realized_week += pnl
-                    except (ValueError, OSError, TypeError):
-                        realized_30d += pnl
+                    b_pnl = 0.0
+                ts_str = b.get("ts", "")
+                if b_pnl != 0:
+                    account_total += b_pnl
+                    count += 1
+                cid = str(b.get("clOrdId", "")).strip()
+                if cid.startswith("rot"):
+                    bot = "Momentum"
+                elif cid.startswith("imp"):
+                    bot = "Impulse 1D"
                 else:
-                    realized_30d += pnl
-            print(f"[pnl] History: total={total_realized:.2f} 1d={realized_1d:.2f} "
-                  f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed_trades={count} per_bot={per_bot}", flush=True)
+                    bid = ord_to_bot.get(str(b.get("ordId", "")).strip())
+                    bot = _db_bot_name(bid) if bid else ""
+                    if bot not in ("Momentum", "Impulse 1D"):
+                        continue  # demo-validator / manual / unmatched: not a strategy trade
+                total_realized += b_pnl
+                strat_count += 1
+                per_bot[bot] = per_bot.get(bot, 0.0) + b_pnl
+                try:
+                    b_fee = abs(float(b.get("fee") or 0))
+                except (TypeError, ValueError):
+                    b_fee = 0.0
+                total_fees += b_fee
+                if ts_str:
+                    try:
+                        b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                        age_sec = (now - b_time).total_seconds()
+                        if age_sec <= 86400:
+                            realized_1d += b_pnl
+                        if age_sec <= 604800:
+                            realized_7d += b_pnl
+                        if age_sec <= 2592000:
+                            realized_30d += b_pnl
+                        if b_time >= week_start:
+                            realized_week += b_pnl
+                    except (ValueError, OSError, TypeError):
+                        realized_30d += b_pnl
+            print(f"[pnl] OKX bills: strat_total={total_realized:.2f} account_total={account_total:.2f} "
+                  f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                  f"fees={total_fees:.2f} closing_fills={count} strat_fills={strat_count} per_bot={per_bot}", flush=True)
     except Exception as e:
         import traceback
-        print(f"[pnl] History source error: {e}", flush=True)
+        print(f"[pnl] OKX bills error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX account bills (if history list is empty) ──
+    # ── 2. Fallback: sum PnL of every closed trade from the History list ──
+    # Uses the SAME trade list as the History page (get_paired_trades), which is
+    # deduplicated by ord_id. Used only when no bills are available.
     if source == "none":
         try:
-            bills = await _fetch_all_trade_bills()
-            if bills:
-                source = "okx_bills"
+            resp = await get_paired_trades(limit=5000)
+            trades = resp.get("trades", [])
+            if trades:
+                source = "history"
                 now = dt.now(tz.utc)
                 week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                for b in bills:
+                for t in trades:
+                    reason = (t.get("reason") or "").lower()
+                    if reason == "open":
+                        continue
                     try:
-                        b_pnl = float(b.get("pnl") or 0)
+                        pnl = float(t.get("pnl", 0) or 0)
                     except (TypeError, ValueError):
-                        b_pnl = 0.0
+                        continue
+                    total_realized += pnl
+                    account_total += pnl
+                    bot = t.get("bot") or "Прочие"
+                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                     try:
-                        b_fee = abs(float(b.get("fee") or 0))
+                        fee = abs(float(t.get("fee", 0) or 0))
                     except (TypeError, ValueError):
-                        b_fee = 0.0
-                    total_realized += b_pnl
-                    total_fees += b_fee
-                    ts_str = b.get("ts", "")
-                    if ts_str:
+                        fee = 0.0
+                    total_fees += fee
+                    time_str = t.get("time", "") or t.get("exit_time", "")
+                    if time_str:
                         try:
-                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                            age_sec = (now - b_time).total_seconds()
+                            t_time = dt.fromisoformat(time_str)
+                            if t_time.tzinfo is None:
+                                t_time = t_time.replace(tzinfo=tz.utc)
+                            age_sec = (now - t_time).total_seconds()
                             if age_sec <= 86400:
-                                realized_1d += b_pnl
+                                realized_1d += pnl
                             if age_sec <= 604800:
-                                realized_7d += b_pnl
+                                realized_7d += pnl
                             if age_sec <= 2592000:
-                                realized_30d += b_pnl
-                            if b_time >= week_start:
-                                realized_week += b_pnl
+                                realized_30d += pnl
+                            if t_time >= week_start:
+                                realized_week += pnl
                         except (ValueError, OSError, TypeError):
-                            realized_30d += b_pnl
+                            realized_30d += pnl
                     else:
-                        realized_30d += b_pnl
-                print(f"[pnl] OKX bills: total={total_realized:.2f} 1d={realized_1d:.2f} "
-                      f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                      f"fees={total_fees:.2f} bills={len(bills)}", flush=True)
+                        realized_30d += pnl
+                print(f"[pnl] History: total={total_realized:.2f} account_total={account_total:.2f} "
+                      f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                      f"fees={total_fees:.2f} per_bot={per_bot}", flush=True)
         except Exception as e:
             import traceback
-            print(f"[pnl] OKX bills error: {e}", flush=True)
+            print(f"[pnl] History source error: {e}", flush=True)
             traceback.print_exc()
 
     # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
@@ -3133,6 +3160,7 @@ async def get_pnl():
 
     return {
         "total": round(total_realized, 2),
+        "account_total": round(account_total, 2),
         "1d": round(realized_1d, 2),
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
