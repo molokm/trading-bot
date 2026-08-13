@@ -226,6 +226,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const allOpen = [
       ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
       ...(impulseStatus?.open_positions || []).map(p => ({ ...p, bot: 'Impulse 1D' })),
+      ...(validationStatus?.open_positions || []).map(p => ({ ...p, bot: 'Validation' })),
     ]
     for (const p of allOpen) {
       const isLong = p.side !== 'short'
@@ -282,7 +283,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
