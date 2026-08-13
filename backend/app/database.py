@@ -379,7 +379,7 @@ class Database:
                          timeframe: str = "1D", capital: float = 0.0,
                          name: str = None) -> None:
         """Idempotent bot insert (INSERT OR IGNORE / ON CONFLICT DO NOTHING)."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         if self._pg_mode:
             await self._execute(
                 "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
@@ -400,7 +400,7 @@ class Database:
                        symbol: str, timeframe: str, capital: float,
                        params: dict, mode: str = "demo", signal_type: str = "diff",
                        name: str = None) -> str:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         if self._pg_mode:
             await self._execute(
                 "INSERT INTO bots (id, strategy_id, strategy_code, symbol, timeframe, "
@@ -510,7 +510,7 @@ class Database:
                          fee_ccy: str = None, pnl: float = 0,
                          state: str = "filled", signal_id: int = None) -> str:
         trade_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         # sz/px/fee columns are TEXT: normalize to string so both SQLite and
         # asyncpg (Postgres) accept them (asyncpg rejects float for TEXT).
         def _to_str(v):
@@ -742,7 +742,8 @@ class Database:
 
     async def get_pnl_by_period(self, days: int, bot_id: str = None) -> float:
         import datetime
-        cutoff = (datetime.datetime.utcnow() - datetime.timedelta(days=days)).isoformat()
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(days=days)).isoformat()
         if bot_id:
             if self._pg_mode:
                 row = await self._fetchone(
@@ -802,7 +803,7 @@ class Database:
     async def save_position(self, bot_id: str, inst_id: str, side: str,
                             size: float, entry_price: float,
                             current_price: float = None):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         existing = await self._fetchone(
             "SELECT id FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
             if self._pg_mode else
@@ -837,7 +838,7 @@ class Database:
 
     async def update_position_price(self, bot_id: str, current_price: float,
                                     unrealized_pnl: float = 0):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         if self._pg_mode:
             await self._execute(
                 "UPDATE positions SET current_price=$1, unrealized_pnl=$2, updated_at=$3 WHERE bot_id=$4",
@@ -870,7 +871,7 @@ class Database:
                           total_pnl: float = 0, win_rate: float = None,
                           sharpe_ratio: float = None, max_drawdown: float = None,
                           total_trades: int = 0):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         if self._pg_mode:
             await self._execute(
                 "INSERT INTO performance_metrics (bot_id, timestamp, equity, total_pnl, "

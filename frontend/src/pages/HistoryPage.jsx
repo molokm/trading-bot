@@ -3,6 +3,7 @@ import { ScrollText, ChevronLeft, ChevronRight, Download, TrendingUp } from 'luc
 import { api } from '../services/api'
 import { EmptyState, Loader, Chip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
+import { fmtTs, parseTradeTs } from '../utils/time'
 
 const PAGE_SIZE = 30
 const ALL_PAIRS_KEY = '__all__'
@@ -60,11 +61,11 @@ export default function HistoryPage() {
         if (!pair.includes(filterPair.toUpperCase())) return false
       }
       if (dateFrom) {
-        const tradeTime = t.time || t.exit_time || t.entry_time ? new Date(t.time || t.exit_time || t.entry_time) : null
+        const tradeTime = parseTradeTs(t.time || t.exit_time || t.entry_time)
         if (tradeTime && tradeTime < new Date(dateFrom)) return false
       }
       if (dateTo) {
-        const tradeTime = t.time || t.exit_time ? new Date(t.time || t.exit_time) : null
+        const tradeTime = parseTradeTs(t.time || t.exit_time || t.entry_time)
         if (tradeTime && tradeTime > new Date(dateTo)) return false
       }
       return true
@@ -74,10 +75,7 @@ export default function HistoryPage() {
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE)
   const pageTrades = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
 
-  const fmtTime = (ts) => {
-    if (!ts) return '---'
-    return new Date(ts).toLocaleString(locale, { day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' })
-  }
+  const fmtTime = (ts) => fmtTs(ts, locale)
 
   const totalPnl = filtered.reduce((s, t) => s + (parseFloat(t.pnl) || 0), 0)
   const winCount = filtered.filter(t => (parseFloat(t.pnl) || 0) >= 0).length
@@ -86,7 +84,7 @@ export default function HistoryPage() {
   const handleExportCSV = useCallback(() => {
     const header = [t('history.time'), t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), 'SL', 'TP', t('history.pnl'), t('history.reason')].join(',')
     const rows = filtered.map(tr => {
-      const time = tr.time ? new Date(tr.time).toLocaleString(locale) : ''
+      const time = tr.time ? fmtTs(tr.time, locale) : ''
       const type = tr.side === 'buy' ? 'BUY' : 'SELL'
       const inst = tr.symbol || tr.inst_id || ''
       const size = tr.size ? tr.size.toFixed(2) : ''

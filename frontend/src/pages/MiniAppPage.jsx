@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
+import { fmtTs } from '../utils/time'
 
 /* ═══════ Mini App diagnostics log (survives reload, shown in panel) ═══════ */
 const MINI_LOGS = []
@@ -35,12 +36,7 @@ function fmt(n, digits = 2) {
 }
 
 function fmtTime(ts) {
-  if (!ts) return '—'
-  const d = new Date(typeof ts === 'string' ? ts : ts * 1000)
-  if (isNaN(d)) return String(ts)
-  return d.toLocaleString('ru-RU', {
-    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
-  })
+  return fmtTs(ts, 'ru-RU')
 }
 
 function pnlClass(v) {

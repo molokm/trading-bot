@@ -2623,11 +2623,13 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
 
 
 def _ms_to_iso(ts_ms: str) -> str:
-    """Convert OKX millisecond timestamp to ISO string."""
+    """Convert OKX millisecond timestamp to UTC ISO string (timezone-aware, so
+    the frontend renders it in the correct local/Moscow time)."""
     if not ts_ms:
         return ""
     try:
-        return datetime.fromtimestamp(int(ts_ms) / 1000).isoformat()
+        return datetime.fromtimestamp(
+            int(ts_ms) / 1000, tz=timezone.utc).isoformat()
     except (ValueError, OSError, TypeError):
         return ts_ms
 

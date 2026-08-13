@@ -13,7 +13,7 @@ import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import parse_qsl
 
@@ -224,7 +224,9 @@ class TelegramNotifier:
 
     @staticmethod
     def _ts_line() -> str:
-        return datetime.now(timezone.utc).strftime("🕐 %d.%m %H:%M:%S UTC")
+        msk = datetime.now(timezone.utc).astimezone(
+            timezone(timedelta(hours=3)))
+        return msk.strftime("🕐 %d.%m %H:%M:%S МСК")
 
     def _footer(self, signal_id) -> str:
         """Trailing lines shared by every trade message: trade number + time."""

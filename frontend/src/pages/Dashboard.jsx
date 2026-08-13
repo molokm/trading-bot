@@ -7,6 +7,7 @@ import {
 import { api } from '../services/api'
 import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
+import { fmtTs } from '../utils/time'
 
 const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
@@ -358,7 +359,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
-  const fmtTime = (ts) => ts ? new Date(ts).toLocaleString(locale, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '---'
+  const fmtTime = (ts) => fmtTs(ts, locale)
 
   return (
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
