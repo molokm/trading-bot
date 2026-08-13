@@ -4,7 +4,7 @@ import logging
 import os
 import time as _time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
