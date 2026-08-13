@@ -2660,7 +2660,17 @@ def _parse_fill_sz(f: dict) -> float:
 
 def _is_close_fill(f: dict, direction: str = None) -> bool:
     """Determine if a fill is closing a position.
-    Priority: 1) pnl field, 2) posSide+side, 3) direction tracking."""
+    Priority: 1) subType (3/4=open, 5/6=close — present on every trade fill),
+    2) pnl field, 3) posSide+side, 4) direction tracking.
+
+    subType is the reliable signal for demo accounts where fillPnl/posSide may
+    be missing and direction tracking breaks under rapid open/close churn."""
+    sub = str(f.get("subType", "") or "")
+    if sub in ("5", "6"):
+        return True
+    if sub in ("1", "2", "3", "4"):
+        return False
+
     pnl = _parse_fill_pnl(f)
     if pnl is not None and pnl != 0:
         return True
