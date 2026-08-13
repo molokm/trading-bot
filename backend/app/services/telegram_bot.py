@@ -118,6 +118,8 @@ class TelegramBotPoller:
                 await self._cmd_status(chat_id)
             elif cmd == "/about":
                 await self._cmd_about(chat_id)
+            elif cmd == "/info":
+                await self._send_info(chat_id, "overview")
             else:
                 await self._send_msg(chat_id, self._menu_text())
             return
@@ -126,12 +128,138 @@ class TelegramBotPoller:
     def _menu_keyboard(self) -> dict:
         return {
             "inline_keyboard": [
-                [{"text": f"📡 Сигналы · {PRICE_STARS} ⭐", "callback_data": "sub_signals"}],
-                [{"text": f"🚀 Pro · свой счёт OKX · {PRO_PRICE_STARS} ⭐", "callback_data": "sub_pro"}],
-                [{"text": "📊 Живые результаты", "callback_data": "tracker"},
+                [{"text": f"📡 Сигналы · {PRICE_STARS} ⭐", "callback_data": "sub_signals"},
+                 {"text": f"🚀 Pro · {PRO_PRICE_STARS} ⭐", "callback_data": "sub_pro"}],
+                [{"text": "📚 Как это работает", "callback_data": "info_overview"},
+                 {"text": "🔍 Результаты", "callback_data": "info_results"}],
+                [{"text": "💳 Оплата", "callback_data": "info_payment"},
+                 {"text": "⚠️ Риски", "callback_data": "info_risks"}],
+                [{"text": "❓ FAQ", "callback_data": "info_faq"},
                  {"text": "ℹ️ О боте", "callback_data": "about"}],
             ]
         }
+
+    def _info_keyboard(self) -> dict:
+        return {
+            "inline_keyboard": [
+                [{"text": "📚 Как это работает", "callback_data": "info_overview"},
+                 {"text": "📡 Сигналы", "callback_data": "info_signals"}],
+                [{"text": "🚀 Pro", "callback_data": "info_pro"},
+                 {"text": "🔍 Результаты", "callback_data": "info_results"}],
+                [{"text": "💳 Оплата", "callback_data": "info_payment"},
+                 {"text": "⚠️ Риски", "callback_data": "info_risks"}],
+                [{"text": "❓ FAQ", "callback_data": "info_faq"},
+                 {"text": "🔙 В меню", "callback_data": "menu"}],
+            ]
+        }
+
+    def _info_text(self, section: str) -> str:
+        texts = {
+            "overview": (
+                "📚 <b>Как это работает</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Это алгоритмический трейдер: бот торгует фьючерсами на OKX по дневным "
+                "свечам, сам находит сигналы, открывает позиции, ставит стопы и закрывает "
+                "сделки. Вам ничего не нужно делать вручную — только выбрать формат и "
+                "наблюдать за результатом.\n\n"
+                "Два формата:\n"
+                "• 📡 <b>Сигналы</b> — видите каждую сделку в приватном канале\n"
+                "• 🚀 <b>Pro</b> — бот торгует на вашем счёте OKX, управление через мини-ап\n\n"
+                "Подробнее — в разделах ниже."
+            ),
+            "signals": (
+                f"📡 <b>Сигналы</b> · {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
+                "━━━━━━━━━━━━━━━\n"
+                "<b>Что вы получаете:</b>\n"
+                "• Доступ в приватный канал, где публикуется каждая сделка бота\n"
+                "• Цена входа, стоп-лосс, тейк и итоговый результат\n"
+                "• Направление (лонг/шорт) и текущие открытые позиции\n\n"
+                "<b>Для кого:</b>\n"
+                "• Хотите учиться на реальных сделках проверенной стратегии\n"
+                "• Повторяете сигналы вручную на своём счёте\n"
+                "• Оцениваете работу бота, прежде чем доверить ему свой счёт\n\n"
+                "Оплатить: /subscribe или кнопкой в меню."
+            ),
+            "pro": (
+                f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Те же стратегии торгуют <b>на вашем счёте OKX</b> полностью автоматически.\n\n"
+                "<b>Что вы получаете:</b>\n"
+                "• Подключаете свои ключи OKX (шифруются на сервере)\n"
+                "• Запускаете ботов в один тап в мини-апе\n"
+                "• Бот сам открывает/закрывает сделки, ставит стопы и ведёт риск\n"
+                "• Статистика и управление — в мини-апе в Telegram\n\n"
+                "<b>Требования:</b>\n"
+                "• Счёт OKX (фьючерсы USDT-M)\n"
+                "• Ключи API с правом торговли + включённый IP-whitelist\n"
+                "• Понимание, что торговля с плечом рискованна\n\n"
+                "Оплатить: /subscribe_pro или кнопкой в меню."
+            ),
+            "results": (
+                "🔍 <b>Результаты и проверка</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Мы публикуем честные цифры и не прячем их:\n\n"
+                "• Стратегии проверены на данных <b>вне выборки</b> (walk-forward) — параметры "
+                "не подгонялись под тестируемый период\n"
+                "• Результаты подтверждены <b>двумя независимыми движками</b>: freqtrade "
+                "(открытый стандарт) и собственный «честный» бэктестер\n"
+                "• Ориентиры бэктестов: десятки процентов в год (CAGR ~30–45%), "
+                "win rate 55–57%, <b>0 ликвидаций</b>, управляемая просадка\n"
+                "• Живые результаты бота видны на странице трекера\n\n"
+                "Главное: результаты можно <b>проверить самостоятельно</b> — скрипты "
+                "верификации лежат в открытом репозитории проекта.\n\n"
+                "Живой отчёт: /tracker"
+            ),
+            "payment": (
+                "💳 <b>Оплата</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Оплата проходит прямо в Telegram через <b>Telegram Stars</b> — встроенную "
+                "валюту. Быстро и безопасно.\n\n"
+                "<b>Как оплатить:</b>\n"
+                "1. Нажмите «Оплатить» под счётом (кнопка подписки)\n"
+                "2. Подтвердите оплату Stars\n"
+                "3. 📡 Сигналы — мгновенно получите ссылку в приватный канал\n"
+                "   🚀 Pro — получите доступ к мини-апу для подключения счёта\n\n"
+                "<b>Продление:</b> срок подписки складывается при каждой оплате.\n\n"
+                "Тарифы:\n"
+                f"• Сигналы — {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
+                f"• Pro — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн."
+            ),
+            "risks": (
+                "⚠️ <b>Важно о рисках</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Торговля фьючерсами с плечом — высокорисковый инструмент.\n\n"
+                "• Любая стратегия может давать убыточные периоды и просадки\n"
+                "• Прошлые результаты не гарантируют будущей доходности\n"
+                "• Мы не обещаем космической доходности; просим использовать только "
+                "свободные средства\n"
+                "• Реалистичный ориентир — десятки процентов в год, но возможны и убытки\n"
+                "• Бот не является финансовым советником\n\n"
+                "Принимайте решение о подписке осознанно."
+            ),
+            "faq": (
+                "❓ <b>FAQ</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "<b>Что нужно для сигналов?</b>\n"
+                "Только Telegram: платите Stars и получаете ссылку в канал.\n\n"
+                "<b>Что нужно для Pro?</b>\n"
+                "Счёт OKX, ключи API (торговля + IP-whitelist) и мини-ап.\n\n"
+                "<b>Ключи безопасны?</b>\n"
+                "Да: шифруются и хранятся на сервере, используются только для торговли "
+                "по вашему запросу.\n\n"
+                "<b>Можно ли отменить подписку?</b>\n"
+                "Да — просто не продлевайте после истечения срока.\n\n"
+                "<b>Что после оплаты Pro?</b>\n"
+                "Открываете мини-ап, подключаете ключи OKX и запускаете ботов одной кнопкой.\n\n"
+                "<b>Почему не обещаете +1000%?</b>\n"
+                "Потому что это ложь. Мы даём реальные цифры и защиту капитала."
+            ),
+        }
+        return texts.get(section, texts["overview"])
+
+    async def _send_info(self, chat_id, section: str):
+        await self._send_msg(chat_id, self._info_text(section),
+                             reply_markup=self._info_keyboard())
 
     def _menu_text(self) -> str:
         return (
@@ -154,7 +282,7 @@ class TelegramBotPoller:
             "Следите за каждой сделкой в приватном канале.\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
             "Бот торгует на вашем счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe · /subscribe_pro · /status · /about"
+            "Команды: /subscribe · /subscribe_pro · /info · /status · /about"
         )
 
     def _about_text(self) -> str:
@@ -199,6 +327,11 @@ class TelegramBotPoller:
                                      "Спросите у администратора ссылку.")
         elif data == "about":
             await self._send_msg(chat_id, self._about_text())
+        elif data == "menu":
+            await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
+        elif data.startswith("info_"):
+            section = data[len("info_"):]
+            await self._send_info(chat_id, section)
 
     async def _cmd_start(self, chat_id):
         await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
