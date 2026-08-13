@@ -3054,7 +3054,16 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
                 kw = {"limit": limit_per_page}
                 if after:
                     kw["after"] = after
-                resp = await _okx_call(lambda c, e=fn, k=kw: e(c, **k))
+                resp = None
+                for attempt in range(3):
+                    resp = await _okx_call(lambda c, e=fn, k=kw: e(c, **k))
+                    if not resp.get("error"):
+                        break
+                    msg = str(resp.get("message", ""))
+                    if "429" in msg or "Too Many Requests" in msg:
+                        await asyncio.sleep(1.0 + attempt)
+                        continue
+                    break
                 if resp.get("error"):
                     print(f"[bills] {endpoint} error: {resp.get('message', '')}", flush=True)
                     break
@@ -3719,7 +3728,9 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
     print(f"[trades/paired] OKX+bills+DB: {len(dedup)} trades "
           f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
-    return {"trades": dedup[-limit:]}
+    return {"trades": dedup[-limit:],
+            "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
+                      "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids)}}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
