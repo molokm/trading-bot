@@ -559,6 +559,25 @@ class RotationStrategy:
         except Exception:
             return 0.0
 
+    async def _last_close_fill(self, client, inst_id: str, pos_side: str) -> dict:
+        """Return the most recent closing fill dict (fillPx + ordId) for this
+        instrument+side, or {} if none found. Used to book external closes with
+        the REAL ordId so PnL dedupe against DB/OKX fills works."""
+        try:
+            result = await client.get_fills_history(inst_type="SWAP",
+                                                    instId=inst_id, limit=20)
+            if result.get("error"):
+                return {}
+            close_side = "sell" if pos_side == "long" else "buy"
+            fills = result.get("data", [])
+            fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
+            for f in fills:
+                if f.get("side") == close_side:
+                    return f
+            return {}
+        except Exception:
+            return {}
+
     # ─── Exchange-side stop orders ───
 
     async def _place_exchange_stop(self, client, pos: RotPosition) -> str:
@@ -656,13 +675,14 @@ class RotationStrategy:
             pnl = close_sz * self.CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
+        partial_ord_id = fills[0].get("ordId", "") if fills else ""
         self._trade_log.append({
             "time": now, "side": close_side,
             "symbol": inst_id, "size": close_sz,
             "pnl": round(pnl, 2),
             "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
             "reason": "partial_tp", "pos_side": pos.side, "coin": pos.coin,
-            "signal_id": pos.signal_id,
+            "signal_id": pos.signal_id, "ord_id": partial_ord_id,
         })
         pos.size -= close_sz
         pos.partial_done = True
@@ -671,6 +691,17 @@ class RotationStrategy:
         if pos.algo_id:
             await self._update_exchange_stop(client, pos)
         if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=close_side, sz=close_sz,
+                    px=round(fill_px, 2), ord_id=partial_ord_id,
+                    inst_id=inst_id, ord_type="market",
+                    fee=round(fee, 4), fee_ccy="USDT",
+                    pnl=round(pnl, 2), state="filled",
+                    signal_id=pos.signal_id,
+                )
+            except Exception as e:
+                print(f"[Rotation] DB save partial error: {e}", flush=True)
             await self._sync_positions_db()
         print(f"[Rotation] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
@@ -688,6 +719,7 @@ class RotationStrategy:
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
@@ -717,13 +749,14 @@ class RotationStrategy:
 
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
+        close_ord_id = fills[0].get("ordId", "") if fills else ""
         trade_entry = {
             "time": now, "side": close_side,
             "symbol": inst_id, "size": pos.size,
             "pnl": round(pnl, 2),
             "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
             "reason": reason, "pos_side": pos.side, "coin": pos.coin,
-            "signal_id": pos.signal_id,
+            "signal_id": pos.signal_id, "ord_id": close_ord_id,
         }
         self._trade_log.append(trade_entry)
 
@@ -732,7 +765,7 @@ class RotationStrategy:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=pos.size,
                     px=round(fill_px, 2),
-                    ord_id=fills[0].get("ordId", "") if fills else "",
+                    ord_id=close_ord_id,
                     inst_id=inst_id, ord_type="market",
                     fee=round(fee, 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
@@ -756,6 +789,7 @@ class RotationStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
@@ -922,6 +956,7 @@ class RotationStrategy:
                 self.notifier.fire(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
@@ -962,11 +997,15 @@ class RotationStrategy:
                     # closed manually/externally). Try to book PnL at the REAL
                     # close price from fills; fall back to the stop price.
                     fill_px = await self._last_close_fill_px(client, pos.inst_id, pos.side)
+                    close_ord_id = ""
                     close_reason = "exchange_stop"
                     if fill_px <= 0:
                         fill_px = pos.stop_price
                     else:
                         close_reason = "manual_close"
+                        last_fill = await self._last_close_fill(client, pos.inst_id, pos.side)
+                        if last_fill:
+                            close_ord_id = str(last_fill.get("ordId", "")).strip()
                     # Whatever the cause (stop or manual), do NOT instantly
                     # re-enter the same coin on the next poll.
                     cd_until = time.time() + self.MANUAL_CLOSE_COOLDOWN_SEC
@@ -993,13 +1032,13 @@ class RotationStrategy:
                         "pnl": round(pnl, 2),
                         "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
                         "reason": close_reason, "pos_side": pos.side, "coin": coin,
-                        "signal_id": pos.signal_id,
+                        "signal_id": pos.signal_id, "ord_id": close_ord_id,
                     })
                     if self.db:
                         try:
                             await self.db.save_trade(
                                 bot_id=self.BOT_ID, side="sell" if pos.side == "long" else "buy",
-                                sz=pos.size, px=round(fill_px, 2), ord_id="",
+                                sz=pos.size, px=round(fill_px, 2), ord_id=close_ord_id,
                                 inst_id=pos.inst_id, ord_type="market",
                                 fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
                                 state="filled", signal_id=pos.signal_id,
@@ -1022,6 +1061,7 @@ class RotationStrategy:
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
+                                bot_name=self.BOT_NAME,
                             ))
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
@@ -1745,6 +1785,7 @@ class RotationStrategy:
                     "pnl": effective_pnl,
                     "entry_price": float(t.get("px", 0) or 0),
                     "reason": "closed",
+                    "ord_id": str(t.get("ord_id", "") or "").strip(),
                     "coin": t.get("inst_id", "").replace("-USDT-SWAP", "").replace("-USD-SWAP", ""),
                     "signal_id": t.get("signal_id", 0),
                 })

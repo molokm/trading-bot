@@ -2227,18 +2227,19 @@ async def telegram_simulate(data: dict = None):
     open_px = 67250.00
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
-        size=0.03, leverage=3.0,
+        size=0.03, leverage=3.0, bot_name="Momentum Rotation v3",
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
-        pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
+        pnl=76.50, closed_sz=0.015, remaining_sz=0.015, bot_name="Momentum Rotation v3",
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
-        pnl=201.75, reason="trail_stop",
+        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v3",
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
+        bot_name="Impulse 1D v1",
     )
 
     results = {}
@@ -3170,6 +3171,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                         "side": t.get("side", ""),
                         "symbol": inst,
                         "inst_id": inst,
+                        "ord_id": str(t.get("ord_id", "") or "").strip(),
                         "entry_price": px,
                         "exit_price": None,
                         "pnl": pnl,
@@ -3192,6 +3194,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "side": t.get("side", ""),
                     "symbol": t.get("symbol", ""),
                     "inst_id": t.get("symbol", "") or t.get("inst_id", ""),
+                    "ord_id": str(t.get("ord_id", "") or "").strip(),
                     "entry_price": t.get("entry_price") or t.get("entry", 0),
                     "exit_price": t.get("exit_price", None),
                     "pnl": t.get("pnl", 0),
@@ -3224,6 +3227,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "side": "buy" if (t.get("pos_side") == "long" or entry and entry.get("pos_side") == "long") else "sell",
                     "symbol": t.get("symbol", ""),
                     "inst_id": t.get("inst_id", "") or t.get("symbol", ""),
+                    "ord_id": str(t.get("ord_id", "") or "").strip(),
                     "entry": entry.get("entry_price", 0) if entry else 0,
                     "entry_px": entry.get("entry_price", 0) if entry else 0,
                     "exit_price": t.get("exit_price", 0) or float(t.get("entry_price", 0) or 0),
@@ -3245,6 +3249,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "side": "buy" if entry.get("pos_side") == "long" else "sell",
                     "symbol": entry.get("symbol", ""),
                     "inst_id": entry.get("inst_id", "") or entry.get("symbol", ""),
+                    "ord_id": str(entry.get("ord_id", "") or "").strip(),
                     "entry": entry.get("entry_price", 0),
                     "entry_px": entry.get("entry_price", 0),
                     "exit_price": None,
@@ -3256,11 +3261,36 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "bot": bot_name,
                 })
         paired.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
-        # dedupe by (inst_id, exit_time, pnl)
+        # dedupe by ord_id when available (DB + live memory + OKX fills share
+        # the same exchange ordId for one closed fill), else fall back to
+        # (inst_id, pnl, time floored to the minute) so DB and in-memory copies
+        # of the same close (timestamps microseconds apart) collapse into one.
+        def _dedup_key(t):
+            oid = str(t.get("ord_id") or "").strip()
+            ts = t.get("exit_time") or t.get("entry_time") or t.get("time") or ""
+            if oid:
+                return ("oid", oid)
+            try:
+                ts_floored = ts[:16]
+            except Exception:
+                ts_floored = ts
+            reason = (t.get("reason") or "").lower()
+            # Open pairs: only one live position per instrument exists at a time
+            # (cooldown + single-position-per-bot), so collapsing by inst+minute
+            # is safe and merges the DB and in-memory copies (whose pnl differs
+            # because memory opens carry -fee while DB opens carry 0).
+            if reason in ("open", "add") or t.get("pnl") is None:
+                return ("open", t.get("inst_id") or "", ts_floored)
+            pnl = t.get("pnl")
+            try:
+                pnl_r = round(float(pnl or 0), 4)
+            except (TypeError, ValueError):
+                pnl_r = 0.0
+            return ("fb", t.get("inst_id") or "", pnl_r, ts_floored)
         seen = set()
         dedup = []
         for t in paired:
-            key = (t.get("inst_id"), t.get("exit_time") or t.get("entry_time"), round(float(t.get("pnl") or 0), 4))
+            key = _dedup_key(t)
             if key in seen:
                 continue
             seen.add(key)
@@ -3272,28 +3302,32 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         try:
             _fills_cache_ts = 0  # bypass fills cache
             raw_fills = await _fetch_okx_fills(limit=300)
-            # drop demo-validator fills so they do not double up with DB entries
+            # drop fills already persisted in the DB (all bots: rotation, impulse
+            # and demo-validator) so they do not double up with the DB result.
             try:
-                val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
-                    "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
-                    " AND ord_id != ''"
+                db_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
+                    "SELECT ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
                     if not db._pg_mode else
-                    "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
-                    " AND ord_id != ''",
-                    (VAL_BOT_ID,)) if r.get("ord_id")}
+                    "SELECT ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+                ) if r.get("ord_id")}
             except Exception:
-                val_ord_ids = set()
-            if val_ord_ids:
-                raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
+                db_ord_ids = set()
+            if db_ord_ids:
+                raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in db_ord_ids]
             raw_fills = [f for f in raw_fills
                          if not str(f.get("clOrdId", "")).startswith("val")]
             fills_paired = await _pair_fills(raw_fills)
             for t in fills_paired:
                 inst = t.get("inst_id", "") or t.get("symbol", "")
                 is_open = t.get("reason") == "open"
-                key = (inst,
-                       t.get("time", "") if not is_open else t.get("entry_time", ""),
-                       round(float(t.get("pnl") or 0), 4))
+                key = _dedup_key({
+                    "ord_id": t.get("ord_id", ""),
+                    "inst_id": inst,
+                    "time": t.get("time", ""),
+                    "exit_time": t.get("time", "") if not is_open else None,
+                    "entry_time": t.get("entry_time", ""),
+                    "pnl": t.get("pnl", 0) if not is_open else None,
+                })
                 if key in seen:
                     continue
                 seen.add(key)
@@ -3306,6 +3340,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     "side": "buy" if t.get("pos_side") == "long" else "sell",
                     "symbol": inst,
                     "inst_id": inst,
+                    "ord_id": str(t.get("ord_id", "") or "").strip(),
                     "entry": entry_px,
                     "entry_px": entry_px,
                     "exit_price": exit_px,

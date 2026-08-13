@@ -132,6 +132,7 @@ class ImpPosition:
 class ImpulseStrategy:
     # Module-level default, overridable per instance (multi-tenant per-user bots).
     BOT_ID: str = IMP_BOT_ID
+    BOT_NAME: str = "Impulse 1D v1"
 
     def __init__(self, config: ImpulseConfig, client_manager=None, db=None,
                  notifier: Optional[TelegramNotifier] = None,
@@ -431,12 +432,13 @@ class ImpulseStrategy:
             pnl = close_sz * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
+        partial_ord_id = fills[0].get("ordId", "") if fills else ""
         self._trade_log.append({
             "time": now, "side": close_side, "symbol": pos.inst_id,
             "size": close_sz, "pnl": round(pnl, 2),
             "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
             "reason": tag, "pos_side": pos.side, "coin": pos.coin,
-            "signal_id": pos.signal_id,
+            "signal_id": pos.signal_id, "ord_id": partial_ord_id,
         })
         pos.size -= close_sz
         if tag == "tp1":
@@ -446,6 +448,17 @@ class ImpulseStrategy:
         if pos.algo_id:
             await self._update_exchange_stop(client, pos)
         if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=close_side, sz=close_sz,
+                    px=round(fill_px, 2), ord_id=partial_ord_id,
+                    inst_id=pos.inst_id, ord_type="market",
+                    fee=round(fee, 4), fee_ccy="USDT",
+                    pnl=round(pnl, 2), state="filled",
+                    signal_id=pos.signal_id,
+                )
+            except Exception as e:
+                print(f"[Impulse] DB save partial error: {e}", flush=True)
             await self._sync_positions_db()
         print(f"[Impulse] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
@@ -462,6 +475,7 @@ class ImpulseStrategy:
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG partial notify error: {e}", flush=True)
@@ -487,19 +501,21 @@ class ImpulseStrategy:
             pnl = pos.size * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
+        close_ord_id = fills[0].get("ordId", "") if fills else ""
         self._trade_log.append({
             "time": now, "side": close_side, "symbol": pos.inst_id,
             "size": pos.size, "pnl": round(pnl, 2),
             "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
             "reason": reason, "pos_side": pos.side, "coin": pos.coin,
             "signal_id": pos.signal_id, "adds": pos.adds,
+            "ord_id": close_ord_id,
         })
         if self.db:
             try:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=pos.size,
                     px=round(fill_px, 2),
-                    ord_id=fills[0].get("ordId", "") if fills else "",
+                    ord_id=close_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
                     fee=round(fee, 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
@@ -522,6 +538,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
@@ -656,6 +673,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG open notify error: {e}", flush=True)
@@ -733,6 +751,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.add_msg(
                     coin=coin, side=pos.side, price=round(fill_px, 2),
                     size=round(add_sz, 4), total=round(pos.size, 4),
+                    bot_name=self.BOT_NAME,
                 ))
             except Exception as e:
                 print(f"[Impulse] TG add notify error: {e}", flush=True)
