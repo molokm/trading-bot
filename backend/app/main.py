@@ -2908,69 +2908,79 @@ def _pair_bills(bills: list) -> list:
         })
 
     for inst_id, inst_bills in by_inst.items():
-        inst_bills.sort(key=lambda x: x.get("ts", "0"))
+        try:
+            inst_bills.sort(key=lambda x: str(x.get("ts", "0")))
+        except Exception:
+            inst_bills.sort(key=lambda x: str(x.get("ts", "0")))
         cur = None  # accumulated open: {size,cost,time,ord_id,side,pos_side,fee}
         pending = None  # aggregated close for the current ordId
         for b in inst_bills:
-            sub = str(b.get("subType", "") or "")
             try:
-                sz = float(b.get("sz", 0) or 0)
-                px = float(b.get("px", 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            try:
-                pnl = float(b.get("pnl", 0) or 0)
-            except (TypeError, ValueError):
-                pnl = 0.0
-            fee = abs(float(b.get("fee", 0) or 0))
-            ts = str(b.get("ts", "") or "")
-            ord_id = str(b.get("ordId", "") or "").strip()
-            side = b.get("side", "")
+                sub = str(b.get("subType", "") or "")
+                try:
+                    sz = float(b.get("sz", 0) or 0)
+                    px = float(b.get("px", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    pnl = float(b.get("pnl", 0) or 0)
+                except (TypeError, ValueError):
+                    pnl = 0.0
+                try:
+                    fee = abs(float(b.get("fee", 0) or 0))
+                except (TypeError, ValueError):
+                    fee = 0.0
+                ts = str(b.get("ts", "") or "")
+                ord_id = str(b.get("ordId", "") or "").strip()
+                side = b.get("side", "")
 
-            if sub in ("3", "4"):
-                # Entry (open). Flush any pending close, then accumulate.
-                if pending is not None:
-                    _flush_close(pending, cur)
-                    if cur is not None and cur["size"] <= 1e-9:
-                        cur = None
-                    pending = None
-                if cur is None:
-                    cur = {
-                        "size": 0.0, "cost": 0.0, "time": ts, "ord_id": ord_id,
-                        "side": side,
-                        "pos_side": "short" if side == "sell" else "long",
-                        "fee": 0.0,
-                    }
-                cur["size"] += sz
-                cur["cost"] += sz * px
-                cur["fee"] += fee
-                continue
+                if sub in ("3", "4"):
+                    # Entry (open). Flush any pending close, then accumulate.
+                    if pending is not None:
+                        _flush_close(pending, cur)
+                        if cur is not None and cur["size"] <= 1e-9:
+                            cur = None
+                        pending = None
+                    if cur is None:
+                        cur = {
+                            "size": 0.0, "cost": 0.0, "time": ts, "ord_id": ord_id,
+                            "side": side,
+                            "pos_side": "short" if side == "sell" else "long",
+                            "fee": 0.0,
+                        }
+                    cur["size"] += sz
+                    cur["cost"] += sz * px
+                    cur["fee"] += fee
+                    continue
 
-            if sub in ("5", "6"):
-                # Close (realized PnL).
-                if pending is None:
-                    pending = {
-                        "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
-                        "time": ts, "px": px, "side": side,
-                        "entry_time": cur["time"] if cur else ts,
-                        "inst_id": inst_id,
-                    }
-                elif pending["ord_id"] == ord_id:
-                    pending["px"] = px
-                    pending["time"] = ts
-                else:
-                    _flush_close(pending, cur)
-                    if cur is not None and cur["size"] <= 1e-9:
-                        cur = None
-                    pending = {
-                        "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
-                        "time": ts, "px": px, "side": side,
-                        "entry_time": cur["time"] if cur else ts,
-                        "inst_id": inst_id,
-                    }
-                pending["size"] += sz
-                pending["pnl"] += pnl
-                pending["fee"] += fee
+                if sub in ("5", "6"):
+                    # Close (realized PnL).
+                    if pending is None:
+                        pending = {
+                            "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
+                            "time": ts, "px": px, "side": side,
+                            "entry_time": cur["time"] if cur else ts,
+                            "inst_id": inst_id,
+                        }
+                    elif pending["ord_id"] == ord_id:
+                        pending["px"] = px
+                        pending["time"] = ts
+                    else:
+                        _flush_close(pending, cur)
+                        if cur is not None and cur["size"] <= 1e-9:
+                            cur = None
+                        pending = {
+                            "size": 0.0, "pnl": 0.0, "fee": 0.0, "ord_id": ord_id,
+                            "time": ts, "px": px, "side": side,
+                            "entry_time": cur["time"] if cur else ts,
+                            "inst_id": inst_id,
+                        }
+                    pending["size"] += sz
+                    pending["pnl"] += pnl
+                    pending["fee"] += fee
+                    continue
+            except Exception as e:
+                print(f"[pair_bills] skip bad bill: {e} ({b.get('billId', '')})", flush=True)
                 continue
 
         if pending is not None:
@@ -3540,6 +3550,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         b = _db_bot_name(ord_to_bot.get(ord_id, ""))
         return b if b in ("Momentum", "Impulse 1D") else ""
 
+    pair_bills_err = ""
     try:
         fills_paired = _pair_bills(bills) if bills else await _pair_fills(raw_fills)
         for t in fills_paired:
@@ -3584,6 +3595,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         import traceback
         print(f"[trades/paired] OKX pairing error: {e}", flush=True)
         traceback.print_exc()
+        pair_bills_err = f"{type(e).__name__}: {e}"
 
     # Dedupe. Open pairs: only one live position per instrument exists at a time
     # (cooldown + single-position-per-bot), so collapsing by inst+minute is safe
@@ -3730,7 +3742,8 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
           f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
     return {"trades": dedup[-limit:],
             "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
-                      "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids)}}
+                      "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids),
+                      "pair_err": pair_bills_err}}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
