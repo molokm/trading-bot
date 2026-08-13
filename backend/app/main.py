@@ -3641,6 +3641,12 @@ if STATIC_DIR.exists():
     async def serve_frontend(full_path: str):
         if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi"):
             return JSONResponse({"detail": "Not Found"}, status_code=404)
+        candidate = STATIC_DIR / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(
+                str(candidate),
+                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+            )
         return FileResponse(
             str(STATIC_DIR / "index.html"),
             headers={"Cache-Control": "no-store"},
