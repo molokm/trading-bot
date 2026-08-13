@@ -3000,75 +3000,82 @@ async def get_pnl():
         print(f"[pnl] History source error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX bills — realized PnL source of truth ──
-    # Used when the History rows are unavailable. Sums closing fills (pnl != 0)
-    # of the account; strategy attribution via the clOrdId prefix (rot/imp) with
-    # a fallback to ordId persisted in the trades table. Cross-checks the rows
-    # path against the bills so any future divergence is caught loudly.
-    if source == "none":
-        try:
-            bills = await _fetch_all_trade_bills()
-            if bills:
-                source = "okx_bills"
-                now = dt.now(tz.utc)
-                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    # ── 2. OKX bills — authoritative "all-time on account" ──
+    # Sums every closing fill (pnl != 0) across the full bill history (up to
+    # 3 months) into `account_total` (the "all-time on account" footnote). The
+    # History rows only cover the OKX fills window, so this keeps the footnote
+    # truthful. When the History rows are unavailable, the bills also fill
+    # total/periods/per_bot via strategy attribution (clOrdId rot/imp prefix +
+    # ordId persisted in the trades table).
+    try:
+        bills = await _fetch_all_trade_bills()
+        if bills:
+            now = dt.now(tz.utc)
+            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+            try:
+                _rows = await db._fetchall(
+                    "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+                )
+                ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0] for r in _rows if r.get("ord_id")}
+            except Exception:
+                ord_to_bot = {}
+            count = 0
+            strat_count = 0
+            bills_account_total = 0.0
+            for b in bills:
                 try:
-                    _rows = await db._fetchall(
-                        "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-                    )
-                    ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0] for r in _rows if r.get("ord_id")}
-                except Exception:
-                    ord_to_bot = {}
-                count = 0
-                strat_count = 0
-                for b in bills:
+                    b_pnl = float(b.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    b_pnl = 0.0
+                ts_str = b.get("ts", "")
+                if b_pnl != 0:
+                    count += 1
+                    bills_account_total += b_pnl
+                if source != "none":
+                    continue  # rows already provided strategy totals
+                cid = str(b.get("clOrdId", "")).strip()
+                if cid.startswith("rot"):
+                    bot = "Momentum"
+                elif cid.startswith("imp"):
+                    bot = "Impulse 1D"
+                else:
+                    bid = ord_to_bot.get(str(b.get("ordId", "")).strip())
+                    bot = _db_bot_name(bid) if bid else ""
+                    if bot not in ("Momentum", "Impulse 1D"):
+                        continue  # demo-validator / manual / unmatched: not a strategy trade
+                total_realized += b_pnl
+                strat_count += 1
+                per_bot[bot] = per_bot.get(bot, 0.0) + b_pnl
+                try:
+                    b_fee = abs(float(b.get("fee") or 0))
+                except (TypeError, ValueError):
+                    b_fee = 0.0
+                total_fees += b_fee
+                if ts_str:
                     try:
-                        b_pnl = float(b.get("pnl") or 0)
-                    except (TypeError, ValueError):
-                        b_pnl = 0.0
-                    ts_str = b.get("ts", "")
-                    if b_pnl != 0:
-                        account_total += b_pnl
-                        count += 1
-                    cid = str(b.get("clOrdId", "")).strip()
-                    if cid.startswith("rot"):
-                        bot = "Momentum"
-                    elif cid.startswith("imp"):
-                        bot = "Impulse 1D"
-                    else:
-                        bid = ord_to_bot.get(str(b.get("ordId", "")).strip())
-                        bot = _db_bot_name(bid) if bid else ""
-                        if bot not in ("Momentum", "Impulse 1D"):
-                            continue  # demo-validator / manual / unmatched: not a strategy trade
-                    total_realized += b_pnl
-                    strat_count += 1
-                    per_bot[bot] = per_bot.get(bot, 0.0) + b_pnl
-                    try:
-                        b_fee = abs(float(b.get("fee") or 0))
-                    except (TypeError, ValueError):
-                        b_fee = 0.0
-                    total_fees += b_fee
-                    if ts_str:
-                        try:
-                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                            age_sec = (now - b_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += b_pnl
-                            if age_sec <= 604800:
-                                realized_7d += b_pnl
-                            if age_sec <= 2592000:
-                                realized_30d += b_pnl
-                            if b_time >= week_start:
-                                realized_week += b_pnl
-                        except (ValueError, OSError, TypeError):
+                        b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                        age_sec = (now - b_time).total_seconds()
+                        if age_sec <= 86400:
+                            realized_1d += b_pnl
+                        if age_sec <= 604800:
+                            realized_7d += b_pnl
+                        if age_sec <= 2592000:
                             realized_30d += b_pnl
-                print(f"[pnl] OKX bills (fallback): strat_total={total_realized:.2f} account_total={account_total:.2f} "
-                      f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                      f"fees={total_fees:.2f} closing_fills={count} strat_fills={strat_count} per_bot={per_bot}", flush=True)
-        except Exception as e:
-            import traceback
-            print(f"[pnl] OKX bills error: {e}", flush=True)
-            traceback.print_exc()
+                        if b_time >= week_start:
+                            realized_week += b_pnl
+                    except (ValueError, OSError, TypeError):
+                        realized_30d += b_pnl
+            account_total = bills_account_total
+            if source == "none":
+                source = "okx_bills"
+            print(f"[pnl] OKX bills: account_total={account_total:.2f} closing_fills={count} "
+                  f"strat_total={total_realized:.2f} strat_fills={strat_count} per_bot={per_bot} "
+                  f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+                  f"fees={total_fees:.2f} source={source}", flush=True)
+    except Exception as e:
+        import traceback
+        print(f"[pnl] OKX bills error: {e}", flush=True)
+        traceback.print_exc()
 
     # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
     if source == "none":
@@ -3274,7 +3281,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
 
     try:
         _fills_cache_ts = 0  # bypass fills cache
-        raw_fills = await _fetch_okx_fills(limit=300)
+        raw_fills = await _fetch_okx_fills(limit=1000)
     except Exception as e:
         print(f"[trades/paired] fills fetch error: {e}", flush=True)
         raw_fills = []
