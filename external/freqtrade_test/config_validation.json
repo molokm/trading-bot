@@ -25,12 +25,7 @@
     "pair_whitelist": [
       "BTC/USDT:USDT",
       "ARB/USDT:USDT",
-      "OP/USDT:USDT",
-      "FIL/USDT:USDT",
       "SUI/USDT:USDT",
-      "ATOM/USDT:USDT",
-      "LINK/USDT:USDT",
-      "DOT/USDT:USDT",
       "NEAR/USDT:USDT"
     ],
     "pair_blacklist": []
@@ -73,5 +68,6 @@
   },
   "internals": {
     "process_throttle_secs": 5
-  }
+  },
+  "initial_state": "running"
 }

@@ -10,7 +10,7 @@ import { useTranslation } from '../hooks/useTranslation'
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 /** Coins the demo validation bot trades (no overlap with Momentum/Impulse) */
-const VALIDATION_SYMBOL_OPTIONS = ['ARB', 'OP', 'FIL', 'SUI', 'ATOM', 'LINK', 'DOT', 'NEAR', 'PEPE']
+const VALIDATION_SYMBOL_OPTIONS = ['SUI', 'BTC', 'ARB', 'NEAR']
 
 /** Params that map 1:1 to RotationConfig on the backend */
 const ROTATION_PARAMS = [

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
-  Clock, Bot
+  Clock, Bot, FlaskConical
 } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
@@ -57,6 +57,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumStatus, setMomentumStatus] = useState(null)
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
+  const [validationStatus, setValidationStatus] = useState(null)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -109,13 +110,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     try {
-      const [pf, pos, tk, momStatus, momTrades, impStatus, trades, pnlData, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, momTrades, impStatus, valStatus, trades, pnlData, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
         api.momentumTrades(30).catch(() => null),
         api.impulseStatus().catch(() => null),
+        api.validationStatus().catch(() => null),
         api.getPairedTrades(50).catch(() => null),
         api.getPnl().catch(() => null),
         Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
@@ -128,6 +130,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       }
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (impStatus) setImpulseStatus(impStatus)
+      if (valStatus) setValidationStatus(valStatus)
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData) setPnl(pnlData)
       if (priceTickers) {
@@ -858,6 +861,74 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.impulseStop(); loadData() } catch (e) { alert(e.message) } }}>
                   <Square size={12} /> {t('dash.stop_bot')}
                 </button>
+              )}
+            </div>
+          </div>
+
+          {/* ─── Validation Bot (demo) ─── */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <FlaskConical size={13} className="text-[var(--warn)]" />
+              <span className="flex-1">{t('dash.validation_bot')}</span>
+              {validationStatus?.version && (
+                <span className="text-[0.62rem] font-semibold mono text-[var(--warn)] uppercase tracking-wide mr-1">
+                  {validationStatus.version}
+                </span>
+              )}
+              {validationStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!validationStatus?.running && validationStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+            </div>
+            <div className="p-3 space-y-2">
+              <div className="grid grid-cols-4 gap-1.5">
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(validationStatus?.config?.capital || 300).toLocaleString?.()}</div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                  <div className={`mono text-xs font-bold mt-0.5 ${validationStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    ${validationStatus?.total_pnl >= 0 ? '+' : ''}{(validationStatus?.total_pnl || 0).toFixed(2)}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{validationStatus?.open_positions?.length || 0}/{validationStatus?.config?.top_k || 1}</div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
+                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{validationStatus?.config?.max_leverage || 1}</div>
+                </div>
+              </div>
+              {validationStatus?.open_positions?.length > 0 && (
+                <div className="space-y-1">
+                  {validationStatus.open_positions.map((p, i) => {
+                    const isLong = p.side !== 'short'
+                    return (
+                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
+                        </div>
+                        <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                          {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+              {!isGuest && (
+                <>
+                  {validationStatus?.running ? (
+                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.validationStop(); loadData() } catch (e) { alert(e.message) } }}>
+                      <Square size={12} /> {t('dash.stop_bot')}
+                    </button>
+                  ) : (
+                    <button className="btn btn-primary btn-sm w-full" onClick={async () => { try { await api.validationStart({}); loadData() } catch (e) { alert(e.message) } }}>
+                      <Play size={12} /> {t('dash.start')}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </div>

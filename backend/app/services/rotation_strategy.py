@@ -55,6 +55,7 @@ STRATEGY_DESC = (
 @dataclass
 class RotationConfig:
     symbols: list = None
+    regime_symbols: list = None    # coins used ONLY for market regime, never traded
     capital: float = 10000.0
     top_k: int = 2
     roc_period: int = 14
@@ -89,6 +90,8 @@ class RotationConfig:
     def __post_init__(self):
         if self.symbols is None:
             self.symbols = list(COINS)
+        if self.regime_symbols is None:
+            self.regime_symbols = []
         if self.roi_table is None:
             # Динамический ROI: чем дольше держим, тем ниже TP.
             self.roi_table = [
@@ -1156,7 +1159,7 @@ class RotationStrategy:
         indicators = {}
         cfg = self.config
 
-        for coin in cfg.symbols:
+        for coin in list(cfg.symbols) + list(cfg.regime_symbols or []):
             try:
                 candles_d = await self._fetch_daily(client, coin, limit=250)
                 if not candles_d:
@@ -1166,7 +1169,7 @@ class RotationStrategy:
                     indicators[coin] = ind
 
                 # BTC 200-day MA (for long-only filter)
-                if coin == "BTC":
+                if coin == "BTC" or coin in (cfg.regime_symbols or []):
                     self._btc_200ma = self._compute_btc_200ma(candles_d)
                     self._regime = self._get_regime(candles_d)
             except Exception as e:
@@ -1283,6 +1286,8 @@ class RotationStrategy:
         regime = getattr(self, "_regime", "unknown")
 
         for coin, ind in indicators.items():
+            if coin in (cfg.regime_symbols or []):
+                continue  # regime-only coin, never traded
             if ind["atr"] <= 0:
                 continue
 
