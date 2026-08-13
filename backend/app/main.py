@@ -3425,6 +3425,9 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                     continue
                 legacy.append(t)
                 continue
+            pnl0 = float(t.get("pnl", 0) or 0)
+            if not oid and pnl0 == 0:
+                continue  # placeholder/corrupt close (no order id, zero pnl) — the real OKX row wins
             legacy.append(t)
         open_map = {}
         paired = []
