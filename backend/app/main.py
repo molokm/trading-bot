@@ -3025,10 +3025,23 @@ async def _get_okx_realized_pnl() -> dict:
     return pnl
 
 
+_bills_cache: list = []
+_bills_cache_ts: float = 0
+_BILLS_TTL = 60  # seconds — avoid OKX 429 from dashboard polls hitting bills every 10s
+
+
 async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
     """Fetch OKX account bills of trade type (type=2) for the whole available
     history: recent 7 days via /account/bills, older up to 3 months via
-    /account/bills-archive, paginated backwards by billId."""
+    /account/bills-archive, paginated backwards by billId.
+
+    Result is cached for _BILLS_TTL seconds: get_paired_trades is polled by the
+    dashboard every ~10s and each full fetch pages up to 20 requests, which
+    trips OKX rate limits (429) and silently kills the authoritative bills."""
+    global _bills_cache, _bills_cache_ts
+    now = _time.time()
+    if _bills_cache and (now - _bills_cache_ts) < _BILLS_TTL:
+        return _bills_cache
     bills: list = []
     seen: set = set()
     try:
@@ -3066,6 +3079,9 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
         import traceback
         print(f"[bills] fetch error: {e}", flush=True)
         traceback.print_exc()
+    if bills:
+        _bills_cache = bills
+        _bills_cache_ts = _time.time()
     return bills
 
 
@@ -3474,7 +3490,6 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
         print(f"[trades/paired] bills fetch error: {e}", flush=True)
 
     try:
-        _fills_cache_ts = 0  # bypass fills cache
         raw_fills = await _fetch_okx_fills(limit=1000)
     except Exception as e:
         print(f"[trades/paired] fills fetch error: {e}", flush=True)
