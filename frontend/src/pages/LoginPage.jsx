@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Lock, Eye, EyeOff, Loader2, TrendingUp, Shield, User } from 'lucide-react'
+import { Lock, Eye, EyeOff, Loader2, Shield, User } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
+import { CopixLogo } from '../components/ui'
 
 export default function LoginPage({ onLogin }) {
   const { t } = useTranslation()
@@ -53,11 +54,13 @@ export default function LoginPage({ onLogin }) {
       <div className="relative panel w-full max-w-sm" style={{ maxWidth: 380 }}>
         <div className="p-8 space-y-6">
           <div className="text-center space-y-3">
-            <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center mx-auto">
-              <TrendingUp size={28} className="text-white" />
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center mx-auto shadow-[0_12px_40px_-12px_rgba(124,108,246,0.5)]">
+              <CopixLogo size={34} className="text-white" />
             </div>
-            <h1 className="text-xl font-bold text-[var(--txt)]">OKX Terminal</h1>
-            <p className="text-xs text-[var(--txt-muted)]">{t('login.title')}</p>
+            <div>
+              <h1 className="text-xl font-bold text-[var(--txt)] tracking-tight">COPIX</h1>
+              <p className="text-xs text-[var(--txt-muted)] mt-1">{t('login.title')}</p>
+            </div>
           </div>
 
           {error && (

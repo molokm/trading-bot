@@ -58,10 +58,10 @@ export default function TrackerPage() {
       {/* Header */}
       <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)] border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center">
             <TrendingUp size={14} className="text-white" />
           </div>
-          <span className="text-sm font-bold">OKX Terminal · Live Performance</span>
+          <span className="text-sm font-bold">COPIX · Live Performance</span>
           <span className={`ml-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${data?.demo ? 'bg-[var(--warn-dim)] text-[var(--warn)]' : 'bg-[var(--profit-dim)] text-[var(--profit)]'}`}>
             {data?.demo ? 'DEMO' : 'LIVE'}
           </span>

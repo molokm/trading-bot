@@ -1,5 +1,5 @@
 #!/bin/bash
-echo "=== OKX Trading Terminal ==="
+echo "=== COPIX Trading Terminal ==="
 
 BACKEND_DIR="$(cd "$(dirname "$0")" && pwd)/backend"
 FRONTEND_DIR="$(cd "$(dirname "$0")" && pwd)/frontend"

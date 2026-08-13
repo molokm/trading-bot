@@ -61,7 +61,7 @@ function exportPng(equityCurve, t) {
   const yScale = (v) => pad.t + (1 - (v - minV) / range) * (h - pad.t - pad.b)
 
   const isUp = vals[vals.length - 1] >= vals[0]
-  const lineColor = isUp ? '#00ff88' : '#ff3366'
+  const lineColor = isUp ? '#16c784' : '#ea3943'
   const fillColor = isUp ? 'rgba(0,255,136,0.08)' : 'rgba(255,51,102,0.08)'
 
   // Grid

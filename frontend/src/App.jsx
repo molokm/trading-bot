@@ -5,7 +5,7 @@ import {
   TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
-import { Loader } from './components/ui'
+import { Loader, CopixLogo } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
@@ -124,14 +124,14 @@ function AppLayout() {
   return (
     <div className="h-screen flex flex-col bg-[var(--bg)] overflow-hidden">
       {/* ═══ HEADER ═══ */}
-      <header className="flex items-center justify-between px-4 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
+      <header className="flex items-center justify-between px-5 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
         {/* Left: Logo + Nav */}
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center">
-              <TrendingUp size={14} className="text-white" />
-            </div>
-            <span className="text-sm font-bold text-[var(--txt)] tracking-tight hidden lg:inline">OKX Terminal</span>
+            <span className="text-[var(--info)] flex items-center">
+              <CopixLogo size={21} />
+            </span>
+            <span className="text-[15px] font-bold text-[var(--txt)] tracking-tight hidden lg:inline">COPIX</span>
           </div>
 
           <nav className="flex items-center gap-1">
@@ -141,7 +141,7 @@ function AppLayout() {
                 to={item.to}
                 end={item.to === '/'}
                 className={({ isActive }) =>
-                  `flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                  `flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
                     isActive
                       ? 'bg-[var(--info-dim)] text-[var(--info)]'
                       : 'text-[var(--txt-muted)] hover:text-[var(--txt)] hover:bg-[var(--surface-overlay)]'
@@ -156,18 +156,18 @@ function AppLayout() {
         </div>
 
         {/* Right: Status + Controls */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {/* Connection Status */}
-          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-[var(--bg)] border border-[var(--border)]">
-            <span className={`w-2 h-2 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
+          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
             <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
               {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
             </span>
           </div>
 
           {/* User role */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[var(--bg)] border border-[var(--border)]">
-            {isGuest ? <User size={12} className="text-[var(--info)]" /> : <Shield size={12} className="text-[var(--profit)]" />}
+          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            {isGuest ? <User size={12} className="text-[var(--txt-muted)]" /> : <Shield size={12} className="text-[var(--profit)]" />}
             <span className="text-2xs font-medium text-[var(--txt-secondary)]">{isGuest ? t('nav.guest') : t('nav.admin')}</span>
           </div>
 

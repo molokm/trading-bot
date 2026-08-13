@@ -9,55 +9,55 @@
    ═══════════════════════════════════════════ */
 
 :root {
-  /* Dark theme (default) */
-  --bg: #0b0e14;
-  --bg-alt: #0f1219;
-  --surface: #13161d;
-  --surface-raised: #181c25;
-  --surface-overlay: #1e222d;
-  --border: rgba(255, 255, 255, 0.06);
-  --border-hover: rgba(255, 255, 255, 0.12);
-  --txt: #e8eaed;
-  --txt-secondary: #9aa0a9;
-  --txt-muted: #5c6370;
+  /* Dark theme (default) — COPIX minimal */
+  --bg: #0a0b0f;
+  --bg-alt: #0d0f14;
+  --surface: #12141a;
+  --surface-raised: #171a22;
+  --surface-overlay: #1d212b;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.16);
+  --txt: #f0f2f5;
+  --txt-secondary: #9aa1ad;
+  --txt-muted: #626a76;
 
-  --profit: #00ff88;
-  --profit-dim: rgba(0, 255, 136, 0.12);
-  --loss: #ff3366;
-  --loss-dim: rgba(255, 51, 102, 0.12);
-  --info: #4a9eff;
-  --info-dim: rgba(74, 158, 255, 0.12);
-  --warn: #ffd700;
-  --warn-dim: rgba(255, 215, 0, 0.12);
+  --profit: #16c784;
+  --profit-dim: rgba(22, 199, 132, 0.12);
+  --loss: #ea3943;
+  --loss-dim: rgba(234, 57, 67, 0.12);
+  --info: #8b7cff;
+  --info-dim: rgba(139, 124, 255, 0.14);
+  --warn: #f0b90b;
+  --warn-dim: rgba(240, 185, 11, 0.12);
 
   --header-h: 52px;
   --sidebar-w: 0px; /* no sidebar in new layout */
-  --radius: 10px;
-  --radius-sm: 6px;
-  --radius-lg: 14px;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-lg: 18px;
 }
 
 /* Light theme */
 .light {
-  --bg: #f5f6f8;
-  --bg-alt: #ecedf0;
+  --bg: #f7f7f9;
+  --bg-alt: #efeff2;
   --surface: #ffffff;
   --surface-raised: #ffffff;
-  --surface-overlay: #f0f1f3;
-  --border: rgba(0, 0, 0, 0.08);
-  --border-hover: rgba(0, 0, 0, 0.15);
-  --txt: #1a1d23;
-  --txt-secondary: #5c6370;
-  --txt-muted: #9aa0a9;
+  --surface-overlay: #f2f2f5;
+  --border: rgba(0, 0, 0, 0.09);
+  --border-hover: rgba(0, 0, 0, 0.16);
+  --txt: #17181d;
+  --txt-secondary: #5d6470;
+  --txt-muted: #9aa1ad;
 
-  --profit: #00b359;
-  --profit-dim: rgba(0, 179, 89, 0.1);
-  --loss: #e6264d;
-  --loss-dim: rgba(230, 38, 77, 0.1);
-  --info: #2b7de9;
-  --info-dim: rgba(43, 125, 233, 0.1);
-  --warn: #cc9a00;
-  --warn-dim: rgba(204, 154, 0, 0.1);
+  --profit: #0da36b;
+  --profit-dim: rgba(13, 163, 107, 0.1);
+  --loss: #d63540;
+  --loss-dim: rgba(214, 53, 64, 0.1);
+  --info: #6a55ef;
+  --info-dim: rgba(106, 85, 239, 0.1);
+  --warn: #c7980a;
+  --warn-dim: rgba(199, 152, 10, 0.1);
 }
 
 /* ═══════════════════════════════════════════
@@ -97,6 +97,7 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 
 .panel-header {
@@ -105,11 +106,10 @@ body {
   gap: 8px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: var(--txt-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
 }
 
 .panel-body {
@@ -204,23 +204,23 @@ body {
 }
 
 .btn-primary {
-  background: var(--profit);
-  color: #0b0e14;
-  border-color: var(--profit);
+  background: linear-gradient(135deg, var(--info) 0%, #6a55ef 100%);
+  color: #fff;
+  border-color: transparent;
   font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 0 20px rgba(0, 255, 136, 0.25);
+  box-shadow: 0 8px 24px -8px rgba(139, 124, 255, 0.55);
   transform: translateY(-1px);
 }
 
 .btn-danger {
   background: var(--loss-dim);
   color: var(--loss);
-  border-color: rgba(255, 51, 102, 0.25);
+  border-color: rgba(234, 57, 67, 0.28);
 }
 .btn-danger:hover:not(:disabled) {
-  background: rgba(255, 51, 102, 0.2);
+  background: rgba(234, 57, 67, 0.18);
   border-color: var(--loss);
 }
 
@@ -273,7 +273,7 @@ input, select, textarea {
 
 input:focus, select:focus, textarea:focus {
   border-color: var(--info) !important;
-  box-shadow: 0 0 0 2px rgba(74, 158, 255, 0.1) !important;
+  box-shadow: 0 0 0 3px rgba(139, 124, 255, 0.14) !important;
 }
 
 input.mono, .mono input {
@@ -412,8 +412,8 @@ input[type="checkbox"] {
    ═══════════════════════════════════════════ */
 
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
@@ -571,28 +571,28 @@ input[type="checkbox"] {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 14px 16px;
+  padding: 16px 18px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   transition: border-color 0.15s ease;
 }
 .metric-card:hover {
   border-color: var(--border-hover);
 }
 .metric-card .label {
-  font-size: 0.65rem;
-  font-weight: 500;
+  font-size: 0.62rem;
+  font-weight: 600;
   color: var(--txt-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.06em;
 }
 .metric-card .value {
   font-family: 'JetBrains Mono', monospace;
-  font-size: 1.35rem;
+  font-size: 1.45rem;
   font-weight: 700;
   color: var(--txt);
-  line-height: 1.2;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
 }
 .metric-card .change {
   font-size: 0.7rem;
@@ -609,7 +609,7 @@ input[type="checkbox"] {
 .tour-highlight {
   position: relative;
   z-index: 40;
-  box-shadow: 0 0 0 4px var(--info), 0 0 30px rgba(74, 158, 255, 0.3);
+  box-shadow: 0 0 0 4px var(--info), 0 0 30px rgba(139, 124, 255, 0.3);
   border-radius: var(--radius);
 }
 .tour-tooltip {
@@ -734,7 +734,10 @@ input[type="checkbox"] {
   50% { background-position: 100% 50%; }
 }
 .login-bg-anim {
-  background: linear-gradient(135deg, #0b0e14 0%, #13161d 25%, #0f1923 50%, #13161d 75%, #0b0e14 100%);
-  background-size: 400% 400%;
-  animation: login-bg 15s ease infinite;
+  background:
+    radial-gradient(600px 400px at 15% 20%, rgba(139, 124, 255, 0.09) 0%, transparent 60%),
+    radial-gradient(700px 500px at 85% 80%, rgba(22, 199, 132, 0.06) 0%, transparent 60%),
+    var(--bg);
+  background-size: 200% 200%;
+  animation: login-bg 18s ease infinite;
 }

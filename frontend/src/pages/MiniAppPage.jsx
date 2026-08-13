@@ -433,10 +433,10 @@ export default function MiniAppPage() {
       {/* ═══ Header ═══ */}
       <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)] border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--profit)] to-[var(--info)] flex items-center justify-center">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center">
             <Zap size={14} className="text-white" />
           </div>
-          <span className="text-sm font-bold text-[var(--txt)]">OKX Terminal</span>
+          <span className="text-sm font-bold text-[var(--txt)]">COPIX</span>
           <span className={`ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${
             connected ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'
           }`}>
@@ -708,7 +708,7 @@ export default function MiniAppPage() {
 
         {/* ═══ Footer ═══ */}
         <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
-          OKX Terminal • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+          COPIX • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
         </div>
 
         {/* ═══ Diagnostics panel (admin only) ═══ */}

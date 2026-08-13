@@ -10,20 +10,20 @@ export default {
       colors: {
         // Accent palette
         profit: {
-          DEFAULT: '#00ff88',
-          dim: 'rgba(0, 255, 136, 0.15)',
-          border: 'rgba(0, 255, 136, 0.3)',
+          DEFAULT: '#16c784',
+          dim: 'rgba(22, 199, 132, 0.15)',
+          border: 'rgba(22, 199, 132, 0.3)',
         },
         loss: {
-          DEFAULT: '#ff3366',
-          dim: 'rgba(255, 51, 102, 0.15)',
-          border: 'rgba(255, 51, 102, 0.3)',
+          DEFAULT: '#ea3943',
+          dim: 'rgba(234, 57, 67, 0.15)',
+          border: 'rgba(234, 57, 67, 0.3)',
         },
         accent: {
-          blue: '#4a9eff',
+          blue: '#8b7cff',
           orange: '#ff9500',
-          purple: '#7c3aed',
-          yellow: '#ffd700',
+          purple: '#8b7cff',
+          yellow: '#f0b90b',
         },
         // Surface
         surface: {

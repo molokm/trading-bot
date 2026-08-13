@@ -13,7 +13,7 @@ const PAIRS = [
 ]
 const INTERVALS = ['5m', '15m', '1H', '4H', '1D']
 const INDICATORS = [
-  { id: 'sma', label: 'SMA 20', color: '#4a9eff' },
+  { id: 'sma', label: 'SMA 20', color: '#8b7cff' },
   { id: 'ema', label: 'EMA 50', color: '#ff9500' },
 ]
 
@@ -116,17 +116,17 @@ export default function ChartPage() {
     const container = containerRef.current
     if (!container) return
 
-    const bgColor = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim() || '#13161d'
-    const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || 'rgba(255,255,255,0.06)'
-    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--txt-muted').trim() || '#5c6370'
+    const bgColor = getComputedStyle(document.documentElement).getPropertyValue('--surface').trim() || '#12141a'
+    const gridColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || 'rgba(255,255,255,0.08)'
+    const textColor = getComputedStyle(document.documentElement).getPropertyValue('--txt-muted').trim() || '#626a76'
 
     const chart = createChart(container, {
       layout: { background: { type: ColorType.Solid, color: bgColor }, textColor, fontSize: 11 },
       grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
       crosshair: {
         mode: 0,
-        vertLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#1e2028' },
-        horzLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#1e2028' },
+        vertLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#171a22' },
+        horzLine: { color: 'rgba(255,255,255,0.15)', width: 1, style: 3, labelBackgroundColor: '#171a22' },
       },
       timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
       rightPriceScale: { borderColor: gridColor, scaleMargins: { top: 0.05, bottom: 0.2 } },
@@ -136,16 +136,16 @@ export default function ChartPage() {
 
     const isBtc = selectedPair.includes('BTC')
     const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: '#00ff88', downColor: '#ff4757',
-      borderUpColor: '#00ff88', borderDownColor: '#ff4757',
-      wickUpColor: '#00ff88', wickDownColor: '#ff4757',
+      upColor: '#16c784', downColor: '#ea3943',
+      borderUpColor: '#16c784', borderDownColor: '#ea3943',
+      wickUpColor: '#16c784', wickDownColor: '#ea3943',
       priceFormat: { type: 'price', precision: isBtc ? 0 : 2, minMove: isBtc ? 1 : 0.01 },
     })
     candleSeries.setData(chartData)
 
     // Volume
     const volumeSeries = chart.addSeries(LineSeries, {
-      color: 'rgba(74,158,255,0.15)', lineWidth: 1, lineStyle: 0,
+      color: 'rgba(139,124,255,0.15)', lineWidth: 1, lineStyle: 0,
       priceScaleId: 'volume', lastValueVisible: false, priceLineVisible: false,
     })
     chart.priceScale('volume').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } })
@@ -182,7 +182,7 @@ export default function ChartPage() {
     if (tpSlLines.length > 0) {
       tpSlLines.forEach(line => {
         const isTp = line.type === 'tp'
-        const color = isTp ? '#00ff88' : '#ff4757'
+        const color = isTp ? '#16c784' : '#ea3943'
         const lineWidth = 2
         const lineStyle = isTp ? 2 : 0 // dashed for TP, solid for SL
         try {

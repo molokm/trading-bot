@@ -4,6 +4,46 @@ import { useTheme } from '../context/ThemeContext'
 import { useOnboarding } from '../context/OnboardingContext'
 import { useTranslation } from '../hooks/useTranslation'
 
+/* ═══════ COPIX Brand Logo ═══════ */
+export function CopixLogo({ size = 24, className = '' }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-label="COPIX"
+    >
+      <path
+        d="M16.9 5.7 A8 8 0 1 0 16.9 18.3"
+        stroke="currentColor"
+        strokeWidth="2.1"
+        strokeLinecap="round"
+      />
+      <path
+        d="M16.9 12 a2.7 2.7 0 1 1 -2.7 2.7"
+        stroke="currentColor"
+        strokeWidth="2.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+export function CopixWordmark({ markSize = 22, className = '', markClassName = '' }) {
+  return (
+    <span className={`inline-flex items-center gap-2 ${className || ''}`}>
+      <span className={markClassName}>
+        <CopixLogo size={markSize} />
+      </span>
+      <span className="text-sm font-bold tracking-tight text-[var(--txt)]">
+        COPIX
+      </span>
+    </span>
+  )
+}
+
 /* ═══════ Tooltip ═══════ */
 export function Tip({ text, className = '' }) {
   if (!text) return null
