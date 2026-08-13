@@ -133,6 +133,9 @@ class ImpulseStrategy:
     # Module-level default, overridable per instance (multi-tenant per-user bots).
     BOT_ID: str = IMP_BOT_ID
     BOT_NAME: str = "Impulse 1D v1"
+    # Client-order-ID prefix: every order gets clOrdId=<prefix>-<n> so OKX fills
+    # can be attributed to this bot (used by the PnL aggregation).
+    CL_ORD_PREFIX: str = "imp"
 
     def __init__(self, config: ImpulseConfig, client_manager=None, db=None,
                  notifier: Optional[TelegramNotifier] = None,
@@ -334,6 +337,8 @@ class ImpulseStrategy:
             "inst_id": inst_id, "side": side, "ord_type": ord_type,
             "sz": str(sz), "td_mode": "cross", "pos_side": pos_side,
         }
+        if self.CL_ORD_PREFIX:
+            params["cl_ord_id"] = f"{self.CL_ORD_PREFIX}{int(time.time() * 1000)}"
         if px and ord_type == "limit":
             params["px"] = str(round(px, 2))
         resp = await client.place_order(**params)
@@ -348,6 +353,7 @@ class ImpulseStrategy:
             sz=str(pos.size), td_mode="cross", pos_side=pos.side,
             reduce_only=True, sl_trigger_px=str(round(pos.stop_price, 2)),
             cxl_on_close_pos=True,
+            cl_ord_id=f"{self.CL_ORD_PREFIX}{int(time.time() * 1000)}" if self.CL_ORD_PREFIX else None,
         )
         if resp.get("error"):
             print(f"[Impulse] Place stop error {pos.coin}: {resp.get('message', '')}", flush=True)
@@ -389,6 +395,7 @@ class ImpulseStrategy:
             sz=str(pos.size), td_mode="cross", pos_side=pos.side,
             reduce_only=True, sl_trigger_px=str(round(pos.stop_price, 2)),
             cxl_on_close_pos=True,
+            cl_ord_id=f"{self.CL_ORD_PREFIX}{int(time.time() * 1000)}" if self.CL_ORD_PREFIX else None,
         )
         if resp.get("error"):
             print(f"[Impulse] Update stop place error {pos.coin}: {resp.get('message', '')} "

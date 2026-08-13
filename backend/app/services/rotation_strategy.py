@@ -131,7 +131,7 @@ class RotPosition:
 class RotationStrategy:
     # Module-level defaults, overridable in subclasses (e.g. validation bot).
     BOT_ID: str = ROT_BOT_ID
-    BOT_NAME: str = "Momentum Rotation v3"
+    BOT_NAME: str = "Momentum Rotation v4"
     CT_VAL: dict = CT_VAL
     LOT_SZ: dict = LOT_SZ
     SWAP_MAP: dict = SWAP_MAP
@@ -140,9 +140,10 @@ class RotationStrategy:
     STRATEGY_DESC: str = STRATEGY_DESC
     PRICE_DECIMALS: int = 2
     # Client-order-ID prefix: when non-empty, every order gets clOrdId=<prefix>-<n>,
-    # so its fills can be identified on the exchange (used by the demo validator to
-    # keep its trades out of Momentum windows).
-    CL_ORD_PREFIX: str = ""
+    # so its fills can be identified on the exchange (used to attribute OKX fills
+    # to this bot in the PnL aggregation, and to keep demo-validator trades out
+    # of Momentum windows).
+    CL_ORD_PREFIX: str = "rot"
 
     def __init__(self, config: RotationConfig, client_manager=None, db=None,
                  notifier: Optional[TelegramNotifier] = None,
@@ -590,6 +591,7 @@ class RotationStrategy:
             sz=self._fmt_sz(pos.coin, pos.size), td_mode="cross", pos_side=pos.side,
             reduce_only=True, sl_trigger_px=self._fmt_px(pos.stop_price),
             cxl_on_close_pos=True,
+            cl_ord_id=f"{self.CL_ORD_PREFIX}{int(time.time() * 1000)}" if self.CL_ORD_PREFIX else None,
         )
         if resp.get("error"):
             print(f"[Rotation] Place stop error {pos.coin}: {resp.get('message', '')}", flush=True)
@@ -634,6 +636,7 @@ class RotationStrategy:
             sz=self._fmt_sz(pos.coin, pos.size), td_mode="cross", pos_side=pos.side,
             reduce_only=True, sl_trigger_px=self._fmt_px(pos.stop_price),
             cxl_on_close_pos=True,
+            cl_ord_id=f"{self.CL_ORD_PREFIX}{int(time.time() * 1000)}" if self.CL_ORD_PREFIX else None,
         )
         if resp.get("error"):
             print(f"[Rotation] Update stop place error {pos.coin}: {resp.get('message', '')} "

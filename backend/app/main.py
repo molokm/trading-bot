@@ -2227,15 +2227,15 @@ async def telegram_simulate(data: dict = None):
     open_px = 67250.00
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
-        size=0.03, leverage=3.0, bot_name="Momentum Rotation v3",
+        size=0.03, leverage=3.0, bot_name="Momentum Rotation v4",
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
-        pnl=76.50, closed_sz=0.015, remaining_sz=0.015, bot_name="Momentum Rotation v3",
+        pnl=76.50, closed_sz=0.015, remaining_sz=0.015, bot_name="Momentum Rotation v4",
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
-        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v3",
+        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v4",
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
@@ -2557,7 +2557,7 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
 
     all_fills = []
     errors = []
-    effective_limit = min(limit, 300)
+    effective_limit = min(limit, 1000)
     pages = max(1, (effective_limit + 99) // 100)
 
     if inst_id:
@@ -2924,10 +2924,11 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
 
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards. Realized PnL is summed from the SAME
-    trade list shown in the History page (get_paired_trades): bot trades from
-    DB + OKX fills history. per_bot breaks the total down by strategy.
-    Unrealized PnL comes from OKX positions."""
+    """PNL for Dashboard metric cards. Realized PnL per closed trade is taken
+    directly from OKX fills (fillPnl), filtered to the bot's own trades (clOrdId
+    prefix or ordId already persisted in the trades table), and summed into the
+    1d/7d/30d/week buckets. Falls back to OKX bills / in-memory logs when fills
+    are unavailable. Unrealized PnL comes from OKX positions."""
     from datetime import datetime as dt, timezone as tz, timedelta as td
 
     realized_1d = 0.0
@@ -2939,57 +2940,81 @@ async def get_pnl():
     source = "none"
     per_bot = {}
 
-    # ── 1. Primary: same trade list as the History page ──
+    # ── 1. Primary: OKX fill PnL, only the bot's own trades ──
+    # Per-close realized PnL comes straight from the exchange (fillPnl), so the
+    # numbers always match the account. Bot trades are identified by the clOrdId
+    # prefix (rot/imp) or by ordId already persisted in the trades table; demo
+    # validator fills (val prefix) never count.
     try:
-        resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", [])
-        if trades:
-            source = "history"
-            now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            count = 0
-            for t in trades:
-                reason = (t.get("reason") or "").lower()
-                if reason == "open":
-                    continue
-                try:
-                    pnl = float(t.get("pnl", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                total_realized += pnl
-                count += 1
-                bot = t.get("bot") or "Прочие"
-                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                try:
-                    fee = abs(float(t.get("fee", 0) or 0))
-                except (TypeError, ValueError):
-                    fee = 0.0
-                total_fees += fee
-                time_str = t.get("time", "") or t.get("exit_time", "")
-                if time_str:
-                    try:
-                        t_time = dt.fromisoformat(time_str)
-                        if t_time.tzinfo is None:
-                            t_time = t_time.replace(tzinfo=tz.utc)
-                        age_sec = (now - t_time).total_seconds()
-                        if age_sec <= 86400:
-                            realized_1d += pnl
-                        if age_sec <= 604800:
-                            realized_7d += pnl
-                        if age_sec <= 2592000:
-                            realized_30d += pnl
-                        if t_time >= week_start:
-                            realized_week += pnl
-                    except (ValueError, OSError, TypeError):
-                        realized_30d += pnl
-                else:
+        _fills_cache_ts = 0  # bypass fills cache
+        raw_fills = await _fetch_okx_fills(limit=1000)
+        try:
+            _rows = await db._fetchall(
+                "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+            )
+            ord_to_bot = {str(r["ord_id"]).strip(): r["bot_id"] for r in _rows if r.get("ord_id")}
+        except Exception:
+            ord_to_bot = {}
+        val_ids = {oid for oid, bid in ord_to_bot.items() if bid == VAL_BOT_ID}
+        now = dt.now(tz.utc)
+        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+        count = 0
+        has_pnl = False
+        for f in raw_fills:
+            cid = str(f.get("clOrdId", "")).strip()
+            oid = str(f.get("ordId", "")).strip()
+            if cid.startswith("val") or oid in val_ids:
+                continue  # demo-validator trades never count
+            if cid.startswith("rot"):
+                bot = "Momentum"
+            elif cid.startswith("imp"):
+                bot = "Impulse 1D"
+            elif oid in ord_to_bot:
+                bot = _db_bot_name(ord_to_bot[oid]) or "Momentum"
+            else:
+                continue  # not one of the bot's trades
+            try:
+                fee = abs(float(f.get("fee", 0) or 0))
+            except (TypeError, ValueError):
+                fee = 0.0
+            total_fees += fee
+            pnl = _parse_fill_pnl(f)
+            if pnl is None or pnl == 0:
+                continue  # opening fill
+            has_pnl = True
+            total_realized += pnl
+            count += 1
+            per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+            try:
+                t_time = dt.fromtimestamp(int(f.get("ts", 0)) / 1000, tz=tz.utc)
+                age_sec = (now - t_time).total_seconds()
+                if age_sec <= 86400:
+                    realized_1d += pnl
+                if age_sec <= 604800:
+                    realized_7d += pnl
+                if age_sec <= 2592000:
                     realized_30d += pnl
-            print(f"[pnl] History: total={total_realized:.2f} 1d={realized_1d:.2f} "
-                  f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed_trades={count} per_bot={per_bot}", flush=True)
+                if t_time >= week_start:
+                    realized_week += pnl
+            except (ValueError, OSError, TypeError):
+                realized_30d += pnl
+        if count:
+            source = "okx_fills"
+        print(f"[pnl] OKX fills: total={total_realized:.2f} 1d={realized_1d:.2f} "
+              f"7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
+              f"fees={total_fees:.2f} closed_fills={count} has_pnl={has_pnl} "
+              f"per_bot={per_bot}", flush=True)
+        if count and not has_pnl:
+            # Demo/paper account returns fillPnl=null: OKX cannot give per-fill
+            # realized PnL, so fall back to the bill/position-based sources.
+            print("[pnl] OKX fills returned no fillPnl (demo?) — falling back", flush=True)
+            source = "none"
+            total_realized = realized_1d = realized_7d = realized_30d = realized_week = 0.0
+            total_fees = 0.0
+            per_bot = {}
     except Exception as e:
         import traceback
-        print(f"[pnl] History source error: {e}", flush=True)
+        print(f"[pnl] OKX fills source error: {e}", flush=True)
         traceback.print_exc()
 
     # ── 2. Fallback: OKX account bills (if history list is empty) ──

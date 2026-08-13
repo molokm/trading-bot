@@ -197,7 +197,8 @@ class OKXClient:
                                reduce_only: bool = False,
                                sl_trigger_px: str = None, sl_ord_px: str = "-1",
                                tp_trigger_px: str = None, tp_ord_px: str = "-1",
-                               cxl_on_close_pos: bool = False) -> dict:
+                               cxl_on_close_pos: bool = False,
+                               cl_ord_id: str = None) -> dict:
         """Place a conditional (TP/SL) algo order. OKX /api/v5/trade/order-algo."""
         body = {
             "instId": inst_id,
@@ -212,6 +213,8 @@ class OKXClient:
             body["reduceOnly"] = "true"
         if cxl_on_close_pos:
             body["cxlOnClosePos"] = "true"
+        if cl_ord_id:
+            body["clOrdId"] = cl_ord_id
         if sl_trigger_px:
             body["slTriggerPx"] = sl_trigger_px
             body["slOrdPx"] = sl_ord_px or "-1"
