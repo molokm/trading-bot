@@ -3450,6 +3450,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     okx_open_keys = {}     # inst_id -> set(ord_id) for open rows
     bill_by_ord = {}
     flag_raw = bool(raw)
+    bills = []
     try:
         bills = await _fetch_all_trade_bills()
         for b in bills:
