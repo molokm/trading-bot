@@ -1,0 +1,27 @@
+{
+  "strategy_name": "ValidationStrategy",
+  "params": {
+    "buy": {
+      "adx_min": 18,
+      "corr_threshold": 0.99,
+      "max_leverage": 2.0,
+      "min_roc": 2.5,
+      "risk_per_trade": 0.14,
+      "rsi_long_max": 82,
+      "rsi_short_min": 21,
+      "vol_mult": 1.8
+    },
+    "sell": {
+      "atr_stop_mult": 2.7,
+      "breakeven_pct": 0.03,
+      "min_hold_days": 1,
+      "partial_tp_pct": 0.06,
+      "trail_atr_mult": 0.3
+    },
+    "roi": {
+      "0": 0.1,
+      "1440": 0.06
+    }
+  },
+  "ft_stratparam_v": 1
+}

@@ -43,3 +43,5 @@ services:
         value: "500"
       - key: PRO_PLAN_DAYS
         value: "30"
+      - key: TRACKER_URL
+        value: "https://trading-bot-mu99.onrender.com/tracker"

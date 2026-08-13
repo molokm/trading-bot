@@ -36,6 +36,7 @@ PLAN_LABEL = os.getenv("SIGNAL_PLAN_LABEL", "Подписка на сигнал�
 PRO_PRICE_STARS = int(os.getenv("PRO_PRICE_STARS", "500"))
 PRO_PLAN_DAYS = int(os.getenv("PRO_PLAN_DAYS", "30"))
 PRO_LABEL = os.getenv("PRO_PLAN_LABEL", "Pro-тариф: мини-ап + свой счёт OKX 1 мес")
+TRACKER_URL = os.getenv("TRACKER_URL", "")
 
 # plan -> (price_stars, plan_days, label)
 PLANS = {
@@ -93,6 +94,10 @@ class TelegramBotPoller:
         if "pre_checkout_query" in update:
             await self._on_pre_checkout(update["pre_checkout_query"])
             return
+        cq = update.get("callback_query")
+        if cq:
+            await self._handle_callback(cq)
+            return
         msg = update.get("message")
         if not msg:
             return
@@ -111,30 +116,90 @@ class TelegramBotPoller:
                 await self._cmd_subscribe(chat_id, "pro")
             elif cmd == "/status":
                 await self._cmd_status(chat_id)
+            elif cmd == "/about":
+                await self._cmd_about(chat_id)
             else:
                 await self._send_msg(chat_id, self._menu_text())
             return
         await self._send_msg(chat_id, self._menu_text())
 
+    def _menu_keyboard(self) -> dict:
+        return {
+            "inline_keyboard": [
+                [{"text": f"📡 Сигналы · {PRICE_STARS} ⭐", "callback_data": "sub_signals"}],
+                [{"text": f"🚀 Pro · свой счёт OKX · {PRO_PRICE_STARS} ⭐", "callback_data": "sub_pro"}],
+                [{"text": "📊 Живые результаты", "callback_data": "tracker"},
+                 {"text": "ℹ️ О боте", "callback_data": "about"}],
+            ]
+        }
+
     def _menu_text(self) -> str:
         return (
-            "🤖 <b>Торговый бот</b>\n"
+            "🤖 <b>Ваш личный алгоритмический трейдер</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "Выберите подписку:\n\n"
-            f"📡 <b>Сигналы</b> — {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
-            "   Доступ в приватный канал, где публикуются сигналы стратегий "
-            "(Momentum Rotation + Impulse 1D).\n"
-            f"💎 <b>Pro</b> — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
-            "   Мини-ап + ваш счёт OKX: подключаете свои ключи, и те же боты "
-            "торгуют на вашем счёте.\n\n"
-            "Команды:\n"
-            "/subscribe — оплатить сигналы\n"
-            "/subscribe_pro — оплатить Pro\n"
-            "/status — статус подписки"
+            "Бот сам торгует фьючерсами на OKX по двум проверенным стратегиям — "
+            "открывает, ведёт и закрывает позиции за вас. 24/7, без эмоций, "
+            "с жёсткими стопами.\n\n"
+            "✅ <b>Доказанная эффективность</b>\n"
+            "• <b>+100% за 2 года</b> на данных вне выборки (walk-forward)\n"
+            "• Win rate 55–57%, ликвидаций — <b>0</b>\n"
+            "• Подтверждено независимыми движками (freqtrade + честный бэктест)\n\n"
+            "Выберите формат:\n\n"
+            f"📡 <b>Сигналы</b> · {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
+            "Смотрите каждую сделку в приватном канале — учитесь и повторяете сами.\n\n"
+            f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
+            "Бот торгует <b>на вашем счёте OKX</b> автоматически, всё управление — "
+            "в удобном мини-апе в Telegram.\n\n"
+            "Команды: /subscribe · /subscribe_pro · /status · /about"
         )
 
+    def _about_text(self) -> str:
+        return (
+            "📈 <b>О боте</b>\n"
+            "━━━━━━━━━━━━━━━\n"
+            "• <b>Стратегии:</b> Momentum Rotation + Impulse 1D\n"
+            "• <b>Таймфрейм:</b> дневные свечи, 10 монет, до 4 позиций одновременно\n"
+            "• <b>Риск-менеджмент:</b> стоп-лоссы, трейлинг, безубыток, частичный тейк — "
+            "всё автоматически\n"
+            "• <b>Валидация:</b> результаты вне выборки, подтверждены freqtrade и "
+            "независимым «честным» бэктестом (вход по открытию следующего дня)\n"
+            "• <b>Результаты бэктеста:</b> +102% и +109% на двух OOS-периодах, "
+            "win rate 55–57%, ликвидаций 0\n"
+            "• <b>Прозрачность:</b> живые результаты — в мини-апе и на странице трекера\n\n"
+            "Живой отчёт: /tracker\n"
+            "Как проверить самостоятельно: результаты воспроизводятся скриптами "
+            "верификации из открытого репозитория проекта.\n\n"
+            "⚠️ Прошлые результаты не гарантируют будущей доходности. Торговля "
+            "фьючерсами с плечом — высокорисковый инструмент."
+        )
+
+    async def _cmd_about(self, chat_id):
+        await self._send_msg(chat_id, self._about_text())
+
+    async def _handle_callback(self, cq: dict):
+        data = cq.get("data", "")
+        msg = cq.get("message") or {}
+        chat_id = msg.get("chat", {}).get("id")
+        cq_id = cq.get("id")
+        if not chat_id:
+            return
+        await self._api("answerCallbackQuery", callback_query_id=cq_id)
+        if data == "sub_signals":
+            await self._cmd_subscribe(chat_id, "signals")
+        elif data == "sub_pro":
+            await self._cmd_subscribe(chat_id, "pro")
+        elif data == "tracker":
+            if TRACKER_URL:
+                await self._send_msg(chat_id, f"📊 Живые результаты бота:\n{TRACKER_URL}")
+            else:
+                await self._send_msg(chat_id,
+                                     "📊 Живые результаты — в мини-апе и на странице трекера. "
+                                     "Спросите у администратора ссылку.")
+        elif data == "about":
+            await self._send_msg(chat_id, self._about_text())
+
     async def _cmd_start(self, chat_id):
-        await self._send_msg(chat_id, self._menu_text())
+        await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
 
     async def _cmd_subscribe(self, chat_id, plan: str = "signals"):
         price, days, label = PLANS.get(plan, PLANS["signals"])
