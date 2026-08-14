@@ -4,40 +4,6 @@ import { useTheme } from '../context/ThemeContext'
 import { useOnboarding } from '../context/OnboardingContext'
 import { useTranslation } from '../hooks/useTranslation'
 
-/* ═══════ COPIX Brand Logo ═══════ */
-export function CopixLogo({ size = 24, className = '' }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      className={className}
-      aria-label="COPIX"
-    >
-      <path
-        d="M 12.00 21.20 A 9.12 9.12 0 0 0 -1.88 -0.36 A 8.95 8.95 0 0 0 -1.73 -0.74 A 8.79 8.79 0 0 0 -1.51 -1.06 A 8.62 8.62 0 0 0 -1.23 -1.33 A 8.46 8.46 0 0 0 -0.91 -1.53 A 8.30 8.30 0 0 0 -0.55 -1.66 A 8.13 8.13 0 0 0 -0.19 -1.70 A 7.97 7.97 0 0 0 0.17 -1.67 A 7.80 7.80 0 0 0 0.51 -1.56 A 7.64 7.64 0 0 0 0.81 -1.39 A 7.47 7.47 0 0 0 1.06 -1.17 A 7.31 7.31 0 0 0 1.25 -0.90 A 7.14 7.14 0 0 0 1.38 -0.60 A 6.98 6.98 0 0 0 1.44 -0.29 A 6.82 6.82 0 0 0 1.44 0.02"
-        stroke="currentColor"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-      />
-    </svg>
-  )
-}
-
-export function CopixWordmark({ markSize = 22, className = '', markClassName = '' }) {
-  return (
-    <span className={`inline-flex items-center gap-2 ${className || ''}`}>
-      <span className={markClassName}>
-        <CopixLogo size={markSize} />
-      </span>
-      <span className="text-sm font-bold tracking-tight text-[var(--txt)]">
-        COPIX
-      </span>
-    </span>
-  )
-}
-
 /* ═══════ Tooltip ═══════ */
 export function Tip({ text, className = '' }) {
   if (!text) return null

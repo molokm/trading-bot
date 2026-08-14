@@ -5,7 +5,7 @@ import {
   TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
-import { Loader, CopixLogo } from './components/ui'
+import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
@@ -128,10 +128,7 @@ function AppLayout() {
         {/* Left: Logo + Nav */}
         <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
-            <span className="text-[var(--info)] flex items-center">
-              <CopixLogo size={21} />
-            </span>
-            <span className="text-[15px] font-bold text-[var(--txt)] tracking-tight hidden lg:inline">COPIX</span>
+            <span className="text-[17px] font-bold text-[var(--txt)] tracking-tight hidden lg:inline">COPIX</span>
           </div>
 
           <nav className="flex items-center gap-1">
