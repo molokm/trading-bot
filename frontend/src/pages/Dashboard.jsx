@@ -441,14 +441,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       </span>
                     </div>
                   ))}
-                  {typeof pnl?.account_total === 'number' && (
-                    <div className="mt-0.5 flex items-center gap-1 border-t border-[var(--border)] pt-0.5 text-[var(--txt-muted)]">
-                      <span className="text-[var(--txt-secondary)]">{t('dash.account_total')}:</span>
-                      <span className={`mono font-medium ${pnl.account_total >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        {pnl.account_total >= 0 ? '+' : ''}{pnl.account_total.toFixed(2)}
-                      </span>
-                    </div>
-                  )}
                 </div>
               )}
             </div>
