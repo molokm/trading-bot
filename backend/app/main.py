@@ -233,10 +233,24 @@ async def startup():
             print("[startup] 6b/6 Equity tracker started", flush=True)
     except Exception as e:
         print(f"[startup] Equity tracker error: {e}", flush=True)
+    # Dashboard cache warmer: pre-compute the paired-trades/pnl pipeline in the
+    # background so user requests are always served from the hot cache.
+    global _warm_task
+    try:
+        _warm_task = asyncio.create_task(_warm_dashboard_caches())
+        print("[startup] 6c/6 Dashboard cache warmer started", flush=True)
+    except Exception as e:
+        print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
 
 @app.on_event("shutdown")
 async def shutdown():
+    global _warm_task
+    if _warm_task:
+        try:
+            _warm_task.cancel()
+        except Exception:
+            pass
     if equity_tracker:
         try:
             equity_tracker.stop()
@@ -1057,6 +1071,10 @@ async def credentials_init(data: dict):
 
 @app.get("/api/portfolio")
 async def get_portfolio():
+    global _portfolio_cache, _portfolio_cache_ts
+    now_s = _time.time()
+    if _portfolio_cache is not None and (now_s - _portfolio_cache_ts) < _POS_CACHE_TTL:
+        return _portfolio_cache
     result = await _okx_call(lambda c: c.get_balance())
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
@@ -1074,7 +1092,10 @@ async def get_portfolio():
             "availBal": float(d.get("availBal", 0)),
             "frozenBal": float(d.get("frozenBal", 0)),
         })
-    return {"totalEqUsd": total_eq, "details": details}
+    out = {"totalEqUsd": total_eq, "details": details}
+    _portfolio_cache = out
+    _portfolio_cache_ts = _time.time()
+    return out
 
 
 # ── Positions ──
@@ -1153,6 +1174,10 @@ def _db_bot_name(bot_id: str) -> str:
 
 @app.get("/api/positions")
 async def get_positions(inst_type: str = "SWAP"):
+    global _positions_cache, _positions_cache_ts
+    now_s = _time.time()
+    if _positions_cache is not None and (now_s - _positions_cache_ts) < _POS_CACHE_TTL:
+        return _positions_cache
     result = await _okx_call(lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
@@ -1161,7 +1186,10 @@ async def get_positions(inst_type: str = "SWAP"):
     for p in result.get("data", []):
         p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"))
         tagged.append(p)
-    return {"positions": tagged}
+    out = {"positions": tagged}
+    _positions_cache = out
+    _positions_cache_ts = _time.time()
+    return out
 
 
 @app.post("/api/positions/close")
@@ -1197,12 +1225,48 @@ async def close_position(data: dict):
 
 # ── Market ──
 
+_ticker_cache: dict = {}
+_ticker_cache_ts: dict = {}
+_TICKER_TTL = 5  # seconds — dashboard polls 11 tickers every 10s
+
+_positions_cache: dict = None
+_positions_cache_ts: float = 0
+_portfolio_cache: dict = None
+_portfolio_cache_ts: float = 0
+_POS_CACHE_TTL = 5  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+
+
 @app.get("/api/market/ticker")
 async def get_ticker(inst_id: str = "BTC-USDT"):
+    now_s = _time.time()
+    if _ticker_cache.get(inst_id) and (now_s - _ticker_cache_ts.get(inst_id, 0)) < _TICKER_TTL:
+        return _ticker_cache[inst_id]
     result = await _okx_call(lambda c: c.get_ticker(inst_id))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
-    return result.get("data", [{}])[0] if result.get("data") else {}
+    data = result.get("data", [{}])[0] if result.get("data") else {}
+    if data:
+        _ticker_cache[inst_id] = data
+        _ticker_cache_ts[inst_id] = _time.time()
+    return data
+
+
+@app.get("/api/market/tickers")
+async def get_tickers(inst_id: str = ""):
+    """Batch ticker fetch — one request replaces N individual /market/ticker
+    calls (the dashboard's 10 coin-price strip)."""
+    ids = [i.strip() for i in (inst_id or "").split(",") if i.strip()]
+    if not ids:
+        return {"tickers": []}
+    out = []
+    for iid in ids:
+        try:
+            t = await get_ticker(inst_id=iid)
+        except HTTPException:
+            t = {}
+        if t:
+            out.append({"instId": iid, **t})
+    return {"tickers": out}
 
 
 @app.get("/api/market/candles")
@@ -3420,8 +3484,60 @@ async def get_all_trades(limit: int = 100):
     return {"trades": []}
 
 
+_paired_cache: dict = {}
+_paired_lock = asyncio.Lock()
+_PAIRED_TTL = 30  # seconds — dashboard polls /api/pnl + /api/trades/paired every 10s
+
+
 @app.get("/api/trades/paired")
 async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None):
+    """Paired entry+exit trades — all bots, all time, sourced from the DB
+    (persisted) plus live in-memory logs. Fallback to OKX fills only when
+    nothing is stored yet.
+
+    Cached for _PAIRED_TTL with single-flight: /api/pnl, /api/trades/paired
+    and the bot-status stats all recompute the same expensive pipeline
+    (OKX bills + fills + DB reads), which previously spiked to 5-14s on every
+    cache expiry and stalled the dashboard."""
+    global _paired_cache
+    now_s = _time.time()
+    if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
+        trades = _paired_cache["data"]
+        return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+    async with _paired_lock:
+        now_s = _time.time()
+        if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
+            trades = _paired_cache["data"]
+            return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+        resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end)
+        trades = resp.get("trades", [])
+        if trades:
+            _paired_cache = {
+                "ts": _time.time(),
+                "data": trades,
+                "debug": resp.get("debug", {}),
+            }
+        return {"trades": trades[-limit:], "debug": resp.get("debug", {})}
+
+
+_warm_task: Optional[asyncio.Task] = None
+_WARM_INTERVAL = 30
+
+
+async def _warm_dashboard_caches() -> None:
+    """Keep the expensive dashboard caches hot in the background so the first
+    (and every 30s) user request never pays the 3-8s bills/fills/DB pipeline."""
+    while True:
+        try:
+            await asyncio.sleep(_WARM_INTERVAL)
+            await get_paired_trades(limit=500)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[warm] paired cache: {e}", flush=True)
+
+
+async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str = None):
     """Paired entry+exit trades — all bots, all time, sourced from the DB
     (persisted) plus live in-memory logs. Fallback to OKX fills only when
     nothing is stored yet."""

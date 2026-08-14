@@ -67,6 +67,9 @@ export const api = {
   getTicker: (instId = 'BTC-USDT') =>
     request(`/market/ticker?inst_id=${instId}`),
 
+  getTickers: (instIds = []) =>
+    request(`/market/tickers?inst_id=${instIds.join(',')}`),
+
   getCandles: (instId = 'BTC-USDT', bar = '1H', limit = 200) =>
     request(`/market/candles?inst_id=${instId}&bar=${bar}&limit=${limit}`),
 

@@ -108,41 +108,56 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return () => clearInterval(interval)
   }, [connected])
 
+  // Skip polling while the tab is hidden — frees the (throttled) server
+  // instance and avoids piling up requests in the background.
+  useEffect(() => {
+    const onVis = () => { if (!document.hidden) loadData() }
+    document.addEventListener('visibilitychange', onVis)
+    return () => document.removeEventListener('visibilitychange', onVis)
+  }, [connected])
+
   async function loadData() {
     if (!connected) { setLoading(false); return }
+    if (document.hidden) return
+    // Fast tier — renders immediately; the slow tier below fills in when ready.
     try {
-      const [pf, pos, tk, momStatus, momTrades, impStatus, valStatus, trades, pnlData, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, impStatus, valStatus, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
-        api.momentumTrades(30).catch(() => null),
         api.impulseStatus().catch(() => null),
         api.validationStatus().catch(() => null),
-        api.getPairedTrades(50).catch(() => null),
-        api.getPnl().catch(() => null),
-        Promise.all(PRICE_COINS.map(c => api.getTicker(`${c}-USDT-SWAP`).catch(() => null))),
+        api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
       if (tk) setTicker(tk)
-      if (momStatus) {
-        setMomentumStatus(momStatus)
-      }
-      if (momTrades) setMomentumTrades(momTrades.trades || [])
+      if (momStatus) setMomentumStatus(momStatus)
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
-      if (trades) setTradeLog(trades.trades || [])
-      if (pnlData) setPnl(pnlData)
-      if (priceTickers) {
+      if (priceTickers?.tickers) {
         const byCoin = {}
-        priceTickers.forEach((tp, idx) => {
-          if (tp) byCoin[PRICE_COINS[idx]] = tp
+        priceTickers.tickers.forEach(tp => {
+          const id = (tp.instId || '').replace('-USDT-SWAP', '')
+          if (id) byCoin[id] = tp
         })
         setTickers(byCoin)
       }
+      setLoading(false)
+    } catch { setLoading(false) }
+    // Slow tier — expensive OKX-bills pipelines; served from the server-side
+    // 30s cache, so updates arrive a little after the fast tier.
+    try {
+      const [momTrades, trades, pnlData] = await Promise.all([
+        api.momentumTrades(30).catch(() => null),
+        api.getPairedTrades(50).catch(() => null),
+        api.getPnl().catch(() => null),
+      ])
+      if (momTrades) setMomentumTrades(momTrades.trades || [])
+      if (trades) setTradeLog(trades.trades || [])
+      if (pnlData) setPnl(pnlData)
     } catch {}
-    setLoading(false)
   }
 
   // Derived values (declared early — before any useMemo that depends on them)
