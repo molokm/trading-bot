@@ -1045,7 +1045,8 @@ async def public_tracker():
 async def health():
     client = client_manager.get_client()
     connected = client is not None
-    return {"status": "ok", "connected": connected, "demo": _env_demo}
+    return {"status": "ok", "connected": connected, "demo": _env_demo,
+            "version": os.environ.get("RENDER_GIT_COMMIT", "")[:12]}
 
 
 # ── Credentials ──
