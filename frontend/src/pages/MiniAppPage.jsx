@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap, Key, Lock
+  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -76,12 +76,178 @@ function SectionTitle({ children }) {
   )
 }
 
+/* ═══════ Pro preview (non-subscribers see what the mini-app looks like) ═══════ */
+function ProPreview({ t, onBack }) {
+  // Demo figures only — no real data is fetched on this screen.
+  const demo = {
+    portfolio: 18420.53,
+    ccy: [['BTC', 8230.12], ['ETH', 3145.88], ['SOL', 690.44], ['BNB', 340.09]],
+    bots: [
+      { name: 'Momentum', running: true, pnl: 1240.55, equity: 9280.11, trades: 42 },
+      { name: 'Impulse 1D', running: true, pnl: -310.22, equity: 9140.42, trades: 27 },
+    ],
+    positions: [
+      { instId: 'BTC-USDT-SWAP', side: 'long', size: 0.05, lev: 3, px: 81420, upl: 480.15 },
+      { instId: 'SOL-USDT-SWAP', side: 'short', size: 120, lev: 2, px: 152.4, upl: -96.3 },
+    ],
+    trades: [
+      { side: 'open', inst: 'ETH-USDT-SWAP', pnl: null, size: 1.2 },
+      { side: 'close', inst: 'BTC-USDT-SWAP', pnl: 312.44, size: 0.03 },
+      { side: 'close', inst: 'BNB-USDT-SWAP', pnl: -45.1, size: 8 },
+    ],
+  }
+  const demoBotCard = (b, iconColor) => (
+    <Card className="flex-1 min-w-0">
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-1.5">
+          <Bot size={14} className={iconColor} />
+          <span className="text-xs font-bold text-[var(--txt)] truncate">{b.name}</span>
+        </div>
+        <span className="flex items-center gap-1 text-2xs font-semibold px-1.5 py-0.5 rounded-md bg-[var(--profit-dim)] text-[var(--profit)]">
+          <span className="w-1.5 h-1.5 rounded-full bg-[var(--profit)] animate-pulse-dot" />
+          {t('mini.running')}
+        </span>
+      </div>
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="text-xs text-[var(--txt-secondary)]">{t('mini.pnl')}</div>
+          <div className={`text-base font-bold mono ${pnlClass(b.pnl)}`}>{pnlSign(b.pnl)}</div>
+        </div>
+        <div className="text-right">
+          <div className="text-2xs text-[var(--txt-muted)]">{t('mini.balance')}</div>
+          <div className="text-xs font-semibold mono text-[var(--txt)]">{fmt(b.equity)}</div>
+        </div>
+      </div>
+      <div className="flex gap-3 mt-2 pt-2 border-t border-[var(--border)] text-2xs text-[var(--txt-muted)]">
+        <span>Трейды: <b className="text-[var(--txt)]">{b.trades}</b></span>
+      </div>
+    </Card>
+  )
+
+  return (
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <div className="p-3 space-y-3">
+        {/* Back */}
+        <button onClick={onBack} className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] active:opacity-70">
+          <ArrowUpRight size={14} className="rotate-180" /> {t('mini.back')}
+        </button>
+
+        {/* ═══ What you get with Pro ═══ */}
+        <Card className="border-[var(--info)]/40">
+          <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--info)] mb-2">
+            <Zap size={13} /> {t('mini.pro_what_get')}
+          </div>
+          <ul className="space-y-1.5 text-2xs text-[var(--txt-secondary)]">
+            <li>• {t('mini.pro_perk1')}</li>
+            <li>• {t('mini.pro_perk2')}</li>
+            <li>• {t('mini.pro_perk3')}</li>
+            <li>• {t('mini.pro_perk4')}</li>
+          </ul>
+          <a
+            href="https://t.me/RotationTradeBot?start=subscribe_pro"
+            className="mt-3 w-full flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold active:opacity-70"
+          >
+            {t('mini.get_pro')}
+          </a>
+        </Card>
+
+        {/* ═══ Demo dashboard ═══ */}
+        <div className="flex items-center justify-between">
+          <SectionTitle>{t('mini.preview_looks_like')}</SectionTitle>
+          <span className="text-2xs font-semibold px-1.5 py-0.5 rounded-md bg-[var(--warn-dim)] text-[var(--warn)]">
+            {t('mini.demo_preview')}
+          </span>
+        </div>
+
+        <Card className="bg-gradient-to-br from-[var(--profit-dim)] to-[var(--info-dim)] border-0">
+          <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--txt-secondary)] mb-1">
+            <Wallet size={13} className="text-[var(--info)]" />
+            {t('mini.portfolio')}
+          </div>
+          <div className="flex items-end justify-between">
+            <div className="text-2xl font-extrabold mono text-[var(--txt)]">${fmt(demo.portfolio)}</div>
+            <div className="text-right text-2xs text-[var(--txt-secondary)]">
+              <div>{t('mini.positions')}: <b className="text-[var(--txt)]">{demo.positions.length}</b></div>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {demo.ccy.map(([ccy, v]) => (
+              <span key={ccy} className="px-1.5 py-0.5 rounded-md bg-[var(--surface-overlay)] text-2xs font-semibold text-[var(--txt-secondary)]">
+                {ccy} <b className="text-[var(--txt)]">${fmt(v)}</b>
+              </span>
+            ))}
+          </div>
+        </Card>
+
+        <div>
+          <SectionTitle>{t('mini.bots')}</SectionTitle>
+          <div className="flex gap-2">
+            {demoBotCard(demo.bots[0], 'text-[var(--info)]')}
+            {demoBotCard(demo.bots[1], 'text-[var(--profit)]')}
+          </div>
+        </div>
+
+        <div>
+          <SectionTitle>{t('mini.positions')}</SectionTitle>
+          <div className="space-y-1.5">
+            {demo.positions.map((p, i) => {
+              const upl = p.upl
+              return (
+                <Card key={i} className="py-2.5">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs font-bold text-[var(--txt)] truncate">{p.instId}</span>
+                      <span className={`text-2xs font-bold px-1 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                        {p.side === 'long' ? 'LONG' : 'SHORT'}
+                      </span>
+                    </div>
+                    <div className={`text-xs font-bold mono ${pnlClass(upl)}`}>{pnlSign(upl)}</div>
+                  </div>
+                  <div className="flex items-center justify-between text-2xs text-[var(--txt-muted)]">
+                    <span>${fmt(p.px)} · {p.lev}x · {p.size}</span>
+                  </div>
+                </Card>
+              )
+            })}
+          </div>
+        </div>
+
+        <div>
+          <SectionTitle>{t('mini.last_trades')}</SectionTitle>
+          <Card className="p-0 overflow-hidden">
+            <div className="divide-y divide-[var(--border)]">
+              {demo.trades.map((tr, i) => {
+                const isOpen = tr.side === 'open'
+                return (
+                  <div key={i} className="flex items-center justify-between px-3 py-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`text-2xs font-bold px-1 py-0.5 rounded ${isOpen ? 'bg-[var(--info-dim)] text-[var(--info)]' : pnlSign(tr.pnl).startsWith('+') ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                        {isOpen ? t('mini.open') : tr.side === 'close' ? t('mini.exit') : ''}
+                      </span>
+                      <span className="text-xs font-semibold text-[var(--txt)] truncate">{tr.inst}</span>
+                      <span className="text-2xs text-[var(--txt-muted)]">{tr.size}</span>
+                    </div>
+                    <div className={`text-sm font-bold mono ${isOpen ? 'text-[var(--info)]' : pnlClass(tr.pnl)}`}>
+                      {isOpen ? '—' : pnlSign(tr.pnl)}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /* ═══════ Main page ═══════ */
 export default function MiniAppPage() {
   const { t } = useTranslation()
   const [authing, setAuthing] = useState(true)
   const [authError, setAuthError] = useState('')
   const [needsPro, setNeedsPro] = useState(false)
+  const [preview, setPreview] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loaded, setLoaded] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -415,18 +581,21 @@ export default function MiniAppPage() {
   }
 
   if (needsPro) {
+    if (preview) {
+      return <ProPreview t={t} onBack={() => setPreview(false)} />
+    }
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-4 p-6 bg-[var(--bg)] text-center">
         <Lock size={40} className="text-[var(--warn)]" />
         <div className="text-sm font-semibold text-[var(--txt)]">{t('mini.pro_required')}</div>
         <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('mini.pro_required_sub')}</div>
-        <a
-          href="https://t.me/RotationTradeBot?start=subscribe_pro"
+        <button
+          onClick={() => setPreview(true)}
           className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold active:opacity-70"
         >
-          <Zap size={15} />
+          <Eye size={15} />
           {t('mini.get_pro')}
-        </a>
+        </button>
         <button
           onClick={() => window.location.reload()}
           className="text-2xs text-[var(--txt-muted)] underline"
