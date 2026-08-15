@@ -131,7 +131,7 @@ class ImpPosition:
 class ImpulseStrategy:
     # Module-level default, overridable per instance (multi-tenant per-user bots).
     BOT_ID: str = IMP_BOT_ID
-    BOT_NAME: str = "Impulse 1D v1"
+    BOT_NAME: str = f"Impulse 1D {STRATEGY_VERSION}"
     # Client-order-ID prefix: every order gets clOrdId=<prefix>-<n> so OKX fills
     # can be attributed to this bot (used by the PnL aggregation).
     CL_ORD_PREFIX: str = "imp"

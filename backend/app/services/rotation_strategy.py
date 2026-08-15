@@ -132,7 +132,7 @@ class RotPosition:
 class RotationStrategy:
     # Module-level defaults, overridable in subclasses (e.g. validation bot).
     BOT_ID: str = ROT_BOT_ID
-    BOT_NAME: str = "Momentum Rotation v4"
+    BOT_NAME: str = f"Momentum Rotation {STRATEGY_VERSION}"
     CT_VAL: dict = CT_VAL
     LOT_SZ: dict = LOT_SZ
     SWAP_MAP: dict = SWAP_MAP
@@ -1499,7 +1499,7 @@ class RotationStrategy:
         await self._sync_open_positions()
         self._thread = threading.Thread(target=self._thread_target, daemon=True)
         self._thread.start()
-        print(f"[Rotation v3] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
+        print(f"[Rotation {STRATEGY_VERSION}] Started (capital=${self._equity:,.0f}, poll={self.config.poll_interval_sec}s)",
               flush=True)
 
     async def _load_cooldowns(self):
@@ -1538,7 +1538,7 @@ class RotationStrategy:
                 await self.db.update_bot_stopped(self.BOT_ID)
             except Exception:
                 pass
-        print("[Rotation v3] Stopped", flush=True)
+        print(f"[Rotation {STRATEGY_VERSION}] Stopped", flush=True)
 
     def get_status(self) -> dict:
         """Return current status dict."""
