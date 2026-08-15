@@ -100,8 +100,10 @@ class TelegramBotPoller:
                 await self._cmd_start(chat_id)
             elif cmd in ("/subscribe", "/subscribe_pro"):
                 await self._cmd_subscribe(chat_id, "pro")
-            elif cmd == "/status":
+            elif cmd in ("/status",):
                 await self._cmd_status(chat_id)
+            elif cmd in ("/tracker",):
+                await self._send_info(chat_id, "results")
             elif cmd == "/about":
                 await self._cmd_about(chat_id)
             elif cmd == "/info":
@@ -295,12 +297,7 @@ class TelegramBotPoller:
         if data in ("sub_signals", "sub_pro"):
             await self._cmd_subscribe(chat_id, "pro")
         elif data == "tracker":
-            if TRACKER_URL:
-                await self._send_msg(chat_id, f"📊 Живые результаты бота:\n{TRACKER_URL}")
-            else:
-                await self._send_msg(chat_id,
-                                     "📊 Живые результаты — в мини-апе и на странице трекера. "
-                                     "Спросите у администратора ссылку.")
+            await self._send_info(chat_id, "results")
         elif data == "about":
             await self._send_msg(chat_id, self._about_text())
         elif data == "menu":
@@ -366,8 +363,8 @@ class TelegramBotPoller:
             f"Тариф: {plan_label}\n"
             f"Статус: {state}\n"
             f"Действует до: <b>{until}</b> (UTC)\n\n"
-            + ("Продлить: /subscribe или /subscribe_pro" if active
-               else "/subscribe — сигналы, /subscribe_pro — Pro"),
+            + ("Продлить: /subscribe_pro" if active
+               else "Сигналы бесплатны в боте. Pro: /subscribe_pro"),
         )
 
     async def _on_pre_checkout(self, pcq: dict):
@@ -469,16 +466,30 @@ class TelegramBotPoller:
 
     async def _poll_loop(self):
         offset = 0
+        # Persist the update offset so a restart does not re-deliver old updates
+        # (which otherwise duplicates menu replies when a user re-sends /start).
+        if self.db:
+            try:
+                saved = await self.db.get_setting("TG_OFFSET")
+                if saved and saved.isdigit():
+                    offset = int(saved)
+            except Exception as e:
+                log.warning("poller offset load error: %s", e)
         while self._running:
             try:
                 res = await self._api(
                     "getUpdates",
                     offset=offset, timeout=30,
-                    allowed_updates=["message", "pre_checkout_query"],
+                    allowed_updates=["message", "callback_query", "pre_checkout_query"],
                 )
                 if res.get("ok"):
                     for u in res.get("result", []):
                         offset = u["update_id"] + 1
+                        if self.db:
+                            try:
+                                await self.db.set_setting("TG_OFFSET", str(offset))
+                            except Exception:
+                                pass
                         try:
                             await self._handle_update(u)
                         except Exception as e:
