@@ -293,7 +293,8 @@ class TelegramBotPoller:
         cq_id = cq.get("id")
         if not chat_id:
             return
-        await self._api("answerCallbackQuery", callback_query_id=cq_id)
+        log.info("[callback] pid=%s chat=%s data=%s cq=%s", os.getpid(), chat_id, data, cq_id)
+        await self._api("answerCallbackQuery", callback_query_id=cq_id, text="✓")
         if data in ("sub_signals", "sub_pro"):
             await self._cmd_subscribe(chat_id, "pro")
         elif data == "tracker":
@@ -488,13 +489,17 @@ class TelegramBotPoller:
                         if self.db:
                             try:
                                 await self.db.set_setting("TG_OFFSET", str(offset))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                log.warning("poller offset save error: %s", e)
                             try:
-                                if await self.db.mark_update_processed(u["update_id"]):
+                                dup = await self.db.mark_update_processed(u["update_id"])
+                                if dup:
+                                    log.info("[dedup] skip already-processed update_id=%s", u["update_id"])
                                     continue
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                log.warning("poller dedup error update_id=%s: %s", u["update_id"], e)
+                        log.info("[update] pid=%s update_id=%s keys=%s",
+                                 os.getpid(), u["update_id"], list(u.keys()))
                         try:
                             await self._handle_update(u)
                         except Exception as e:
