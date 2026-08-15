@@ -466,8 +466,45 @@ class TelegramBotPoller:
             except Exception as e:
                 log.warning("signals migration: notify %s error: %s", uid, e)
 
+    async def _update_bot_profile(self):
+        """Refresh the bot's Telegram profile (name / description / commands).
+
+        The "What can this bot do?" panel and the profile page show the stored
+        description; without this call it keeps the old strategy text forever.
+        """
+        desc = (
+            "Алгоритмический трейдер: Momentum Rotation + Impulse 1D на OKX.\n"
+            "Дневные свечи, 10 монет, жёсткие стопы, трейлинг, 0 ликвидаций.\n"
+            "Бэктест 2023–2026 (нативные 1D, независимый движок Backtrader): "
+            "CAGR ~55–65% в год.\n"
+            "📡 Сигналы — бесплатно прямо в боте.\n"
+            "🚀 Pro — боты торгуют на вашем счёте OKX: /subscribe_pro"
+        )
+        short = (
+            "Сигналы бесплатно · Pro — торговые боты на вашем OKX "
+            "(Momentum + Impulse). Бэктест CAGR ~55–65%."
+        )
+        await self._api("setMyName", name="Rotation Trade Bot")
+        await self._api("setMyDescription", description=desc)
+        await self._api("setMyShortDescription", short_description=short)
+        await self._api("setMyCommands", commands=[
+            {"command": "start", "description": "Главное меню"},
+            {"command": "info", "description": "Как это работает"},
+            {"command": "status", "description": "Статус ботов"},
+            {"command": "tracker", "description": "Живой отчёт"},
+            {"command": "about", "description": "О боте"},
+            {"command": "subscribe_pro", "description": "Pro-тариф"},
+        ])
+
     async def _poll_loop(self):
         offset = 0
+        # Refresh the bot's Telegram profile (description / name / commands) once
+        # on startup so the "What can this bot do?" panel and profile show the
+        # current strategy info instead of a stale description.
+        try:
+            await self._update_bot_profile()
+        except Exception as e:
+            log.warning("bot profile update error: %s", e)
         # Persist the update offset so a restart does not re-deliver old updates
         # (which otherwise duplicates menu replies when a user re-sends /start).
         if self.db:
@@ -527,7 +564,6 @@ class TelegramBotPoller:
         self._thread = threading.Thread(target=self._thread_runner, daemon=True)
         self._thread.start()
         log.info("Telegram bot poller started (price=%s stars/%sd)", PRO_PRICE_STARS, PRO_PLAN_DAYS)
-
     def stop(self):
         if not self._running:
             return
