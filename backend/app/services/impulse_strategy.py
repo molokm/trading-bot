@@ -1,14 +1,13 @@
-"""Impulse 1D Strategy — fast momentum entry + pyramiding + cascade exit (daily bars).
+"""Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
 
-Live implementation of the honest daily-bar backtest (full window 3.39y:
-+530.6%, CAGR 72.1%, MaxDD 31.0%, Sharpe 1.26, WR 35.6%, PF 2.38).
+Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
+1D, 10 coins, 2023-05..2026-08: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%).
   - Signal on yesterday's daily close (causal), entry today at open
-  - Entry impulse: 1-day |ROC| >= 4% + volume surge + EMA20>50 trend
+  - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
   - Initial stop = 5 x daily ATR (both sides)
-  - Pyramiding: up to 2 adds within a 5-day window when a new peak is made
-    with a volume surge (each add 60% of the current position)
-  - Cascade take-profit: 30% at +2 ATR, 30% at +6 ATR, rest on stop/time
-  - Trailing stop = 8 x entry ATR (rarely fires, keeps winners running)
+  - Pyramiding DISABLED (v2: adds hurt risk-adjusted returns)
+  - Cascade take-profit: 30% at +2 ATR, 30% at +10 ATR, rest on stop/time
+  - Trailing stop = 12 x entry ATR (wide, keeps winners running)
   - Time exit: 30 days (max_hold_bars)
   - Risk-per-trade sizing 10% of equity, max leverage 3x, margin cap 50%
 """
@@ -24,7 +23,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v1"
+STRATEGY_VERSION = "v2"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,15 +38,15 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Бот ежедневно сканирует BTC, ETH, BNB, SOL на дневных барах и входит в сильные "
-    "импульсные движения. Сигнал входа: цена выросла на ≥4% за 1 день с всплеском объёма "
+    "Impulse 1D v2 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
+    "импульсные движения. Сигнал входа: цена изменилась на ≥3% за 1 день с всплеском объёма "
     "(выше среднего в 1.5 раза) и трендом EMA20>EMA50; шорты — по симметричному импульсу вниз. "
-    "До 4 позиций одновременно, ранжирование по силе импульса (|ROC|). "
-    "Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, плечо до 3× "
-    "(чем выше волатильность, тем меньше плечо). После входа: пирамидирование — до 2 докупок "
-    "в 5-дневном окне на новых максимумах с всплеском объёма. Выход каскадом: 30% позиции на "
-    "+2 ATR, ещё 30% на +6 ATR, остаток держим с широким трейлингом (8× ATR) и принудительный "
-    "выход через 30 дней. Режим cross margin, демо/реал переключается env."
+    "До 3 позиций одновременно, ранжирование по силе импульса (|ROC|). Пирамидинг отключён (вредит "
+    "риск-скорректированной доходности). Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, "
+    "плечо до 3× (чем выше волатильность, тем меньше плечо). Выход каскадом: 30% позиции на "
+    "+2 ATR, ещё 30% на +10 ATR, остаток держим с широким трейлингом (12× ATR) и принудительный "
+    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~63%, "
+    "Sharpe 1.58, MaxDD −36%. Режим cross margin, демо/реал переключается env."
 )
 
 
@@ -55,10 +54,10 @@ STRATEGY_DESC = (
 class ImpulseConfig:
     symbols: list = None
     capital: float = 10000.0
-    top_k: int = 4                    # max concurrent positions
+    top_k: int = 3                    # max concurrent positions (v2)
     # entry / impulse
     impulse_bars: int = 1             # ROC window for the impulse (1 = 1-day ROC)
-    entry_roc: float = 4.0            # |ROC| % over window
+    entry_roc: float = 3.0            # |ROC| % over window (v2)
     rsi_conf_min: float = 0.0         # long confirmation RSI floor
     rsi_conf_max: float = 100.0       # not chasing extreme overbought
     ema_fast: int = 20
@@ -66,8 +65,8 @@ class ImpulseConfig:
     adx_min: float = 0.0
     vol_mult: float = 1.5             # volume > avg_vol * this
     vol_period: int = 24
-    # pyramiding (докупка)
-    max_adds: int = 2
+    # pyramiding (докупка) — DISABLED in v2 (max_adds=0 hurts risk-adjusted return)
+    max_adds: int = 0
     add_size_ratio: float = 0.6       # each add = 60% of current position
     add_window_bars: int = 5          # only add within N bars of entry
     add_atr_mult: float = 0.5         # add when new peak >= last_add_peak + ATR*this
@@ -76,14 +75,14 @@ class ImpulseConfig:
     risk_per_trade: float = 0.10
     sl_atr_mult: float = 5.0          # initial stop = entry - ATR*this
     sl_atr_mult_short: float = 5.0    # short-specific stop; 0 = use sl_atr_mult
-    trail_atr_mult: float = 8.0       # trail = peak - ATR*this
-    trail_atr_mult_short: float = 8.0 # short-specific trail; 0 = use trail_atr_mult
+    trail_atr_mult: float = 12.0      # trail = peak - ATR*this (v2: wide)
+    trail_atr_mult_short: float = 12.0 # short-specific trail; 0 = use trail_atr_mult
     be_pct: float = 0.005             # move stop to breakeven after +0.5%
-    cooldown_bars: int = 5            # min bars between entries on the SAME coin
+    cooldown_bars: int = 3            # min bars between entries on the SAME coin (v2)
     # cascade exit (выход частями)
     tp1_atr: float = 2.0
     tp1_frac: float = 0.3
-    tp2_atr: float = 6.0
+    tp2_atr: float = 10.0             # v2: second TP at 10 ATR
     tp2_frac: float = 0.3
     max_hold_bars: int = 30           # time exit (30 days)
     exit_ema_death: bool = False
@@ -858,12 +857,18 @@ class ImpulseStrategy:
         summary = []
         for coin in self.config.symbols:
             ind = indicators.get(coin) or {}
+            avg_vol = ind.get("avg_vol", 0) or 0
+            vol = ind.get("vol", 0) or 0
             summary.append({
                 "coin": coin,
                 "close": round(ind.get("close_today", 0), 2),
                 "roc": round(ind.get("roc", 0), 2),
                 "atr": round(ind.get("atr", 0), 2),
-                "vol_ok": ind.get("avg_vol", 0) and ind.get("vol", 0) >= ind.get("avg_vol", 0) * self.config.vol_mult,
+                "vol": round(vol, 2),
+                "avg_vol": round(avg_vol, 2),
+                "vol_mult": self.config.vol_mult,
+                "vol_ratio": round(vol / avg_vol, 2) if avg_vol > 0 else 0,
+                "vol_ok": avg_vol > 0 and vol >= avg_vol * self.config.vol_mult,
             })
         self.analysis.log("impulse", "cycle",
                           positions=list(self._positions.keys()),

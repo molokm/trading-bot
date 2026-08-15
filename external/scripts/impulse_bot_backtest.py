@@ -88,12 +88,17 @@ def aggregate_bars(bars_1h, n=4):
     """Aggregate 1H bars into n-H bars (causal, uses only past bars).
 
     Buckets are anchored to fixed epoch multiples of n hours so that all
-    coins share the same bar boundaries (matching the 00:00/04:00/... grid).
+    coins share the same bar boundaries. IMPORTANT: OKX native candles for
+    timeframes >= 1H are anchored to 00:00 UTC+8 (= 16:00 UTC), while 1H
+    candles are UTC-anchored. To reproduce native daily bars from 1H data the
+    buckets must be shifted by +8h (verified byte-for-byte against /market/
+    candles bar=1D).
     """
     bucket_ms = n * 60 * 60 * 1000
+    offset = 8 * 60 * 60 * 1000  # UTC+8 day boundary
     buckets = {}
     for b in bars_1h:
-        key = (int(b["ts"]) // bucket_ms) * bucket_ms
+        key = ((int(b["ts"]) + offset) // bucket_ms) * bucket_ms - offset
         buckets.setdefault(key, []).append(b)
     out = []
     for key in sorted(buckets):
@@ -166,6 +171,22 @@ BASE = ImpulseConfig(
     trail_atr_mult=8.0, trail_atr_mult_short=8.0, be_pct=0.005,
     cooldown_bars=5,
     tp1_atr=2.0, tp1_frac=0.3, tp2_atr=6.0, tp2_frac=0.3,
+    max_hold_bars=30, exit_ema_death=False, allow_short=True,
+    bars_per_day=1,
+)
+
+TUNED = ImpulseConfig(
+    name="Impulse Bot 1D (tuned: no adds, wide trail, tp2=10 ATR)",
+    top_k=3, impulse_bars=1, entry_roc=3.0,
+    rsi_conf_min=0.0, rsi_conf_max=100.0,
+    ema_fast=20, ema_slow=50, adx_min=0.0,
+    vol_mult=1.5, vol_period=24,
+    max_adds=0, add_size_ratio=0.6, add_window_bars=5, add_atr_mult=0.5,
+    max_leverage=3.0, risk_per_trade=0.10,
+    sl_atr_mult=5.0, sl_atr_mult_short=5.0,
+    trail_atr_mult=12.0, trail_atr_mult_short=12.0, be_pct=0.005,
+    cooldown_bars=3,
+    tp1_atr=2.0, tp1_frac=0.3, tp2_atr=10.0, tp2_frac=0.3,
     max_hold_bars=30, exit_ema_death=False, allow_short=True,
     bars_per_day=1,
 )

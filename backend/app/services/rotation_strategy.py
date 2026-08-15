@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v4"
+STRATEGY_VERSION = "v5"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,16 +39,17 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Бот ежедневно сканирует BTC, ETH, BNB, SOL на дневных барах и выбирает до 2 самых сильных тренда. "
+    "Momentum Rotation v5 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и выбирает до 2 самых сильных тренда. "
     "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
-    "Фильтры отсекают шум: ADX≥29, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
-    "волатильность не выше среднего, низкая корреляция. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
+    "Фильтры отсекают шум: ADX≥25, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
+    "волатильность не выше среднего (×2.2), корреляция до 0.85. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
     "в бычьем — только лонги, в медвежьем — только шорты, в неопределённости — кэш. "
-    "Размер позиции считается от риска 14% капитала: стоп = 2.7× дневной ATR, плечо до 2× "
-    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 0.2× дневной ATR, "
+    "Размер позиции считается от риска 20% капитала, маржа на позицию ≤50% equity: стоп = 4.5× дневной ATR, плечо до 2× "
+    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 3× дневной ATR (держит победителей), "
     "при +5% стоп в безубыток, при +8% закрывается половина позиции, динамический тейк-профит "
     "(37.6% → 23.7% → 9.2% → безубыток по мере удержания). Минимум держим 11 дней. "
-    "Если монета выпадает из топа — закрываем по рынку. Режим cross margin, демо/реал переключается env."
+    "Если монета выпадает из топа — закрываем по рынку. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): "
+    "CAGR ~60%, Sharpe 1.23, MaxDD −52%. Режим cross margin, демо/реал переключается env."
 )
 
 
@@ -62,16 +63,16 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 29.0
+    adx_min: float = 25.0
     min_roc: float = 4.5            # min |roc| to even rank a coin
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.14   # risk of equity per trade (optimized)
-    allocation_pct: float = 1.0    # max total margin = eq * this
-    atr_stop_mult: float = 2.7     # initial stop = daily ATR * 2.7
-    trail_atr_mult: float = 0.2    # trailing = daily ATR * 0.2
+    risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
+    allocation_pct: float = 0.5    # max margin per position = eq * this
+    atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
+    trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
     partial_tp_pct: float = 0.08   # close 50% at +8%
     partial_tp_ratio: float = 0.5  # fraction to close
@@ -79,8 +80,8 @@ class RotationConfig:
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
     rsi_short_min: float = 21.0    # no short if RSI < 21
-    vol_mult: float = 1.8          # skip if ATR > avg * 1.8
-    corr_threshold: float = 0.7    # max correlation between held pairs
+    vol_mult: float = 2.2          # skip if ATR > avg * 2.2 (v5: stricter)
+    corr_threshold: float = 0.85   # max correlation between held pairs (v5)
     allow_short: bool = True       # allow shorting bearish coins
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
     limit_wait_sec: int = 300      # 5 min fallback to market
