@@ -543,6 +543,32 @@ class Database:
             )
         return trade_id
 
+    async def find_signal_id(self, inst_id: str, side: str) -> int:
+        """Return the most recent opening signal_id for (inst_id, side).
+
+        Used after a bot restart to re-attach the trade number to positions
+        that were restored from the exchange, so close/partial messages keep
+        the same "Сделка №N" as the original open.
+
+        We take the latest signal_id by time: while a position is still open,
+        the newest record for that (inst_id, side) belongs to it. If the
+        position was already closed and reopened, the latest signal_id is the
+        new open — which is what we want."""
+        inst = inst_id or ""
+        sql = (
+            "SELECT signal_id FROM trades "
+            "WHERE inst_id = $1 AND side = $2 AND signal_id IS NOT NULL "
+            "ORDER BY timestamp DESC LIMIT 1"
+            if self._pg_mode else
+            "SELECT signal_id FROM trades "
+            "WHERE inst_id = ? AND side = ? AND signal_id IS NOT NULL "
+            "ORDER BY timestamp DESC LIMIT 1"
+        )
+        rows = await self._fetchall(sql, (inst, side))
+        if rows and rows[0].get("signal_id"):
+            return int(rows[0]["signal_id"])
+        return 0
+
     async def get_trades(self, bot_id: str = None, limit: int = 100) -> list[dict]:
         if bot_id:
             return await self._fetchall(

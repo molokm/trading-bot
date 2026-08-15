@@ -1090,12 +1090,21 @@ class RotationStrategy:
                     continue
                 inst_id = self.SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
                 now = datetime.now(timezone.utc).isoformat()
+                # Re-attach the original trade number so close/partial messages
+                # keep the same "Сделка №N" as the open.
+                restored_signal_id = 0
+                if self.db:
+                    try:
+                        restored_signal_id = await self.db.find_signal_id(inst_id, side)
+                    except Exception as e:
+                        print(f"[Rotation] reconcile signal_id lookup error: {e}", flush=True)
                 pos = RotPosition(
                     symbol=inst_id, coin=coin, inst_id=inst_id,
                     side=side, size=real_sz, size_original=real_sz,
                     entry_price=0.0, stop_price=0.0, peak_price=0.0,
                     opened_at=now, atr=0.0, atr_hourly=0.0,
-                    leverage=self.config.max_leverage, signal_id=0, raw_entry=0.0,
+                    leverage=self.config.max_leverage, signal_id=restored_signal_id,
+                    raw_entry=0.0,
                 )
                 # Re-fetch the position to get avgPx + place a fresh exchange stop.
                 pos_result = await client.get_positions("SWAP", inst_id=inst_id)
@@ -1828,6 +1837,15 @@ class RotationStrategy:
                 else:
                     stop_price = entry_px * 1.015
 
+                # Re-attach the original trade number so close/partial messages
+                # keep the same "Сделка №N" as the open before the restart.
+                restored_signal_id = 0
+                if self.db:
+                    try:
+                        restored_signal_id = await self.db.find_signal_id(inst_id, side)
+                    except Exception as e:
+                        print(f"[Rotation] restore signal_id lookup error: {e}", flush=True)
+
                 pos = RotPosition(
                     symbol=inst_id, coin=coin, inst_id=inst_id,
                     side=side, size=sz, size_original=sz,
@@ -1835,6 +1853,7 @@ class RotationStrategy:
                     peak_price=entry_px, opened_at=datetime.now(timezone.utc).isoformat(),
                     atr=estimated_atr, atr_hourly=estimated_atr,
                     leverage=self.config.max_leverage,
+                    signal_id=restored_signal_id,
                 )
                 self._positions[coin] = pos
                 await self._place_exchange_stop(client, pos)
