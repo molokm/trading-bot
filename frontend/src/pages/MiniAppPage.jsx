@@ -641,7 +641,7 @@ export default function MiniAppPage() {
             <span className={`ml-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${
               me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
             }`}>
-              {me?.plan === 'pro' ? '💎 PRO' : me?.plan === 'signals' ? '📡 Сигналы' : 'FREE'}
+              {me?.plan === 'pro' ? '💎 PRO' : 'FREE'}
             </span>
           )}
         </div>

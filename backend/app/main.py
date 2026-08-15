@@ -31,7 +31,7 @@ from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
-from app.services.telegram_bot import TelegramBotPoller, PRICE_STARS, PLAN_DAYS, INVITE_DAYS, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
+from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.analysis_logger import DEFAULT_PATH
 
@@ -87,7 +87,7 @@ equity_tracker: Optional[EquityTracker] = None
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
 _user_clients: dict[str, OKXClient] = {}
-PLANS_PRICE = {"signals": PRICE_STARS, "pro": PRO_PRICE_STARS}
+PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
 # ── Auth helpers ──
 
@@ -240,6 +240,10 @@ async def startup():
             bot_poller = TelegramBotPoller(notifier=telegram, db=db)
             bot_poller.start()
             print("[startup] 6/6 Telegram poller started", flush=True)
+            try:
+                asyncio.get_event_loop().create_task(bot_poller.notify_signals_migration())
+            except Exception as e:
+                print(f"[startup] signals migration task error: {e}", flush=True)
         else:
             print("[startup] 6/6 Telegram poller skipped (no bot token)", flush=True)
     except Exception as e:
@@ -466,7 +470,7 @@ async def auth_telegram(data: dict):
 
     # Any other verified Telegram user -> own account (multi-tenant), but only
     # if they hold an ACTIVE "pro" subscription (mini-app access is a Pro feature).
-    # "signals"-only subscribers and users without a plan get 403.
+    # Free / signals-only users get 403.
     try:
         u = await db.find_or_create_user(
             uid, user.get("username"), user.get("first_name"))
@@ -489,7 +493,7 @@ async def auth_telegram(data: dict):
             "plan": plan,
         }
 
-    # No active Pro plan -> no mini-app access. Signals-only or free users are
+    # No active Pro plan -> no mini-app access. Free / signals-only users are
     # blocked with a clear, subscriber-facing message.
     logger.info("mini auth: user %s denied mini-app (plan=%s, active=%s)",
                 uid, plan, _is_active(u) if u else False)
@@ -575,7 +579,7 @@ def _has_active_plan(user_row: dict) -> bool:
     if not user_row:
         return False
     plan = user_row.get("plan")
-    if plan not in ("signals", "pro"):
+    if plan != "pro":
         return False
     return _is_active(user_row)
 
@@ -2391,10 +2395,10 @@ async def subs_list():
         is_active = _is_active(r)
         if is_active:
             active += 1
-        plan = r.get("plan", "signals")
+        plan = r.get("plan", "pro")
         # Every saved subscription row with a payment_id is a paid month.
         if r.get("payment_id"):
-            revenue[plan if plan in revenue else "signals"] += PLANS_PRICE[plan if plan in PLANS_PRICE else "signals"]
+            revenue[plan if plan in revenue else "pro"] += PLANS_PRICE[plan if plan in PLANS_PRICE else "pro"]
         subscribers.append({
             "user_id": r.get("user_id"),
             "username": r.get("username") or "",
@@ -2430,7 +2434,7 @@ async def subs_list():
             "revenue_stars": sum(revenue.values()),
             "revenue_signals": revenue["signals"],
             "revenue_pro": revenue["pro"],
-            "price_stars": PRICE_STARS,
+            "price_stars": PRO_PRICE_STARS,
             "pro_price_stars": PRO_PRICE_STARS,
         },
     }
@@ -2441,7 +2445,7 @@ async def subs_activate(data: dict = None):
     """Manually grant/extend a subscription (e.g. cash payment or admin test)."""
     d = data or {}
     user_id = str(d.get("user_id", "")).strip()
-    days = int(d.get("days", PLAN_DAYS))
+    days = int(d.get("days", PRO_PLAN_DAYS))
     if not user_id:
         raise HTTPException(status_code=400, detail="user_id required")
     from datetime import timedelta as _td
@@ -2464,8 +2468,17 @@ async def subs_activate(data: dict = None):
         first_name=d.get("first_name", ""),
         active_until=until,
         payment_id=d.get("payment_id", "") or f"manual_{int(_time.time())}",
-        plan="monthly", status="active",
+        plan="pro", status="active",
     )
+    # Keep users.plan in sync so the mini-app gate grants access.
+    try:
+        await db.find_or_create_user(user_id, d.get("username", ""), d.get("first_name", ""))
+        await db.update_user(
+            user_id, plan="pro", username=d.get("username", ""),
+            first_name=d.get("first_name", ""), active_until=until,
+        )
+    except Exception as e:
+        logger.warning("subs/activate user sync error: %s", e)
     # Optionally notify the user directly in Telegram.
     if d.get("notify") and telegram.token and user_id.isdigit():
         try:
@@ -2492,18 +2505,13 @@ async def subs_deactivate(data: dict = None):
 
 @app.get("/api/subs/config", dependencies=[Depends(require_admin)])
 async def subs_config():
-    """Subscription product config + poller/channel readiness (admin)."""
+    """Subscription product config + poller readiness (admin)."""
     return {
-        "price_stars": PRICE_STARS,
-        "plan_days": PLAN_DAYS,
-        "invite_days": INVITE_DAYS,
         "pro_price_stars": PRO_PRICE_STARS,
         "pro_plan_days": PRO_PLAN_DAYS,
-        "channel_id": telegram.channel_id or "",
-        "channel_configured": bool(telegram.channel_id),
+        "signals_free": True,
         "bot_configured": bool(telegram.token),
         "poller_running": bool(bot_poller and bot_poller._running),
-        "notify_hint": "Сделайте бота админом приватного канала с правом приглашать",
     }
 
 

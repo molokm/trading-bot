@@ -1,17 +1,16 @@
-"""Telegram bot command & payments poller for paid signal subscriptions.
+"""Telegram bot command & payments poller for the Pro subscription.
 
 Long-polls Telegram getUpdates and handles:
-  /start, /help, /subscribe, /status        — text commands
-  pre_checkout_query                        — Stars invoice confirmation
-  successful_payment                        — activate/extend subscription and
-                                              issue a one-time invite to the
-                                              private signals channel
+  /start, /help, /subscribe_pro, /status       — text commands
+  pre_checkout_query                            — Stars invoice confirmation
+  successful_payment                            — activate/extend the Pro
+                                                  subscription (mini-app access)
 
-Payment rail: Telegram Stars (native, no fiat processor needed). The bot must be
-an admin (with "Invite users" permission) of the private channel referenced by
-TELEGRAM_CHANNEL_ID so it can create invite links after payment.
+Payment rail: Telegram Stars (native, no fiat processor needed).
 
-Runs in its own daemon thread with a private event loop, like the strategies.
+Only the Pro plan remains: mini-app + the user's own OKX account. The former
+paid "signals" channel has been retired — trade signals are free and published
+in the bot itself.
 """
 
 import asyncio
@@ -28,19 +27,12 @@ from .telegram_notifier import TelegramNotifier
 
 log = logging.getLogger("telegram_bot")
 
-PRICE_STARS = int(os.getenv("SIGNAL_PRICE_STARS", "100"))
-PLAN_DAYS = int(os.getenv("SIGNAL_PLAN_DAYS", "30"))
-INVITE_DAYS = int(os.getenv("SIGNAL_INVITE_DAYS", "3"))
-PLAN_LABEL = os.getenv("SIGNAL_PLAN_LABEL", "Подписка на сигналы 1 мес")
-
 PRO_PRICE_STARS = int(os.getenv("PRO_PRICE_STARS", "500"))
 PRO_PLAN_DAYS = int(os.getenv("PRO_PLAN_DAYS", "30"))
 PRO_LABEL = os.getenv("PRO_PLAN_LABEL", "Pro-тариф: мини-ап + свой счёт OKX 1 мес")
 TRACKER_URL = os.getenv("TRACKER_URL", "")
 
-# plan -> (price_stars, plan_days, label)
 PLANS = {
-    "signals": (PRICE_STARS, PLAN_DAYS, PLAN_LABEL),
     "pro": (PRO_PRICE_STARS, PRO_PLAN_DAYS, PRO_LABEL),
 }
 
@@ -59,10 +51,6 @@ class TelegramBotPoller:
     def token(self) -> str:
         """Read the token live from the notifier so runtime config changes apply."""
         return self.notifier.token
-
-    @property
-    def channel_id(self) -> str:
-        return self.notifier.channel_id or os.getenv("TELEGRAM_CHANNEL_ID", "")
 
     # ─── Bot API helpers ───
 
@@ -110,9 +98,7 @@ class TelegramBotPoller:
             cmd = text.split()[0].lower().split("@")[0]
             if cmd in ("/start", "/help", "/menu"):
                 await self._cmd_start(chat_id)
-            elif cmd == "/subscribe":
-                await self._cmd_subscribe(chat_id, "signals")
-            elif cmd == "/subscribe_pro":
+            elif cmd in ("/subscribe", "/subscribe_pro"):
                 await self._cmd_subscribe(chat_id, "pro")
             elif cmd == "/status":
                 await self._cmd_status(chat_id)
@@ -128,9 +114,8 @@ class TelegramBotPoller:
     def _menu_keyboard(self) -> dict:
         return {
             "inline_keyboard": [
-                [{"text": f"📡 Сигналы · {PRICE_STARS} ⭐", "callback_data": "sub_signals"},
-                 {"text": f"🚀 Pro · {PRO_PRICE_STARS} ⭐", "callback_data": "sub_pro"}],
-                [{"text": "📚 Как это работает", "callback_data": "info_overview"},
+                [{"text": f"🚀 Pro · {PRO_PRICE_STARS} ⭐", "callback_data": "sub_pro"}],
+                [{"text": "📡 Бесплатные сигналы", "callback_data": "info_signals"},
                  {"text": "🔍 Результаты", "callback_data": "info_results"}],
                 [{"text": "💳 Оплата", "callback_data": "info_payment"},
                  {"text": "⚠️ Риски", "callback_data": "info_risks"}],
@@ -160,25 +145,21 @@ class TelegramBotPoller:
                 "━━━━━━━━━━━━━━━\n"
                 "Это алгоритмический трейдер: бот торгует фьючерсами на OKX по дневным "
                 "свечам, сам находит сигналы, открывает позиции, ставит стопы и закрывает "
-                "сделки. Вам ничего не нужно делать вручную — только выбрать формат и "
-                "наблюдать за результатом.\n\n"
-                "Два формата:\n"
-                "• 📡 <b>Сигналы</b> — видите каждую сделку в приватном канале\n"
-                "• 🚀 <b>Pro</b> — бот торгует на вашем счёте OKX, управление через мини-ап\n\n"
+                "сделки. Вам ничего не нужно делать вручную — только наблюдать за результатом.\n\n"
+                "📡 <b>Сигналы</b> — каждая сделка публикуется прямо в этом боте, бесплатно.\n"
+                "🚀 <b>Pro</b> — бот торгует на вашем счёте OKX, управление через мини-ап\n\n"
                 "Подробнее — в разделах ниже."
             ),
             "signals": (
-                f"📡 <b>Сигналы</b> · {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
+                "📡 <b>Бесплатные сигналы</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "<b>Что вы получаете:</b>\n"
-                "• Доступ в приватный канал, где публикуется каждая сделка бота\n"
+                "<b>Теперь бесплатно и прямо в этом боте.</b>\n\n"
+                "• Каждая сделка бота публикуется здесь автоматически\n"
                 "• Цена входа, стоп-лосс, тейк и итоговый результат\n"
                 "• Направление (лонг/шорт) и текущие открытые позиции\n\n"
-                "<b>Для кого:</b>\n"
-                "• Хотите учиться на реальных сделках проверенной стратегии\n"
-                "• Повторяете сигналы вручную на своём счёте\n"
-                "• Оцениваете работу бота, прежде чем доверить ему свой счёт\n\n"
-                "Оплатить: /subscribe или кнопкой в меню."
+                "Никакой оплаты и отдельного канала не нужно — следите за "
+                "сигналами прямо здесь.\n\n"
+                "Хотите, чтобы бот торговал на вашем счёте? → 🚀 Pro: /subscribe_pro"
             ),
             "pro": (
                 f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
@@ -211,19 +192,18 @@ class TelegramBotPoller:
                 "Живой отчёт: /tracker"
             ),
             "payment": (
-                "💳 <b>Оплата</b>\n"
+                "💳 <b>Оплата Pro</b>\n"
                 "━━━━━━━━━━━━━━━\n"
                 "Оплата проходит прямо в Telegram через <b>Telegram Stars</b> — встроенную "
                 "валюту. Быстро и безопасно.\n\n"
+                "🚀 <b>Pro</b> — мини-ап + торговля на вашем счёте OKX.\n\n"
                 "<b>Как оплатить:</b>\n"
-                "1. Нажмите «Оплатить» под счётом (кнопка подписки)\n"
+                "1. Нажмите «Оплатить» под счётом (кнопка Pro)\n"
                 "2. Подтвердите оплату Stars\n"
-                "3. 📡 Сигналы — мгновенно получите ссылку в приватный канал\n"
-                "   🚀 Pro — получите доступ к мини-апу для подключения счёта\n\n"
+                "3. Откройте мини-ап через кнопку меню — подключите счёт и запустите ботов\n\n"
                 "<b>Продление:</b> срок подписки складывается при каждой оплате.\n\n"
-                "Тарифы:\n"
-                f"• Сигналы — {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
-                f"• Pro — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн."
+                f"Тариф: Pro — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n\n"
+                "📡 Сигналы — бесплатно, прямо в этом боте."
             ),
             "risks": (
                 "⚠️ <b>Важно о рисках</b>\n"
@@ -240,8 +220,8 @@ class TelegramBotPoller:
             "faq": (
                 "❓ <b>FAQ</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "<b>Что нужно для сигналов?</b>\n"
-                "Только Telegram: платите Stars и получаете ссылку в канал.\n\n"
+                "<b>Сигналы платные?</b>\n"
+                "Нет — сигналы публикуются прямо в этом боте бесплатно.\n\n"
                 "<b>Что нужно для Pro?</b>\n"
                 "Счёт OKX, ключи API (торговля + IP-whitelist) и мини-ап.\n\n"
                 "<b>Ключи безопасны?</b>\n"
@@ -277,12 +257,10 @@ class TelegramBotPoller:
             "• Доходность — <b>десятки процентов в год</b> (CAGR ~30–45%), а не «x10 за месяц»\n"
             "• Win rate 55–57%: не угадываем каждую сделку — даём стабильное преимущество\n"
             "• Подтверждено независимыми движками (freqtrade + честный бэктест)\n\n"
-            "Формат на выбор:\n\n"
-            f"📡 <b>Сигналы</b> · {PRICE_STARS} ⭐ / {PLAN_DAYS} дн.\n"
-            "Следите за каждой сделкой в приватном канале.\n\n"
+            "📡 <b>Сигналы</b> — бесплатно, каждая сделка публикуется прямо здесь.\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
             "Бот торгует на вашем счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe · /subscribe_pro · /info · /status · /about"
+            "Команды: /subscribe_pro · /info · /status · /about"
         )
 
     def _about_text(self) -> str:
@@ -314,9 +292,7 @@ class TelegramBotPoller:
         if not chat_id:
             return
         await self._api("answerCallbackQuery", callback_query_id=cq_id)
-        if data == "sub_signals":
-            await self._cmd_subscribe(chat_id, "signals")
-        elif data == "sub_pro":
+        if data in ("sub_signals", "sub_pro"):
             await self._cmd_subscribe(chat_id, "pro")
         elif data == "tracker":
             if TRACKER_URL:
@@ -336,18 +312,16 @@ class TelegramBotPoller:
     async def _cmd_start(self, chat_id):
         await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
 
-    async def _cmd_subscribe(self, chat_id, plan: str = "signals"):
-        price, days, label = PLANS.get(plan, PLANS["signals"])
-        title = "Pro-тариф" if plan == "pro" else "Сигналы торгового бота"
-        desc = (f"Мини-ап + торговые боты на вашем счёте OKX на {days} дн."
-                if plan == "pro"
-                else f"Доступ к приватному каналу с сигналами на {days} дн.")
+    async def _cmd_subscribe(self, chat_id, plan: str = "pro"):
+        price, days, label = PLANS.get(plan, PLANS["pro"])
+        title = "Pro-тариф: мини-ап + ваш счёт OKX"
+        desc = f"Мини-ап + торговые боты на вашем счёте OKX на {days} дн."
         invoice = await self._api(
             "sendInvoice",
             chat_id=chat_id,
             title=title,
             description=desc,
-            payload=f"sub_{plan}_{int(time.time())}",
+            payload=f"sub_pro_{int(time.time())}",
             provider_token="",          # empty => Telegram Stars
             currency="XTR",
             prices=[{"label": label, "amount": price}],
@@ -376,14 +350,14 @@ class TelegramBotPoller:
             await self._send_msg(
                 chat_id,
                 "У вас пока нет активной подписки.\n\n"
-                f"/subscribe — сигналы {PRICE_STARS} ⭐\n"
-                f"/subscribe_pro — Pro (мини-ап + свой счёт) {PRO_PRICE_STARS} ⭐",
+                f"/subscribe_pro — Pro (мини-ап + свой счёт) {PRO_PRICE_STARS} ⭐\n\n"
+                "📡 Сигналы — бесплатно, прямо в этом боте.",
             )
             return
         until = sub.get("active_until", "")
         active = _is_active(sub)
-        plan = sub.get("plan", "signals")
-        plan_label = "💎 Pro" if plan == "pro" else "📡 Сигналы"
+        plan = sub.get("plan", "pro")
+        plan_label = "💎 Pro"
         state = "✅ активна" if active else "⛔ истекла"
         await self._send_msg(
             chat_id,
@@ -409,10 +383,10 @@ class TelegramBotPoller:
         username = user.get("username", "")
         first_name = user.get("first_name", "")
 
-        # Plan is carried in the invoice payload ("sub_<plan>_<ts>").
+        # Only the Pro plan exists now; plan is always "pro".
         payload = payment.get("invoice_payload", "") or ""
-        plan = "pro" if "sub_pro" in payload else "signals"
-        days = PRO_PLAN_DAYS if plan == "pro" else PLAN_DAYS
+        plan = "pro"
+        days = PRO_PLAN_DAYS
 
         # Stack: extend from the later of (now, current expiry).
         base = datetime.now(timezone.utc)
@@ -443,55 +417,55 @@ class TelegramBotPoller:
                 log.warning("subscription save error: %s", e)
 
         chat_id = msg["chat"]["id"]
-        plan_label = "💎 Pro (мини-ап + ваш счёт OKX)" if plan == "pro" else "📡 Сигналы"
+        plan_label = "💎 Pro (мини-ап + ваш счёт OKX)"
         await self._send_msg(
             chat_id,
             f"✅ <b>Оплата получена</b> ({amount} ⭐)\n"
             f"Тариф: {plan_label}\n"
             f"Активен до <b>{until_iso}</b> (UTC).",
         )
-        if plan == "pro":
-            # Pro users don't need a channel invite; they use the mini-app.
-            await self._send_msg(
-                chat_id,
-                "Откройте мини-ап через кнопку меню или "
-                "https://t.me/<yourbot>/app — подключите ключи OKX и запустите ботов.",
-            )
-        else:
-            await self._issue_invite(chat_id)
-
-    async def _issue_invite(self, chat_id):
-        """Create a one-time invite to the private channel and send it."""
-        ch = self.channel_id
-        if not ch:
-            await self._send_msg(
-                chat_id,
-                "Канал сигналов ещё не настроен. Пожалуйста, подождите — "
-                "администратор добавит вас вручную.",
-            )
-            return
-        expire_ts = int(time.time()) + INVITE_DAYS * 86400
-        res = await self._api("createChatInviteLink",
-                              chat_id=ch, member_limit=1, expire_date=expire_ts)
-        link = ""
-        if res.get("ok") and res.get("result"):
-            link = res["result"].get("invite_link", "")
-        if not link:
-            await self._send_msg(
-                chat_id,
-                "Оплата принята, но не удалось выдать ссылку (бот не админ канала "
-                "или нет права приглашать). Администратор добавит вас вручную.",
-            )
-            return
         await self._send_msg(
             chat_id,
-            f"🔑 <b>Ваша ссылка на канал сигналов</b>\n"
-            f"━━━━━━━━━━━━━━━\n"
-            f"Действует {INVITE_DAYS} дн., можно использовать один раз.\n\n"
-            f"{link}",
+            "Откройте мини-ап через кнопку меню или "
+            "https://t.me/<yourbot>/app — подключите ключи OKX и запустите ботов.",
         )
 
     # ─── Lifecycle ───
+
+    async def notify_signals_migration(self) -> None:
+        """One-time notice to former paid "signals" subscribers.
+
+        Signals became free and moved into the bot itself, so the private
+        channel and the paid signals plan are retired. Existing subscribers
+        keep whatever remaining active_until they had, but their plan is not
+        "pro" — mini-app access is not auto-granted (only Pro unlocks it).
+        """
+        if not self.db:
+            return
+        try:
+            rows = await self.db.list_subscriptions()
+        except Exception as e:
+            log.warning("signals migration: list error: %s", e)
+            return
+        for r in rows:
+            if (r or {}).get("plan") != "signals":
+                continue
+            uid = r.get("user_id")
+            if not uid:
+                continue
+            try:
+                await self._send_msg(
+                    uid,
+                    "📡 <b>Новость о сигналах</b>\n"
+                    "━━━━━━━━━━━━━━━\n"
+                    "Спасибо за поддержку! Теперь сигналы стали <b>бесплатными</b> "
+                    "и публикуются прямо в этом боте — отдельный платный канал больше "
+                    "не нужен.\n\n"
+                    "🚀 Остался один платный тариф — <b>Pro</b>: торговля на вашем "
+                    "счёте OKX через мини-ап. Подробнее: /subscribe_pro",
+                )
+            except Exception as e:
+                log.warning("signals migration: notify %s error: %s", uid, e)
 
     async def _poll_loop(self):
         offset = 0
@@ -530,7 +504,7 @@ class TelegramBotPoller:
         self._running = True
         self._thread = threading.Thread(target=self._thread_runner, daemon=True)
         self._thread.start()
-        log.info("Telegram bot poller started (price=%s stars/%sd)", PRICE_STARS, PLAN_DAYS)
+        log.info("Telegram bot poller started (price=%s stars/%sd)", PRO_PRICE_STARS, PRO_PLAN_DAYS)
 
     def stop(self):
         if not self._running:

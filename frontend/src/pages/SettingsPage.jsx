@@ -143,7 +143,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const handleSubsActivate = async (userId) => {
     if (!userId) return
     setSubsAction(userId)
-    const days = prompt(t('settings.subs_activate_prompt'), subsConfig?.plan_days || 30)
+    const days = prompt(t('settings.subs_activate_prompt'), subsConfig?.pro_plan_days || 30)
     if (!days) { setSubsAction(null); return }
     try {
       await api.subsActivate({ user_id: userId, days: parseInt(days, 10) || 30 })
@@ -425,15 +425,11 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                     <span className="dot" />
                     {subsConfig.poller_running ? t('settings.subs_poller_on') : t('settings.subs_poller_off')}
                   </span>
-                  <span className={`status-badge ${subsConfig.channel_configured ? 'status-live' : 'status-off'}`}>
-                    <span className="dot" />
-                    {subsConfig.channel_configured ? t('settings.subs_channel_on') : t('settings.subs_channel_off')}
-                  </span>
-                  <span className="status-badge status-live">
-                    <Star size={10} /> {subsConfig.price_stars} ⭐ / {subsConfig.plan_days} {t('settings.subs_days')}
-                  </span>
                   <span className="status-badge status-live">
                     <Star size={10} /> PRO {subsConfig.pro_price_stars} ⭐ / {subsConfig.pro_plan_days} {t('settings.subs_days')}
+                  </span>
+                  <span className="status-badge status-live">
+                    {t('settings.subs_signals_free')}
                   </span>
                 </div>
               )}
@@ -515,8 +511,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                           <div className="flex items-center gap-2 text-xs font-medium text-[var(--txt)]">
                             <span className="truncate">{u.username ? '@' + u.username : u.first_name || u.telegram_id}</span>
                             <span className={`px-1.5 py-0.5 rounded text-2xs font-bold ${
-                              u.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' :
-                              u.plan === 'signals' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
+                              u.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
                             }`}>
                               {u.plan}
                             </span>

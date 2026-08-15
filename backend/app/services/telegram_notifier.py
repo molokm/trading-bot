@@ -94,15 +94,12 @@ class TelegramNotifier:
     def fire(self, text: str, parse_mode: str = "HTML") -> None:
         """Fire-and-forget send — never blocks the trading loop or raises.
 
-        Posts to the owner chat AND, when TELEGRAM_CHANNEL_ID is configured, to
-        the paid signals channel (broadcast to subscribers)."""
+        Trade signals go straight to the bot's owner chat (TELEGRAM_CHAT_ID).
+        There is no separate paid signals channel anymore — signals are free
+        and published in the bot itself."""
         if not self.configured:
             return
-        targets = [self.chat_id]
-        if self.channel_id:
-            targets.append(self.channel_id)
-        for target in targets:
-            self._fire_send(target, text, parse_mode)
+        self._fire_send(self.chat_id, text, parse_mode)
 
     def _fire_send(self, chat_id: str, text: str, parse_mode: str) -> None:
         try:
