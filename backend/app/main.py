@@ -13,7 +13,7 @@ logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -89,6 +89,25 @@ strategy_mgr = StrategyManager(db=db, notifier=telegram)
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRICE_STARS, "pro": PRO_PRICE_STARS}
 
+# ── Auth helpers ──
+
+def get_token(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth[7:]
+    return ""
+
+
+def require_admin(request: Request):
+    """FastAPI dependency: reject the request unless a valid admin token is present.
+
+    Attach via ``Depends(require_admin)`` on sensitive/mutating routes as
+    defense-in-depth alongside the global auth middleware.
+    """
+    if not is_admin(get_token(request)):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
 # ── Server-side request hit logger (diagnostics for Telegram Mini App) ──
 _SERVER_HITS = []
 
@@ -113,7 +132,7 @@ async def _server_hit_logger(request: Request, call_next):
         raise
 
 
-@app.get("/api/debug/server-hits")
+@app.get("/api/debug/server-hits", dependencies=[Depends(require_admin)])
 async def debug_server_hits():
     """Return the most recent server-side API hits (for Mini App diagnostics)."""
     return {"hits": _SERVER_HITS[-80:]}
@@ -293,15 +312,6 @@ async def _okx_call(coro_factory):
     return result
 
 
-# ── Auth helpers ──
-
-def get_token(request: Request):
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        return auth[7:]
-    return ""
-
-
 # ── Access control ──
 
 PUBLIC_API_PATHS = {
@@ -454,25 +464,39 @@ async def auth_telegram(data: dict):
             },
         }
 
-    # Any other verified Telegram user -> own account (multi-tenant).
+    # Any other verified Telegram user -> own account (multi-tenant), but only
+    # if they hold an ACTIVE "pro" subscription (mini-app access is a Pro feature).
+    # "signals"-only subscribers and users without a plan get 403.
     try:
         u = await db.find_or_create_user(
             uid, user.get("username"), user.get("first_name"))
     except Exception as e:
         logger.warning("mini auth: user provision error: %s", e)
         raise HTTPException(status_code=500, detail="Failed to create account")
-    token = grant_user(uid)
-    logger.info("mini auth: user account %s (plan=%s)", uid, u.get("plan"))
-    return {
-        "token": token,
-        "role": "user",
-        "user": {
-            "id": user.get("id"),
-            "username": user.get("username"),
-            "first_name": user.get("first_name"),
-        },
-        "plan": u.get("plan"),
-    }
+
+    plan = (u or {}).get("plan", "free")
+    if plan == "pro" and _is_active(u):
+        token = grant_user(uid)
+        logger.info("mini auth: PRO user account %s granted mini-app access", uid)
+        return {
+            "token": token,
+            "role": "user",
+            "user": {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "first_name": user.get("first_name"),
+            },
+            "plan": plan,
+        }
+
+    # No active Pro plan -> no mini-app access. Signals-only or free users are
+    # blocked with a clear, subscriber-facing message.
+    logger.info("mini auth: user %s denied mini-app (plan=%s, active=%s)",
+                uid, plan, _is_active(u) if u else False)
+    raise HTTPException(
+        status_code=403,
+        detail="Доступ к мини-апу только по Pro-подписке. Сигналы — отдельный канал.",
+    )
 
 
 @app.post("/api/auth/logout")
@@ -1023,13 +1047,13 @@ async def health():
 
 # ── Credentials ──
 
-@app.get("/api/credentials/status")
+@app.get("/api/credentials/status", dependencies=[Depends(require_admin)])
 async def credentials_status():
     configured = bool(_env_key and _env_secret and _env_pass)
     return {"configured": configured, "demo": _env_demo}
 
 
-@app.post("/api/credentials/test")
+@app.post("/api/credentials/test", dependencies=[Depends(require_admin)])
 async def credentials_test(data: dict):
     key = data.get("apiKey", _env_key)
     secret = data.get("secretKey", _env_secret)
@@ -1045,7 +1069,7 @@ async def credentials_test(data: dict):
         return {"success": False, "message": str(e)}
 
 
-@app.post("/api/credentials/init")
+@app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
 async def credentials_init(data: dict):
     global _env_key, _env_secret, _env_pass, _env_demo
     key = data.get("apiKey", "")
@@ -1192,7 +1216,7 @@ async def get_positions(inst_type: str = "SWAP"):
     return out
 
 
-@app.post("/api/positions/close")
+@app.post("/api/positions/close", dependencies=[Depends(require_admin)])
 async def close_position(data: dict):
     client = client_manager.get_client()
     if not client:
@@ -1432,7 +1456,7 @@ async def backtest_last():
 
 # ── Trade ──
 
-@app.post("/api/trade/order")
+@app.post("/api/trade/order", dependencies=[Depends(require_admin)])
 async def place_order(data: dict):
     client = client_manager.get_client()
     if not client:
@@ -1485,7 +1509,7 @@ async def momentum_status():
     return status
 
 
-@app.post("/api/momentum/start")
+@app.post("/api/momentum/start", dependencies=[Depends(require_admin)])
 async def momentum_start(data: dict = None):
     """Start Rotation strategy (Dashboard calls this endpoint)."""
     global rotation
@@ -1517,7 +1541,7 @@ async def momentum_start(data: dict = None):
     return {"message": "Momentum Rotation started", **rotation.get_status()}
 
 
-@app.post("/api/momentum/stop")
+@app.post("/api/momentum/stop", dependencies=[Depends(require_admin)])
 async def momentum_stop():
     """Stop Rotation strategy (Dashboard calls this endpoint)."""
     global rotation
@@ -1527,7 +1551,7 @@ async def momentum_stop():
     return {"message": "Bot stopped"}
 
 
-@app.post("/api/momentum/config")
+@app.post("/api/momentum/config", dependencies=[Depends(require_admin)])
 async def momentum_update_config(data: dict = None):
     """Update running Rotation strategy config (hot-reload safe fields)."""
     global rotation
@@ -1822,7 +1846,7 @@ async def rotation_status():
     return rotation.get_status()
 
 
-@app.post("/api/rotation/start")
+@app.post("/api/rotation/start", dependencies=[Depends(require_admin)])
 async def rotation_start(data: dict = None):
     global rotation
     if rotation and rotation._running:
@@ -1852,7 +1876,7 @@ async def rotation_start(data: dict = None):
     return {"message": "Rotation started", "config": asdict(cfg)}
 
 
-@app.post("/api/rotation/stop")
+@app.post("/api/rotation/stop", dependencies=[Depends(require_admin)])
 async def rotation_stop():
     global rotation
     if not rotation:
@@ -1861,7 +1885,7 @@ async def rotation_stop():
     return {"message": "Rotation stopped"}
 
 
-@app.post("/api/rotation/reset")
+@app.post("/api/rotation/reset", dependencies=[Depends(require_admin)])
 async def rotation_reset():
     """Reset all trades, signals, positions, PNL for rotation strategy."""
     global rotation
@@ -1894,7 +1918,7 @@ async def rotation_reset():
     return {"message": "Rotation reset complete - PNL = 0"}
 
 
-@app.post("/api/db/reset-all")
+@app.post("/api/db/reset-all", dependencies=[Depends(require_admin)])
 async def db_reset_all():
     """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
     global rotation
@@ -1944,7 +1968,7 @@ async def rotation_indicators():
     return {"indicators": rotation._latest_indicators}
 
 
-@app.post("/api/rotation/config")
+@app.post("/api/rotation/config", dependencies=[Depends(require_admin)])
 async def rotation_update_config(data: dict = None):
     global rotation
     if not rotation:
@@ -1978,7 +2002,7 @@ async def impulse_status():
     return status
 
 
-@app.post("/api/impulse/start")
+@app.post("/api/impulse/start", dependencies=[Depends(require_admin)])
 async def impulse_start(data: dict = None):
     """Start Impulse 1D strategy."""
     global impulse
@@ -2012,7 +2036,7 @@ async def impulse_start(data: dict = None):
     return {"message": "Impulse 1D started", **impulse.get_status()}
 
 
-@app.post("/api/impulse/stop")
+@app.post("/api/impulse/stop", dependencies=[Depends(require_admin)])
 async def impulse_stop():
     """Stop Impulse 1D strategy."""
     global impulse
@@ -2022,7 +2046,7 @@ async def impulse_stop():
     return {"message": "Impulse stopped"}
 
 
-@app.post("/api/impulse/config")
+@app.post("/api/impulse/config", dependencies=[Depends(require_admin)])
 async def impulse_update_config(data: dict = None):
     """Update running Impulse config (hot-reload safe fields)."""
     global impulse
@@ -2058,7 +2082,7 @@ async def impulse_indicators():
     return {"indicators": impulse._latest_indicators}
 
 
-@app.post("/api/impulse/reset")
+@app.post("/api/impulse/reset", dependencies=[Depends(require_admin)])
 async def impulse_reset():
     """Reset all trades, signals, positions, PNL for the impulse strategy."""
     global impulse
@@ -2092,7 +2116,7 @@ async def impulse_reset():
 # VALIDATION STRATEGY ENDPOINTS (демо-проверка исполнения)
 # ══════════════════════════════════════════════════════════════
 
-@app.get("/api/validation/status")
+@app.get("/api/validation/status", dependencies=[Depends(require_admin)])
 async def validation_status():
     if not validation:
         return {"running": False, "strategy": "momentum_validation",
@@ -2101,7 +2125,7 @@ async def validation_status():
     return validation.get_status()
 
 
-@app.post("/api/validation/start")
+@app.post("/api/validation/start", dependencies=[Depends(require_admin)])
 async def validation_start(data: dict = None):
     """Start the demo validation bot (relaxed filters → forces trades)."""
     global validation
@@ -2126,7 +2150,7 @@ async def validation_start(data: dict = None):
     return {"message": "Validation started", **validation.get_status()}
 
 
-@app.post("/api/validation/stop")
+@app.post("/api/validation/stop", dependencies=[Depends(require_admin)])
 async def validation_stop():
     global validation
     if not validation:
@@ -2135,7 +2159,7 @@ async def validation_stop():
     return {"message": "Validation stopped"}
 
 
-@app.post("/api/validation/reset")
+@app.post("/api/validation/reset", dependencies=[Depends(require_admin)])
 async def validation_reset():
     """Reset all trades, signals, positions, PNL for the validation bot."""
     global validation
@@ -2165,7 +2189,7 @@ async def validation_reset():
     return {"message": "Validation reset complete - PNL = 0"}
 
 
-@app.get("/api/validation/trades")
+@app.get("/api/validation/trades", dependencies=[Depends(require_admin)])
 async def validation_trades(limit: int = 50):
     trades = []
     if validation and validation._trade_log:
@@ -2194,14 +2218,14 @@ async def validation_trades(limit: int = 50):
     return {"trades": trades}
 
 
-@app.get("/api/validation/indicators")
+@app.get("/api/validation/indicators", dependencies=[Depends(require_admin)])
 async def validation_indicators():
     if not validation:
         return {"indicators": {}}
     return {"indicators": validation._latest_indicators}
 
 
-@app.post("/api/validation/config")
+@app.post("/api/validation/config", dependencies=[Depends(require_admin)])
 async def validation_update_config(data: dict = None):
     global validation
     if not validation:
@@ -2223,7 +2247,7 @@ async def validation_update_config(data: dict = None):
 # TELEGRAM NOTIFICATIONS
 # ══════════════════════════════════════════════════════════════
 
-@app.get("/api/telegram/status")
+@app.get("/api/telegram/status", dependencies=[Depends(require_admin)])
 async def telegram_status():
     """Return Telegram notification config status (token masked)."""
     masked_token = (telegram.token[:10] + "…" + telegram.token[-4:]) if telegram.token else ""
@@ -2237,7 +2261,7 @@ async def telegram_status():
     }
 
 
-@app.post("/api/telegram/config")
+@app.post("/api/telegram/config", dependencies=[Depends(require_admin)])
 async def telegram_config(data: dict = None):
     """Set/update Telegram bot token, chat id and signals channel at runtime."""
     d = data or {}
@@ -2265,7 +2289,7 @@ async def telegram_config(data: dict = None):
     return await telegram_status()
 
 
-@app.post("/api/telegram/test")
+@app.post("/api/telegram/test", dependencies=[Depends(require_admin)])
 async def telegram_test(data: dict = None):
     """Send a test message to verify the Telegram connection."""
     d = data or {}
@@ -2282,7 +2306,7 @@ async def telegram_test(data: dict = None):
     }
 
 
-@app.post("/api/telegram/simulate")
+@app.post("/api/telegram/simulate", dependencies=[Depends(require_admin)])
 async def telegram_simulate(data: dict = None):
     """Send sample trade-signal messages to Telegram to preview the real format.
 
@@ -2332,7 +2356,7 @@ async def telegram_simulate(data: dict = None):
     }
 
 
-@app.post("/api/telegram/menu")
+@app.post("/api/telegram/menu", dependencies=[Depends(require_admin)])
 async def telegram_menu(request: Request, data: dict = None):
     """Set the bot's chat menu button to open the Mini App (/mini)."""
     if not (telegram.token and telegram.chat_id):
@@ -2355,7 +2379,7 @@ async def telegram_menu(request: Request, data: dict = None):
 # PAID SIGNAL SUBSCRIPTIONS (Telegram Stars)
 # ══════════════════════════════════════════════════════════════
 
-@app.get("/api/subs")
+@app.get("/api/subs", dependencies=[Depends(require_admin)])
 async def subs_list():
     """List all subscribers with status + revenue stats (admin)."""
     rows = await db.list_subscriptions()
@@ -2412,7 +2436,7 @@ async def subs_list():
     }
 
 
-@app.post("/api/subs/activate")
+@app.post("/api/subs/activate", dependencies=[Depends(require_admin)])
 async def subs_activate(data: dict = None):
     """Manually grant/extend a subscription (e.g. cash payment or admin test)."""
     d = data or {}
@@ -2455,7 +2479,7 @@ async def subs_activate(data: dict = None):
     return {"message": "Subscription activated", "active_until": until}
 
 
-@app.post("/api/subs/deactivate")
+@app.post("/api/subs/deactivate", dependencies=[Depends(require_admin)])
 async def subs_deactivate(data: dict = None):
     """Immediately deactivate a user's subscription."""
     d = data or {}
@@ -2466,7 +2490,7 @@ async def subs_deactivate(data: dict = None):
     return {"message": "Subscription deactivated"}
 
 
-@app.get("/api/subs/config")
+@app.get("/api/subs/config", dependencies=[Depends(require_admin)])
 async def subs_config():
     """Subscription product config + poller/channel readiness (admin)."""
     return {
@@ -3921,7 +3945,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         return {"trades": []}
 
 
-@app.get("/api/debug/trades-db")
+@app.get("/api/debug/trades-db", dependencies=[Depends(require_admin)])
 async def debug_trades_db():
     """Diagnostic: check what's in the DB trades table."""
     try:
@@ -3952,7 +3976,7 @@ async def debug_trades_db():
 
 # ── DB Positions ──
 
-@app.get("/api/debug/fills")
+@app.get("/api/debug/fills", dependencies=[Depends(require_admin)])
 async def debug_fills():
     """Diagnostic endpoint: shows raw OKX fills (ALL fields) and pairing results."""
     client = client_manager.get_client()
@@ -3996,7 +4020,7 @@ async def debug_fills():
     }
 
 
-@app.get("/api/analysis")
+@app.get("/api/analysis", dependencies=[Depends(require_admin)])
 async def trade_analysis():
     """Detailed trade analysis: PnL breakdown, last ETH trades, stop-loss detection."""
     # Force cache bypass
@@ -4096,7 +4120,7 @@ async def trade_analysis():
     }
 
 
-@app.get("/api/db/positions")
+@app.get("/api/db/positions", dependencies=[Depends(require_admin)])
 async def get_db_positions():
     positions = await db.get_all_positions()
     return {"positions": positions}
@@ -4104,7 +4128,7 @@ async def get_db_positions():
 
 # ── Analysis log download ──
 
-@app.get("/api/analysis/log")
+@app.get("/api/analysis/log", dependencies=[Depends(require_admin)])
 async def analysis_log_download(request: Request):
     token = get_token(request)
     if not validate(token):
@@ -4159,7 +4183,7 @@ if STATIC_DIR.exists():
 _MINI_LOG_RING = []
 
 
-@app.post("/api/debug/mini-log")
+@app.post("/api/debug/mini-log", dependencies=[Depends(require_admin)])
 async def mini_log_collect(data: dict):
     """Collect client-side logs from the Telegram Mini App (admin-only)."""
     logs = (data or {}).get("logs") or []
@@ -4191,7 +4215,7 @@ async def client_errors_read():
     return {"errors": [l for l in _MINI_LOG_RING if l.startswith("CLIENT-ERR")][-20:]}
 
 
-@app.get("/api/debug/mini-log")
+@app.get("/api/debug/mini-log", dependencies=[Depends(require_admin)])
 async def mini_log_read():
     """Return the most recent Mini App client logs."""
     return {"count": len(_MINI_LOG_RING), "logs": _MINI_LOG_RING[-150:]}

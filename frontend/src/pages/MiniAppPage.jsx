@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap, Key
+  ArrowDownRight, Shield, Loader2, Zap, Key, Lock
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -81,6 +81,7 @@ export default function MiniAppPage() {
   const { t } = useTranslation()
   const [authing, setAuthing] = useState(true)
   const [authError, setAuthError] = useState('')
+  const [needsPro, setNeedsPro] = useState(false)
   const [loading, setLoading] = useState(true)
   const [loaded, setLoaded] = useState(false)
   const [connected, setConnected] = useState(false)
@@ -251,8 +252,13 @@ export default function MiniAppPage() {
         }
       } catch (err) {
         console.warn('mini auth error', err)
-        setAuthError(err.message || 'auth_failed')
-        miniLog('auth', 'ERROR', err.message || err)
+        if (err.status === 403) {
+          setNeedsPro(true)
+          miniLog('auth', 'FORBIDDEN (Pro required)', err.message || err)
+        } else {
+          setAuthError(err.message || 'auth_failed')
+          miniLog('auth', 'ERROR', err.message || err)
+        }
       }
       setAuthing(false)
     }
@@ -404,6 +410,29 @@ export default function MiniAppPage() {
       <div className="h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--txt-secondary)]">
         <Loader2 size={28} className="animate-spin text-[var(--info)]" />
         <span className="text-xs">{t('mini.loading')}</span>
+      </div>
+    )
+  }
+
+  if (needsPro) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center gap-4 p-6 bg-[var(--bg)] text-center">
+        <Lock size={40} className="text-[var(--warn)]" />
+        <div className="text-sm font-semibold text-[var(--txt)]">{t('mini.pro_required')}</div>
+        <div className="text-xs text-[var(--txt-secondary)] leading-relaxed">{t('mini.pro_required_sub')}</div>
+        <a
+          href="https://t.me/RotationTradeBot?start=subscribe_pro"
+          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold active:opacity-70"
+        >
+          <Zap size={15} />
+          {t('mini.get_pro')}
+        </a>
+        <button
+          onClick={() => window.location.reload()}
+          className="text-2xs text-[var(--txt-muted)] underline"
+        >
+          {t('mini.reload')}
+        </button>
       </div>
     )
   }
