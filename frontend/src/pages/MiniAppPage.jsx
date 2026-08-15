@@ -83,8 +83,8 @@ function ProPreview({ t, onBack }) {
     portfolio: 18420.53,
     ccy: [['BTC', 8230.12], ['ETH', 3145.88], ['SOL', 690.44], ['BNB', 340.09]],
     bots: [
-      { name: 'Momentum', running: true, pnl: 1240.55, equity: 9280.11, trades: 42 },
-      { name: 'Impulse 1D', running: true, pnl: -310.22, equity: 9140.42, trades: 27 },
+      { name: 'Momentum', running: true, pnl: 3240.55, equity: 13280.11, trades: 58 },
+      { name: 'Impulse 1D', running: true, pnl: 1890.22, equity: 11890.42, trades: 64 },
     ],
     positions: [
       { instId: 'BTC-USDT-SWAP', side: 'long', size: 0.05, lev: 3, px: 81420, upl: 480.15 },

@@ -959,12 +959,11 @@ async def me_pnl(request: Request):
 # ══════════════════════════════════════════════════════════════
 
 _BACKTEST_SUMMARY = {
-    "note": "Результаты бэктестов — вне выборки (walk-forward). Не гарантия будущей доходности.",
+    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности.",
     "periods": [
-        {"label": "Momentum Rotation 2024–2026 (OOS)", "return_pct": 102.0, "max_dd_pct": 38.6},
-        {"label": "Momentum Rotation 2022–2023 (OOS)", "return_pct": 109.0, "max_dd_pct": 27.0},
-        {"label": "Портфель 50/50 2024–2026", "return_pct": 112.0, "max_dd_pct": 16.4, "cagr_pct": 36.2, "sharpe": 1.42},
-        {"label": "Impulse 1D 2024–2026", "return_pct": 105.2, "max_dd_pct": 24.2, "cagr_pct": 34.3},
+        {"label": "Momentum Rotation v5 2023–2026", "return_pct": 365.5, "max_dd_pct": 51.8, "cagr_pct": 59.8, "sharpe": 1.23},
+        {"label": "Impulse 1D v2 2023–2026", "return_pct": 402.2, "max_dd_pct": 36.5, "cagr_pct": 63.5, "sharpe": 1.58},
+        {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
     ],
     "win_rate_backtest_pct": 55.0,
     "liquidations": 0,

@@ -102,23 +102,21 @@ const DEFAULT_VAL_CONFIG = {
 // Честный бэктест (Freqtrade) — по каждой стратегии
 const MOM_BACKTEST = {
   years: [
-    { year: '2022', ret: '+19.04%' },
-    { year: '2023', ret: '+158.19%' },
-    { year: '2024', ret: '+38.37%' },
-    { year: '2025', ret: '+17.24%' },
-    { year: '2026', ret: '+39.15%' },
+    { year: '2023', ret: '+34.0%' },
+    { year: '2024', ret: '+41.4%' },
+    { year: '2025', ret: '+14.3%' },
+    { year: '2026', ret: '+113.6%' },
   ],
-  summary: { cagr: '45%', dd: '30.3%' },
+  summary: { cagr: '59.8%', dd: '51.8%' },
 }
 const IMP_BACKTEST = {
   years: [
-    { year: '2022', ret: '+64%' },
-    { year: '2023', ret: '+45%' },
-    { year: '2024', ret: '+61%' },
-    { year: '2025', ret: '+14%' },
-    { year: '2026', ret: '+48%' },
+    { year: '2023', ret: '+108.9%' },
+    { year: '2024', ret: '+102.1%' },
+    { year: '2025', ret: '-6.3%' },
+    { year: '2026', ret: '+25.7%' },
   ],
-  summary: { cagr: '52%', dd: '19.1%' },
+  summary: { cagr: '63.5%', dd: '36.5%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {
