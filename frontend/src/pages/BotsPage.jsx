@@ -99,7 +99,7 @@ const DEFAULT_VAL_CONFIG = {
   allocation_pct: 0.15,
 }
 
-// Честный бэктест (Freqtrade) — по каждой стратегии
+// Независимый бэктест (Backtrader, нативные 1D OKX) — по каждой стратегии
 const MOM_BACKTEST = {
   years: [
     { year: '2023', ret: '+34.0%' },
@@ -333,7 +333,7 @@ function BotCard({
           )}
         </div>
 
-        {/* ─── Таблица доходности (freqtrade) ─── */}
+        {/* ─── Таблица доходности (Backtrader) ─── */}
         {backtest && (
         <div className="rounded-xl bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-3">
           <div className="flex items-center gap-1.5 mb-2">
