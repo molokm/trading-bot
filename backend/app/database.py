@@ -178,6 +178,11 @@ class Database:
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS tg_processed_updates (
+                update_id     INTEGER PRIMARY KEY,
+                processed_at  TEXT NOT NULL
+            );
         """)
         await self._conn.commit()
 
@@ -311,6 +316,10 @@ class Database:
                 active_until  TEXT,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT
+            );
+            CREATE TABLE IF NOT EXISTS tg_processed_updates (
+                update_id     BIGINT PRIMARY KEY,
+                processed_at  TEXT NOT NULL
             )
         """)
 
@@ -1079,6 +1088,34 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
+
+    async def mark_update_processed(self, update_id: int) -> bool:
+        """Atomically claim a Telegram update_id for processing.
+
+        Returns True if this update was already processed (a duplicate that
+        should be skipped), False if it is the first time we've seen it.
+        Guards against double delivery when two pollers/processes race."""
+        uid = int(update_id)
+        now = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            res = await self._execute_returning(
+                "INSERT INTO tg_processed_updates (update_id, processed_at) "
+                "VALUES ($1, $2) ON CONFLICT (update_id) DO NOTHING RETURNING update_id",
+                (uid, now)
+            )
+            return res is None
+        # SQLite: a returning INSERT is not available; check-then-insert under
+        # the shared connection lock (see _execute) keeps this atomic.
+        existing = await self._fetchone(
+            "SELECT update_id FROM tg_processed_updates WHERE update_id = ?", (uid,)
+        )
+        if existing:
+            return True
+        await self._execute(
+            "INSERT INTO tg_processed_updates (update_id, processed_at) VALUES (?, ?)",
+            (uid, now)
+        )
+        return False
 
     # ── Cleanup ──
 

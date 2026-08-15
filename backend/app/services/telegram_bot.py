@@ -490,6 +490,11 @@ class TelegramBotPoller:
                                 await self.db.set_setting("TG_OFFSET", str(offset))
                             except Exception:
                                 pass
+                            try:
+                                if await self.db.mark_update_processed(u["update_id"]):
+                                    continue
+                            except Exception:
+                                pass
                         try:
                             await self._handle_update(u)
                         except Exception as e:
