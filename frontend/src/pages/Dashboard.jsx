@@ -379,6 +379,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   return (
     <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
 
+      {!connected && (
+        <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--loss)]/30 bg-[var(--loss-dim)] text-2xs text-[var(--loss)]">
+          <Activity size={14} />
+          <span>{t('dash.offline_banner')}</span>
+        </div>
+      )}
+
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
       <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <MetricCard
@@ -524,7 +531,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const botName = p.bot || ''
                       const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
+                        : botName === 'Impulse'
+                        ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
+                        : botName
+                        ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
                         : { label: '—', cls: 'text-[var(--txt-muted)]' }
+                      const mgnRatio = parseFloat(p.mgnRatio || 0)
+                      const riskCls = !mgnRatio ? ''
+                        : mgnRatio < 2 ? 'text-[var(--loss)]'
+                        : mgnRatio < 5 ? 'text-[var(--warn)]'
+                        : 'text-[var(--txt-muted)]'
+                      const side = (p.posSide || '').toLowerCase()
+                      const lever = p.lever ? `${p.lever}x` : ''
                       return (
                         <tr key={i} style={{
                           background: upl >= 0
@@ -532,7 +550,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                             : 'linear-gradient(90deg, rgba(255,51,102,0.06) 0%, transparent 50%)',
                           boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
                         }}>
-                          <td className="text-[var(--txt)] font-medium">{p.instId?.replace('-USDT-SWAP', '')}</td>
+                          <td className="text-[var(--txt)] font-medium">
+                            <div className="flex flex-col gap-0.5">
+                              <span>{p.instId?.replace('-USDT-SWAP', '')}</span>
+                              <span className="text-2xs text-[var(--txt-muted)] flex items-center gap-1.5">
+                                {side && (
+                                  <span className={side === 'long' ? 'text-[var(--profit)]' : side === 'short' ? 'text-[var(--loss)]' : ''}>
+                                    {side.toUpperCase()}
+                                  </span>
+                                )}
+                                {lever && <span>{lever}</span>}
+                                {mgnRatio > 0 && (
+                                  <span className={riskCls} title={t('dash.margin_ratio_tip')}>
+                                    MR {mgnRatio >= 100 ? mgnRatio.toFixed(0) : mgnRatio.toFixed(1)}
+                                  </span>
+                                )}
+                              </span>
+                            </div>
+                          </td>
                           <td><span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span></td>
                           <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
                           <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { Lock, Eye, EyeOff, Loader2, Shield, User } from 'lucide-react'
+import { Lock, Eye, EyeOff, Loader2, Shield, User, Activity } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
@@ -12,6 +12,7 @@ export default function LoginPage({ onLogin }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [hasPassword, setHasPassword] = useState(true)
+  const [sysHealth, setSysHealth] = useState(null)
   const [searchParams] = useSearchParams()
 
   useEffect(() => {
@@ -22,6 +23,9 @@ export default function LoginPage({ onLogin }) {
 
   useEffect(() => {
     api.authStatus().then(s => setHasPassword(s.has_password)).catch(() => {})
+    api.health()
+      .then(h => setSysHealth(h))
+      .catch(() => setSysHealth({ status: 'error', connected: false }))
   }, [])
 
   const handleLogin = async () => {
@@ -63,7 +67,23 @@ export default function LoginPage({ onLogin }) {
             <div>
               <h1 className="text-2xl font-bold text-[var(--txt)] tracking-tight">COPIX</h1>
               <p className="text-xs text-[var(--txt-muted)] mt-1">{t('login.title')}</p>
+              <p className="text-[11px] text-[var(--txt-muted)] mt-2 leading-relaxed">{t('login.tagline')}</p>
             </div>
+            {sysHealth && (
+              <div className="flex items-center justify-center gap-2 text-2xs text-[var(--txt-secondary)] px-3 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+                <Activity size={12} className={sysHealth.connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'} />
+                <span className={sysHealth.connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+                  {sysHealth.connected
+                    ? (sysHealth.demo ? t('login.status_demo') : t('login.status_live'))
+                    : t('login.status_offline')}
+                </span>
+                {sysHealth.bots && (
+                  <span className="text-[var(--txt-muted)] mono">
+                    {[sysHealth.bots.rotation, sysHealth.bots.impulse, sysHealth.bots.validation].filter(Boolean).length}/3 bots
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {error && (
