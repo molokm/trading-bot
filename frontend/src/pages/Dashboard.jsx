@@ -525,11 +525,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       <th className="text-right">{t('dash.size')}</th>
                       <th className="text-right">{t('dash.entry')}</th>
                       <th className="text-right">{t('dash.mark')}</th>
+                      <th className="text-right">PnL</th>
+                      <th className="text-right">ROE</th>
                       {isAdmin(isGuest) ? null : <th className="text-right"></th>}
                     </tr>
                   </thead>
                   <tbody>
                     {positions.map((p, i) => {
+                      const upl = parseFloat(p.upl || 0)
+                      const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
                       const botName = p.bot || ''
                       const botBadge = botName === 'Momentum'
@@ -547,7 +551,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const side = (p.posSide || '').toLowerCase()
                       const lever = p.lever ? `${p.lever}x` : ''
                       return (
-                        <tr key={i}>
+                        <tr key={i} style={{
+                          background: upl >= 0
+                            ? 'linear-gradient(90deg, rgba(0,255,136,0.06) 0%, transparent 50%)'
+                            : 'linear-gradient(90deg, rgba(255,51,102,0.06) 0%, transparent 50%)',
+                          boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
+                        }}>
                           <td className="text-[var(--txt)] font-medium">
                             <div className="flex flex-col gap-0.5">
                               <span>{p.instId?.replace('-USDT-SWAP', '')}</span>
@@ -570,6 +579,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
                           <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
                           <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
+                          <td className={`text-right mono font-semibold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                          </td>
+                          <td className={`text-right mono ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {roe.toFixed(2)}%
+                          </td>
                           {!isGuest && (
                             <td className="text-right">
                               <button
