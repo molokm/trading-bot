@@ -54,6 +54,8 @@ const en = {
   'dash.btc_tip': 'Current Bitcoin-USDT Perpetual Swap price',
 
   'dash.open_positions': 'Open Positions',
+  'dash.open_no_pnl': 'PnL is shown after close',
+    'dash.open_no_pnl': 'PnL is shown after close',
   'dash.no_positions': 'No open positions',
   'dash.positions_hint': 'Positions will appear after starting the bot',
   'dash.pair': 'Pair',
