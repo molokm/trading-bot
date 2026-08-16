@@ -1,12 +1,13 @@
 """ValidationStrategy — MACD + Donchian breakout.
 
-Реализация бэктест-конфига MACD+Donchian (см. external/scripts/honest_backtest_macd_donchian.py).
-Лучший прогон (dc15 / tp 8% на 30% / tp2 10% / breakeven +1.5% / max_hold 3 дня / top_k 4 @ 1x):
-CAGR ~121%, Sharpe ~1.81, MaxDD ~39%; walk-forward 2024/2025 стабилен (CAGR 219%/113%).
+Реализация бэктест-конфига MACD+Donchian (см. external/backtests/backtrader_macd_donchian.py).
+Бэктест на Backtrader, live-faithful (10 монет, OKX-SWAP daily, 2023–2026):
+CAGR ~17.7%, Sharpe ~0.59, MaxDD ~62%; сигнал по закрытию предыдущего бара,
+исполнение по открытию следующего (комиссия 0.1% + проскальзывание 0.05%).
 
-Вход: Donchian breakout (close > 15-дневный максимум) + MACD hist > 0.
+Вход: Donchian breakout (close > 15-дневный максимум, без текущего бара) + MACD hist > 0.
 Выходы: chandelier 4*ATR, breakeven при +1.5% (для ВСЕХ позиций), частичный TP 8% на 30%,
-второй TP 10%, ротация.
+второй TP 10%, time-exit 3 дня, ротация.
 """
 
 from .macd_donchian_strategy import MacdDonchianStrategy, MacdDonchianConfig
@@ -20,18 +21,23 @@ VAL_VERSION = "v1"
 VAL_STRATEGY_NAME = f"macd_donchian_validation_{VAL_VERSION}"
 VAL_BOT_NAME = "MACD+Donchian Validation v1"
 
-# Вселенная бэктеста: BTC, ETH, BNB, SOL (daily OHLC, прокси OKX SWAP).
-VAL_COINS = ["BTC", "ETH", "BNB", "SOL"]
+# Вселенная бэктеста: 10 монет, как у Momentum/Impulse (daily OHLC, прокси OKX SWAP).
+VAL_COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 # ctVal / lotSz / тик проверены через OKX (market_get_instruments, 2026-08-12).
 VAL_CT_VAL = {
-    "BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1,
+    "BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
+    "DOGE": 1000, "ADA": 100, "TRX": 1000, "AVAX": 1, "LTC": 1,
 }
 VAL_LOT_SZ = {
-    "BTC": 0.01, "ETH": 0.01, "BNB": 1, "SOL": 0.01,
+    "BTC": 0.01, "ETH": 0.01, "BNB": 1, "SOL": 0.01, "XRP": 0.01,
+    "DOGE": 0.01, "ADA": 0.01, "TRX": 0.01, "AVAX": 0.1, "LTC": 0.1,
 }
 VAL_SWAP_MAP = {
-    coin: f"{coin}-USDT-SWAP" for coin in VAL_COINS
+    "BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP", "BNB": "BNB-USDT-SWAP",
+    "SOL": "SOL-USDT-SWAP", "XRP": "XRP-USDT-SWAP", "DOGE": "DOGE-USDT-SWAP",
+    "ADA": "ADA-USDT-SWAP", "TRX": "TRX-USDT-SWAP", "AVAX": "AVAX-USDT-SWAP",
+    "LTC": "LTC-USDT-SWAP",
 }
 VAL_PX_DECIMALS = 4
 
@@ -39,8 +45,8 @@ VAL_DESC = (
     "MACD+Donchian Validation v1: Donchian breakout (close > 15-дневный максимум) "
     "с подтверждением MACD-гистограммы > 0. Выходы: chandelier 4×ATR, breakeven при +1.5% "
     "для всех позиций, частичный тейк 8% (30% позиции), второй тейк 10%, max_hold 3 дня, "
-    "top_k 4 @ 1×. Бэктест (daily OHLC BTC/ETH/BNB/SOL, 2023–2026): CAGR ~121%, Sharpe ~1.81, "
-    "MaxDD ~39%, walk-forward 2024/2025 стабилен."
+    "top_k 4 @ 1×. Бэктест (Backtrader, OKX-SWAP daily, 10 монет, 2023–2026): CAGR ~17.7%, "
+    "Sharpe ~0.59, MaxDD ~62%, исполнение по открытию следующего бара."
 )
 
 

@@ -1,0 +1,44 @@
+{
+  "engine": "backtrader",
+  "strategy": "MACD+Donchian Validation (dc15 tp8% r0.3 tp2 10% be1.5% ch4 hold3 top4 @1x)",
+  "coins": 10,
+  "period": "2023-05-04 -> 2026-08-15",
+  "years": 3.28,
+  "capital": 10000.0,
+  "final_equity": 17063.74,
+  "total_return_pct": 70.64,
+  "cagr_pct": 17.68,
+  "sharpe": 0.59,
+  "max_drawdown_pct": 62.12,
+  "closed_trades": 233,
+  "win_rate": 34.8,
+  "profit_factor": 1.6,
+  "yearly": [
+    {
+      "year": "2023",
+      "return_pct": 62.0
+    },
+    {
+      "year": "2024",
+      "return_pct": 120.3
+    },
+    {
+      "year": "2025",
+      "return_pct": -28.6
+    },
+    {
+      "year": "2026",
+      "return_pct": -38.3
+    }
+  ],
+  "exit_reasons": {
+    "rotation_exit": 290,
+    "partial_tp": 104,
+    "take_profit2": 82,
+    "chandelier_stop": 62,
+    "time_exit": 3
+  },
+  "costs": "commission 0.10% + slippage 0.05% per side",
+  "data": "OKX-SWAP daily candles, 10 coins, signal on prev close, fills at next open",
+  "look_ahead": false
+}

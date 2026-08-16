@@ -30,9 +30,11 @@ from collections import defaultdict
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 
-COINS = ["BTC", "ETH", "BNB", "SOL"]
-CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.1, "SOL": 0.1}
-LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 0.01, "SOL": 0.01}
+COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
+CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
+          "DOGE": 1000, "ADA": 100, "TRX": 1000, "AVAX": 1, "LTC": 1}
+LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "BNB": 1, "SOL": 0.01, "XRP": 0.01,
+          "DOGE": 0.01, "ADA": 0.01, "TRX": 0.01, "AVAX": 0.1, "LTC": 0.1}
 
 COMMISSION = 0.001    # 0.10% taker
 SLIPPAGE = 0.0005     # 0.05%
@@ -630,7 +632,7 @@ def main():
             "entry": "bar T+1 open",
             "stops": "pessimistic H/L first",
             "costs": f"commission {COMMISSION*100:.2f}% + slippage {SLIPPAGE*100:.2f}% per side",
-            "data": "Binance daily OHLCV proxy for OKX SWAP (BTC/ETH/BNB/SOL)",
+            "data": "Binance daily OHLCV proxy for OKX SWAP (10 coins, BTC/ETH/BNB/XRP/SOL/DOGE/ADA/TRX/AVAX/LTC)",
             "look_ahead": False,
         },
         "strategies": [

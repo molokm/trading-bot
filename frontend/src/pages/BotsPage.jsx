@@ -9,8 +9,8 @@ import { useTranslation } from '../hooks/useTranslation'
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
-/** Coins the validation bot trades (MACD+Donchian universe) */
-const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'SOL']
+/** Coins the validation bot trades (MACD+Donchian universe, 10 coins like Momentum/Impulse) */
+const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 /** Params that map 1:1 to RotationConfig on the backend */
 const ROTATION_PARAMS = [
@@ -126,12 +126,12 @@ const IMP_BACKTEST = {
 }
 const VAL_BACKTEST = {
   years: [
-    { year: '2023', ret: '+147.3%' },
-    { year: '2024', ret: '+282.6%' },
-    { year: '2025', ret: '+44.8%' },
-    { year: '2026', ret: '-30.2%' },
+    { year: '2023', ret: '+62.0%' },
+    { year: '2024', ret: '+120.3%' },
+    { year: '2025', ret: '-28.6%' },
+    { year: '2026', ret: '-38.3%' },
   ],
-  summary: { cagr: '121.0%', dd: '39.3%' },
+  summary: { cagr: '17.7%', dd: '62.1%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {

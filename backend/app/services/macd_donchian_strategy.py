@@ -1,8 +1,8 @@
 """MacdDonchianStrategy — MACD + Donchian breakout + partial TP + breakeven.
 
-Реализация бэктест-конфига MACD+Donchian (external/scripts/honest_backtest_macd_donchian.py,
-лучший прогон: dc15 / tp 8% на 30% / tp2 10% / breakeven при +1.5% / max_hold 3 дня /
-top_k 4 @ 1x: CAGR ~121%, Sharpe ~1.81, MaxDD ~39%, walk-forward 2024/2025 стабилен).
+Реализация бэктест-конфига MACD+Donchian (external/backtests/backtrader_macd_donchian.py,
+live-faithful Backtrader, dc15 / tp 8% на 30% / tp2 10% / breakeven при +1.5% /
+max_hold 3 дня / top_k 4 @ 1x: CAGR ~17.7%, Sharpe ~0.59, MaxDD ~62%).
 
 Вход: Donchian breakout (close > N-дневный максимум без текущего бара) И MACD hist > 0.
 Выходы: chandelier-trailing (peak - N*ATR), breakeven-триггер при +be_pct для ВСЕХ
