@@ -100,6 +100,18 @@ def get_token(request: Request):
     return ""
 
 
+async def write_audit(request: Request, action: str, detail: str = "", meta: str = ""):
+    """Best-effort audit log; never breaks the request path."""
+    try:
+        role = validate(get_token(request)) or "anonymous"
+        uid = get_user_id(get_token(request))
+        actor = f"{role}:{uid}" if uid else role
+        await db.add_audit(action=action, actor=actor, detail=detail, meta=meta)
+    except Exception as e:
+        print(f"[audit] write failed: {e}", flush=True)
+
+
+
 def require_admin(request: Request):
     """FastAPI dependency: reject the request unless a valid admin token is present.
 
@@ -1131,11 +1143,12 @@ async def risk_status():
 
 
 @app.post("/api/risk/kill", dependencies=[Depends(require_admin)])
-async def risk_kill(data: dict = None):
+async def risk_kill(request: Request, data: dict = None):
     """Enable/disable runtime kill switch (blocks new entries, not closes)."""
     data = data or {}
     enabled = bool(data.get("enabled", True))
     set_kill_switch(enabled)
+    await write_audit(request, "risk.kill_switch", detail=f"enabled={enabled}")
     return {"ok": True, **risk_get_status().to_dict()}
 
 
@@ -1164,7 +1177,7 @@ async def credentials_test(data: dict):
 
 
 @app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
-async def credentials_init(data: dict):
+async def credentials_init(request: Request, data: dict):
     global _env_key, _env_secret, _env_pass, _env_demo
     key = data.get("apiKey", "")
     secret = data.get("secretKey", "")
@@ -1182,7 +1195,50 @@ async def credentials_init(data: dict):
     result = await client_manager.init_client(key, secret, passphrase, demo)
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+    await write_audit(request, "credentials.init", detail=f"demo={bool(demo)}")
     return {"message": "Credentials configured", "demo": demo}
+
+
+@app.get("/api/mode", dependencies=[Depends(require_admin)])
+async def get_trading_mode():
+    return {"demo": _env_demo, "okx_demo": _env_demo, "live": not _env_demo}
+
+
+@app.post("/api/mode", dependencies=[Depends(require_admin)])
+async def set_trading_mode(request: Request, data: dict = None):
+    """Switch DEMO/LIVE for the owner OKX client.
+
+    Switching to LIVE requires confirm == "LIVE" to avoid accidental flips.
+    """
+    global _env_demo
+    data = data or {}
+    demo = bool(data.get("demo", True))
+    if not demo:
+        if str(data.get("confirm", "")).strip() != "LIVE":
+            raise HTTPException(
+                status_code=400,
+                detail='Switching to LIVE requires confirm: "LIVE"',
+            )
+    if not (_env_key and _env_secret and _env_pass):
+        raise HTTPException(status_code=400, detail="OKX credentials not configured")
+    prev = _env_demo
+    _env_demo = demo
+    result = await client_manager.init_client(_env_key, _env_secret, _env_pass, demo)
+    if result.get("error"):
+        _env_demo = prev
+        raise HTTPException(status_code=400, detail=result.get("message", "Reconnect failed"))
+    await write_audit(
+        request,
+        "mode.switch",
+        detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
+    )
+    return {"ok": True, "demo": _env_demo, "live": not _env_demo}
+
+
+@app.get("/api/audit", dependencies=[Depends(require_admin)])
+async def get_audit(limit: int = 100):
+    rows = await db.list_audit(limit=limit)
+    return {"items": rows}
 
 
 # ── Portfolio ──
