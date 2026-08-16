@@ -167,7 +167,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   }
   const btcChange = ticker ? change24hPct(ticker).toFixed(2) : '0.00'
   const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
-  const unrealizedPnl = pnl?.unrealized || 0
+  // Prefer sum of live OKX position rows (same source as the positions table).
+  // /api/pnl.unrealized is a slower cached path and can disagree with the table.
+  const unrealizedFromPositions = positions.reduce(
+    (s, p) => s + (parseFloat(p.upl) || 0), 0
+  )
+  const unrealizedPnl = positions.length > 0
+    ? unrealizedFromPositions
+    : (pnl?.unrealized || 0)
   const pnlTotal = pnl?.total || 0
   const pnlDay = pnl?.['1d'] || 0
   const pnlWeek = pnl?.week || 0

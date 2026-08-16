@@ -3582,6 +3582,12 @@ async def get_pnl():
         pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
         if not pos_result.get("error"):
             for p in pos_result.get("data", []):
+                # Ignore flat rows OKX sometimes returns with residual upl
+                try:
+                    if abs(float(p.get("pos", 0) or 0)) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
                 unrealized += float(p.get("upl", 0) or 0)
     except Exception:
         pass
