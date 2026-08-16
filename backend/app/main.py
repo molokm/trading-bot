@@ -33,7 +33,7 @@ from app.services.validation_strategy import ValidationStrategy, make_validation
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
-from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -373,6 +373,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/status",
     "/api/auth/logout",
     "/api/auth/telegram",
+    "/api/risk/status",
 }
 
 ADMIN_ONLY_PATHS = {
@@ -1110,6 +1111,7 @@ async def health():
             "validation": _bot_flag(validation),
         },
         "auth": "jwt",
+        "risk": risk_get_status().to_dict(),
     }
 
 
@@ -3521,6 +3523,12 @@ async def get_pnl():
         if not pos_result.get("error"):
             for p in pos_result.get("data", []):
                 unrealized += float(p.get("upl", 0) or 0)
+    except Exception:
+        pass
+
+    # Feed risk_guard so place_order can enforce RISK_MAX_DAILY_LOSS_USD
+    try:
+        update_daily_pnl(realized_1d + unrealized)
     except Exception:
         pass
 
