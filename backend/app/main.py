@@ -1017,7 +1017,7 @@ async def me_pnl(request: Request):
 # ══════════════════════════════════════════════════════════════
 
 _BACKTEST_SUMMARY = {
-    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности.",
+    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности. Full-sample после тюнинга ≠ чистый OOS; см. external/STAGE5_EVAL.md.",
     "periods": [
         {"label": "Momentum Rotation v5 2023–2026", "return_pct": 365.5, "max_dd_pct": 51.8, "cagr_pct": 59.8, "sharpe": 1.23},
         {"label": "Impulse 1D v2 2023–2026", "return_pct": 402.2, "max_dd_pct": 36.5, "cagr_pct": 63.5, "sharpe": 1.58},
