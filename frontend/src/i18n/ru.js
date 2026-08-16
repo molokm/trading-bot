@@ -54,6 +54,8 @@ const ru = {
   'dash.btc_tip': 'Текущая цена Bitcoin-USDT Perpetual Swap',
 
   'dash.open_positions': 'Открытые позиции',
+  'dash.open_no_pnl': 'PnL появится после закрытия',
+    'dash.open_no_pnl': 'PnL появится после закрытия',
   'dash.no_positions': 'Нет открытых позиций',
   'dash.positions_hint': 'Позиции появятся после запуска бота',
   'dash.pair': 'Пара',
