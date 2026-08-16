@@ -13,6 +13,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [status, setStatus] = useState(null)
   const [testSteps, setTestSteps] = useState([])
   const [dangerConfirm, setDangerConfirm] = useState(false)
+  const [risk, setRisk] = useState(null)
+  const [riskBusy, setRiskBusy] = useState(false)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
@@ -44,6 +46,21 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       setTg({ ...s, loaded: true })
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    api.riskStatus().then(setRisk).catch(() => setRisk(null))
+  }, [])
+
+  const toggleKill = async (enabled) => {
+    setRiskBusy(true)
+    try {
+      const r = await api.riskKill(enabled)
+      setRisk(r)
+    } catch (e) {
+      console.error(e)
+    }
+    setRiskBusy(false)
+  }
 
   const loadSubs = async () => {
     setSubsLoading(true)
@@ -551,7 +568,58 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
 
           {/* Danger Zone */}
           <div className="panel border-[var(--loss)]/30">
-            <div className="panel-header border-b-[var(--loss)]/20">
+            
+        {/* Risk guards */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <Shield size={13} className="text-[var(--warn)]" /> {t('settings.risk_title')}
+          </div>
+          <p className="text-2xs text-[var(--txt-muted)]">{t('settings.risk_tip')}</p>
+          {risk ? (
+            <div className="grid grid-cols-2 gap-2 text-2xs">
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_kill')}</div>
+                <div className={`font-semibold ${risk.kill_switch ? 'text-[var(--loss)]' : 'text-[var(--profit)]'}`}>
+                  {risk.kill_switch ? t('settings.risk_on') : t('settings.risk_off')}
+                </div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">DEMO</div>
+                <div className="font-semibold">{risk.okx_demo ? 'yes' : 'no'}</div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_daily')}</div>
+                <div className="mono">{risk.max_daily_loss_usd > 0 ? `$${risk.max_daily_loss_usd}` : '—'}</div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_pos')}</div>
+                <div className="mono">{risk.max_position_usd > 0 ? `$${risk.max_position_usd}` : '—'}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-2xs text-[var(--txt-muted)]">—</div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={riskBusy || risk?.kill_switch}
+              onClick={() => toggleKill(true)}
+            >
+              {t('settings.risk_enable_kill')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={riskBusy || !risk?.kill_switch}
+              onClick={() => toggleKill(false)}
+            >
+              {t('settings.risk_disable_kill')}
+            </button>
+          </div>
+        </div>
+
+<div className="panel-header border-b-[var(--loss)]/20">
               <AlertTriangle size={13} className="text-[var(--loss)]" /> {t('settings.danger_zone')}
             </div>
             <div className="p-4 flex items-start justify-between gap-4">

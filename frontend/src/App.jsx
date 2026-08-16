@@ -174,6 +174,16 @@ function AppLayout() {
                 {latencyMs}ms
               </span>
             ) : null}
+            {health?.bots && (
+              <span className="hidden sm:flex items-center gap-1 ml-0.5" title={t('nav.bots_status_tip')}>
+                {['rotation', 'impulse', 'validation'].map(k => (
+                  <span
+                    key={k}
+                    className={`w-1.5 h-1.5 rounded-full ${health.bots[k] ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)] opacity-40'}`}
+                  />
+                ))}
+              </span>
+            )}
           </div>
 
           {/* User role */}

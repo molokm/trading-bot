@@ -33,6 +33,7 @@ from app.services.validation_strategy import ValidationStrategy, make_validation
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open
 from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -1110,6 +1111,30 @@ async def health():
         },
         "auth": "jwt",
     }
+
+
+# ── Risk guards (stage-3a) ──
+
+@app.get("/api/risk/status")
+async def risk_status():
+    """Public-ish status for UI badges (no secrets)."""
+    daily = None
+    try:
+        # best-effort daily pnl from existing endpoint helper if present
+        from app.services import risk_guard as _rg  # noqa: F401
+    except Exception:
+        pass
+    st = risk_get_status(daily_pnl=None)
+    return st.to_dict()
+
+
+@app.post("/api/risk/kill", dependencies=[Depends(require_admin)])
+async def risk_kill(data: dict = None):
+    """Enable/disable runtime kill switch (blocks new entries, not closes)."""
+    data = data or {}
+    enabled = bool(data.get("enabled", True))
+    set_kill_switch(enabled)
+    return {"ok": True, **risk_get_status().to_dict()}
 
 
 # ── Credentials ──

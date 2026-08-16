@@ -27,6 +27,14 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
+      - key: RISK_KILL_SWITCH
+        sync: false
+      - key: RISK_MAX_DAILY_LOSS_USD
+        sync: false
+      - key: RISK_MAX_POSITION_USD
+        sync: false
+      - key: RISK_MAX_LEVERAGE
+        sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: TELEGRAM_BOT_TOKEN

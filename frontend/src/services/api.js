@@ -44,6 +44,10 @@ export const api = {
 
   health: () => request('/health'),
 
+  riskStatus: () => request('/risk/status'),
+  riskKill: (enabled) =>
+    request('/risk/kill', { method: 'POST', body: JSON.stringify({ enabled }) }),
+
   // ── Public equity tracker (no auth) ──
   getTracker: () => request('/tracker'),
 
