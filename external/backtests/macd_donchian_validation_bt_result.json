@@ -1,43 +1,44 @@
 {
   "engine": "backtrader",
-  "strategy": "MACD+Donchian Validation (dc15 tp8% r0.3 tp2 10% be1.5% ch4 hold3 top4 @1x)",
+  "strategy": "MACD+Donchian Validation (dc15 tp10% r0.2 tp2 8% be1.5% ch4 hold3 top4 @2x alloc0.5)",
   "coins": 10,
   "period": "2023-05-04 -> 2026-08-15",
   "years": 3.28,
   "capital": 10000.0,
-  "final_equity": 17063.74,
-  "total_return_pct": 70.64,
-  "cagr_pct": 17.68,
-  "sharpe": 0.59,
-  "max_drawdown_pct": 62.12,
-  "closed_trades": 233,
-  "win_rate": 34.8,
-  "profit_factor": 1.6,
+  "final_equity": 37631.31,
+  "total_return_pct": 276.31,
+  "cagr_pct": 49.74,
+  "sharpe": 1.19,
+  "max_drawdown_pct": 48.02,
+  "closed_trades": 145,
+  "win_rate": 45.5,
+  "profit_factor": 1.47,
   "yearly": [
     {
       "year": "2023",
-      "return_pct": 62.0
+      "return_pct": 57.3
     },
     {
       "year": "2024",
-      "return_pct": 120.3
+      "return_pct": 243.4
     },
     {
       "year": "2025",
-      "return_pct": -28.6
+      "return_pct": -9.3
     },
     {
       "year": "2026",
-      "return_pct": -38.3
+      "return_pct": -26.0
     }
   ],
   "exit_reasons": {
-    "rotation_exit": 290,
-    "partial_tp": 104,
-    "take_profit2": 82,
-    "chandelier_stop": 62,
-    "time_exit": 3
+    "rotation_exit": 133,
+    "partial_tp": 49,
+    "take_profit2": 49,
+    "chandelier_stop": 26,
+    "time_exit": 1
   },
+  "tuned": "sweep + walk-forward 2026-08-16; prev config dc15 tp8% r0.3 tp2 10% @1x alloc0.15 -> CAGR 17.7%, MaxDD 62.1%",
   "costs": "commission 0.10% + slippage 0.05% per side",
   "data": "OKX-SWAP daily candles, 10 coins, signal on prev close, fills at next open",
   "look_ahead": false

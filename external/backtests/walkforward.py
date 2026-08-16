@@ -26,11 +26,13 @@ import backtrader as bt  # noqa: E402
 import bt_okx  # noqa: E402
 import backtrader_momentum_rotation as mom  # noqa: E402
 import backtrader_impulse as imp  # noqa: E402
+import backtrader_macd_donchian as val  # noqa: E402
 from sweep_momentum import load_data as load_mom  # noqa: E402
 from sweep_impulse import load_data as load_imp  # noqa: E402
+from sweep_validation import load_data as load_val  # noqa: E402
 
-MODULES = {"momentum": mom, "impulse": imp}
-LOADERS = {"momentum": load_mom, "impulse": load_imp}
+MODULES = {"momentum": mom, "impulse": imp, "validation": val}
+LOADERS = {"momentum": load_mom, "impulse": load_imp, "validation": load_val}
 COINS = ["BTC", "ETH", "BNB", "SOL", "XRP", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 # focused levers per strategy (full-window tuning already found the good ones)
@@ -47,6 +49,13 @@ GRIDS = {
         "trail_atr_mult": [8.0, 12.0],
         "tp2_atr": [6.0, 10.0],
     },
+    "validation": {
+        "top_k": [3, 4],
+        "risk_per_trade": [0.14, 0.20],
+        "allocation_pct": [0.3, 0.5],
+        "tp_ratio": [0.2, 0.5],
+        "tp2_pct": [0.08, 0.10],
+    },
 }
 
 # full-window tuned configs (as baked into defaults)
@@ -59,6 +68,11 @@ TUNED = {
                     entry_roc=3.0, vol_mult=1.5, sl_atr_mult=5.0,
                     trail_atr_mult=12.0, tp1_atr=2.0, tp1_frac=0.3,
                     tp2_atr=10.0, tp2_frac=0.3, risk_per_trade=0.10),
+    "validation": dict(top_k=4, donchian_n=15, macd_fast=12, macd_slow=26,
+                       macd_signal=9, atr_period=14, max_leverage=2.0,
+                       risk_per_trade=0.14, allocation_pct=0.5,
+                       chandelier_atr=4.0, tp_pct=0.10, tp_ratio=0.2,
+                       tp2_pct=0.08, be_pct=0.015, max_hold_days=3),
 }
 
 # old defaults (pre-tuning) — for relative comparison on OOS
@@ -71,13 +85,24 @@ OLD = {
                     max_hold_bars=30, entry_roc=4.0, vol_mult=1.5,
                     sl_atr_mult=5.0, trail_atr_mult=8.0, tp1_atr=2.0,
                     tp1_frac=0.3, tp2_atr=6.0, tp2_frac=0.3),
+    "validation": dict(top_k=4, donchian_n=15, macd_fast=12, macd_slow=26,
+                       macd_signal=9, atr_period=14, max_leverage=1.0,
+                       risk_per_trade=0.14, allocation_pct=0.15,
+                       chandelier_atr=4.0, tp_pct=0.08, tp_ratio=0.3,
+                       tp2_pct=0.10, be_pct=0.015, max_hold_days=3),
+}
+
+
+STRAT_CLASS = {
+    mom: mom.MomentumRotationV4,
+    imp: imp.Impulse1D,
+    val: val.MacdDonchian,
 }
 
 
 def run_curve(mod, raw, overrides):
     cerebro = bt.Cerebro(stdstats=False)
-    cerebro.addstrategy(mod.Impulse1D if mod is imp else mod.MomentumRotationV4,
-                        **overrides)
+    cerebro.addstrategy(STRAT_CLASS[mod], **overrides)
     for inst, df in raw.items():
         cerebro.adddata(bt_okx.as_bt_feed(df, name=inst), name=inst)
     cerebro.broker.setcash(10000 * mod.SCALE)
@@ -121,7 +146,7 @@ def window(curve, start, end):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--strat", choices=["momentum", "impulse"], default="momentum")
+    ap.add_argument("--strat", choices=["momentum", "impulse", "validation"], default="momentum")
     ap.add_argument("--days", type=int, default=1100)
     ap.add_argument("--is-frac", type=float, default=0.6)
     ap.add_argument("--min-dd", type=float, default=-55.0)

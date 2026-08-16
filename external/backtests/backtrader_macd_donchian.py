@@ -41,13 +41,13 @@ MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
 ATR_PERIOD = 14
-MAX_LEVERAGE = 1.0
+MAX_LEVERAGE = 2.0
 RISK_PER_TRADE = 0.14
-ALLOCATION_PCT = 0.15
+ALLOCATION_PCT = 0.5
 CHANDELIER_ATR = 4.0        # trail = peak - 4*ATR
-TP_PCT = 0.08               # partial TP: close 30% at +8%
-TP_RATIO = 0.3
-TP2_PCT = 0.10              # second TP for remainder (full exit)
+TP_PCT = 0.10               # partial TP: close 20% at +10%
+TP_RATIO = 0.2
+TP2_PCT = 0.08              # second TP for remainder (full exit)
 BE_PCT = 0.015              # breakeven for ALL positions at +1.5%
 MAX_HOLD_DAYS = 3           # time exit
 ALLOW_SHORT = False
@@ -301,6 +301,8 @@ def main():
         k, v = s.split("=", 1)
         if v.lower() in ("true", "false"):
             overrides[k] = v.lower() == "true"
+        elif v.lstrip("-").isdigit():
+            overrides[k] = int(v)
         else:
             try:
                 overrides[k] = float(v)
