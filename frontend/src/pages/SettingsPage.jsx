@@ -590,6 +590,11 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               <div className="rounded-lg border border-[var(--border)] p-2">
                 <div className="text-[var(--txt-muted)]">{t('settings.risk_max_daily')}</div>
                 <div className="mono">{risk.max_daily_loss_usd > 0 ? `$${risk.max_daily_loss_usd}` : '—'}</div>
+                {risk.daily_pnl_usd != null && (
+                  <div className={`text-[10px] mt-0.5 ${risk.daily_pnl_usd >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    today {risk.daily_pnl_usd >= 0 ? '+' : ''}{Number(risk.daily_pnl_usd).toFixed(2)}
+                  </div>
+                )}
               </div>
               <div className="rounded-lg border border-[var(--border)] p-2">
                 <div className="text-[var(--txt-muted)]">{t('settings.risk_max_pos')}</div>
