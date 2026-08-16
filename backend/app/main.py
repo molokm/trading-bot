@@ -3602,6 +3602,93 @@ async def get_pnl():
     }
 
 
+
+@app.get("/api/reports/summary")
+async def reports_summary():
+    """Single reporting snapshot for UI/export — same trade source as History/Dashboard.
+
+    Fields:
+    - realized / unrealized / fees / funding (funding best-effort from OKX bills type=8)
+    - periods 1d/7d/30d/week aligned with /api/pnl
+    - trade_count, wins, losses, win_rate from closed paired trades
+    - source labels for transparency
+    """
+    pnl = await get_pnl()
+    paired = await get_paired_trades(limit=5000)
+    trades = [x for x in (paired.get("trades") or []) if (x.get("reason") or "").lower() in ("closed", "tp", "sl", "trail", "breakeven", "manual", "")]
+    # prefer explicit closed-like
+    closed = []
+    for x in (paired.get("trades") or []):
+        reason = (x.get("reason") or "").lower()
+        if reason in ("open", "tp1"):
+            continue
+        try:
+            if float(x.get("pnl") or 0) == 0 and reason == "open":
+                continue
+        except (TypeError, ValueError):
+            pass
+        closed.append(x)
+
+    fees = 0.0
+    wins = losses = 0
+    for x in closed:
+        try:
+            fees += abs(float(x.get("fee") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            pval = float(x.get("pnl") or 0)
+        except (TypeError, ValueError):
+            pval = 0.0
+        if pval > 0:
+            wins += 1
+        elif pval < 0:
+            losses += 1
+    n = wins + losses
+    win_rate = round(wins / n * 100, 1) if n else 0.0
+
+    funding = 0.0
+    funding_source = "none"
+    try:
+        resp = await _okx_call(lambda c: c.get_bills(inst_type="SWAP", type="8", limit=100))
+        if not resp.get("error"):
+            for b in resp.get("data") or []:
+                try:
+                    # OKX funding often in pnl or balChg
+                    v = b.get("pnl")
+                    if v is None or v == "":
+                        v = b.get("balChg")
+                    funding += float(v or 0)
+                except (TypeError, ValueError):
+                    continue
+            funding_source = "okx_bills_type8"
+    except Exception as e:
+        print(f"[reports] funding fetch: {e}", flush=True)
+
+    net = float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding - 0.0
+    # fees already often embedded in trade pnl on OKX; still surface separately
+    return {
+        "as_of": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "realized_total": pnl.get("total"),
+        "realized_1d": pnl.get("1d"),
+        "realized_7d": pnl.get("7d"),
+        "realized_30d": pnl.get("30d"),
+        "realized_week": pnl.get("week"),
+        "unrealized": pnl.get("unrealized"),
+        "fees_reported": round(fees, 4) if fees else pnl.get("fees"),
+        "funding": round(funding, 4),
+        "funding_source": funding_source,
+        "net_approx": round(float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding, 2),
+        "per_bot": pnl.get("per_bot") or {},
+        "trades_closed": len(closed),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate,
+        "pnl_source": pnl.get("source"),
+        "note": "PnL matches History paired trades; funding is OKX bills type=8 (best-effort, last page).",
+    }
+
+
 _bot_stats_cache = {"ts": 0, "data": {}}  # {"Momentum": {...}, "Impulse 1D": {...}}
 _BOT_STATS_TTL = 60  # seconds
 

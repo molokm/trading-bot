@@ -51,6 +51,7 @@ export const api = {
   setMode: (demo, confirm) =>
     request('/mode', { method: 'POST', body: JSON.stringify({ demo, confirm }) }),
   getAudit: (limit = 50) => request(`/audit?limit=${limit}`),
+  reportSummary: () => request('/reports/summary'),
 
   // ── Public equity tracker (no auth) ──
   getTracker: () => request('/tracker'),
