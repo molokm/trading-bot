@@ -882,7 +882,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* ─── Validation Bot (demo) ─── */}
+          {/* ─── Validation Bot ─── */}
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <FlaskConical size={13} className="text-[var(--warn)]" />

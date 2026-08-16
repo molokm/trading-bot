@@ -9,7 +9,7 @@ import { useTranslation } from '../hooks/useTranslation'
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
-/** Coins the demo validation bot trades (MACD+Donchian universe) */
+/** Coins the validation bot trades (MACD+Donchian universe) */
 const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'SOL']
 
 /** Params that map 1:1 to RotationConfig on the backend */
@@ -81,7 +81,7 @@ const VALIDATION_PARAMS = [
   'chandelier_atr', 'max_hold_days', 'max_leverage', 'allocation_pct',
 ]
 
-/** Validation ranges (MACD+Donchian) on a small demo budget */
+/** Validation ranges (MACD+Donchian) on a small budget */
 const VALIDATION_PARAM_BASE = {
   ...PARAM_BASE,
   capital:          { min: 50, max: 5000, step: 50, unit: '$' },
@@ -123,6 +123,15 @@ const IMP_BACKTEST = {
     { year: '2026', ret: '+25.7%' },
   ],
   summary: { cagr: '63.5%', dd: '36.5%' },
+}
+const VAL_BACKTEST = {
+  years: [
+    { year: '2023', ret: '+147.3%' },
+    { year: '2024', ret: '+282.6%' },
+    { year: '2025', ret: '+44.8%' },
+    { year: '2026', ret: '-30.2%' },
+  ],
+  summary: { cagr: '121.0%', dd: '39.3%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {
@@ -564,7 +573,6 @@ export default function BotsPage({ connected, isGuest }) {
     ...(valCfg?.max_leverage ? [t('bots.tag_leverage', { x: valCfg.max_leverage })] : []),
     t('bots.tag_breakout'),
     t('bots.tag_partial_tp'),
-    'демо',
   ]
 
   const impCfg = impulseStatus?.config
@@ -671,6 +679,7 @@ export default function BotsPage({ connected, isGuest }) {
             description={valStatus?.description || t('bots.validation_desc')}
             tags={valTags}
             tagline={t('bots.tagline_validation')}
+            backtest={VAL_BACKTEST}
             pnl={valStatus?.total_pnl || 0}
             trades={valStatus?.total_trades || 0}
             winRate={valStatus?.win_rate}

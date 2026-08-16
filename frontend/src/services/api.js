@@ -125,7 +125,7 @@ export const api = {
   impulseReset: () =>
     request('/impulse/reset', { method: 'POST' }),
 
-  // ── Validation Strategy (demo) ──
+  // ── Validation Strategy ──
   validationStatus: () => request('/validation/status'),
 
   validationStart: (config = {}) =>

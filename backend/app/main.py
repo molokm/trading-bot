@@ -141,13 +141,13 @@ async def debug_server_hits():
 @app.on_event("startup")
 async def startup():
     try:
-        print("[startup] 1/6 DB init ...", flush=True)
+        print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
-        print("[startup] 2/6 OKX client init ...", flush=True)
+        print("[startup] 2/7 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        print("[startup] 3/6 Migration check ...", flush=True)
+        print("[startup] 3/7 Migration check ...", flush=True)
         # One-time cleanup: check if any old momentum data exists, wipe it all.
         # Checks trades table for old bot_id - most reliable signal.
         needs_cleanup = False
@@ -170,7 +170,7 @@ async def startup():
                 except Exception as e:
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
-        print("[startup] 4/6 Rotation auto-start ...", flush=True)
+        print("[startup] 4/7 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
@@ -201,7 +201,7 @@ async def startup():
             global rotation
             rotation = r
             await rotation.start()
-        print("[startup] 4/6 Impulse 1D auto-start ...", flush=True)
+        print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
@@ -229,7 +229,30 @@ async def startup():
             global impulse
             impulse = imp
             await impulse.start()
-        print("[startup] 5/6 Done ...", flush=True)
+        print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
+        if _env_key and _env_secret and _env_pass:
+            val_config = make_validation_config(
+                capital=300.0,
+                top_k=4,
+                donchian_n=15,
+                tp_pct=0.08,
+                tp_ratio=0.3,
+                tp2_pct=0.10,
+                be_pct=0.015,
+                chandelier_atr=4.0,
+                max_hold_days=3,
+                risk_per_trade=0.14,
+                allocation_pct=0.15,
+                max_leverage=1.0,
+                poll_interval_sec=300,
+                auto_execute=True,
+            )
+            v = ValidationStrategy(config=val_config, client_manager=client_manager, db=db,
+                                   notifier=telegram)
+            global validation
+            validation = v
+            await validation.start()
+        print("[startup] 7/7 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
         raise
@@ -239,13 +262,13 @@ async def startup():
         if telegram.token:
             bot_poller = TelegramBotPoller(notifier=telegram, db=db)
             bot_poller.start()
-            print("[startup] 6/6 Telegram poller started", flush=True)
+            print("[startup] Telegram poller started", flush=True)
             try:
                 asyncio.get_event_loop().create_task(bot_poller.notify_signals_migration())
             except Exception as e:
                 print(f"[startup] signals migration task error: {e}", flush=True)
         else:
-            print("[startup] 6/6 Telegram poller skipped (no bot token)", flush=True)
+            print("[startup] Telegram poller skipped (no bot token)", flush=True)
     except Exception as e:
         print(f"[startup] Telegram poller error: {e}", flush=True)
     # Public equity tracker: snapshot owner portfolio for the /tracker page.
@@ -253,7 +276,7 @@ async def startup():
         if client_manager.get_client():
             equity_tracker = EquityTracker(client_manager=client_manager, db=db)
             equity_tracker.start()
-            print("[startup] 6b/6 Equity tracker started", flush=True)
+            print("[startup] Equity tracker started", flush=True)
     except Exception as e:
         print(f"[startup] Equity tracker error: {e}", flush=True)
     # Dashboard cache warmer: pre-compute the paired-trades/pnl pipeline in the
@@ -261,7 +284,7 @@ async def startup():
     global _warm_task
     try:
         _warm_task = asyncio.create_task(_warm_dashboard_caches())
-        print("[startup] 6c/6 Dashboard cache warmer started", flush=True)
+        print("[startup] Dashboard cache warmer started", flush=True)
     except Exception as e:
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
@@ -1137,7 +1160,7 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
         for coin, pos in impulse._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
                 return "Impulse 1D"
-    # Check Validation bot positions (demo)
+    # Check Validation bot positions
     if validation and validation._running and validation._positions:
         for coin, pos in validation._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
@@ -1642,8 +1665,8 @@ async def momentum_trades(limit: int = 20):
         global _fills_cache_ts
         _fills_cache_ts = 0  # bypass cache
         raw_fills = await _fetch_okx_fills(limit=300)
-        # Exclude fills that belong to the demo validation bot (its ordIds are
-        # persisted with bot_id=validation_strategy). Otherwise its demo trades
+        # Exclude fills that belong to the validation bot (its ordIds are
+        # persisted with bot_id=validation_strategy). Otherwise its trades
         # leak into the Momentum window on the dashboard.
         try:
             val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
@@ -1657,7 +1680,7 @@ async def momentum_trades(limit: int = 20):
             val_ord_ids = set()
         if val_ord_ids:
             raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
-        # Also drop fills whose client order id marks them as the demo validator
+        # Also drop fills whose client order id marks them as the validation bot
         # (CL_ORD_PREFIX="val"). New orders from the validator carry clOrdId=val<ts>.
         raw_fills = [f for f in raw_fills
                      if not str(f.get("clOrdId", "")).startswith("val")]
@@ -2135,7 +2158,7 @@ async def impulse_reset():
 
 
 # ══════════════════════════════════════════════════════════════
-# VALIDATION STRATEGY ENDPOINTS (демо-проверка исполнения)
+# VALIDATION STRATEGY ENDPOINTS (проверка исполнения)
 # ══════════════════════════════════════════════════════════════
 
 @app.get("/api/validation/status", dependencies=[Depends(require_admin)])
@@ -2149,7 +2172,7 @@ async def validation_status():
 
 @app.post("/api/validation/start", dependencies=[Depends(require_admin)])
 async def validation_start(data: dict = None):
-    """Start the demo validation bot (MACD+Donchian, relaxed filters → forces trades)."""
+    """Start the validation bot (MACD+Donchian)."""
     global validation
     if validation and validation._running:
         return {"message": "Validation already running", **validation.get_status()}
@@ -3246,7 +3269,7 @@ async def get_pnl():
 
     # ── 1. Primary: History rows — the single source for the cards ──
     # `total`/`account_total` cover EVERY closed trade shown in the History
-    # section (Momentum, Impulse 1D, Validation demo, manual…), so the "Всего"
+    # section (Momentum, Impulse 1D, Validation, manual…), so the "Всего"
     # card equals History's "Итого". `per_bot` is the per-bot breakdown of the
     # same rows; open rows (pnl=None) contribute nothing.
     try:
@@ -3887,8 +3910,8 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     try:
         _fills_cache_ts = 0
         raw_fills = await _fetch_okx_fills(limit=300)
-        # Exclude fills that belong to the demo validation bot (its ordIds are
-        # persisted with bot_id=validation_strategy). Otherwise its demo trades
+        # Exclude fills that belong to the validation bot (its ordIds are
+        # persisted with bot_id=validation_strategy). Otherwise its trades
         # leak into the Momentum window on the dashboard.
         try:
             val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
@@ -3902,7 +3925,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             val_ord_ids = set()
         if val_ord_ids:
             raw_fills = [f for f in raw_fills if str(f.get("ordId", "")).strip() not in val_ord_ids]
-        # Also drop fills whose client order id marks them as the demo validator
+        # Also drop fills whose client order id marks them as the validation bot
         # (CL_ORD_PREFIX="val"). New orders from the validator carry clOrdId=val<ts>.
         raw_fills = [f for f in raw_fills
                      if not str(f.get("clOrdId", "")).startswith("val")]

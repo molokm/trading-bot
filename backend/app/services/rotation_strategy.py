@@ -142,7 +142,7 @@ class RotationStrategy:
     PRICE_DECIMALS: int = 2
     # Client-order-ID prefix: when non-empty, every order gets clOrdId=<prefix>-<n>,
     # so its fills can be identified on the exchange (used to attribute OKX fills
-    # to this bot in the PnL aggregation, and to keep demo-validator trades out
+    # to this bot in the PnL aggregation, and to keep validation-bot trades out
     # of Momentum windows).
     CL_ORD_PREFIX: str = "rot"
 

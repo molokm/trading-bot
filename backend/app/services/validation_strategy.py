@@ -1,4 +1,4 @@
-"""ValidationStrategy — MACD + Donchian breakout (демо-валидатор на демо-счёте).
+"""ValidationStrategy — MACD + Donchian breakout.
 
 Реализация бэктест-конфига MACD+Donchian (см. external/scripts/honest_backtest_macd_donchian.py).
 Лучший прогон (dc15 / tp 8% на 30% / tp2 10% / breakeven +1.5% / max_hold 3 дня / top_k 4 @ 1x):
@@ -7,7 +7,6 @@ CAGR ~121%, Sharpe ~1.81, MaxDD ~39%; walk-forward 2024/2025 стабилен (C
 Вход: Donchian breakout (close > 15-дневный максимум) + MACD hist > 0.
 Выходы: chandelier 4*ATR, breakeven при +1.5% (для ВСЕХ позиций), частичный TP 8% на 30%,
 второй TP 10%, ротация.
-Используется только на ДЕМО для валидации стратегии и исполнительного механизма.
 """
 
 from .macd_donchian_strategy import MacdDonchianStrategy, MacdDonchianConfig
@@ -37,11 +36,11 @@ VAL_SWAP_MAP = {
 VAL_PX_DECIMALS = 4
 
 VAL_DESC = (
-    "MACD+Donchian Validation v1 (демо): Donchian breakout (close > 15-дневный максимум) "
+    "MACD+Donchian Validation v1: Donchian breakout (close > 15-дневный максимум) "
     "с подтверждением MACD-гистограммы > 0. Выходы: chandelier 4×ATR, breakeven при +1.5% "
     "для всех позиций, частичный тейк 8% (30% позиции), второй тейк 10%, max_hold 3 дня, "
     "top_k 4 @ 1×. Бэктест (daily OHLC BTC/ETH/BNB/SOL, 2023–2026): CAGR ~121%, Sharpe ~1.81, "
-    "MaxDD ~39%, walk-forward 2024/2025 стабилен. Демо-счёт, НЕ для реальной торговли."
+    "MaxDD ~39%, walk-forward 2024/2025 стабилен."
 )
 
 
