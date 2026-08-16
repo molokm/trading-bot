@@ -46,6 +46,17 @@ Keep-alive is **external only** — do not couple health pings with strategy log
 - Mutating routes still require admin (`Depends(require_admin)`).
 - On 401 the SPA redirects to `/login?reason=session`.
 
+### Health payload (stage-1b)
+
+`GET /api/health` includes:
+
+- `uptime_sec` — seconds since process start (resets after sleep/wake)
+- `bots.rotation|impulse|validation` — `true` if loop is running after auto-start
+- `auth: "jwt"`
+
+On every boot (including Render wake) strategies auto-start when OKX env keys are set.
+Failures are isolated: one bot error does not block the others.
+
 ### Smoke checklist after deploy
 
 1. Open site → Guest login → dashboard loads, badge visible.

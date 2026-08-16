@@ -83,6 +83,7 @@ function AppLayout() {
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
+  const [latencyMs, setLatencyMs] = useState(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
 
   const isGuest = auth?.role === 'guest'
@@ -90,12 +91,15 @@ function AppLayout() {
 
   useEffect(() => {
     const check = async () => {
+      const t0 = performance.now()
       try {
         const h = await api.health()
+        setLatencyMs(Math.round(performance.now() - t0))
         setHealth(h)
         setConnected(h.connected)
         setDemoMode(h.demo)
       } catch {
+        setLatencyMs(null)
         setHealth({ status: 'error' })
         setConnected(false)
       }
@@ -160,6 +164,16 @@ function AppLayout() {
             <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
               {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
             </span>
+            {health?.version ? (
+              <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title="Build / git commit">
+                {String(health.version).slice(0, 7)}
+              </span>
+            ) : null}
+            {latencyMs != null ? (
+              <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title={t('nav.latency_tip')}>
+                {latencyMs}ms
+              </span>
+            ) : null}
           </div>
 
           {/* User role */}
@@ -199,6 +213,12 @@ function AppLayout() {
           </button>
         </div>
       </header>
+
+      {isGuest && (
+        <div className="flex-shrink-0 px-4 py-1.5 text-center text-2xs bg-amber-500/10 border-b border-amber-500/20 text-amber-200/90">
+          {t('nav.guest_banner')}
+        </div>
+      )}
 
       {/* ═══ MAIN CONTENT ═══ */}
       <main className="flex-1 overflow-hidden">

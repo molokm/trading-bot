@@ -77,6 +77,7 @@ _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 
 trade_log: list = []
+_STARTED_AT = None  # set in startup(); used by /api/health uptime
 rotation: Optional[RotationStrategy] = None
 impulse: Optional[ImpulseStrategy] = None
 validation: Optional[ValidationStrategy] = None
@@ -140,6 +141,8 @@ async def debug_server_hits():
 
 @app.on_event("startup")
 async def startup():
+    global _STARTED_AT
+    _STARTED_AT = _time.time()
     try:
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
@@ -200,7 +203,13 @@ async def startup():
                                  notifier=telegram)
             global rotation
             rotation = r
-            await rotation.start()
+            try:
+                await rotation.start()
+                print("[startup]   Rotation RUNNING (auto-start after boot/wake)", flush=True)
+            except Exception as e:
+                print(f"[startup]   Rotation FAILED to start: {e}", flush=True)
+        else:
+            print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             imp_config = ImpulseConfig(
@@ -228,7 +237,13 @@ async def startup():
                                   notifier=telegram)
             global impulse
             impulse = imp
-            await impulse.start()
+            try:
+                await impulse.start()
+                print("[startup]   Impulse RUNNING (auto-start after boot/wake)", flush=True)
+            except Exception as e:
+                print(f"[startup]   Impulse FAILED to start: {e}", flush=True)
+        else:
+            print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             val_config = make_validation_config(
@@ -251,7 +266,13 @@ async def startup():
                                    notifier=telegram)
             global validation
             validation = v
-            await validation.start()
+            try:
+                await validation.start()
+                print("[startup]   Validation RUNNING (auto-start after boot/wake)", flush=True)
+            except Exception as e:
+                print(f"[startup]   Validation FAILED to start: {e}", flush=True)
+        else:
+            print("[startup]   Validation skipped (no OKX env keys)", flush=True)
         print("[startup] 7/7 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -1066,10 +1087,29 @@ async def public_tracker():
 
 @app.get("/api/health")
 async def health():
+    """Liveness + connection + bot run flags (for keep-alive monitors and UI)."""
     client = client_manager.get_client()
     connected = client is not None
-    return {"status": "ok", "connected": connected, "demo": _env_demo,
-            "version": os.environ.get("RENDER_GIT_COMMIT", "")[:12]}
+    uptime = None
+    if _STARTED_AT is not None:
+        uptime = round(_time.time() - _STARTED_AT, 1)
+
+    def _bot_flag(bot) -> bool:
+        return bool(bot is not None and getattr(bot, "_running", False))
+
+    return {
+        "status": "ok",
+        "connected": connected,
+        "demo": _env_demo,
+        "version": os.environ.get("RENDER_GIT_COMMIT", "")[:12],
+        "uptime_sec": uptime,
+        "bots": {
+            "rotation": _bot_flag(rotation),
+            "impulse": _bot_flag(impulse),
+            "validation": _bot_flag(validation),
+        },
+        "auth": "jwt",
+    }
 
 
 # ── Credentials ──

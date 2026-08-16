@@ -10,6 +10,8 @@ const en = {
   'nav.guest': 'Guest',
   'nav.guest_readonly': 'Guest · view only',
   'nav.guest_tip': 'View-only mode: start/stop bots and trading actions are disabled',
+  'nav.guest_banner': 'Guest mode — view only. Bot controls and trading actions are disabled.',
+  'nav.latency_tip': 'Latency of /api/health response',
   'nav.admin': 'Admin',
   'nav.glossary': 'Glossary',
   'nav.light_theme': 'Light theme',
