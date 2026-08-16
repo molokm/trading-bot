@@ -163,9 +163,18 @@ function AppLayout() {
           </div>
 
           {/* User role */}
-          <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-            {isGuest ? <User size={12} className="text-[var(--txt-muted)]" /> : <Shield size={12} className="text-[var(--profit)]" />}
-            <span className="text-2xs font-medium text-[var(--txt-secondary)]">{isGuest ? t('nav.guest') : t('nav.admin')}</span>
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border ${
+              isGuest
+                ? 'bg-amber-500/10 border-amber-500/30'
+                : 'bg-[var(--bg)] border-[var(--border)]'
+            }`}
+            title={isGuest ? t('nav.guest_tip') : t('nav.admin')}
+          >
+            {isGuest ? <User size={12} className="text-amber-400" /> : <Shield size={12} className="text-[var(--profit)]" />}
+            <span className={`text-2xs font-medium ${isGuest ? 'text-amber-300' : 'text-[var(--txt-secondary)]'}`}>
+              {isGuest ? t('nav.guest_readonly') : t('nav.admin')}
+            </span>
           </div>
 
           {/* Glossary */}

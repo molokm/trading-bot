@@ -8,6 +8,8 @@ const ru = {
   'nav.settings': 'Настройки',
   'nav.docs': 'Документация',
   'nav.guest': 'Гость',
+  'nav.guest_readonly': 'Гость · только просмотр',
+  'nav.guest_tip': 'Режим только просмотра: старт/стоп ботов и сделки недоступны',
   'nav.admin': 'Админ',
   'nav.glossary': 'Глоссарий',
   'nav.light_theme': 'Светлая тема',
@@ -22,6 +24,7 @@ const ru = {
   'login.submit': 'Войти',
   'login.or': 'или',
   'login.guest': 'Гостевой режим (только просмотр)',
+  'login.session_expired': 'Сессия истекла или сервер перезапустился — войдите снова',
   'login.no_password': 'Пароль не установлен — вход без авторизации',
   'login.https_note': 'Все данные передаются по HTTPS',
 
