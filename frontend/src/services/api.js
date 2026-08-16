@@ -47,6 +47,10 @@ export const api = {
   riskStatus: () => request('/risk/status'),
   riskKill: (enabled) =>
     request('/risk/kill', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  getMode: () => request('/mode'),
+  setMode: (demo, confirm) =>
+    request('/mode', { method: 'POST', body: JSON.stringify({ demo, confirm }) }),
+  getAudit: (limit = 50) => request(`/audit?limit=${limit}`),
 
   // ── Public equity tracker (no auth) ──
   getTracker: () => request('/tracker'),
