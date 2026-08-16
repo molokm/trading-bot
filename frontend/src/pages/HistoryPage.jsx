@@ -166,7 +166,11 @@ export default function HistoryPage() {
           {currentLoading ? (
             <div className="flex items-center justify-center py-16"><Loader /></div>
           ) : pageTrades.length === 0 ? (
-            <EmptyState icon={ScrollText} text={t('history.empty')} sub={t('history.empty_hint')} />
+            <EmptyState
+              icon={ScrollText}
+              text={currentTrades.length === 0 ? t('history.empty') : t('history.empty_filtered')}
+              sub={currentTrades.length === 0 ? t('history.empty_hint') : t('history.empty_filtered_hint')}
+            />
           ) : (
             <table className="data-table">
               <thead>
