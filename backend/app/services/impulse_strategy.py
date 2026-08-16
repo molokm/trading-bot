@@ -1,7 +1,7 @@
 """Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
 
 Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
-1D, 10 coins, 2023-05..2026-08: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%).
+1D, 10 coins, 2023-05..2026-08 full-sample after tuning: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%; not pure OOS).
   - Signal on yesterday's daily close (causal), entry today at open
   - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
   - Initial stop = 5 x daily ATR (both sides)
