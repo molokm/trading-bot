@@ -1275,25 +1275,29 @@ async def get_portfolio():
 # ── Positions ──
 
 def _tag_position_bot(inst_id: str, pos_side: str) -> str:
-    """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
-    # Normalize pos_side for matching
+    """Determine which bot owns an OKX position by checking running bots' in-memory positions.
+
+    Order: Rotation (Momentum) → Impulse → Validation. Validation shares the same
+    coin universe and must not steal tags from older strategies if both claim a pos.
+    """
     norm_side = pos_side.lower() if pos_side else ""
-    # Check Impulse bot positions
-    if impulse and impulse._running and impulse._positions:
-        for coin, pos in impulse._positions.items():
+
+    def _match(bot) -> bool:
+        if not (bot and bot._running and bot._positions):
+            return False
+        for coin, pos in bot._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Impulse 1D"
-    # Check Validation bot positions
-    if validation and validation._running and validation._positions:
-        for coin, pos in validation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "MACD+Donchian Validation"
-    # Check Rotation bot positions
-    if rotation and rotation._running and rotation._positions:
-        for coin, pos in rotation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Momentum"
-    # Fallback: check trade logs for recent open entry of this instrument
+                return True
+        return False
+
+    if _match(rotation):
+        return "Momentum"
+    if _match(impulse):
+        return "Impulse 1D"
+    if _match(validation):
+        return "MACD+Donchian Validation"
+
+    # Fallback: trade logs (same priority)
     if rotation and rotation._trade_log:
         for t in reversed(rotation._trade_log):
             sym = t.get("symbol", "") or t.get("inst_id", "")
