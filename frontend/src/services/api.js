@@ -14,7 +14,10 @@ async function request(path, options = {}) {
   if (resp.status === 401) {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_role');
-    if (!window.__MINI_APP__) window.location.href = '/login';
+    if (!window.__MINI_APP__) {
+      // Preserve path so user knows session died (e.g. after Render sleep with old tokens)
+      window.location.href = '/login?reason=session';
+    }
     throw new Error('Unauthorized');
   }
   if (!resp.ok) {

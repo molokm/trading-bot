@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Lock, Eye, EyeOff, Loader2, Shield, User } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -12,6 +12,13 @@ export default function LoginPage({ onLogin }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [hasPassword, setHasPassword] = useState(true)
+  const [searchParams] = useSearchParams()
+
+  useEffect(() => {
+    if (searchParams.get('reason') === 'session') {
+      setError(t('login.session_expired'))
+    }
+  }, [searchParams, t])
 
   useEffect(() => {
     api.authStatus().then(s => setHasPassword(s.has_password)).catch(() => {})

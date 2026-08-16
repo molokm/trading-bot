@@ -8,6 +8,8 @@ const en = {
   'nav.settings': 'Settings',
   'nav.docs': 'Docs',
   'nav.guest': 'Guest',
+  'nav.guest_readonly': 'Guest · view only',
+  'nav.guest_tip': 'View-only mode: start/stop bots and trading actions are disabled',
   'nav.admin': 'Admin',
   'nav.glossary': 'Glossary',
   'nav.light_theme': 'Light theme',
@@ -22,6 +24,7 @@ const en = {
   'login.submit': 'Login',
   'login.or': 'or',
   'login.guest': 'Guest mode (view only)',
+  'login.session_expired': 'Session expired or server restarted — please sign in again',
   'login.no_password': 'No password set — enter without authorization',
   'login.https_note': 'All data is transmitted over HTTPS',
 
