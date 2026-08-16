@@ -993,6 +993,19 @@ class RotationStrategy:
                         continue
                     actual[(coin, "long" if is_long else "short")] = sz
 
+            # Drop positions we adopted incorrectly (another strategy owns them)
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, pos.inst_id, pos.side):
+                            print(f"[{self.BOT_NAME}] drop foreign position {coin} {pos.side} "
+                                  f"(owned by another bot)", flush=True)
+                            del self._positions[coin]
+                            continue
+                    except Exception as e:
+                        print(f"[{self.BOT_NAME}] foreign drop check error: {e}", flush=True)
+
             for coin in list(self._positions.keys()):
                 pos = self._positions[coin]
                 real_sz = actual.get((coin, pos.side))
@@ -1090,6 +1103,8 @@ class RotationStrategy:
                 if coin in self._positions:
                     continue
                 inst_id = self.SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 now = datetime.now(timezone.utc).isoformat()
                 # Re-attach the original trade number so close/partial messages
                 # keep the same "Сделка №N" as the open.
@@ -1807,6 +1822,44 @@ class RotationStrategy:
         except Exception as e:
             print(f"[Rotation] DB reload error: {e}", flush=True)
 
+
+    async def _should_adopt_exchange_position(self, coin: str, side: str, inst_id: str) -> bool:
+        """Only restore exchange positions that THIS bot opened.
+
+        Prevents Validation (and other RotationStrategy subclasses sharing the
+        same coin universe) from adopting Momentum/Impulse positions on start
+        or during reconcile — which duplicated open positions in the UI.
+        """
+        if coin in self._positions:
+            return False
+        # Another bot already tracks it in DB
+        if self.db:
+            try:
+                if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
+                          flush=True)
+                    return False
+                mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                if mine:
+                    return True
+            except Exception as e:
+                print(f"[{self.BOT_NAME}] adopt ownership check error: {e}", flush=True)
+        # Our in-memory trade log: last event for this inst is an open
+        for tr in reversed(getattr(self, "_trade_log", []) or []):
+            sym = tr.get("symbol") or tr.get("inst_id") or ""
+            if sym != inst_id:
+                continue
+            reason = (tr.get("reason") or "").lower()
+            if reason == "open":
+                return True
+            if reason in ("closed", "exchange_stop", "manual_close", "sl", "tp", "trail"):
+                return False
+            break
+        # No proof of ownership — do not claim foreign / orphan positions
+        print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: no local ownership proof",
+              flush=True)
+        return False
+
     async def _sync_open_positions(self):
         """After restart, detect open positions from OKX and restore _positions +
         re-place exchange-side stops so they survive a process crash."""
@@ -1832,6 +1885,8 @@ class RotationStrategy:
                     continue
 
                 side = "long" if is_long else "short"
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 estimated_atr = entry_px * 0.015
                 if is_long:
                     stop_price = entry_px * 0.985

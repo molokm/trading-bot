@@ -903,6 +903,25 @@ class Database:
         else:
             await self._execute("DELETE FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def find_position(self, bot_id: str, inst_id: str, side: str) -> Optional[dict]:
+        """Lookup a single open position row owned by this bot."""
+        sql = (
+            "SELECT * FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+            if self._pg_mode else
+            "SELECT * FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?"
+        )
+        return await self._fetchone(sql, (bot_id, inst_id, side))
+
+    async def other_bot_owns_position(self, bot_id: str, inst_id: str, side: str) -> bool:
+        """True if some OTHER bot already has this instrument/side in the positions table."""
+        sql = (
+            "SELECT bot_id FROM positions WHERE inst_id = $1 AND side = $2 AND bot_id <> $3 LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM positions WHERE inst_id = ? AND side = ? AND bot_id <> ? LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id, side, bot_id))
+        return bool(row)
+
     async def get_all_positions(self) -> list[dict]:
         return await self._fetchall(
             "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
