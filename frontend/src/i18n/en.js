@@ -20,6 +20,12 @@ const en = {
 
   // ── Login ──
   'login.title': 'Login to Dashboard',
+  'login.tagline': 'OKX terminal · bots · backtest · monitoring',
+  'login.status_demo': 'System online · DEMO',
+  'login.status_live': 'System online · LIVE',
+  'login.status_offline': 'Exchange disconnected',
+  'dash.offline_banner': 'No OKX connection — data may be stale. Check API keys and service status.',
+  'dash.margin_ratio_tip': 'OKX margin ratio. Lower value means higher liquidation risk',
   'login.password': 'Password',
   'login.placeholder': 'Enter password',
   'login.submitting': 'Logging in...',

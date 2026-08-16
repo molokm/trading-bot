@@ -20,6 +20,12 @@ const ru = {
 
   // ── Login ──
   'login.title': 'Вход в панель управления',
+  'login.tagline': 'OKX терминал · боты · бэктест · мониторинг',
+  'login.status_demo': 'Система онлайн · DEMO',
+  'login.status_live': 'Система онлайн · LIVE',
+  'login.status_offline': 'Нет связи с биржей',
+  'dash.offline_banner': 'Нет подключения к OKX — данные могут быть устаревшими. Проверьте ключи и статус сервиса.',
+  'dash.margin_ratio_tip': 'Margin ratio (OKX). Низкое значение — выше риск ликвидации',
   'login.password': 'Пароль',
   'login.placeholder': 'Введите пароль',
   'login.submitting': 'Вход...',

@@ -132,10 +132,10 @@ function AppLayout() {
         {/* Left: Logo + Nav */}
         <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
-            <span className="text-[17px] font-bold text-[var(--txt)] tracking-tight hidden lg:inline">COPIX</span>
+            <span className="text-[15px] sm:text-[17px] font-bold text-[var(--txt)] tracking-tight">COPIX</span>
           </div>
 
-          <nav className="flex items-center gap-1">
+          <nav className="hidden md:flex items-center gap-1">
             {navItems.map(item => (
               <NavLink
                 key={item.to}
@@ -150,7 +150,7 @@ function AppLayout() {
                 }
               >
                 <item.icon size={14} />
-                <span className="hidden md:inline">{item.label}</span>
+                <span className="hidden lg:inline">{item.label}</span>
               </NavLink>
             ))}
           </nav>
@@ -221,7 +221,7 @@ function AppLayout() {
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 overflow-hidden">
+      <main className="flex-1 overflow-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
@@ -237,6 +237,23 @@ function AppLayout() {
 
       {/* ═══ MODALS ═══ */}
       <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
+
+      {/* Mobile bottom nav */}
+      <nav className="mobile-bottom-nav md:hidden" aria-label="Primary">
+        {navItems.map(item => (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.to === '/'}
+            className={({ isActive }) =>
+              `mobile-bottom-nav__item ${isActive ? 'is-active' : ''}`
+            }
+          >
+            <item.icon size={18} strokeWidth={1.75} />
+            <span>{item.label}</span>
+          </NavLink>
+        ))}
+      </nav>
       <OnboardingTour />
     </div>
   )
