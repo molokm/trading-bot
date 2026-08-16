@@ -178,7 +178,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     rotation_strategy: 'Momentum',
     momentum_strategy: 'Momentum',
     impulse_strategy: 'Impulse 1D',
-    validation_strategy: 'Validation',
+    validation_strategy: 'MACD+Donchian Validation',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
@@ -909,7 +909,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{validationStatus?.open_positions?.length || 0}/{validationStatus?.config?.top_k || 1}</div>
+                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{validationStatus?.open_positions?.length || 0}/{validationStatus?.config?.top_k || 4}</div>
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>

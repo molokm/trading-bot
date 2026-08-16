@@ -9,8 +9,8 @@ import { useTranslation } from '../hooks/useTranslation'
 
 const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
-/** Coins the demo validation bot trades (no overlap with Momentum/Impulse) */
-const VALIDATION_SYMBOL_OPTIONS = ['SUI', 'BTC', 'ARB', 'NEAR']
+/** Coins the demo validation bot trades (MACD+Donchian universe) */
+const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'SOL']
 
 /** Params that map 1:1 to RotationConfig on the backend */
 const ROTATION_PARAMS = [
@@ -77,25 +77,31 @@ const DEFAULT_IMP_CONFIG = {
 /** Params the validation bot accepts via /api/validation/start */
 const VALIDATION_PARAMS = [
   'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'min_roc', 'adx_min', 'min_hold_days', 'max_leverage', 'allocation_pct',
+  'donchian_n', 'tp_pct', 'tp_ratio', 'tp2_pct', 'be_pct',
+  'chandelier_atr', 'max_hold_days', 'max_leverage', 'allocation_pct',
 ]
 
-/** Validation shares momentum ranges but on a smaller demo budget */
+/** Validation ranges (MACD+Donchian) on a small demo budget */
 const VALIDATION_PARAM_BASE = {
   ...PARAM_BASE,
   capital:          { min: 50, max: 5000, step: 50, unit: '$' },
   top_k:            { min: 1, max: 4, step: 1, unit: '' },
   risk_per_trade:   { min: 1, max: 30, step: 1, unit: '%', asPercent: true },
-  min_roc:          { min: 0.5, max: 8, step: 0.5, unit: '%' },
-  adx_min:          { min: 5, max: 35, step: 1, unit: '' },
-  min_hold_days:    { min: 1, max: 7, step: 1, unit: 'd' },
+  donchian_n:       { min: 5, max: 30, step: 1, unit: 'd' },
+  tp_pct:           { min: 2, max: 20, step: 0.5, unit: '%', asPercent: true },
+  tp_ratio:         { min: 10, max: 60, step: 5, unit: '%', asPercent: true },
+  tp2_pct:          { min: 3, max: 30, step: 0.5, unit: '%', asPercent: true },
+  be_pct:           { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
+  chandelier_atr:   { min: 2, max: 8, step: 0.5, unit: '×ATR' },
+  max_hold_days:    { min: 1, max: 10, step: 1, unit: 'd' },
   max_leverage:     { min: 1, max: 3, step: 0.5, unit: 'x' },
   allocation_pct:   { min: 5, max: 100, step: 5, unit: '%', asPercent: true },
 }
 
 const DEFAULT_VAL_CONFIG = {
-  capital: 300, top_k: 1, risk_per_trade: 0.14, poll_interval_sec: 300,
-  min_roc: 1.5, adx_min: 18, min_hold_days: 1, max_leverage: 2,
+  capital: 300, top_k: 4, risk_per_trade: 0.14, poll_interval_sec: 300,
+  donchian_n: 15, tp_pct: 0.08, tp_ratio: 0.3, tp2_pct: 0.10,
+  be_pct: 0.015, chandelier_atr: 4.0, max_hold_days: 3, max_leverage: 1,
   allocation_pct: 0.15,
 }
 
@@ -554,10 +560,11 @@ export default function BotsPage({ connected, isGuest }) {
   const valTags = [
     ...(valCfg?.symbols?.length ? [`${valCfg.symbols.length} монет`] : []),
     t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: valCfg?.top_k || 1 }),
+    t('bots.tag_positions', { n: valCfg?.top_k || 4 }),
     ...(valCfg?.max_leverage ? [t('bots.tag_leverage', { x: valCfg.max_leverage })] : []),
+    t('bots.tag_breakout'),
+    t('bots.tag_partial_tp'),
     'демо',
-    'рот-тест',
   ]
 
   const impCfg = impulseStatus?.config
@@ -653,7 +660,7 @@ export default function BotsPage({ connected, isGuest }) {
           <BotCard
             id="validation"
             name={t('dash.validation_bot')}
-            stratId={valStatus?.strategy || 'momentum_validation'}
+            stratId={valStatus?.strategy || 'macd_donchian_validation'}
             version={valStatus?.version}
             icon={FlaskConical}
             accentDim="bg-[var(--warn-dim)]"
@@ -788,7 +795,7 @@ const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, conf
             {isImpulse ? t('docs.strat_impulse_title') : isValidation ? t('dash.validation_bot') : t('dash.momentum_bot')}
           </div>
           <div className="text-2xs text-[var(--txt-muted)]">
-            {isImpulse ? 'impulse_1d' : isValidation ? 'momentum_validation' : 'momentum_rotation'}
+            {isImpulse ? 'impulse_1d' : isValidation ? 'macd_donchian_validation' : 'momentum_rotation'}
           </div>
         </div>
       </div>

@@ -113,5 +113,5 @@ class StrategyManager:
         if bot_id == IMP_BOT_ID or bot_id.startswith(IMP_BOT_ID + ":"):
             return "Impulse 1D"
         if bot_id == "validation_strategy":
-            return "Validation"
+            return "MACD+Donchian Validation"
         return ""

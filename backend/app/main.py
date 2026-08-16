@@ -1137,6 +1137,11 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
         for coin, pos in impulse._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
                 return "Impulse 1D"
+    # Check Validation bot positions (demo)
+    if validation and validation._running and validation._positions:
+        for coin, pos in validation._positions.items():
+            if pos.inst_id == inst_id and pos.side == norm_side:
+                return "MACD+Donchian Validation"
     # Check Rotation bot positions
     if rotation and rotation._running and rotation._positions:
         for coin, pos in rotation._positions.items():
@@ -1153,6 +1158,11 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "Impulse 1D"
+    if validation and validation._trade_log:
+        for t in reversed(validation._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "MACD+Donchian Validation"
     return ""
 
 
@@ -1172,6 +1182,10 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in impulse._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "Impulse 1D"
+    if validation and validation._trade_log:
+        for t in validation._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "MACD+Donchian Validation"
     # Fallback: match by symbol+side (works when entry_time is unknown)
     side = trade.get("side", "")
     if rotation and rotation._trade_log:
@@ -1182,6 +1196,10 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in impulse._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
                 return "Impulse 1D"
+    if validation and validation._trade_log:
+        for t in validation._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "MACD+Donchian Validation"
     # Fallback: DB bot_id stored for this trade
     return _db_bot_name(trade.get("bot_id", ""))
 
@@ -1196,7 +1214,7 @@ def _db_bot_name(bot_id: str) -> str:
     if base in ("impulse_strategy", IMP_BOT_ID):
         return "Impulse 1D"
     if base == VAL_BOT_ID:
-        return "Validation"
+        return "MACD+Donchian Validation"
     return ""
 
 
@@ -2123,7 +2141,7 @@ async def impulse_reset():
 @app.get("/api/validation/status", dependencies=[Depends(require_admin)])
 async def validation_status():
     if not validation:
-        return {"running": False, "strategy": "momentum_validation",
+        return {"running": False, "strategy": "macd_donchian_validation",
                 "equity": 0, "open_positions": [], "total_trades": 0,
                 "total_pnl": 0, "config": {}}
     return validation.get_status()
@@ -2131,20 +2149,24 @@ async def validation_status():
 
 @app.post("/api/validation/start", dependencies=[Depends(require_admin)])
 async def validation_start(data: dict = None):
-    """Start the demo validation bot (relaxed filters → forces trades)."""
+    """Start the demo validation bot (MACD+Donchian, relaxed filters → forces trades)."""
     global validation
     if validation and validation._running:
         return {"message": "Validation already running", **validation.get_status()}
     d = data or {}
     cfg = make_validation_config(
         capital=float(d.get("capital", 300.0)),
-        top_k=int(d.get("top_k", 1)),
-        min_roc=float(d.get("min_roc", 1.5)),
-        adx_min=float(d.get("adx_min", 18.0)),
-        min_hold_days=int(d.get("min_hold_days", 1)),
-        max_leverage=float(d.get("max_leverage", 2.0)),
+        top_k=int(d.get("top_k", 4)),
+        donchian_n=int(d.get("donchian_n", 15)),
+        tp_pct=float(d.get("tp_pct", 0.08)),
+        tp_ratio=float(d.get("tp_ratio", 0.3)),
+        tp2_pct=float(d.get("tp2_pct", 0.10)),
+        be_pct=float(d.get("be_pct", 0.015)),
+        chandelier_atr=float(d.get("chandelier_atr", 4.0)),
+        max_hold_days=int(d.get("max_hold_days", 3)),
         risk_per_trade=float(d.get("risk_per_trade", 0.14)),
         allocation_pct=float(d.get("allocation_pct", 0.15)),
+        max_leverage=float(d.get("max_leverage", 1.0)),
         poll_interval_sec=int(d.get("poll_interval_sec", 300)),
         auto_execute=d.get("auto_execute", True),
     )
@@ -2218,7 +2240,7 @@ async def validation_trades(limit: int = 50):
         except Exception as e:
             print(f"[validation/trades] DB fallback error: {e}", flush=True)
     for t in trades:
-        t.setdefault("bot", "Validation")
+        t.setdefault("bot", "MACD+Donchian Validation")
     return {"trades": trades}
 
 
@@ -2237,11 +2259,14 @@ async def validation_update_config(data: dict = None):
     if not data:
         return {"message": "No config provided"}
     cfg = validation.config
-    for key in ("symbols", "top_k", "roc_period", "ema_fast", "ema_slow",
-                "atr_period", "atr_stop_mult", "trail_pct", "breakeven_pct",
-                "adx_min", "min_roc", "min_hold_days", "max_leverage",
-                "risk_per_trade", "allocation_pct", "poll_interval_sec",
-                "auto_execute", "capital"):
+    for key in ("symbols", "top_k", "donchian_n", "macd_fast", "macd_slow",
+                "macd_signal", "chandelier_atr", "hard_stop_atr",
+                "tp_pct", "tp_ratio", "tp2_pct", "be_pct", "max_hold_days",
+                "atr_period", "atr_stop_mult", "trail_atr_mult", "breakeven_pct",
+                "partial_tp_pct", "partial_tp_ratio", "adx_min", "min_roc",
+                "min_hold_days", "max_leverage", "risk_per_trade",
+                "allocation_pct", "poll_interval_sec", "auto_execute",
+                "capital", "roi_table"):
         if key in data:
             setattr(cfg, key, data[key])
     return {"message": "Config updated", "config": asdict(cfg)}
@@ -3568,7 +3593,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
 
     # Live in-memory logs (they may include entries not yet flushed to DB).
     live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation)]
-    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "Validation"}
+    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation"}
     for key, bot in live_bots:
         if bot and bot._trade_log:
             for t in bot._trade_log:
