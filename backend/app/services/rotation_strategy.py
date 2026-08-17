@@ -74,8 +74,10 @@ class RotationConfig:
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
-    partial_tp_pct: float = 0.08   # first scale-out at +8%
-    partial_tp_ratio: float = 0.3  # close 30% at TP1 (BT: better full/OOS vs 50%)
+    partial_tp_pct: float = 0.06   # first scale-out at +6% (dual ladder v5.2)
+    partial_tp_ratio: float = 0.25 # first scale-out fraction at TP1
+    partial_tp2_pct: float = 0.12  # second scale-out level (0=off)
+    partial_tp2_ratio: float = 0.3  # fraction of *remaining* size at TP2
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
@@ -116,7 +118,8 @@ class RotPosition:
     stop_price: float
     peak_price: float
     breakeven: bool = False
-    partial_done: bool = False   # 50% already closed at TP1
+    partial_done: bool = False   # True after first partial (compat)
+    partial_stage: int = 0       # 0=none, 1=after TP1, 2=after TP2
     opened_at: str = ""
     entry_bar_ts: int = 0
     atr: float = 0.0             # ATR at entry (for dynamic trailing)
@@ -691,7 +694,8 @@ class RotationStrategy:
             "signal_id": pos.signal_id, "ord_id": partial_ord_id,
         })
         pos.size -= close_sz
-        pos.partial_done = True
+        pos.partial_stage = min(int(getattr(pos, "partial_stage", 0)) + 1, 2)
+        pos.partial_done = pos.partial_stage >= 1
         # Immediately re-size the exchange-side stop to the reduced position so
         # the exchange never holds a stop larger than the remaining size.
         if pos.algo_id:
@@ -1286,9 +1290,13 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                # Partial TP at +5%
-                if not pos.partial_done and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
+                # Dual partial ladder: TP1 then optional TP2 on remaining
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price >= pos.entry_price * (1 + cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price <= pos.stop_price:
                     hit_stop = True
             else:  # short
@@ -1310,8 +1318,12 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                if not pos.partial_done and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price <= pos.entry_price * (1 - cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price >= pos.stop_price:
                     hit_stop = True
 

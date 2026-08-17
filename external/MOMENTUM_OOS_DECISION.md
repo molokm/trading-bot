@@ -109,3 +109,19 @@ Engine already supports one partial + breakeven + ATR trail:
 **Why +1% hurts OOS:** on daily bars a +1% touch is noise; early scale-out cuts runners that dominated 2025–2026 recovery. Early BE after 1% turns winners into scratches and kills trend capture.
 
 **Applied:** `partial_tp_ratio` **0.5 → 0.3** (still first take at +8%, BE +5%). Slightly higher MaxDD tradeoff for higher full return without cutting OOS.
+
+
+## Dual partial ladder (2026-08-17)
+
+Engine extended with TP2 (`partial_tp2_pct` / `partial_tp2_ratio` of **remaining** size).
+
+Constraint: full-sample and OOS total ≥ single-partial baseline (8%/30%, vol_mult=2.0).
+
+| Ladder | Full | OOS | MaxDD | Verdict |
+|--------|------|-----|-------|---------|
+| baseline single 8%/30% | +388% | +310% | −53.3% | ref |
+| early 1–4% first step | usually lower OOS | — | — | reject |
+| **6%/25% → 12%/30% rem, BE5%** | **+415%** | **+311%** | **−46.4%** | **accept** |
+| 8%/25% → 12%/30% | +403% | +315% | −52.9% | accept alt |
+
+**Live defaults:** TP1 +6% close 25%; TP2 +12% close 30% of remainder; BE +5%; trail 3×ATR.
