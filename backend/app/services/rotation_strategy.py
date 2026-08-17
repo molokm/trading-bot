@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v3 — daily-bar model (validated +76% CAGR backtest).
+"""Momentum Rotation Strategy v6 — dual partial ladder + vol filter (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v5"
+STRATEGY_VERSION = "v6"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,17 +39,12 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v5 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и выбирает до 2 самых сильных тренда. "
-    "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
-    "Фильтры отсекают шум: ADX≥25, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
-    "волатильность не выше среднего (×2.2), корреляция до 0.85. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
-    "в бычьем — только лонги, в медвежьем — только шорты, в неопределённости — кэш. "
-    "Размер позиции считается от риска 20% капитала, маржа на позицию ≤50% equity: стоп = 4.5× дневной ATR, плечо до 2× "
-    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 3× дневной ATR (держит победителей), "
-    "при +5% стоп в безубыток, при +8% закрывается половина позиции, динамический тейк-профит "
-    "(37.6% → 23.7% → 9.2% → безубыток по мере удержания). Минимум держим 11 дней. "
-    "Если монета выпадает из топа — закрываем по рынку. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): "
-    "Full-sample BT после тюнинга: CAGR ~60%, Sharpe 1.23, MaxDD −52% (не чистый OOS; external/STAGE5_EVAL.md). Cross margin; demo/live через env."
+    "Momentum Rotation v6. Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥4.5%, EMA-тренд, RSI, "
+    "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
+    "маржа ≤50%, стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
+    "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, costs 0.10%+0.05%, не чистый OOS): "
+    "CAGR ~64%, Sharpe ~1.31, MaxDD −46%. См. external/MOMENTUM_OOS_DECISION.md."
 )
 
 
