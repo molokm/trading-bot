@@ -73,7 +73,7 @@ TUNED = {
     "validation": dict(top_k=4, donchian_n=15, macd_fast=12, macd_slow=26,
                        macd_signal=9, atr_period=14, max_leverage=2.0,
                        risk_per_trade=0.14, allocation_pct=0.5,
-                       chandelier_atr=4.0, tp_pct=0.10, tp_ratio=0.2,
+                       chandelier_atr=4.0, tp_pct=0.08, tp_ratio=0.2,
                        tp2_pct=0.08, be_pct=0.015, max_hold_days=3),
 }
 

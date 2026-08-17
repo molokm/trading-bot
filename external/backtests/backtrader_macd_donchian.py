@@ -45,7 +45,7 @@ MAX_LEVERAGE = 2.0
 RISK_PER_TRADE = 0.14
 ALLOCATION_PCT = 0.5
 CHANDELIER_ATR = 4.0        # trail = peak - 4*ATR
-TP_PCT = 0.10               # partial TP: close 20% at +10%
+TP_PCT = 0.08               # partial TP: close 20% at +8% (v2)
 TP_RATIO = 0.2
 TP2_PCT = 0.08              # second TP for remainder (full exit)
 BE_PCT = 0.015              # breakeven for ALL positions at +1.5%
