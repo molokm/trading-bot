@@ -108,12 +108,12 @@ const DEFAULT_VAL_CONFIG = {
 // Независимый бэктест (Backtrader, нативные 1D OKX) — по каждой стратегии
 const MOM_BACKTEST = {
   years: [
-    { year: '2023', ret: '+34.0%' },
-    { year: '2024', ret: '+41.4%' },
-    { year: '2025', ret: '+14.3%' },
-    { year: '2026', ret: '+113.6%' },
+    { year: '2023', ret: '+12.9%' },
+    { year: '2024', ret: '+62.0%' },
+    { year: '2025', ret: '+16.3%' },
+    { year: '2026', ret: '+134.9%' },
   ],
-  summary: { cagr: '59.8%', dd: '51.8%' },
+  summary: { cagr: '64.4%', dd: '46.4%' },
 }
 const IMP_BACKTEST = {
   years: [
