@@ -47,10 +47,9 @@ import bt_okx
 SCALE = 100
 
 # ── Defaults mirroring ImpulseConfig BASE (daily), tuned 2026-08 ────────────
-# Tuned config (safe/live variant): top_k=3, max_adds=0, cooldown=3,
+# Tuned config (safe/live variant): top_k=3, max_adds=0, cooldown=3, max_hold=28, tp1_frac=0.25,
 # entry_roc=3.0, trail=12 ATR, tp2=10 ATR, risk=0.10.
-# Validated on OKX native 1D, 10 coins, 2023-05..2026-08:
-#   BT (live-faithful):  CAGR ~63%, Sharpe 1.58, MaxDD ~-36%.
+# v3 BT: CAGR ~68%, MaxDD ~-39% (full+OOS >= v2 baseline).
 TOP_K = 3
 IMPULSE_BARS = 1
 ENTRY_ROC = 3.0
@@ -71,10 +70,10 @@ TRAIL_ATR_MULT = 12.0
 BE_PCT = 0.005
 COOLDOWN_BARS = 3
 TP1_ATR = 2.0
-TP1_FRAC = 0.3
+TP1_FRAC = 0.25
 TP2_ATR = 10.0
 TP2_FRAC = 0.3
-MAX_HOLD_BARS = 30
+MAX_HOLD_BARS = 28
 ALLOW_SHORT = True
 MAX_MARGIN_PCT = 0.5
 # regime filter (BTC): 0=off, 1=direction (bull:long/bear:short/chop:both),

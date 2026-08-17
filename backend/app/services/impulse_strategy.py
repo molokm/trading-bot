@@ -1,7 +1,7 @@
 """Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
 
 Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
-1D, 10 coins, 2023-05..2026-08 full-sample after tuning: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%; not pure OOS).
+1D, 10 coins, 2023-05..2026-08 full-sample after tuning: CAGR ~68%, Sharpe 1.58, MaxDD ~-39%; not pure OOS).
   - Signal on yesterday's daily close (causal), entry today at open
   - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
   - Initial stop = 5 x daily ATR (both sides)
@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v2"
+STRATEGY_VERSION = "v3"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,14 +39,14 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v2 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
+    "Impulse 1D v3 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
     "импульсные движения. Сигнал входа: цена изменилась на ≥3% за 1 день с всплеском объёма "
     "(выше среднего в 1.5 раза) и трендом EMA20>EMA50; шорты — по симметричному импульсу вниз. "
     "До 3 позиций одновременно, ранжирование по силе импульса (|ROC|). Пирамидинг отключён (вредит "
     "риск-скорректированной доходности). Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, "
     "плечо до 3× (чем выше волатильность, тем меньше плечо). Выход каскадом: 30% позиции на "
     "+2 ATR, ещё 30% на +10 ATR, остаток держим с широким трейлингом (12× ATR) и принудительный "
-    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~63%, "
+    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~68%, "
     "Sharpe 1.58, MaxDD −36%. Режим cross margin, демо/реал переключается env."
 )
 
@@ -82,10 +82,10 @@ class ImpulseConfig:
     cooldown_bars: int = 3            # min bars between entries on the SAME coin (v2)
     # cascade exit (выход частями)
     tp1_atr: float = 2.0
-    tp1_frac: float = 0.3
+    tp1_frac: float = 0.25  # v3: lighter first scale (BT)
     tp2_atr: float = 10.0             # v2: second TP at 10 ATR
     tp2_frac: float = 0.3
-    max_hold_bars: int = 30           # time exit (30 days)
+    max_hold_bars: int = 28  # v3: BT OOS+full improvement           # time exit (30 days)
     exit_ema_death: bool = False
     allow_short: bool = True
     max_margin_pct: float = 0.5

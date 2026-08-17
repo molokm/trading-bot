@@ -117,12 +117,12 @@ const MOM_BACKTEST = {
 }
 const IMP_BACKTEST = {
   years: [
-    { year: '2023', ret: '+108.9%' },
-    { year: '2024', ret: '+102.1%' },
-    { year: '2025', ret: '-6.3%' },
-    { year: '2026', ret: '+25.7%' },
+    { year: '2023', ret: '+114.9%' },
+    { year: '2024', ret: '+114.1%' },
+    { year: '2025', ret: '-10.4%' },
+    { year: '2026', ret: '+34.1%' },
   ],
-  summary: { cagr: '63.5%', dd: '36.5%' },
+  summary: { cagr: '68.7%', dd: '38.7%' },
 }
 const VAL_BACKTEST = {
   years: [
