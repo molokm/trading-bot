@@ -37,7 +37,7 @@ import bt_okx
 SCALE = 100
 
 # ── Defaults mirroring RotationConfig v4, tuned 2026-08 ─────────────────────
-# Tuned config: risk=0.20, alloc=0.5, stricter volume surge (vol_mult=2.2),
+# Tuned config: risk=0.20, alloc=0.5, vol filter vol_mult=2.0 (improved vs 2.2 on same window),
 # adx_min=25, looser corr filter (0.85), wider stop (4.5 ATR) + wider trailing
 # (3 ATR), min_hold=11.
 # Validated on OKX native 1D, 10 coins, 2023-05..2026-08:
@@ -64,7 +64,7 @@ ROI_TABLE = [(17, 0.00), (8, 0.092), (3, 0.237), (0, 0.376)]
 RSI_PERIOD = 14
 RSI_LONG_MAX = 82.0
 RSI_SHORT_MIN = 21.0
-VOL_MULT = 2.2
+VOL_MULT = 2.0
 CORR_THRESHOLD = 0.85
 ALLOW_SHORT = True
 COMMISSION = 0.001

@@ -71,3 +71,18 @@ cd external/backtests
 python3 -c "..."  # see walkforward.py --strat momentum
 python walkforward.py --strat momentum   # full IS grid + OOS table
 ```
+
+
+## Improvement 2026-08-17: vol_mult 2.2 → 2.0
+
+Constraint: full-sample **and** OOS total return must not decrease vs TUNED v5.
+
+| Config | Full total | OOS total | MaxDD |
+|--------|------------|-----------|-------|
+| baseline vol_mult=2.2 | +297.4% | +281.3% | −51.8% |
+| **vol_mult=2.0** | **+330.0%** | **+307.8%** | −51.8% |
+
+Other one-factor moves (min_roc, adx, trail, stop, hold) failed the constraint.
+vol_mult=1.9 matched 2.0; 2.1 was slightly worse than 2.0 but still above baseline.
+
+**Caveat:** search was on the same historical window — not a guarantee of future returns.
