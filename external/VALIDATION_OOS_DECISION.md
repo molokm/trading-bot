@@ -31,3 +31,28 @@ Calendar v2: 2023 +40.8% / 2024 +281.9% / 2025 −16.1% / 2026 −20.1%.
 - Keep on **DEMO only**; do not size up on LIVE while OOS remains negative.
 - Prefer Momentum v6 / Impulse v3 for capital allocation.
 - Re-review after another quarter of market data.
+
+
+## v3 — OOS equalization (2026-08-17)
+
+Goal: push OOS toward non-negative even if full-sample CAGR falls.
+
+Only configuration found with **OOS > 0** in extensive search:
+
+| Param | v2 | v3 |
+|-------|----|----|
+| donchian_n | 15 | **30** |
+| top_k | 4 | **2** |
+| tp_ratio | 0.2 | **0.4** |
+
+| Metric | v2 | v3 |
+|--------|----|----|
+| Full total | +267% | **+102%** |
+| Full CAGR | ~48.6% | **~23.9%** |
+| OOS total | −16.2% | **+1.9%** |
+| MaxDD | −40.7% | **−31.0%** |
+
+Years v3: 2023 +25.3% / 2024 +56.7% / **2025 +18.7%** / 2026 −17.5%.
+
+Neighbors (donchian 28/32, other ratios) mostly fall back to negative OOS — edge is narrow.
+Still DEMO-first; 2026 partial year remains soft.

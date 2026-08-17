@@ -261,10 +261,10 @@ async def startup():
         if _env_key and _env_secret and _env_pass:
             val_config = make_validation_config(
                 capital=300.0,
-                top_k=4,
-                donchian_n=15,
+                top_k=2,
+                donchian_n=30,
                 tp_pct=0.08,
-                tp_ratio=0.2,
+                tp_ratio=0.4,
                 tp2_pct=0.08,
                 be_pct=0.015,
                 chandelier_atr=4.0,

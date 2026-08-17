@@ -70,10 +70,10 @@ TUNED = {
                     entry_roc=3.0, vol_mult=1.5, sl_atr_mult=5.0,
                     trail_atr_mult=12.0, tp1_atr=2.0, tp1_frac=0.25,
                     tp2_atr=10.0, tp2_frac=0.3, risk_per_trade=0.10),
-    "validation": dict(top_k=4, donchian_n=15, macd_fast=12, macd_slow=26,
+    "validation": dict(top_k=2, donchian_n=30, macd_fast=12, macd_slow=26,
                        macd_signal=9, atr_period=14, max_leverage=2.0,
                        risk_per_trade=0.14, allocation_pct=0.5,
-                       chandelier_atr=4.0, tp_pct=0.08, tp_ratio=0.2,
+                       chandelier_atr=4.0, tp_pct=0.08, tp_ratio=0.4,
                        tp2_pct=0.08, be_pct=0.015, max_hold_days=3),
 }
 

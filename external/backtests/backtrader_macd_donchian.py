@@ -35,8 +35,8 @@ import bt_okx
 SCALE = 100
 
 # ── Defaults mirroring ValidationStrategy (make_validation_config), tuned 2026-08 ──
-TOP_K = 4
-DONCHIAN_N = 15
+TOP_K = 2
+DONCHIAN_N = 30
 MACD_FAST = 12
 MACD_SLOW = 26
 MACD_SIGNAL = 9
@@ -46,7 +46,7 @@ RISK_PER_TRADE = 0.14
 ALLOCATION_PCT = 0.5
 CHANDELIER_ATR = 4.0        # trail = peak - 4*ATR
 TP_PCT = 0.08               # partial TP: close 20% at +8% (v2)
-TP_RATIO = 0.2
+TP_RATIO = 0.4
 TP2_PCT = 0.08              # second TP for remainder (full exit)
 BE_PCT = 0.015              # breakeven for ALL positions at +1.5%
 MAX_HOLD_DAYS = 3           # time exit

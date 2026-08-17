@@ -18,9 +18,9 @@ from .rotation_strategy import (
 )
 
 VAL_BOT_ID = "validation_strategy"
-VAL_VERSION = "v2"
+VAL_VERSION = "v3"
 VAL_STRATEGY_NAME = f"macd_donchian_validation_{VAL_VERSION}"
-VAL_BOT_NAME = "MACD+Donchian Validation v2"
+VAL_BOT_NAME = "MACD+Donchian Validation v3"
 
 # Вселенная бэктеста: 10 монет, как у Momentum/Impulse (daily OHLC, прокси OKX SWAP).
 VAL_COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
@@ -43,19 +43,19 @@ VAL_SWAP_MAP = {
 VAL_PX_DECIMALS = 4
 
 VAL_DESC = (
-    "MACD+Donchian Validation v2: Donchian breakout (close > 15d high) + MACD hist > 0. "
-    "Выходы: chandelier 4×ATR, BE +1.5%, partial +8%×20%, TP2 +8%, max_hold 3д, top_k 4 @ 2×, "
-    "allocation 50%, risk 14%. Full-sample BT ~CAGR 49%, MaxDD −41%; OOS 2025–2026 still negative "
-    "(лучше v1 TUNED −30% → ~−16%). Не pure OOS; см. external/VALIDATION_OOS_DECISION.md."
+    "MACD+Donchian Validation v3 (OOS-focused): Donchian 30 + MACD hist>0, top_k=2 @ 2×. "
+    "Выходы: chandelier 4×ATR, BE +1.5%, partial +8%×40%, TP2 +8%, max_hold 3д. "
+    "BT: CAGR ~24%, MaxDD −31%; OOS 2025-04→2026-08 ~+2% (v2 был −16%). "
+    "Full-sample ниже v2 — обмен на выравнивание OOS. DEMO recommended."
 )
 
 
 def make_validation_config(
     capital: float = 300.0,
-    top_k: int = 4,
-    donchian_n: int = 15,
+    top_k: int = 2,  # v3: fewer slots, OOS-focused
+    donchian_n: int = 30,  # v3: slower breakout, OOS+
     tp_pct: float = 0.08,  # v2: earlier partial (better OOS vs 0.10)
-    tp_ratio: float = 0.2,
+    tp_ratio: float = 0.4,  # v3: larger first scale-out
     tp2_pct: float = 0.08,
     be_pct: float = 0.015,
     chandelier_atr: float = 4.0,

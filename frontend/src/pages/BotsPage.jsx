@@ -126,12 +126,12 @@ const IMP_BACKTEST = {
 }
 const VAL_BACKTEST = {
   years: [
-    { year: '2023', ret: '+40.8%' },
-    { year: '2024', ret: '+281.9%' },
-    { year: '2025', ret: '-16.1%' },
-    { year: '2026', ret: '-20.1%' },
+    { year: '2023', ret: '+25.3%' },
+    { year: '2024', ret: '+56.7%' },
+    { year: '2025', ret: '+18.7%' },
+    { year: '2026', ret: '-17.5%' },
   ],
-  summary: { cagr: '48.6%', dd: '40.7%' },
+  summary: { cagr: '23.9%', dd: '31.0%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {
