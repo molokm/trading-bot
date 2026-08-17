@@ -164,6 +164,8 @@ class RotationStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
+        self._last_managed_day: str = ""  # last UTC day a managed-daily record was written
         self._last_rotate_ts: int = 0
         self._last_daily_check: str = ""
         self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
@@ -1492,10 +1494,39 @@ class RotationStrategy:
         """Main polling loop running in daemon thread's event loop."""
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Rotation] Poll error: {e}", flush=True)
             await asyncio.sleep(self.config.poll_interval_sec)
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed.
+
+        A bot is 'managed' when its polling loop is alive and heartbeating.
+        The record is written to the analysis log and to the DB settings table
+        (key managed_daily:<bot_id>:<YYYY-MM-DD>) so management coverage can be
+        audited day by day.
+        """
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("rotation", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Rotation] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Rotation] managed_daily db error: {e}", flush=True)
 
     def _thread_target(self):
         self._loop = asyncio.new_event_loop()
@@ -1614,8 +1645,23 @@ class RotationStrategy:
                 btc_above = btc_ind["close_today"] > self._btc_200ma
                 filters_active.append(f"BTC {'>' if btc_above else '<'} 200MA: {'longs OK' if btc_above else 'longs blocked'}")
 
+        # Heartbeat: the bot is 'managed' only while its poll loop is alive and
+        # heartbeating. A stale heartbeat means the strategy thread died/crashed
+        # even though the process may still be up.
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
+        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": self.STRATEGY_NAME,
             "version": self.STRATEGY_VERSION,
             "config": cfg,

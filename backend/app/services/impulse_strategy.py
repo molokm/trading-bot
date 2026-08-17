@@ -15,6 +15,7 @@ Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
 import asyncio
 import math
 import threading
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -154,7 +155,9 @@ class ImpulseStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
         self._last_daily_check: str = ""
+        self._last_managed_day: str = ""
 
     # ─── Indicators (no look-ahead) ───
 
@@ -1066,10 +1069,33 @@ class ImpulseStrategy:
     async def _poll_loop(self):
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Impulse] Poll error: {e}", flush=True)
             await asyncio.sleep(self.config.poll_interval_sec)
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("impulse", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Impulse] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Impulse] managed_daily db error: {e}", flush=True)
 
     def _thread_runner(self):
         self._loop = asyncio.new_event_loop()
@@ -1163,8 +1189,20 @@ class ImpulseStrategy:
                 "stage": "tp1_done" if pos.tp1_done else "tp2_done" if pos.tp2_done else "running",
             })
 
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
+        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "started_at": self._started_at,

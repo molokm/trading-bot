@@ -126,12 +126,12 @@ const IMP_BACKTEST = {
 }
 const VAL_BACKTEST = {
   years: [
-    { year: '2023', ret: '+62.0%' },
-    { year: '2024', ret: '+120.3%' },
-    { year: '2025', ret: '-28.6%' },
-    { year: '2026', ret: '-38.3%' },
+    { year: '2023', ret: '+57.3%' },
+    { year: '2024', ret: '+243.4%' },
+    { year: '2025', ret: '-9.3%' },
+    { year: '2026', ret: '-26.0%' },
   ],
-  summary: { cagr: '17.7%', dd: '62.1%' },
+  summary: { cagr: '49.7%', dd: '48.0%' },
 }
 
 function getParamMeta(t, base = PARAM_BASE) {
@@ -243,6 +243,45 @@ function RiskMeter({ percentValue }) {
   )
 }
 
+function ManagedPill({ statusMode, managed, apiAlive, lastActivity, heartbeatMaxAge, t }) {
+  if (statusMode !== 'live') return null
+  let color, label
+  if (!apiAlive) {
+    color = 'var(--txt-muted)'
+    label = t('bots.managed_offline')
+  } else if (managed) {
+    color = 'var(--profit)'
+    label = t('bots.managed_yes')
+  } else {
+    color = 'var(--loss)'
+    label = t('bots.managed_no')
+  }
+
+  let lastStr = ''
+  if (lastActivity) {
+    const ts = Date.parse(lastActivity)
+    if (!Number.isNaN(ts)) {
+      const mins = Math.max(0, Math.floor((Date.now() - ts) / 60000))
+      lastStr = mins < 1 ? '<1м' : `${mins}м`
+    }
+  }
+
+  const stale = apiAlive && heartbeatMaxAge && lastActivity &&
+    (Date.now() - Date.parse(lastActivity)) > heartbeatMaxAge * 1000
+
+  return (
+    <div className="flex items-center gap-1.5" style={{ color }} title={lastActivity ? `${t('bots.managed_last_activity')}: ${lastActivity}` : t('bots.managed_tip')}>
+      <span className="relative flex h-2 w-2 flex-shrink-0">
+        <span className="absolute inline-flex h-full w-full rounded-full opacity-50 animate-ping" style={{ background: color }} />
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${stale ? 'animate-pulse' : ''}`} style={{ background: color }} />
+      </span>
+      <span className="text-[0.6rem] font-semibold whitespace-nowrap">{label}</span>
+      {lastStr && <span className="text-[0.55rem] opacity-70 whitespace-nowrap">{lastStr}</span>}
+      <Tip text={t('bots.managed_tip')} />
+    </div>
+  )
+}
+
 function PerfTile({ label, value, tone = 'neutral' }) {
   const color = tone === 'profit' ? 'text-[var(--profit)]' : tone === 'loss' ? 'text-[var(--loss)]' : 'text-[var(--txt)]'
   return (
@@ -259,6 +298,7 @@ function BotCard({
   tagline, backtest,
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
+  managed, lastActivity, heartbeatMaxAge, apiAlive,
   isGuest, loading, t,
 }) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
@@ -281,7 +321,17 @@ function BotCard({
               <div className="text-2xs text-[var(--txt-muted)] mono">{stratId}</div>
             </div>
           </div>
-          <StatusBadge mode={statusMode} label={statusLabel} />
+          <div className="flex flex-col items-end gap-1.5">
+            <StatusBadge mode={statusMode} label={statusLabel} />
+            <ManagedPill
+              statusMode={statusMode}
+              managed={managed}
+              apiAlive={apiAlive}
+              lastActivity={lastActivity}
+              heartbeatMaxAge={heartbeatMaxAge}
+              t={t}
+            />
+          </div>
         </div>
       </div>
 
@@ -316,15 +366,22 @@ function BotCard({
             {openPositions.map((p, i) => {
               const isLong = p.side !== 'short'
               const upnl = parseFloat(p.unrealized_pnl || 0)
+              const stop = p.stop ?? p.stop_price
+              const entry = p.entry ?? p.entry_price
               return (
-                <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                  <div className="flex items-center gap-1.5">
+                <div key={i} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
                     <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
                     <span className="text-[var(--txt)] font-medium">{p.coin}</span>
                   </div>
-                  <span className={`mono font-semibold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
-                  </span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {entry != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(entry).toFixed(4)}</span>}
+                    {stop != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_sl')} {Number(stop).toFixed(4)}</span>}
+                    {p.tp1 != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_tp')} {Number(p.tp1).toFixed(4)}</span>}
+                    <span className={`mono font-semibold flex-shrink-0 ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
               )
             })}
@@ -410,6 +467,7 @@ export default function BotsPage({ connected, isGuest }) {
   const [impLoading, setImpLoading] = useState(false)
   const [valStatus, setValStatus] = useState(null)
   const [valLoading, setValLoading] = useState(false)
+  const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [sliderOpen, setSliderOpen] = useState(false)
   const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'impulse' | 'validation'
@@ -432,9 +490,11 @@ export default function BotsPage({ connected, isGuest }) {
   }))
 
   const refreshStatus = useCallback(async () => {
+    let anyOk = false
     try {
       const m = await api.momentumStatus().catch(() => null)
       if (m) {
+        anyOk = true
         setMomentumStatus(m)
         if (m.config) {
           setMomLocal(prev => ({
@@ -447,6 +507,7 @@ export default function BotsPage({ connected, isGuest }) {
     try {
       const i = await api.impulseStatus().catch(() => null)
       if (i) {
+        anyOk = true
         setImpulseStatus(i)
         if (i.config) {
           setImpLocal(prev => ({
@@ -459,6 +520,7 @@ export default function BotsPage({ connected, isGuest }) {
     try {
       const v = await api.validationStatus().catch(() => null)
       if (v) {
+        anyOk = true
         setValStatus(v)
         if (v.config) {
           setValLocal(prev => ({
@@ -468,6 +530,7 @@ export default function BotsPage({ connected, isGuest }) {
         }
       }
     } catch { /* ignore */ }
+    setApiAlive(anyOk)
   }, [])
 
   useEffect(() => {
@@ -624,6 +687,10 @@ export default function BotsPage({ connected, isGuest }) {
           sparklinePnl={momentumStatus?.total_pnl || 0}
           startedAt={momRunning ? momStartedAt : null}
           openPositions={momentumStatus?.open_positions || []}
+          managed={momentumStatus?.managed}
+          lastActivity={momentumStatus?.last_activity}
+          heartbeatMaxAge={momentumStatus?.heartbeat_max_age_sec}
+          apiAlive={apiAlive}
           onToggle={momToggle}
           onEdit={() => { setEditingBot('momentum'); setSliderOpen(true) }}
           isGuest={isGuest}
@@ -652,6 +719,10 @@ export default function BotsPage({ connected, isGuest }) {
           sparklinePnl={impulseStatus?.total_pnl || 0}
           startedAt={impRunning ? impStartedAt : null}
           openPositions={impulseStatus?.open_positions || []}
+          managed={impulseStatus?.managed}
+          lastActivity={impulseStatus?.last_activity}
+          heartbeatMaxAge={impulseStatus?.heartbeat_max_age_sec}
+          apiAlive={apiAlive}
           onToggle={impToggle}
           onReset={() => {
             if (window.confirm('Сбросить историю сделок Impulse 1D?')) {
@@ -686,6 +757,10 @@ export default function BotsPage({ connected, isGuest }) {
             sparklinePnl={valStatus?.total_pnl || 0}
             startedAt={valRunning ? valStartedAt : null}
             openPositions={valStatus?.open_positions || []}
+            managed={valStatus?.managed}
+            lastActivity={valStatus?.last_activity}
+            heartbeatMaxAge={valStatus?.heartbeat_max_age_sec}
+            apiAlive={apiAlive}
             onToggle={valToggle}
             onReset={() => {
               if (window.confirm(t('bots.validation_reset_confirm'))) {
