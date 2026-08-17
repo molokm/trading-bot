@@ -86,3 +86,26 @@ Other one-factor moves (min_roc, adx, trail, stop, hold) failed the constraint.
 vol_mult=1.9 matched 2.0; 2.1 was slightly worse than 2.0 but still above baseline.
 
 **Caveat:** search was on the same historical window — not a guarantee of future returns.
+
+
+## Partial exits experiment (2026-08-17)
+
+User idea: scale out at **+1%**, trail remainder, lock small profit on reverse.
+
+Engine already supports one partial + breakeven + ATR trail:
+- baseline: partial **50% at +8%**, BE at **+5%**, trail 3×ATR
+
+### Results vs baseline (vol_mult=2.0)
+
+| Idea | Full total | OOS total | MaxDD | Verdict |
+|------|------------|-----------|-------|---------|
+| baseline 8%/50%/BE5% | +332% | +310% | −51.8% | ref |
+| **+1% / 30–50%** + BE5% | full ≈ or + | **OOS much worse** | often better | **reject** (fails OOS) |
+| +1% + early BE (1–2%) | full collapses | weak | — | **reject** |
+| +5%/50%/BE5% | +342% | +262% OOS↓ | −38% | reject OOS |
+| **8%/30%/BE5%** | **+390%** | **+311%** | −53.3% | **accept** (return ≥ baseline) |
+| 8%/40%/BE5% | +361% | +311% | −52.6% | accept milder |
+
+**Why +1% hurts OOS:** on daily bars a +1% touch is noise; early scale-out cuts runners that dominated 2025–2026 recovery. Early BE after 1% turns winners into scratches and kills trend capture.
+
+**Applied:** `partial_tp_ratio` **0.5 → 0.3** (still first take at +8%, BE +5%). Slightly higher MaxDD tradeoff for higher full return without cutting OOS.

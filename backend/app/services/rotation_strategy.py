@@ -74,8 +74,8 @@ class RotationConfig:
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
-    partial_tp_pct: float = 0.08   # close 50% at +8%
-    partial_tp_ratio: float = 0.5  # fraction to close
+    partial_tp_pct: float = 0.08   # first scale-out at +8%
+    partial_tp_ratio: float = 0.3  # close 30% at TP1 (BT: better full/OOS vs 50%)
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
