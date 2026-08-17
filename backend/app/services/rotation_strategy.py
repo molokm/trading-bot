@@ -80,7 +80,7 @@ class RotationConfig:
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
     rsi_short_min: float = 21.0    # no short if RSI < 21
-    vol_mult: float = 2.2          # skip if ATR > avg * 2.2 (v5: stricter)
+    vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
     allow_short: bool = True       # allow shorting bearish coins
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
