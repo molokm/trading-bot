@@ -3778,12 +3778,12 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     now_s = _time.time()
     if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
         trades = _paired_cache["data"]
-        return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+        return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
     async with _paired_lock:
         now_s = _time.time()
         if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
             trades = _paired_cache["data"]
-            return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+            return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end)
         trades = resp.get("trades", [])
         if trades:
@@ -3792,7 +3792,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "data": trades,
                 "debug": resp.get("debug", {}),
             }
-        return {"trades": trades[-limit:], "debug": resp.get("debug", {})}
+        return {"trades": trades[:limit], "debug": resp.get("debug", {})}
 
 
 _warm_task: Optional[asyncio.Task] = None
@@ -4131,7 +4131,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
     print(f"[trades/paired] OKX+bills+DB: {len(dedup)} trades "
           f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
-    return {"trades": dedup[-limit:],
+    return {"trades": dedup[:limit],
             "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
                       "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids),
                       "pair_err": pair_bills_err}}

@@ -273,9 +273,10 @@ export default function MiniAppPage() {
   const [credsStatus, setCredsStatus] = useState(null)
   const [botAction, setBotAction] = useState(null)
 
-  // Same source as the web Dashboard: /trades/paired (OKX-backed) with the same
-  // phantom-close suppression — a "closed" row is hidden while its instrument
-  // is still open on OKX/bots (no real trade ever happened).
+  // Same source as the web Dashboard: /trades/paired (OKX-backed). Open rows
+  // live in the Positions card above (real OKX positions), so here we keep only
+  // closed trades with the same phantom-close suppression — a "closed" row is
+  // hidden while its instrument+side is still open on OKX/bots (no real close).
   const displayTrades = useMemo(() => {
     const openKeys = new Set()
     const pushOpen = (p) => {
@@ -293,8 +294,8 @@ export default function MiniAppPage() {
     for (const tr of (trades || [])) {
       const inst = tr.inst_id || tr.symbol || ''
       const reason = (tr.reason || '').toLowerCase()
-      const isOpen = reason === 'open' || reason === 'add'
-      if (!isOpen && inst) {
+      if (reason === 'open' || reason === 'add') continue
+      if (inst) {
         const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
         if (openKeys.has(`${inst}|${sideKey}`)) continue
       }
@@ -302,7 +303,7 @@ export default function MiniAppPage() {
         ...tr,
         coin: tr.coin || (inst || '').replace('-USDT-SWAP', ''),
         symbol: tr.symbol || inst,
-        isOpen,
+        isOpen: false,
         entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
         exit: tr.exit_px ?? tr.exit_price,
         size: tr.size ?? tr.sz ?? '',
