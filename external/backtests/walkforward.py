@@ -60,7 +60,7 @@ GRIDS = {
 
 # full-window tuned configs (as baked into defaults)
 TUNED = {
-    "momentum": dict(top_k=2, allocation_pct=0.5, min_roc=4.5, adx_min=25.0,
+    "momentum": dict(top_k=2, allocation_pct=0.5, min_roc=3.5, adx_min=25.0,
                      vol_mult=2.0, corr_threshold=0.85, atr_stop_mult=4.5,
                      trail_atr_mult=3.0, breakeven_pct=0.05, min_hold_days=11,
                      risk_per_trade=0.20,
@@ -82,7 +82,7 @@ OLD = {
     "momentum": dict(top_k=2, risk_per_trade=0.14, allocation_pct=1.0,
                      adx_min=29.0, vol_mult=1.8, corr_threshold=0.7,
                      atr_stop_mult=2.7, trail_atr_mult=0.2, min_hold_days=11,
-                     min_roc=4.5, breakeven_pct=0.05),
+                     min_roc=3.5, breakeven_pct=0.05),
     "impulse": dict(top_k=4, risk_per_trade=0.10, max_adds=2, cooldown_bars=5,
                     max_hold_bars=30, entry_roc=4.0, vol_mult=1.5,
                     sl_atr_mult=5.0, trail_atr_mult=8.0, tp1_atr=2.0,

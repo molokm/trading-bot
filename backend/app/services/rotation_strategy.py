@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6"
+STRATEGY_VERSION = "v6.1"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,12 +39,12 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6. Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
-    "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥4.5%, EMA-тренд, RSI, "
+    "Momentum Rotation v6.1. Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
     "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
     "маржа ≤50%, стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
     "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, costs 0.10%+0.05%, не чистый OOS): "
-    "CAGR ~64%, Sharpe ~1.31, MaxDD −46%. См. external/MOMENTUM_OOS_DECISION.md."
+    "CAGR ~76%, Sharpe ~1.31, MaxDD −43%. См. external/MOMENTUM_OOS_DECISION.md."
 )
 
 
@@ -59,7 +59,7 @@ class RotationConfig:
     ema_slow: int = 50
     atr_period: int = 14
     adx_min: float = 25.0
-    min_roc: float = 4.5            # min |roc| to even rank a coin
+    min_roc: float = 3.5            # v6.1: milder impulse gate (better full/2025 vs 4.5)
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
