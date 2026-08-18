@@ -277,8 +277,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (r === 'open' || r === 'add') continue
       if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
       const inst = tr.inst_id || tr.symbol || ''
-      // Hide phantom "closed" while same instrument is still open on OKX/bots
-      if (inst && [...openKeys].some(k => k.startsWith(inst + '|'))) continue
+      // Hide phantom "closed" while the SAME instrument+side is still open on
+      // OKX/bots (a false close of the still-open position). Side-aware so real
+      // historical closes of the other direction are still shown.
+      if (inst) {
+        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+        if (openKeys.has(`${inst}|${sideKey}`)) continue
+      }
       rows.push({
         type: 'closed',
         time: tr.exit_time || tr.entry_time || tr.time || '',

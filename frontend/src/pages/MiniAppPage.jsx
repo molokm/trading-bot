@@ -294,7 +294,10 @@ export default function MiniAppPage() {
       const inst = tr.inst_id || tr.symbol || ''
       const reason = (tr.reason || '').toLowerCase()
       const isOpen = reason === 'open' || reason === 'add'
-      if (!isOpen && inst && [...openKeys].some(k => k.startsWith(inst + '|'))) continue
+      if (!isOpen && inst) {
+        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+        if (openKeys.has(`${inst}|${sideKey}`)) continue
+      }
       out.push({
         ...tr,
         coin: tr.coin || (inst || '').replace('-USDT-SWAP', ''),
