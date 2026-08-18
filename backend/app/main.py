@@ -76,6 +76,10 @@ _env_key = os.getenv("OKX_API_KEY", "")
 _env_secret = os.getenv("OKX_SECRET_KEY", "")
 _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
+# When "0"/"false": keep OKX read access (dashboard/trades) but do NOT auto-start
+# the trading strategies. Use on a local viewer instance to avoid duplicate
+# management of the same account that the deployed (Render) version handles.
+_bots_auto_start = os.getenv("BOTS_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
 
 trade_log: list = []
 _STARTED_AT = None  # set in startup(); used by /api/health uptime
@@ -187,7 +191,7 @@ async def startup():
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -224,7 +228,7 @@ async def startup():
         else:
             print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -258,7 +262,7 @@ async def startup():
         else:
             print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             val_config = make_validation_config(
                 capital=300.0,
                 top_k=2,
