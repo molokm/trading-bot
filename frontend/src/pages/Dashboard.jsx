@@ -194,119 +194,113 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
   }, [pnl])
 
-    // Raw trades from DB + bot log (used as source for activeTrades)
+    // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
+  // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
     const combined = [...tradeLog]
-    const pairedKeys = new Set(tradeLog.map(t => `${t.inst_id}_${t.entry_time}_${t.exit_time}`))
-    for (const mt of momentumTrades) {
-      const key = `${mt.symbol}_${mt.time}_${mt.time}`
-      if (pairedKeys.has(key)) continue
-      // Full close trade with both prices (in-memory)
-      if (mt.entry_price && mt.exit_price) {
-        const isLongClose = (mt.pos_side === 'long' && mt.side === 'sell')
-                           || (mt.pos_side === 'short' && mt.side === 'buy')
-        if (!isLongClose && mt.pos_side) continue
-        combined.push({
-          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
-          side: mt.pos_side === 'short' ? 'sell' : 'buy',
-          entry_px: mt.entry_price, exit_px: mt.exit_price,
-          pnl: mt.pnl, reason: mt.reason || '', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      // DB-restored close trade (pnl!=0 but may lack entry_price)
-      } else if (mt.pnl != null && parseFloat(mt.pnl) !== 0 && !mt.entry) {
-        combined.push({
-          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
-          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: mt.entry || null, exit_px: mt.exit_price || null,
-          pnl: mt.pnl, reason: mt.reason || 'closed', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      // Entry / open trade
-      } else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
-        combined.push({
-          entry_time: mt.time, exit_time: null, inst_id: mt.symbol,
-          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: mt.entry, exit_px: null, pnl: null, reason: 'open', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      }
-    }
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog, momentumTrades])
+  }, [tradeLog])
 
-  // Active trades — one row per position (open from live status, closed from trade log)
+  // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
     const rows = []
-    const tp1Pct = momentumStatus?.config?.tp1_pct || 0.015
+    const openKeys = new Set() // inst|side to avoid double rows
 
-    // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
-    const allOpen = [
-      ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
-      ...(impulseStatus?.open_positions || []).map(p => ({ ...p, bot: 'Impulse 1D' })),
-      ...(validationStatus?.open_positions || []).map(p => ({ ...p, bot: 'Validation' })),
-    ]
-    for (const p of allOpen) {
-      const isLong = p.side !== 'short'
+    const pushOpen = (p, botHint) => {
+      const inst = p.inst_id || p.instId || p.symbol || ''
+      const coin = (p.coin || inst.replace('-USDT-SWAP', '') || '').replace('-USDT-SWAP', '')
+      const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
+      const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
+      const sideKey = isLong ? 'long' : 'short'
+      const key = `${inst}|${sideKey}`
+      if (openKeys.has(key)) return
+      openKeys.add(key)
+      const entry = parseFloat(p.entry_price ?? p.entry ?? p.avgPx ?? 0) || 0
+      const mark = parseFloat(p.mark_px ?? p.markPx ?? p.last ?? 0) || 0
+      const size = parseFloat(p.size_original ?? p.size ?? p.pos ?? 0) || 0
+      const sizeRem = parseFloat(p.size_remaining ?? p.size ?? p.pos ?? size) || size
       rows.push({
         type: 'open',
-        time: p.opened_at || '',
-        symbol: p.symbol,
-        inst_id: p.inst_id || p.symbol,
+        time: p.opened_at || p.time || p.cTime || '',
+        symbol: coin || p.symbol,
+        inst_id: inst,
         side: isLong ? 'buy' : 'sell',
-        pos_side: p.side,
-        entry: p.entry_price ?? p.entry,
-        stop: p.stop_price ?? p.stop,
-        tp1: p.tp1,
-        tp2: p.tp2,
-        be: p.be_price ?? (isLong ? (p.entry_price ?? p.entry) * 0.999 : (p.entry_price ?? p.entry) * 1.001),
-        mark: p.mark_px,
-        size: p.size_original ?? p.size,
-        size_remaining: p.size_remaining ?? p.size,
-        stage: p.stage,
+        pos_side: sideKey,
+        entry: entry || null,
+        stop: p.stop_price ?? p.stop ?? null,
+        tp1: p.tp1 ?? null,
+        tp2: p.tp2 ?? null,
+        be: p.be_price ?? (entry ? (isLong ? entry * 0.999 : entry * 1.001) : null),
+        mark: mark || null,
+        size: size,
+        size_remaining: sizeRem,
+        stage: p.stage || (p.breakeven ? 'trailing' : (p.partial_done ? 'partial' : 'initial')),
         pos_mode: p.pos_mode,
-        breakeven: p.breakeven,
-        partial_done: p.partial_done,
-        unrealized_pnl: p.unrealized_pnl,
+        breakeven: !!p.breakeven,
+        partial_done: !!p.partial_done,
+        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : (parseFloat(p.upl) || null),
         pnl: null,
         reason: 'open',
-        bot: p.bot,
+        bot: botHint || p.bot || '',
       })
     }
 
-    // 2. Closed trades — from combined trade log, skip 'open' and 'tp1' (partial closes)
-    for (const t of allTrades) {
-      const r = (t.reason || '').toLowerCase()
-      if (r === 'open') continue   // covered by live positions above
-      if (r === 'tp1') continue    // partial close — position row updates in-place
+    // 1a. Bot-owned opens (have stops/stage)
+    for (const p of (momentumStatus?.open_positions || [])) pushOpen(p, 'Momentum')
+    for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
+    for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
+
+    // 1b. Exchange positions not yet in bot memory (prevents missing open row)
+    for (const p of (positions || [])) {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) continue
+      pushOpen({
+        ...p,
+        inst_id: p.instId || p.inst_id,
+        side: (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long',
+        entry_price: parseFloat(p.avgPx || p.avg_px || 0),
+        mark_px: parseFloat(p.markPx || p.last || 0),
+        size: posSz,
+        size_remaining: posSz,
+        upl: p.upl,
+      }, p.bot || '')
+    }
+
+    // 2. Closed — paired log only; skip opens still on exchange and partials
+    for (const tr of allTrades) {
+      const r = (tr.reason || '').toLowerCase()
+      if (r === 'open' || r === 'add') continue
+      if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
+      const inst = tr.inst_id || tr.symbol || ''
+      // Hide phantom "closed" while same instrument is still open on OKX/bots
+      if (inst && [...openKeys].some(k => k.startsWith(inst + '|'))) continue
       rows.push({
         type: 'closed',
-        time: t.exit_time || t.entry_time || '',
-        symbol: t.inst_id?.replace('-USDT-SWAP', '') || '',
-        inst_id: t.inst_id,
-        side: t.side,
-        entry: t.entry_px,
-        exit: t.exit_px,
-        pnl: parseFloat(t.pnl || 0),
+        time: tr.exit_time || tr.entry_time || tr.time || '',
+        symbol: (inst || '').replace('-USDT-SWAP', ''),
+        inst_id: inst,
+        side: tr.side,
+        entry: tr.entry_px ?? tr.entry,
+        exit: tr.exit_px ?? tr.exit_price,
+        pnl: parseFloat(tr.pnl || 0),
         reason: r,
         stage: null,
-        bot: t.bot,
+        bot: tr.bot,
       })
     }
 
-    // Open first (sorted by time desc), then closed
     rows.sort((a, b) => {
       if (a.type === 'open' && b.type !== 'open') return -1
       if (a.type !== 'open' && b.type === 'open') return 1
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
