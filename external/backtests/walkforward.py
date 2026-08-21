@@ -67,7 +67,7 @@ TUNED = {
                      partial_tp_pct=0.06, partial_tp_ratio=0.25,
                      partial_tp2_pct=0.12, partial_tp2_ratio=0.3),
     "impulse": dict(top_k=3, max_adds=0, cooldown_bars=3, max_hold_bars=28,
-                    entry_roc=3.0, vol_mult=1.5, sl_atr_mult=5.0,
+                    entry_roc=3.0, vol_mult=1.5, climax_vol_mult=3.5, sl_atr_mult=5.0,
                     trail_atr_mult=12.0, tp1_atr=2.0, tp1_frac=0.25,
                     tp2_atr=10.0, tp2_frac=0.3, risk_per_trade=0.10),
     "validation": dict(top_k=2, donchian_n=30, macd_fast=12, macd_slow=26,

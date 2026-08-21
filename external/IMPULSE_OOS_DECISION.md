@@ -37,3 +37,9 @@ Tradeoff: MaxDD full ~−38.7% vs −36.5% (slightly deeper).
 ## LIVE
 
 Keep DEMO bias; set risk limits before LIVE. 2025-style chop still a risk.
+
+
+## v4 (2026-08-21)
+
+Anti-climax filter: skip entry when volume >= 3.5× average on the impulse day.
+Full-sample BT: ~+5550tal, CAGR ~77.3

@@ -1,14 +1,15 @@
 """Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
 
-Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
-1D, 10 coins, 2023-05..2026-08 full-sample after tuning: CAGR ~68%, Sharpe 1.58, MaxDD ~-39%; not pure OOS).
+Live implementation of the honest daily-bar backtest (v4, OKX native
+1D, 10 coins, 2023-05..2026-08 full-sample: CAGR ~77%, Sharpe ~1.41, MaxDD ~-36.5%; not pure OOS).
   - Signal on yesterday's daily close (causal), entry today at open
   - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
+  - Anti-climax: skip if volume >= 3.5x average (exhaustion / FOMO bar)
   - Initial stop = 5 x daily ATR (both sides)
   - Pyramiding DISABLED (v2: adds hurt risk-adjusted returns)
-  - Cascade take-profit: 30% at +2 ATR, 30% at +10 ATR, rest on stop/time
+  - Cascade take-profit: 25% at +2 ATR, 30% at +10 ATR, rest on stop/time
   - Trailing stop = 12 x entry ATR (wide, keeps winners running)
-  - Time exit: 30 days (max_hold_bars)
+  - Time exit: 28 days (max_hold_bars)
   - Risk-per-trade sizing 10% of equity, max leverage 3x, margin cap 50%
 """
 
@@ -24,7 +25,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v3"
+STRATEGY_VERSION = "v4"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,15 +40,13 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v3 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
-    "импульсные движения. Сигнал входа: цена изменилась на ≥3% за 1 день с всплеском объёма "
-    "(выше среднего в 1.5 раза) и трендом EMA20>EMA50; шорты — по симметричному импульсу вниз. "
-    "До 3 позиций одновременно, ранжирование по силе импульса (|ROC|). Пирамидинг отключён (вредит "
-    "риск-скорректированной доходности). Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, "
-    "плечо до 3× (чем выше волатильность, тем меньше плечо). Выход каскадом: 30% позиции на "
-    "+2 ATR, ещё 30% на +10 ATR, остаток держим с широким трейлингом (12× ATR) и принудительный "
-    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~68%, "
-    "Sharpe 1.58, MaxDD −36%. Режим cross margin, демо/реал переключается env."
+    "Impulse 1D v4. Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
+    "импульсные движения. Сигнал: |ROC|≥3% за 1 день, объём ≥1.5× среднего и ≤3.5× среднего "
+    "(anti-climax: отсев дней истощения/FOMO), тренд EMA20>EMA50; шорты — симметрично. "
+    "До 3 позиций, ранжирование по |ROC|. Пирамидинг отключён. Стоп = 5×ATR, риск 10% капитала, "
+    "плечо до 3×. Выход: 25% на +2 ATR, 30% на +10 ATR, остаток с трейлингом 12×ATR, max hold 28 дней. "
+    "Full-sample BT (OKX 1D, 10 монет, 2023-05..2026-08): full ~+555%, CAGR ~77%, Sharpe ~1.41, MaxDD −36.5%; "
+    "по годам ~+125% / +141% / −9% / +28% (2023–2026). Не чистый OOS. Cross margin, demo/live через env."
 )
 
 
@@ -65,6 +64,7 @@ class ImpulseConfig:
     ema_slow: int = 50
     adx_min: float = 0.0
     vol_mult: float = 1.5             # volume > avg_vol * this
+    climax_vol_mult: float = 3.5      # v4: skip if vol >= avg * this (anti-climax)
     vol_period: int = 24
     # pyramiding (докупка) — DISABLED in v2 (max_adds=0 hurts risk-adjusted return)
     max_adds: int = 0
@@ -1003,6 +1003,9 @@ class ImpulseStrategy:
             return None, 0
         vol_surge = ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.vol_mult
         if not vol_surge:
+            return None, 0
+        # v4 anti-climax: skip exhaustion / FOMO volume spikes
+        if cfg.climax_vol_mult and ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.climax_vol_mult:
             return None, 0
         rsi = ind["rsi"]
         roc = ind["roc"]

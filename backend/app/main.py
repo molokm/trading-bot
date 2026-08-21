@@ -1024,7 +1024,7 @@ _BACKTEST_SUMMARY = {
     "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности. Full-sample после тюнинга ≠ чистый OOS; см. external/STAGE5_EVAL.md.",
     "periods": [
         {"label": "Momentum Rotation v6.1 2023–2026", "return_pct": 538.0, "max_dd_pct": 43.4, "cagr_pct": 75.9, "sharpe": 1.45},
-        {"label": "Impulse 1D v3 2023–2026", "return_pct": 402.2, "max_dd_pct": 36.5, "cagr_pct": 63.5, "sharpe": 1.58},
+        {"label": "Impulse 1D v4 2023–2026", "return_pct": 555.0, "max_dd_pct": 36.5, "cagr_pct": 77.3, "sharpe": 1.41},
         {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
     ],
     "win_rate_backtest_pct": 55.0,
@@ -2521,7 +2521,7 @@ async def telegram_simulate(data: dict = None):
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
-        bot_name="Impulse 1D v3", signal_id=124,
+        bot_name="Impulse 1D v4", signal_id=124,
     )
 
     results = {}

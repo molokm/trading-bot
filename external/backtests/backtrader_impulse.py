@@ -98,6 +98,7 @@ class Impulse1D(bt.Strategy):
         ("rsi_conf_min", RSI_CONF_MIN), ("rsi_conf_max", RSI_CONF_MAX),
         ("ema_fast", EMA_FAST), ("ema_slow", EMA_SLOW),
         ("vol_mult", VOL_MULT), ("vol_period", VOL_PERIOD),
+        ("climax_vol_mult", 3.5),
         ("max_adds", MAX_ADDS), ("add_size_ratio", ADD_SIZE_RATIO),
         ("add_window_bars", ADD_WINDOW_BARS), ("add_atr_mult", ADD_ATR_MULT),
         ("max_leverage", MAX_LEVERAGE), ("risk_per_trade", RISK_PER_TRADE),
@@ -352,6 +353,8 @@ class Impulse1D(bt.Strategy):
             if math.isnan(avg_vol) or avg_vol <= 0:
                 continue
             if self.vol[j][-1] < avg_vol * self.p.vol_mult:
+                continue
+            if getattr(self.p, "climax_vol_mult", 0) and avg_vol > 0 and self.vol[j][-1] >= avg_vol * self.p.climax_vol_mult:
                 continue
             ema_t = self.emaf[j][-1] > self.emas[j][-1]
             side = None
