@@ -31,6 +31,7 @@ from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
@@ -1020,16 +1021,7 @@ async def me_pnl(request: Request):
 # PUBLIC EQUITY TRACKER (no auth — trust page for selling subscriptions)
 # ══════════════════════════════════════════════════════════════
 
-_BACKTEST_SUMMARY = {
-    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности. Full-sample после тюнинга ≠ чистый OOS; см. external/STAGE5_EVAL.md.",
-    "periods": [
-        {"label": "Momentum Rotation v6.2 2023–2026", "return_pct": 572.8, "max_dd_pct": 42.4, "cagr_pct": 78.5, "sharpe": 1.45},
-        {"label": "Impulse 1D v4 2023–2026", "return_pct": 555.0, "max_dd_pct": 36.5, "cagr_pct": 77.3, "sharpe": 1.41},
-        {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
-    ],
-    "win_rate_backtest_pct": 55.0,
-    "liquidations": 0,
-}
+# _BACKTEST_SUMMARY imported from app.services.strategy_cards
 
 
 @app.get("/api/tracker")

@@ -24,6 +24,13 @@ from typing import Optional
 import httpx
 
 from .telegram_notifier import TelegramNotifier
+from .strategy_cards import (
+    telegram_metrics_block,
+    telegram_profile_description,
+    telegram_short_description,
+    strategy_versions_line,
+    cagr_range_str,
+)
 
 log = logging.getLogger("telegram_bot")
 
@@ -186,8 +193,8 @@ class TelegramBotPoller:
                 "2023–2026) и дополнительно провалидированы walk-forward (вне выборки)\n"
                 "• Результаты подтверждены <b>независимым бэктест-движком (Backtrader)</b> "
                 "на реальных биржевых данных\n"
-                "• Ориентиры бэктестов: CAGR ~55–65% в год, win rate ~51–59%, "
-                "<b>0 ликвидаций</b>, управляемая просадка\n"
+                "• Ориентиры — те же, что в карточках стратегий (full-sample):\n"
+                f"{telegram_metrics_block(html=True)}\n"
                 "• Живые результаты бота видны на странице трекера\n\n"
                 "Главное: результаты можно <b>проверить самостоятельно</b> — скрипты "
                 "верификации лежат в открытом репозитории проекта.\n\n"
@@ -255,9 +262,8 @@ class TelegramBotPoller:
             "• Жёсткий стоп на каждую сделку, безубыток, частичный тейк\n"
             "• За всю историю бэктестов — <b>0 ликвидаций</b>\n"
             "• Просадка управляемая, а не «всё или ничего»\n\n"
-            "📊 <b>Честные ожидания</b> (бэктест 2023–2026)\n"
-            "• Доходность — <b>CAGR ~55–65% в год</b>, а не «x10 за месяц»\n"
-            "• Win rate ~51–59%: не угадываем каждую сделку — даём стабильное преимущество\n"
+            "📊 <b>Честные ожидания</b> (бэктест 2023–2026, как в карточках)\n"
+            f"{telegram_metrics_block(html=True)}\n"
             "• Подтверждено независимым бэктест-движком (Backtrader)\n\n"
             "📡 <b>Сигналы</b> — бесплатно, каждая сделка публикуется прямо здесь.\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
@@ -269,12 +275,13 @@ class TelegramBotPoller:
         return (
             "📈 <b>О боте</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "• <b>Стратегии:</b> Momentum Rotation (до 2 позиций) + Impulse 1D (до 3)\n"
+            f"• <b>Стратегии:</b> {strategy_versions_line()}\n"
             "• <b>Таймфрейм:</b> дневные свечи, 10 монет\n"
             "• <b>Защита капитала:</b> стоп-лоссы, трейлинг, безубыток, частичный тейк — "
             "всё автоматически; 0 ликвидаций за всю историю бэктестов\n"
             "• <b>Честная позиция:</b> мы не обещаем космической доходности. Реальные "
-            "ориентиры — CAGR ~55–65% в год (бэктест 2023–2026) при управляемой просадке\n"
+            f"ориентиры как в карточках: CAGR {cagr_range_str()} (full-sample, не чистый OOS)\n"
+            f"{telegram_metrics_block(html=True)}\n"
             "• <b>Проверяемость:</b> результаты на реальных свечах OKX (нативные 1D), "
             "воспроизводятся скриптами из открытого репозитория и подтверждены независимым "
             "бэктест-движком (Backtrader)\n"
@@ -473,17 +480,11 @@ class TelegramBotPoller:
         description; without this call it keeps the old strategy text forever.
         """
         desc = (
-            "Алгоритмический трейдер: Momentum Rotation + Impulse 1D на OKX.\n"
-            "Дневные свечи, 10 монет, жёсткие стопы, трейлинг, 0 ликвидаций.\n"
-            "Бэктест 2023–2026 (нативные 1D, независимый движок Backtrader): "
-            "CAGR ~55–65% в год.\n"
-            "📡 Сигналы — бесплатно прямо в боте.\n"
-            "🚀 Pro — боты торгуют на вашем счёте OKX: /subscribe_pro"
+            telegram_profile_description()
+            + "\n📡 Сигналы — бесплатно прямо в боте."
+            + "\n🚀 Pro — боты торгуют на вашем счёте OKX: /subscribe_pro"
         )
-        short = (
-            "Сигналы бесплатно · Pro — торговые боты на вашем OKX "
-            "(Momentum + Impulse). Бэктест CAGR ~55–65%."
-        )
+        short = telegram_short_description()
         await self._api("setMyName", name="Rotation Trade Bot")
         await self._api("setMyDescription", description=desc)
         await self._api("setMyShortDescription", short_description=short)
