@@ -320,6 +320,15 @@ class Database:
             CREATE TABLE IF NOT EXISTS tg_processed_updates (
                 update_id     BIGINT PRIMARY KEY,
                 processed_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id            BIGSERIAL PRIMARY KEY,
+                ts            TEXT NOT NULL,
+                actor         TEXT,
+                action        TEXT NOT NULL,
+                detail        TEXT,
+                meta          TEXT
             )
         """)
 
@@ -894,6 +903,25 @@ class Database:
         else:
             await self._execute("DELETE FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def find_position(self, bot_id: str, inst_id: str, side: str) -> Optional[dict]:
+        """Lookup a single open position row owned by this bot."""
+        sql = (
+            "SELECT * FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+            if self._pg_mode else
+            "SELECT * FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?"
+        )
+        return await self._fetchone(sql, (bot_id, inst_id, side))
+
+    async def other_bot_owns_position(self, bot_id: str, inst_id: str, side: str) -> bool:
+        """True if some OTHER bot already has this instrument/side in the positions table."""
+        sql = (
+            "SELECT bot_id FROM positions WHERE inst_id = $1 AND side = $2 AND bot_id <> $3 LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM positions WHERE inst_id = ? AND side = ? AND bot_id <> ? LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id, side, bot_id))
+        return bool(row)
+
     async def get_all_positions(self) -> list[dict]:
         return await self._fetchall(
             "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
@@ -1088,6 +1116,34 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
+
+
+    async def add_audit(self, action: str, actor: str = None, detail: str = None, meta: str = None):
+        """Append an audit trail row (admin actions, mode switches, risk)."""
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO audit_log (ts, actor, action, detail, meta) VALUES ($1,$2,$3,$4,$5)",
+                (ts, actor or "", action, detail or "", meta or ""),
+            )
+        else:
+            await self._execute(
+                "INSERT INTO audit_log (ts, actor, action, detail, meta) VALUES (?,?,?,?,?)",
+                (ts, actor or "", action, detail or "", meta or ""),
+            )
+
+    async def list_audit(self, limit: int = 100) -> list:
+        limit = max(1, min(int(limit), 500))
+        if self._pg_mode:
+            return await self._fetchall(
+                "SELECT id, ts, actor, action, detail, meta FROM audit_log ORDER BY id DESC LIMIT $1",
+                (limit,),
+            )
+        return await self._fetchall(
+            "SELECT id, ts, actor, action, detail, meta FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
 
     async def mark_update_processed(self, update_id: int) -> bool:
         """Atomically claim a Telegram update_id for processing.

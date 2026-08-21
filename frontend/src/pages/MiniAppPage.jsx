@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
   ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye
@@ -273,6 +273,46 @@ export default function MiniAppPage() {
   const [credsStatus, setCredsStatus] = useState(null)
   const [botAction, setBotAction] = useState(null)
 
+  // Same source as the web Dashboard: /trades/paired (OKX-backed). Open rows
+  // live in the Positions card above (real OKX positions), so here we keep only
+  // closed trades with the same phantom-close suppression — a "closed" row is
+  // hidden while its instrument+side is still open on OKX/bots (no real close).
+  const displayTrades = useMemo(() => {
+    const openKeys = new Set()
+    const pushOpen = (p) => {
+      const inst = p.inst_id || p.instId || p.symbol || ''
+      if (!inst) return
+      const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
+      const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
+      openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
+    }
+    for (const p of (positions || [])) pushOpen(p)
+    for (const p of (rotation?.open_positions || [])) pushOpen(p)
+    for (const p of (impulse?.open_positions || [])) pushOpen(p)
+
+    const out = []
+    for (const tr of (trades || [])) {
+      const inst = tr.inst_id || tr.symbol || ''
+      const reason = (tr.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (inst) {
+        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+        if (openKeys.has(`${inst}|${sideKey}`)) continue
+      }
+      out.push({
+        ...tr,
+        coin: tr.coin || (inst || '').replace('-USDT-SWAP', ''),
+        symbol: tr.symbol || inst,
+        isOpen: false,
+        entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
+        exit: tr.exit_px ?? tr.exit_price,
+        size: tr.size ?? tr.sz ?? '',
+        time: tr.time || tr.exit_time || tr.entry_time || '',
+      })
+    }
+    return out
+  }, [trades, positions, rotation, impulse])
+
   useEffect(() => {
     if (!showLogs) return
     let cancelled = false
@@ -442,7 +482,7 @@ export default function MiniAppPage() {
       rotation: () => isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus(),
       impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
-      trades: () => isUser ? api.meTrades(20) : api.getAllTrades(20),
+      trades: () => api.getPairedTrades(20),
     }
     const names = Object.keys(callers)
     const results = await Promise.all(names.map(async (name) => {
@@ -859,17 +899,17 @@ export default function MiniAppPage() {
         {/* ═══ Last trades ═══ */}
         <div>
           <SectionTitle>{t('mini.last_trades')}</SectionTitle>
-          {trades.length === 0 ? (
+          {displayTrades.length === 0 ? (
             <Card className="text-center py-4 text-xs text-[var(--txt-muted)]">
               {t('mini.no_trades')}
             </Card>
           ) : (
             <Card className="p-0 overflow-hidden">
               <div className="divide-y divide-[var(--border)]">
-                {trades.slice(0, 8).map((tr, i) => {
+                {displayTrades.slice(0, 8).map((tr, i) => {
                   const pnl = Number(tr.pnl || 0)
                   const reason = tr.reason || ''
-                  const isOpen = reason === 'open'
+                  const isOpen = tr.isOpen || reason === 'open'
                   return (
                     <div key={i} className="flex items-center justify-between px-3 py-2">
                       <div className="min-w-0">
@@ -883,14 +923,14 @@ export default function MiniAppPage() {
                         </div>
                         <div className="text-2xs text-[var(--txt-muted)]">
                           {fmtTime(tr.time)}
-                          {tr.exit_price ? ` • ${t('mini.entry')} ${fmt(tr.entry_price ?? tr.entry)} → ${t('mini.exit')} ${fmt(tr.exit_price)}` : ''}
+                          {tr.exit ? ` • ${t('mini.entry')} ${fmt(tr.entry)} → ${t('mini.exit')} ${fmt(tr.exit)}` : ''}
                         </div>
                       </div>
                       <div className="text-right">
                         <div className={`text-sm font-bold mono ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
-                          {isOpen ? fmt(tr.entry_price ?? tr.entry) : pnlSign(pnl)}
+                          {isOpen ? fmt(tr.entry) : pnlSign(pnl)}
                         </div>
-                        <div className="text-2xs text-[var(--txt-muted)]">{fmt(tr.size)}</div>
+                        <div className="text-2xs text-[var(--txt-muted)]">{tr.size ? fmt(tr.size) : '—'}</div>
                       </div>
                     </div>
                   )

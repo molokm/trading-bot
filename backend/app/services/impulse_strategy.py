@@ -1,20 +1,22 @@
 """Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
 
-Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
-1D, 10 coins, 2023-05..2026-08: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%).
+Live implementation of the honest daily-bar backtest (v4, OKX native
+1D, 10 coins, 2023-05..2026-08 full-sample: CAGR ~77%, Sharpe ~1.41, MaxDD ~-36.5%; not pure OOS).
   - Signal on yesterday's daily close (causal), entry today at open
   - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
+  - Anti-climax: skip if volume >= 3.5x average (exhaustion / FOMO bar)
   - Initial stop = 5 x daily ATR (both sides)
   - Pyramiding DISABLED (v2: adds hurt risk-adjusted returns)
-  - Cascade take-profit: 30% at +2 ATR, 30% at +10 ATR, rest on stop/time
+  - Cascade take-profit: 25% at +2 ATR, 30% at +10 ATR, rest on stop/time
   - Trailing stop = 12 x entry ATR (wide, keeps winners running)
-  - Time exit: 30 days (max_hold_bars)
+  - Time exit: 28 days (max_hold_bars)
   - Risk-per-trade sizing 10% of equity, max leverage 3x, margin cap 50%
 """
 
 import asyncio
 import math
 import threading
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -23,7 +25,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v2"
+STRATEGY_VERSION = "v4"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -38,15 +40,13 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v2 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
-    "импульсные движения. Сигнал входа: цена изменилась на ≥3% за 1 день с всплеском объёма "
-    "(выше среднего в 1.5 раза) и трендом EMA20>EMA50; шорты — по симметричному импульсу вниз. "
-    "До 3 позиций одновременно, ранжирование по силе импульса (|ROC|). Пирамидинг отключён (вредит "
-    "риск-скорректированной доходности). Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, "
-    "плечо до 3× (чем выше волатильность, тем меньше плечо). Выход каскадом: 30% позиции на "
-    "+2 ATR, ещё 30% на +10 ATR, остаток держим с широким трейлингом (12× ATR) и принудительный "
-    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~63%, "
-    "Sharpe 1.58, MaxDD −36%. Режим cross margin, демо/реал переключается env."
+    "Impulse 1D v4. Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
+    "импульсные движения. Сигнал: |ROC|≥3% за 1 день, объём ≥1.5× среднего и ≤3.5× среднего "
+    "(anti-climax: отсев дней истощения/FOMO), тренд EMA20>EMA50; шорты — симметрично. "
+    "До 3 позиций, ранжирование по |ROC|. Пирамидинг отключён. Стоп = 5×ATR, риск 10% капитала, "
+    "плечо до 3×. Выход: 25% на +2 ATR, 30% на +10 ATR, остаток с трейлингом 12×ATR, max hold 28 дней. "
+    "Full-sample BT (OKX 1D, 10 монет, 2023-05..2026-08): full ~+555%, CAGR ~77%, Sharpe ~1.41, MaxDD −36.5%; "
+    "по годам ~+125% / +141% / −9% / +28% (2023–2026). Не чистый OOS. Cross margin, demo/live через env."
 )
 
 
@@ -64,6 +64,7 @@ class ImpulseConfig:
     ema_slow: int = 50
     adx_min: float = 0.0
     vol_mult: float = 1.5             # volume > avg_vol * this
+    climax_vol_mult: float = 3.5      # v4: skip if vol >= avg * this (anti-climax)
     vol_period: int = 24
     # pyramiding (докупка) — DISABLED in v2 (max_adds=0 hurts risk-adjusted return)
     max_adds: int = 0
@@ -81,10 +82,10 @@ class ImpulseConfig:
     cooldown_bars: int = 3            # min bars between entries on the SAME coin (v2)
     # cascade exit (выход частями)
     tp1_atr: float = 2.0
-    tp1_frac: float = 0.3
+    tp1_frac: float = 0.25  # v3: lighter first scale (BT)
     tp2_atr: float = 10.0             # v2: second TP at 10 ATR
     tp2_frac: float = 0.3
-    max_hold_bars: int = 30           # time exit (30 days)
+    max_hold_bars: int = 28  # v3: BT OOS+full improvement           # time exit (30 days)
     exit_ema_death: bool = False
     allow_short: bool = True
     max_margin_pct: float = 0.5
@@ -154,7 +155,9 @@ class ImpulseStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
         self._last_daily_check: str = ""
+        self._last_managed_day: str = ""
 
     # ─── Indicators (no look-ahead) ───
 
@@ -1001,6 +1004,9 @@ class ImpulseStrategy:
         vol_surge = ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.vol_mult
         if not vol_surge:
             return None, 0
+        # v4 anti-climax: skip exhaustion / FOMO volume spikes
+        if cfg.climax_vol_mult and ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.climax_vol_mult:
+            return None, 0
         rsi = ind["rsi"]
         roc = ind["roc"]
         strength = abs(roc)
@@ -1066,10 +1072,33 @@ class ImpulseStrategy:
     async def _poll_loop(self):
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Impulse] Poll error: {e}", flush=True)
             await asyncio.sleep(self.config.poll_interval_sec)
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("impulse", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Impulse] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Impulse] managed_daily db error: {e}", flush=True)
 
     def _thread_runner(self):
         self._loop = asyncio.new_event_loop()
@@ -1163,8 +1192,20 @@ class ImpulseStrategy:
                 "stage": "tp1_done" if pos.tp1_done else "tp2_done" if pos.tp2_done else "running",
             })
 
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
+        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             "started_at": self._started_at,

@@ -8,6 +8,7 @@ from datetime import datetime
 
 import httpx
 import websockets
+from app.services.risk_guard import assert_can_open
 
 
 class OKXClient:
@@ -133,6 +134,9 @@ class OKXClient:
             body["tgtCcy"] = tgt_ccy
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
+        # Block new risk-increasing orders when kill switch / daily loss limits hit.
+        # reduce_only closes always pass.
+        assert_can_open(is_reduce_only=bool(reduce_only))
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:

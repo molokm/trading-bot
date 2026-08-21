@@ -31,8 +31,10 @@ from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -75,6 +77,10 @@ _env_key = os.getenv("OKX_API_KEY", "")
 _env_secret = os.getenv("OKX_SECRET_KEY", "")
 _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
+# When "0"/"false": keep OKX read access (dashboard/trades) but do NOT auto-start
+# the trading strategies. Use on a local viewer instance to avoid duplicate
+# management of the same account that the deployed (Render) version handles.
+_bots_auto_start = os.getenv("BOTS_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
 
 trade_log: list = []
 _STARTED_AT = None  # set in startup(); used by /api/health uptime
@@ -97,6 +103,18 @@ def get_token(request: Request):
     if auth.startswith("Bearer "):
         return auth[7:]
     return ""
+
+
+async def write_audit(request: Request, action: str, detail: str = "", meta: str = ""):
+    """Best-effort audit log; never breaks the request path."""
+    try:
+        role = validate(get_token(request)) or "anonymous"
+        uid = get_user_id(get_token(request))
+        actor = f"{role}:{uid}" if uid else role
+        await db.add_audit(action=action, actor=actor, detail=detail, meta=meta)
+    except Exception as e:
+        print(f"[audit] write failed: {e}", flush=True)
+
 
 
 def require_admin(request: Request):
@@ -174,7 +192,7 @@ async def startup():
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -184,12 +202,12 @@ async def startup():
                 ema_slow=50,
                 atr_period=14,
                 adx_min=25.0,
-                min_roc=4.5,
+                min_roc=3.5,
                 sma_long=200,
                 min_hold_days=11,
                 max_leverage=2.0,
                 risk_per_trade=0.20,
-                allocation_pct=0.5,
+                allocation_pct=0.45,
                 atr_stop_mult=4.5,
                 trail_atr_mult=3.0,
                 breakeven_pct=0.05,
@@ -211,7 +229,7 @@ async def startup():
         else:
             print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -225,10 +243,10 @@ async def startup():
                 trail_atr_mult_short=12.0,
                 cooldown_bars=3,
                 tp1_atr=2.0,
-                tp1_frac=0.3,
+                tp1_frac=0.25,
                 tp2_atr=10.0,
                 tp2_frac=0.3,
-                max_hold_bars=30,
+                max_hold_bars=28,
                 max_leverage=3.0,
                 poll_interval_sec=300,
                 auto_execute=True,
@@ -245,20 +263,20 @@ async def startup():
         else:
             print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start:
             val_config = make_validation_config(
                 capital=300.0,
-                top_k=4,
-                donchian_n=15,
+                top_k=2,
+                donchian_n=30,
                 tp_pct=0.08,
-                tp_ratio=0.3,
-                tp2_pct=0.10,
+                tp_ratio=0.4,
+                tp2_pct=0.08,
                 be_pct=0.015,
                 chandelier_atr=4.0,
                 max_hold_days=3,
                 risk_per_trade=0.14,
-                allocation_pct=0.15,
-                max_leverage=1.0,
+                allocation_pct=0.5,
+                max_leverage=2.0,
                 poll_interval_sec=300,
                 auto_execute=True,
             )
@@ -372,6 +390,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/status",
     "/api/auth/logout",
     "/api/auth/telegram",
+    "/api/risk/status",
 }
 
 ADMIN_ONLY_PATHS = {
@@ -1002,16 +1021,7 @@ async def me_pnl(request: Request):
 # PUBLIC EQUITY TRACKER (no auth — trust page for selling subscriptions)
 # ══════════════════════════════════════════════════════════════
 
-_BACKTEST_SUMMARY = {
-    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности.",
-    "periods": [
-        {"label": "Momentum Rotation v5 2023–2026", "return_pct": 365.5, "max_dd_pct": 51.8, "cagr_pct": 59.8, "sharpe": 1.23},
-        {"label": "Impulse 1D v2 2023–2026", "return_pct": 402.2, "max_dd_pct": 36.5, "cagr_pct": 63.5, "sharpe": 1.58},
-        {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
-    ],
-    "win_rate_backtest_pct": 55.0,
-    "liquidations": 0,
-}
+# _BACKTEST_SUMMARY imported from app.services.strategy_cards
 
 
 @app.get("/api/tracker")
@@ -1109,7 +1119,33 @@ async def health():
             "validation": _bot_flag(validation),
         },
         "auth": "jwt",
+        "risk": risk_get_status().to_dict(),
     }
+
+
+# ── Risk guards (stage-3a) ──
+
+@app.get("/api/risk/status")
+async def risk_status():
+    """Public-ish status for UI badges (no secrets)."""
+    daily = None
+    try:
+        # best-effort daily pnl from existing endpoint helper if present
+        from app.services import risk_guard as _rg  # noqa: F401
+    except Exception:
+        pass
+    st = risk_get_status(daily_pnl=None)
+    return st.to_dict()
+
+
+@app.post("/api/risk/kill", dependencies=[Depends(require_admin)])
+async def risk_kill(request: Request, data: dict = None):
+    """Enable/disable runtime kill switch (blocks new entries, not closes)."""
+    data = data or {}
+    enabled = bool(data.get("enabled", True))
+    set_kill_switch(enabled)
+    await write_audit(request, "risk.kill_switch", detail=f"enabled={enabled}")
+    return {"ok": True, **risk_get_status().to_dict()}
 
 
 # ── Credentials ──
@@ -1137,7 +1173,7 @@ async def credentials_test(data: dict):
 
 
 @app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
-async def credentials_init(data: dict):
+async def credentials_init(request: Request, data: dict):
     global _env_key, _env_secret, _env_pass, _env_demo
     key = data.get("apiKey", "")
     secret = data.get("secretKey", "")
@@ -1155,7 +1191,50 @@ async def credentials_init(data: dict):
     result = await client_manager.init_client(key, secret, passphrase, demo)
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+    await write_audit(request, "credentials.init", detail=f"demo={bool(demo)}")
     return {"message": "Credentials configured", "demo": demo}
+
+
+@app.get("/api/mode", dependencies=[Depends(require_admin)])
+async def get_trading_mode():
+    return {"demo": _env_demo, "okx_demo": _env_demo, "live": not _env_demo}
+
+
+@app.post("/api/mode", dependencies=[Depends(require_admin)])
+async def set_trading_mode(request: Request, data: dict = None):
+    """Switch DEMO/LIVE for the owner OKX client.
+
+    Switching to LIVE requires confirm == "LIVE" to avoid accidental flips.
+    """
+    global _env_demo
+    data = data or {}
+    demo = bool(data.get("demo", True))
+    if not demo:
+        if str(data.get("confirm", "")).strip() != "LIVE":
+            raise HTTPException(
+                status_code=400,
+                detail='Switching to LIVE requires confirm: "LIVE"',
+            )
+    if not (_env_key and _env_secret and _env_pass):
+        raise HTTPException(status_code=400, detail="OKX credentials not configured")
+    prev = _env_demo
+    _env_demo = demo
+    result = await client_manager.init_client(_env_key, _env_secret, _env_pass, demo)
+    if result.get("error"):
+        _env_demo = prev
+        raise HTTPException(status_code=400, detail=result.get("message", "Reconnect failed"))
+    await write_audit(
+        request,
+        "mode.switch",
+        detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
+    )
+    return {"ok": True, "demo": _env_demo, "live": not _env_demo}
+
+
+@app.get("/api/audit", dependencies=[Depends(require_admin)])
+async def get_audit(limit: int = 100):
+    rows = await db.list_audit(limit=limit)
+    return {"items": rows}
 
 
 # ── Portfolio ──
@@ -1192,25 +1271,29 @@ async def get_portfolio():
 # ── Positions ──
 
 def _tag_position_bot(inst_id: str, pos_side: str) -> str:
-    """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
-    # Normalize pos_side for matching
+    """Determine which bot owns an OKX position by checking running bots' in-memory positions.
+
+    Order: Rotation (Momentum) → Impulse → Validation. Validation shares the same
+    coin universe and must not steal tags from older strategies if both claim a pos.
+    """
     norm_side = pos_side.lower() if pos_side else ""
-    # Check Impulse bot positions
-    if impulse and impulse._running and impulse._positions:
-        for coin, pos in impulse._positions.items():
+
+    def _match(bot) -> bool:
+        if not (bot and bot._running and bot._positions):
+            return False
+        for coin, pos in bot._positions.items():
             if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Impulse 1D"
-    # Check Validation bot positions
-    if validation and validation._running and validation._positions:
-        for coin, pos in validation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "MACD+Donchian Validation"
-    # Check Rotation bot positions
-    if rotation and rotation._running and rotation._positions:
-        for coin, pos in rotation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Momentum"
-    # Fallback: check trade logs for recent open entry of this instrument
+                return True
+        return False
+
+    if _match(rotation):
+        return "Momentum"
+    if _match(impulse):
+        return "Impulse 1D"
+    if _match(validation):
+        return "MACD+Donchian Validation"
+
+    # Fallback: trade logs (same priority)
     if rotation and rotation._trade_log:
         for t in reversed(rotation._trade_log):
             sym = t.get("symbol", "") or t.get("inst_id", "")
@@ -2415,22 +2498,22 @@ async def telegram_simulate(data: dict = None):
     open_px = 67250.00
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
-        size=0.03, leverage=3.0, bot_name="Momentum Rotation v5",
+        size=0.03, leverage=3.0, bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
         pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
-        bot_name="Momentum Rotation v5", signal_id=123,
+        bot_name="Momentum Rotation v6.2", signal_id=123,
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
-        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v5",
+        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
-        bot_name="Impulse 1D v2", signal_id=124,
+        bot_name="Impulse 1D v4", signal_id=124,
     )
 
     results = {}
@@ -3495,7 +3578,19 @@ async def get_pnl():
         pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
         if not pos_result.get("error"):
             for p in pos_result.get("data", []):
+                # Ignore flat rows OKX sometimes returns with residual upl
+                try:
+                    if abs(float(p.get("pos", 0) or 0)) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
                 unrealized += float(p.get("upl", 0) or 0)
+    except Exception:
+        pass
+
+    # Feed risk_guard so place_order can enforce RISK_MAX_DAILY_LOSS_USD
+    try:
+        update_daily_pnl(realized_1d + unrealized)
     except Exception:
         pass
 
@@ -3510,6 +3605,93 @@ async def get_pnl():
         "source": source,
         "fees": round(total_fees, 2),
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
+    }
+
+
+
+@app.get("/api/reports/summary")
+async def reports_summary():
+    """Single reporting snapshot for UI/export — same trade source as History/Dashboard.
+
+    Fields:
+    - realized / unrealized / fees / funding (funding best-effort from OKX bills type=8)
+    - periods 1d/7d/30d/week aligned with /api/pnl
+    - trade_count, wins, losses, win_rate from closed paired trades
+    - source labels for transparency
+    """
+    pnl = await get_pnl()
+    paired = await get_paired_trades(limit=5000)
+    trades = [x for x in (paired.get("trades") or []) if (x.get("reason") or "").lower() in ("closed", "tp", "sl", "trail", "breakeven", "manual", "")]
+    # prefer explicit closed-like
+    closed = []
+    for x in (paired.get("trades") or []):
+        reason = (x.get("reason") or "").lower()
+        if reason in ("open", "tp1"):
+            continue
+        try:
+            if float(x.get("pnl") or 0) == 0 and reason == "open":
+                continue
+        except (TypeError, ValueError):
+            pass
+        closed.append(x)
+
+    fees = 0.0
+    wins = losses = 0
+    for x in closed:
+        try:
+            fees += abs(float(x.get("fee") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            pval = float(x.get("pnl") or 0)
+        except (TypeError, ValueError):
+            pval = 0.0
+        if pval > 0:
+            wins += 1
+        elif pval < 0:
+            losses += 1
+    n = wins + losses
+    win_rate = round(wins / n * 100, 1) if n else 0.0
+
+    funding = 0.0
+    funding_source = "none"
+    try:
+        resp = await _okx_call(lambda c: c.get_bills(inst_type="SWAP", type="8", limit=100))
+        if not resp.get("error"):
+            for b in resp.get("data") or []:
+                try:
+                    # OKX funding often in pnl or balChg
+                    v = b.get("pnl")
+                    if v is None or v == "":
+                        v = b.get("balChg")
+                    funding += float(v or 0)
+                except (TypeError, ValueError):
+                    continue
+            funding_source = "okx_bills_type8"
+    except Exception as e:
+        print(f"[reports] funding fetch: {e}", flush=True)
+
+    net = float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding - 0.0
+    # fees already often embedded in trade pnl on OKX; still surface separately
+    return {
+        "as_of": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "realized_total": pnl.get("total"),
+        "realized_1d": pnl.get("1d"),
+        "realized_7d": pnl.get("7d"),
+        "realized_30d": pnl.get("30d"),
+        "realized_week": pnl.get("week"),
+        "unrealized": pnl.get("unrealized"),
+        "fees_reported": round(fees, 4) if fees else pnl.get("fees"),
+        "funding": round(funding, 4),
+        "funding_source": funding_source,
+        "net_approx": round(float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding, 2),
+        "per_bot": pnl.get("per_bot") or {},
+        "trades_closed": len(closed),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate,
+        "pnl_source": pnl.get("source"),
+        "note": "PnL matches History paired trades; funding is OKX bills type=8 (best-effort, last page).",
     }
 
 
@@ -3588,12 +3770,12 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     now_s = _time.time()
     if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
         trades = _paired_cache["data"]
-        return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+        return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
     async with _paired_lock:
         now_s = _time.time()
         if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
             trades = _paired_cache["data"]
-            return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+            return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end)
         trades = resp.get("trades", [])
         if trades:
@@ -3602,7 +3784,7 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "data": trades,
                 "debug": resp.get("debug", {}),
             }
-        return {"trades": trades[-limit:], "debug": resp.get("debug", {})}
+        return {"trades": trades[:limit], "debug": resp.get("debug", {})}
 
 
 _warm_task: Optional[asyncio.Task] = None
@@ -3941,7 +4123,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
     print(f"[trades/paired] OKX+bills+DB: {len(dedup)} trades "
           f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
-    return {"trades": dedup[-limit:],
+    return {"trades": dedup[:limit],
             "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
                       "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids),
                       "pair_err": pair_bills_err}}

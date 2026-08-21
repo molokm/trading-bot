@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v3 — daily-bar model (validated +76% CAGR backtest).
+"""Momentum Rotation Strategy v6.2 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v5"
+STRATEGY_VERSION = "v6.2"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,17 +39,13 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v5 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и выбирает до 2 самых сильных тренда. "
-    "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
-    "Фильтры отсекают шум: ADX≥25, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
-    "волатильность не выше среднего (×2.2), корреляция до 0.85. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
-    "в бычьем — только лонги, в медвежьем — только шорты, в неопределённости — кэш. "
-    "Размер позиции считается от риска 20% капитала, маржа на позицию ≤50% equity: стоп = 4.5× дневной ATR, плечо до 2× "
-    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 3× дневной ATR (держит победителей), "
-    "при +5% стоп в безубыток, при +8% закрывается половина позиции, динамический тейк-профит "
-    "(37.6% → 23.7% → 9.2% → безубыток по мере удержания). Минимум держим 11 дней. "
-    "Если монета выпадает из топа — закрываем по рынку. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): "
-    "CAGR ~60%, Sharpe 1.23, MaxDD −52%. Режим cross margin, демо/реал переключается env."
+    "Momentum Rotation v6.2 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
+    "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
+    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
+    "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, 2023-05..2026-08, не чистый OOS): "
+    "full ~+573%, CAGR ~78%, Sharpe ~1.45, MaxDD −42.4%; годы ~+31%/+136%/+21%/+82%. "
+    "См. external/MOMENTUM_OOS_DECISION.md."
 )
 
 
@@ -64,23 +60,25 @@ class RotationConfig:
     ema_slow: int = 50
     atr_period: int = 14
     adx_min: float = 25.0
-    min_roc: float = 4.5            # min |roc| to even rank a coin
+    min_roc: float = 3.5            # v6.1: milder impulse gate (better full/2025 vs 4.5)
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
     risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
-    allocation_pct: float = 0.5    # max margin per position = eq * this
+    allocation_pct: float = 0.45   # v6.2: max margin per position = eq * this
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
-    partial_tp_pct: float = 0.08   # close 50% at +8%
-    partial_tp_ratio: float = 0.5  # fraction to close
+    partial_tp_pct: float = 0.06   # first scale-out at +6% (dual ladder v5.2)
+    partial_tp_ratio: float = 0.25 # first scale-out fraction at TP1
+    partial_tp2_pct: float = 0.12  # second scale-out level (0=off)
+    partial_tp2_ratio: float = 0.3  # fraction of *remaining* size at TP2
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
     rsi_short_min: float = 21.0    # no short if RSI < 21
-    vol_mult: float = 2.2          # skip if ATR > avg * 2.2 (v5: stricter)
+    vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
     allow_short: bool = True       # allow shorting bearish coins
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
@@ -116,7 +114,8 @@ class RotPosition:
     stop_price: float
     peak_price: float
     breakeven: bool = False
-    partial_done: bool = False   # 50% already closed at TP1
+    partial_done: bool = False   # True after first partial (compat)
+    partial_stage: int = 0       # 0=none, 1=after TP1, 2=after TP2
     opened_at: str = ""
     entry_bar_ts: int = 0
     atr: float = 0.0             # ATR at entry (for dynamic trailing)
@@ -164,6 +163,8 @@ class RotationStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
+        self._last_managed_day: str = ""  # last UTC day a managed-daily record was written
         self._last_rotate_ts: int = 0
         self._last_daily_check: str = ""
         self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
@@ -689,7 +690,8 @@ class RotationStrategy:
             "signal_id": pos.signal_id, "ord_id": partial_ord_id,
         })
         pos.size -= close_sz
-        pos.partial_done = True
+        pos.partial_stage = min(int(getattr(pos, "partial_stage", 0)) + 1, 2)
+        pos.partial_done = pos.partial_stage >= 1
         # Immediately re-size the exchange-side stop to the reduced position so
         # the exchange never holds a stop larger than the remaining size.
         if pos.algo_id:
@@ -993,6 +995,19 @@ class RotationStrategy:
                         continue
                     actual[(coin, "long" if is_long else "short")] = sz
 
+            # Drop positions we adopted incorrectly (another strategy owns them)
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, pos.inst_id, pos.side):
+                            print(f"[{self.BOT_NAME}] drop foreign position {coin} {pos.side} "
+                                  f"(owned by another bot)", flush=True)
+                            del self._positions[coin]
+                            continue
+                    except Exception as e:
+                        print(f"[{self.BOT_NAME}] foreign drop check error: {e}", flush=True)
+
             for coin in list(self._positions.keys()):
                 pos = self._positions[coin]
                 real_sz = actual.get((coin, pos.side))
@@ -1090,6 +1105,8 @@ class RotationStrategy:
                 if coin in self._positions:
                     continue
                 inst_id = self.SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 now = datetime.now(timezone.utc).isoformat()
                 # Re-attach the original trade number so close/partial messages
                 # keep the same "Сделка №N" as the open.
@@ -1269,9 +1286,13 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                # Partial TP at +5%
-                if not pos.partial_done and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
+                # Dual partial ladder: TP1 then optional TP2 on remaining
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price >= pos.entry_price * (1 + cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price <= pos.stop_price:
                     hit_stop = True
             else:  # short
@@ -1293,8 +1314,12 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                if not pos.partial_done and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price <= pos.entry_price * (1 - cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price >= pos.stop_price:
                     hit_stop = True
 
@@ -1477,10 +1502,39 @@ class RotationStrategy:
         """Main polling loop running in daemon thread's event loop."""
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Rotation] Poll error: {e}", flush=True)
             await asyncio.sleep(self.config.poll_interval_sec)
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed.
+
+        A bot is 'managed' when its polling loop is alive and heartbeating.
+        The record is written to the analysis log and to the DB settings table
+        (key managed_daily:<bot_id>:<YYYY-MM-DD>) so management coverage can be
+        audited day by day.
+        """
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("rotation", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Rotation] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Rotation] managed_daily db error: {e}", flush=True)
 
     def _thread_target(self):
         self._loop = asyncio.new_event_loop()
@@ -1599,8 +1653,23 @@ class RotationStrategy:
                 btc_above = btc_ind["close_today"] > self._btc_200ma
                 filters_active.append(f"BTC {'>' if btc_above else '<'} 200MA: {'longs OK' if btc_above else 'longs blocked'}")
 
+        # Heartbeat: the bot is 'managed' only while its poll loop is alive and
+        # heartbeating. A stale heartbeat means the strategy thread died/crashed
+        # even though the process may still be up.
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
+        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": self.STRATEGY_NAME,
             "version": self.STRATEGY_VERSION,
             "config": cfg,
@@ -1807,6 +1876,44 @@ class RotationStrategy:
         except Exception as e:
             print(f"[Rotation] DB reload error: {e}", flush=True)
 
+
+    async def _should_adopt_exchange_position(self, coin: str, side: str, inst_id: str) -> bool:
+        """Only restore exchange positions that THIS bot opened.
+
+        Prevents Validation (and other RotationStrategy subclasses sharing the
+        same coin universe) from adopting Momentum/Impulse positions on start
+        or during reconcile — which duplicated open positions in the UI.
+        """
+        if coin in self._positions:
+            return False
+        # Another bot already tracks it in DB
+        if self.db:
+            try:
+                if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
+                          flush=True)
+                    return False
+                mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                if mine:
+                    return True
+            except Exception as e:
+                print(f"[{self.BOT_NAME}] adopt ownership check error: {e}", flush=True)
+        # Our in-memory trade log: last event for this inst is an open
+        for tr in reversed(getattr(self, "_trade_log", []) or []):
+            sym = tr.get("symbol") or tr.get("inst_id") or ""
+            if sym != inst_id:
+                continue
+            reason = (tr.get("reason") or "").lower()
+            if reason == "open":
+                return True
+            if reason in ("closed", "exchange_stop", "manual_close", "sl", "tp", "trail"):
+                return False
+            break
+        # No proof of ownership — do not claim foreign / orphan positions
+        print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: no local ownership proof",
+              flush=True)
+        return False
+
     async def _sync_open_positions(self):
         """After restart, detect open positions from OKX and restore _positions +
         re-place exchange-side stops so they survive a process crash."""
@@ -1832,6 +1939,8 @@ class RotationStrategy:
                     continue
 
                 side = "long" if is_long else "short"
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 estimated_atr = entry_px * 0.015
                 if is_long:
                     stop_price = entry_px * 0.985
