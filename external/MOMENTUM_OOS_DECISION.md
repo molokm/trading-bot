@@ -125,3 +125,11 @@ Constraint: full-sample and OOS total ≥ single-partial baseline (8%/30%, vol_m
 | 8%/25% → 12%/30% | +403% | +315% | −52.9% | accept alt |
 
 **Live defaults:** TP1 +6% close 25%; TP2 +12% close 30% of remainder; BE +5%; trail 3×ATR.
+
+
+## v6.2 (2026-08-21)
+
+Only change vs v6.1: allocation_pct 0.50 → 0.45.
+Full-sample BT: ~+573% total, CAGR ~78%, MaxDD -42.4%, Sharpe ~1.45.
+Years: 2023 +31%, 2024 +136%, 2025 +21%, 2026 +82% (partial).
+OOS ~+209% (vs ~+207% at 0.50). Slightly fewer loss trades, higher PF.

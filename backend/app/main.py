@@ -206,7 +206,7 @@ async def startup():
                 min_hold_days=11,
                 max_leverage=2.0,
                 risk_per_trade=0.20,
-                allocation_pct=0.5,
+                allocation_pct=0.45,
                 atr_stop_mult=4.5,
                 trail_atr_mult=3.0,
                 breakeven_pct=0.05,
@@ -1023,7 +1023,7 @@ async def me_pnl(request: Request):
 _BACKTEST_SUMMARY = {
     "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности. Full-sample после тюнинга ≠ чистый OOS; см. external/STAGE5_EVAL.md.",
     "periods": [
-        {"label": "Momentum Rotation v6.1 2023–2026", "return_pct": 538.0, "max_dd_pct": 43.4, "cagr_pct": 75.9, "sharpe": 1.45},
+        {"label": "Momentum Rotation v6.2 2023–2026", "return_pct": 572.8, "max_dd_pct": 42.4, "cagr_pct": 78.5, "sharpe": 1.45},
         {"label": "Impulse 1D v4 2023–2026", "return_pct": 555.0, "max_dd_pct": 36.5, "cagr_pct": 77.3, "sharpe": 1.41},
         {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
     ],
@@ -2506,17 +2506,17 @@ async def telegram_simulate(data: dict = None):
     open_px = 67250.00
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
-        size=0.03, leverage=3.0, bot_name="Momentum Rotation v6.1",
+        size=0.03, leverage=3.0, bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
         pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
-        bot_name="Momentum Rotation v6.1", signal_id=123,
+        bot_name="Momentum Rotation v6.2", signal_id=123,
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
-        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v6.1",
+        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_add = notifier.add_msg(

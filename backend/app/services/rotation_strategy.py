@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6 — dual partial ladder + vol filter (BT 2023–2026).
+"""Momentum Rotation Strategy v6.2 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -24,7 +24,7 @@ from .telegram_notifier import TelegramNotifier
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.1"
+STRATEGY_VERSION = "v6.2"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,12 +39,13 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.1. Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Momentum Rotation v6.2 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
     "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
     "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
-    "маржа ≤50%, стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
-    "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, costs 0.10%+0.05%, не чистый OOS): "
-    "CAGR ~76%, Sharpe ~1.31, MaxDD −43%. См. external/MOMENTUM_OOS_DECISION.md."
+    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
+    "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, 2023-05..2026-08, не чистый OOS): "
+    "full ~+573%, CAGR ~78%, Sharpe ~1.45, MaxDD −42.4%; годы ~+31%/+136%/+21%/+82%. "
+    "См. external/MOMENTUM_OOS_DECISION.md."
 )
 
 
@@ -65,7 +66,7 @@ class RotationConfig:
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
     risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
-    allocation_pct: float = 0.5    # max margin per position = eq * this
+    allocation_pct: float = 0.45   # v6.2: max margin per position = eq * this
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
