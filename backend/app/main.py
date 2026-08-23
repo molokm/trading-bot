@@ -414,6 +414,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/logout",
     "/api/auth/telegram",
     "/api/risk/status",
+    "/api/ai/status",  # LLM config flags only (no secrets)
 }
 
 ADMIN_ONLY_PATHS = {
