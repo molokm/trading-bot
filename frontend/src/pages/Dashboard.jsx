@@ -60,6 +60,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
+  const [scalpStatus, setScalpStatus] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
@@ -123,7 +124,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     if (document.hidden) return
     // Fast tier — renders immediately; the slow tier below fills in when ready.
     try {
-      const [pf, pos, tk, momStatus, impStatus, valStatus, aiSt, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, impStatus, valStatus, aiSt, scalpSt, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
@@ -131,6 +132,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.impulseStatus().catch(() => null),
         api.validationStatus().catch(() => null),
         api.aiStatus().catch(() => null),
+        api.scalpStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
@@ -140,6 +142,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
       setAiStatus(aiSt)
+      setScalpStatus(scalpSt)
 
       if (priceTickers?.tickers) {
         const byCoin = {}
@@ -279,6 +282,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (momentumStatus?.open_positions || [])) pushOpen(p, 'Momentum')
     for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
     for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
+    for (const p of (aiStatus?.open_positions || [])) pushOpen(p, 'AI Discretionary 1H')
+    for (const p of (scalpStatus?.open_positions || [])) pushOpen(p, 'Order Book Scalp')
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
     for (const p of (positions || [])) {
@@ -330,7 +335,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, positions, allTrades])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -564,6 +569,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : botName === 'Impulse'
                         ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
+                        : botName === 'Validation' || botName === 'MACD+Donchian Validation'
+                        ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
+                        : botName === 'AI Discretionary 1H'
+                        ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                        : botName === 'Order Book Scalp'
+                        ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
                         : botName
                         ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
                         : { label: '—', cls: 'text-[var(--txt-muted)]' }
@@ -707,6 +718,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                           : tr.bot === 'AI Discretionary 1H'
                             ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                            : tr.bot === 'Order Book Scalp'
+                            ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
                             : null
                     const mark = parseFloat(tr.mark || 0)
                     const upnl = parseFloat(tr.unrealized_pnl || 0)
