@@ -50,10 +50,10 @@ LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
 @dataclass
 class ScalpConfig:
     symbols: list = None
-    capital: float = 5000.0
-    max_leverage: float = 3.0
-    risk_per_trade: float = 0.005       # 0.5% equity at stop
-    allocation_pct: float = 0.12
+    capital: float = 500.0
+    max_leverage: float = 2.0
+    risk_per_trade: float = 0.003       # 0.3% equity at stop
+    allocation_pct: float = 0.06
     levels: int = 10
     obi_threshold: float = 0.35
     persist_n: int = 3                  # consecutive same-sign OBI
@@ -191,6 +191,7 @@ class OrderBookScalpStrategy:
         self._last_activity = None
         self._started_at = None
         self._last_exec = None
+        self._avail_usdt = None  # live free USDT margin from OKX
 
     def start(self):
         if self._running:
@@ -395,29 +396,70 @@ class OrderBookScalpStrategy:
             return
         await self._open(client, coin, side, metrics, sig)
 
-    def _size_order(self, coin: str, entry: float) -> tuple[float, float]:
+    async def _refresh_balance(self, client) -> float:
+        """Update equity from OKX available USDT; never size above free margin."""
+        try:
+            resp = await client.get_balance()
+            if resp.get("error"):
+                return float(self._equity)
+            details = []
+            for row in (resp.get("data") or []):
+                details.extend(row.get("details") or [])
+            avail = 0.0
+            eq = 0.0
+            for d in details:
+                if (d.get("ccy") or "").upper() == "USDT":
+                    avail = float(d.get("availEq") or d.get("availBal") or d.get("cashBal") or 0)
+                    eq = float(d.get("eq") or d.get("cashBal") or avail or 0)
+                    break
+            if avail > 0:
+                self._avail_usdt = avail
+            # usable equity for sizing: min(configured capital, 80% of free USDT)
+            usable = min(float(self.config.capital), avail * 0.8) if avail > 0 else float(self.config.capital)
+            # keep total equity for PnL tracking if we already traded
+            if eq > 0 and self._equity == self._capital:
+                self._equity = min(float(self.config.capital), eq)
+            return max(10.0, usable)  # floor so we don't go crazy-small only
+        except Exception as e:
+            print(f"[Scalp] balance: {e}", flush=True)
+            return float(self._equity)
+
+    def _size_order(self, coin: str, entry: float, equity_cap: float = None) -> tuple[float, float]:
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
-        stop_pct = max(0.0005, float(self.config.stop_bps) / 10000.0)
-        risk_usd = self._equity * float(self.config.risk_per_trade)
+        base = float(equity_cap if equity_cap is not None else self._equity)
+        # hard cap: never use more free margin than we think we have
+        if self._avail_usdt is not None:
+            base = min(base, float(self._avail_usdt) * 0.75)
+        stop_pct = max(0.0008, float(self.config.stop_bps) / 10000.0)
+        risk_usd = base * float(self.config.risk_per_trade)
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = self._equity * float(self.config.allocation_pct)
+        max_margin = base * float(self.config.allocation_pct)
+        # leave headroom for fees / other bots on same account
+        max_margin = min(max_margin, (float(self._avail_usdt) * 0.5) if self._avail_usdt else max_margin)
         lev = min(float(self.config.max_leverage), max(1.0, notional / max_margin if max_margin else 1))
-        if notional / lev > max_margin:
+        if lev > 0 and notional / lev > max_margin:
             notional = max_margin * lev
-        if entry <= 0 or ct <= 0:
+        # absolute notional ceiling for scalp (demo-friendly)
+        notional = min(notional, 150.0)
+        if entry <= 0 or ct <= 0 or max_margin < 5:
             return 0.0, lev
         raw = notional / (entry * ct)
         steps = math.floor(raw / lot)
-        return max(0.0, round(steps * lot, 8)), round(lev, 2)
+        sz = max(0.0, round(steps * lot, 8))
+        return sz, round(lev, 2)
 
     async def _open(self, client, coin: str, side: str, metrics: dict, sig: dict):
         entry = float(metrics.get("mid") or 0)
         if entry <= 0:
             return
-        sz, lev = self._size_order(coin, entry)
+        usable = await self._refresh_balance(client)
+        sz, lev = self._size_order(coin, entry, equity_cap=usable)
         if sz <= 0:
-            self._last_exec = {"event": "skip", "reason": "size=0", "coin": coin}
+            self._last_exec = {
+                "event": "skip", "reason": "size=0_or_low_margin", "coin": coin,
+                "avail_usdt": self._avail_usdt, "usable": usable,
+            }
             return
         try:
             assert_can_open(is_reduce_only=False)
@@ -446,28 +488,50 @@ class OrderBookScalpStrategy:
             except Exception:
                 pass
 
-        try:
-            resp = await client.place_order(
+        async def _try_place(size_try: float, pos_side_try):
+            return await client.place_order(
                 inst_id=inst, side=order_side, ord_type="market",
-                sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=side,
+                sz=self._fmt_sz(coin, size_try), td_mode="cross",
+                pos_side=pos_side_try,
             )
-        except Exception as e:
-            self._last_exec = {"event": "open_error", "reason": str(e), "coin": coin}
-            return
 
-        if resp.get("error"):
-            # net mode retry
+        resp = None
+        size_try = sz
+        for attempt in range(4):
+            try:
+                resp = await _try_place(size_try, side)
+            except Exception as e:
+                self._last_exec = {"event": "open_error", "reason": str(e), "coin": coin}
+                return
+            if not resp.get("error"):
+                sz = size_try
+                break
             msg = str(resp.get("message") or "")
-            if "pos" in msg.lower():
-                resp = await client.place_order(
-                    inst_id=inst, side=order_side, ord_type="market",
-                    sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=None,
-                )
-        if resp.get("error"):
+            # net-mode accounts
+            if "pos" in msg.lower() or "posside" in msg.lower():
+                resp = await _try_place(size_try, None)
+                if not resp.get("error"):
+                    sz = size_try
+                    break
+                msg = str(resp.get("message") or "")
+            # insufficient margin → cut size in half
+            if "51008" in msg or "Insufficient" in msg or "margin" in msg.lower():
+                size_try = round(size_try / 2, 8)
+                lot = LOT_SZ.get(coin, 0.01)
+                steps = math.floor(size_try / lot)
+                size_try = round(steps * lot, 8)
+                if size_try <= 0:
+                    break
+                print(f"[Scalp] 51008 retry smaller sz={size_try} {coin}", flush=True)
+                continue
+            break
+
+        if not resp or resp.get("error"):
             self._last_exec = {
-                "event": "open_error", "reason": resp.get("message"), "coin": coin,
+                "event": "open_error", "reason": (resp or {}).get("message"),
+                "coin": coin, "avail_usdt": self._avail_usdt, "tried_sz": size_try,
             }
-            print(f"[Scalp] open error {coin}: {resp.get('message')}", flush=True)
+            print(f"[Scalp] open error {coin}: {(resp or {}).get('message')}", flush=True)
             return
 
         fills = resp.get("data") or []
@@ -606,6 +670,7 @@ class OrderBookScalpStrategy:
             "version": STRATEGY_VERSION,
             "description": STRATEGY_DESC,
             "execute": self._execute_enabled(),
+            "avail_usdt": self._avail_usdt,
             "capital": self._capital,
             "equity": round(self._equity, 4),
             "total_pnl": round(self._equity - self._capital, 4),

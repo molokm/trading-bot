@@ -152,7 +152,7 @@ export default function ScalpPage({ connected, isGuest }) {
       else {
         await api.scalpStart({
           symbols: COINS,
-          capital: 5000,
+          capital: 500,
           execute: true,
           use_llm: true,
           obi_threshold: 0.35,
