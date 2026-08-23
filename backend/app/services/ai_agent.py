@@ -10,6 +10,7 @@ Always returns a validated dict decision; invalid/unsafe → hold.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -315,7 +316,16 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             }
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
-            r = await client.post(url, headers=headers, json=body)
+            # Retry loop with exponential backoff for 429 rate limits
+            for attempt in range(3):
+                r = await client.post(url, headers=headers, json=body)
+                if r.status_code == 429 and attempt < 2:
+                    wait = 2 ** (attempt + 1)
+                    log.warning("LLM 429 rate limit on %s, retry in %ds (attempt %d/3)",
+                                mid, wait, attempt + 1)
+                    await asyncio.sleep(wait)
+                    continue
+                break
             if r.status_code >= 400 and json_mode and r.status_code in (400, 422):
                 body.pop("response_format", None)
                 r = await client.post(url, headers=headers, json=body)
@@ -325,9 +335,10 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                     log.warning("LLM model fallback: %s -> %s", model, mid)
                 return data["choices"][0]["message"]["content"]
             last_err = f"LLM HTTP {r.status_code}: {r.text[:300]}"
-            # only continue chain on model_not_found
-            if "model_not_found" not in (r.text or "") and "does not exist" not in (r.text or ""):
-                break
+            # Continue fallback chain on rate limit or model_not_found
+            if r.status_code == 429 or "model_not_found" in (r.text or "") or "does not exist" in (r.text or ""):
+                continue
+            break
     raise RuntimeError(last_err or "LLM request failed")
 
 
