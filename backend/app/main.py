@@ -1364,6 +1364,7 @@ async def scalp_start(data: dict = None):
 async def scalp_stop():
     global scalp_bot
     if scalp_bot:
+        scalp_bot._save_scalp_state()
         scalp_bot.stop()
     return {"message": "Scalp stopped", "running": False}
 

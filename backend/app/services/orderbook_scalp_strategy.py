@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import json
 import os
 import threading
 import time
@@ -46,6 +47,24 @@ STRATEGY_DESC = (
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
 LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
 
+
+
+_SCALP_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scalp_state.json")
+
+def load_scalp_state():
+    try:
+        with open(_SCALP_STATE_FILE, "r") as f:
+            data = json.load(f)
+        return float(data.get("equity", 0)), float(data.get("capital", 0)), data.get("started_at")
+    except Exception:
+        return None, None, None
+
+def save_scalp_state(equity, capital, started_at):
+    try:
+        with open(_SCALP_STATE_FILE, "w") as f:
+            json.dump({"equity": equity, "capital": capital, "started_at": started_at}, f)
+    except Exception as e:
+        print(f"[Scalp] Error saving state: {e}")
 
 @dataclass
 class ScalpConfig:
@@ -178,8 +197,17 @@ class OrderBookScalpStrategy:
         self._running = False
         self._thread = None
         self._loop = None
+        self._state_file = "scalp_state.json"
         self._capital = float(self.config.capital)
         self._equity = float(self.config.capital)
+        # Load saved state if exists
+        _equity, _capital, _started_at = load_scalp_state()
+        if _equity is not None:
+            self._equity = _equity
+            self._capital = _capital
+        else:
+            self._equity = float(self.config.capital)
+            self._capital = float(self.config.capital)
         self._positions: dict[str, ScalpPosition] = {}
         self._history: dict[str, deque] = {
             s: deque(maxlen=max(20, self.config.persist_n * 4)) for s in self.config.symbols
@@ -710,6 +738,7 @@ class OrderBookScalpStrategy:
             fill_px = mark or pos.entry_price
         pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
+        self._save_scalp_state()
         self._trade_log.append({
             "time": _now_iso(), "event": "close", "coin": coin, "side": pos.side,
             "entry": pos.entry_price, "exit": fill_px, "pnl": round(pnl, 4), "reason": reason,
@@ -766,6 +795,9 @@ class OrderBookScalpStrategy:
             "last_activity": self._last_activity,
             "started_at": self._started_at,
         }
+
+    def _save_scalp_state(self):
+        save_scalp_state(self._equity, self._capital, self._started_at)
 
     async def snapshot(self, coin: str = "BTC") -> dict:
         """One-shot book + metrics for UI without starting the bot."""
