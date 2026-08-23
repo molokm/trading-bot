@@ -234,6 +234,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return combined
   }, [tradeLog])
 
+  // Map instId|side → bot name for badge resolution on exchange positions
+  const botMap = useMemo(() => {
+    const m = {}
+    const addPositions = (list, name) => {
+      for (const p of (list || [])) {
+        const inst = p.inst_id || p.instId || ''
+        const sideKey = (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+        m[`${inst}|${sideKey}`] = name
+      }
+    }
+    addPositions(momentumStatus?.open_positions, 'Momentum')
+    addPositions(impulseStatus?.open_positions, 'Impulse 1D')
+    addPositions(validationStatus?.open_positions, 'Validation')
+    addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+    addPositions(scalpStatus?.open_positions, 'Order Book Scalp')
+    return m
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions])
+
   // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
     const rows = []
@@ -289,16 +307,20 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (positions || [])) {
       const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
       if (!posSz) continue
+      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
+      const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
+      const hint = p.bot || botMap[posKey] || ''
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
-        side: (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long',
+        side: posSide,
         entry_price: parseFloat(p.avgPx || p.avg_px || 0),
         mark_px: parseFloat(p.markPx || p.last || 0),
         size: posSz,
         size_remaining: posSz,
         upl: p.upl,
-      }, p.bot || '')
+        bot: hint,
+      }, hint)
     }
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
@@ -335,7 +357,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, positions, allTrades, botMap])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -564,7 +586,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const upl = parseFloat(p.upl || 0)
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
-                      const botName = p.bot || ''
+                      const posSideKey = (p.posSide || 'long').toLowerCase()
+                      const botName = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
                       const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : botName === 'Impulse'
