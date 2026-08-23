@@ -50,10 +50,10 @@ LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
 @dataclass
 class ScalpConfig:
     symbols: list = None
-    capital: float = 500.0
-    max_leverage: float = 2.0
-    risk_per_trade: float = 0.003       # 0.3% equity at stop
-    allocation_pct: float = 0.06
+    capital: float = 200.0
+    max_leverage: float = 1.0
+    risk_per_trade: float = 0.002       # 0.2% equity at stop
+    allocation_pct: float = 0.04
     levels: int = 10
     obi_threshold: float = 0.35
     persist_n: int = 3                  # consecutive same-sign OBI
@@ -397,56 +397,93 @@ class OrderBookScalpStrategy:
         await self._open(client, coin, side, metrics, sig)
 
     async def _refresh_balance(self, client) -> float:
-        """Update equity from OKX available USDT; never size above free margin."""
+        """Return usable USDT for *new* margin; 0 if account is tight.
+
+        Prefer the smaller of account-level availEq and USDT detail availEq/availBal.
+        Never fall back to configured capital when free margin is unknown/zero —
+        that caused 51008 with oversized orders while other bots held margin.
+        """
         try:
             resp = await client.get_balance()
             if resp.get("error"):
-                return float(self._equity)
-            details = []
-            for row in (resp.get("data") or []):
-                details.extend(row.get("details") or [])
-            avail = 0.0
-            eq = 0.0
-            for d in details:
-                if (d.get("ccy") or "").upper() == "USDT":
-                    avail = float(d.get("availEq") or d.get("availBal") or d.get("cashBal") or 0)
-                    eq = float(d.get("eq") or d.get("cashBal") or avail or 0)
-                    break
-            if avail > 0:
-                self._avail_usdt = avail
-            # usable equity for sizing: min(configured capital, 80% of free USDT)
-            usable = min(float(self.config.capital), avail * 0.8) if avail > 0 else float(self.config.capital)
-            # keep total equity for PnL tracking if we already traded
-            if eq > 0 and self._equity == self._capital:
-                self._equity = min(float(self.config.capital), eq)
-            return max(10.0, usable)  # floor so we don't go crazy-small only
+                print(f"[Scalp] balance error: {resp.get('message')}", flush=True)
+                self._avail_usdt = 0.0
+                return 0.0
+            rows = resp.get("data") or []
+            acct_avail = 0.0
+            acct_eq = 0.0
+            usdt_avail = 0.0
+            usdt_eq = 0.0
+            for row in rows:
+                try:
+                    acct_avail = float(row.get("availEq") or 0) or acct_avail
+                    acct_eq = float(row.get("totalEq") or row.get("eq") or 0) or acct_eq
+                except (TypeError, ValueError):
+                    pass
+                for d in row.get("details") or []:
+                    if (d.get("ccy") or "").upper() != "USDT":
+                        continue
+                    try:
+                        usdt_avail = float(
+                            d.get("availEq") or d.get("availBal") or d.get("cashBal") or 0
+                        )
+                        usdt_eq = float(d.get("eq") or d.get("cashBal") or usdt_avail or 0)
+                    except (TypeError, ValueError):
+                        pass
+            # free margin = min of account and USDT bucket when both present
+            candidates = [x for x in (acct_avail, usdt_avail) if x > 0]
+            avail = min(candidates) if candidates else 0.0
+            self._avail_usdt = float(avail)
+            if usdt_eq > 0 and self._equity == self._capital:
+                self._equity = min(float(self.config.capital), usdt_eq)
+            elif acct_eq > 0 and self._equity == self._capital:
+                self._equity = min(float(self.config.capital), acct_eq)
+            # usable budget for this bot only
+            usable = min(float(self.config.capital), avail * 0.35) if avail > 0 else 0.0
+            print(f"[Scalp] margin avail={avail:.2f} usable={usable:.2f} "
+                  f"acct_avail={acct_avail:.2f} usdt_avail={usdt_avail:.2f}", flush=True)
+            return usable
         except Exception as e:
             print(f"[Scalp] balance: {e}", flush=True)
-            return float(self._equity)
+            self._avail_usdt = 0.0
+            return 0.0
 
     def _size_order(self, coin: str, entry: float, equity_cap: float = None) -> tuple[float, float]:
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
-        base = float(equity_cap if equity_cap is not None else self._equity)
-        # hard cap: never use more free margin than we think we have
-        if self._avail_usdt is not None:
-            base = min(base, float(self._avail_usdt) * 0.75)
+        avail = float(self._avail_usdt or 0)
+        # Hard stop: other bots own the margin
+        if avail < 12.0:
+            return 0.0, 1.0
+        base = float(equity_cap if equity_cap is not None else 0.0)
+        if base <= 0:
+            base = min(float(self.config.capital), avail * 0.35)
+        base = min(base, avail * 0.35)
         stop_pct = max(0.0008, float(self.config.stop_bps) / 10000.0)
         risk_usd = base * float(self.config.risk_per_trade)
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = base * float(self.config.allocation_pct)
-        # leave headroom for fees / other bots on same account
-        max_margin = min(max_margin, (float(self._avail_usdt) * 0.5) if self._avail_usdt else max_margin)
-        lev = min(float(self.config.max_leverage), max(1.0, notional / max_margin if max_margin else 1))
+        max_margin = min(base * float(self.config.allocation_pct), avail * 0.25)
+        lev = min(float(self.config.max_leverage), 1.0)  # scalp default: no extra leverage pressure
+        lev = max(1.0, lev)
         if lev > 0 and notional / lev > max_margin:
             notional = max_margin * lev
-        # absolute notional ceiling for scalp (demo-friendly)
-        notional = min(notional, 150.0)
-        if entry <= 0 or ct <= 0 or max_margin < 5:
+        # tiny absolute ceiling — demo shares margin with 3–4 other bots
+        notional = min(notional, 40.0)
+        # required margin check
+        req_margin = notional / lev if lev else notional
+        if entry <= 0 or ct <= 0 or req_margin > avail * 0.3 or max_margin < 3:
             return 0.0, lev
         raw = notional / (entry * ct)
         steps = math.floor(raw / lot)
         sz = max(0.0, round(steps * lot, 8))
+        # if still too big vs avail, force minimum lot once, else 0
+        min_notional = lot * entry * ct
+        min_margin = min_notional / lev
+        if sz <= 0:
+            if min_margin <= avail * 0.25:
+                sz = lot
+            else:
+                return 0.0, lev
         return sz, round(lev, 2)
 
     async def _open(self, client, coin: str, side: str, metrics: dict, sig: dict):
@@ -454,6 +491,13 @@ class OrderBookScalpStrategy:
         if entry <= 0:
             return
         usable = await self._refresh_balance(client)
+        if usable <= 0 or (self._avail_usdt is not None and self._avail_usdt < 12):
+            self._last_exec = {
+                "event": "skip", "reason": "insufficient_free_margin",
+                "coin": coin, "avail_usdt": self._avail_usdt, "usable": usable,
+            }
+            print(f"[Scalp] skip {coin}: free margin {self._avail_usdt}", flush=True)
+            return
         sz, lev = self._size_order(coin, entry, equity_cap=usable)
         if sz <= 0:
             self._last_exec = {
