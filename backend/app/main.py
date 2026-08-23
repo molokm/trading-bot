@@ -1318,6 +1318,19 @@ def _tag_trade_bot(trade: dict) -> str:
     pos_side = trade.get("pos_side", "")
     if trade.get("reason") == "open":
         return _tag_position_bot(inst_id, pos_side)
+    # Prefer exact ordId match against in-memory close logs (most reliable)
+    ord_id = str(trade.get("ord_id") or trade.get("close_ord_id") or "").strip()
+    if ord_id:
+        for bot_label, log in (
+            ("Momentum", getattr(rotation, "_trade_log", None) if rotation else None),
+            ("Impulse 1D", getattr(impulse, "_trade_log", None) if impulse else None),
+            ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
+        ):
+            if not log:
+                continue
+            for t in log:
+                if str(t.get("ord_id", "") or "").strip() == ord_id:
+                    return bot_label
     # For closed trades, check trade logs for matching entry+exit
     entry_time = trade.get("entry_time", "")
     if rotation and rotation._trade_log:
@@ -1671,9 +1684,13 @@ async def momentum_status():
             "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC,
         }
     status = rotation.get_status()
+    status["total_pnl_internal"] = status.get("total_pnl")
     stats = (await _bot_history_stats()).get("Momentum")
     if stats:
         status.update(stats)
+        status["total_pnl_source"] = "okx_history"
+    else:
+        status["total_pnl_source"] = "internal"
     return status
 
 
@@ -2164,9 +2181,13 @@ async def impulse_status():
                 "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
                 "config": None, "description": IMPULSE_DESC}
     status = impulse.get_status()
+    status["total_pnl_internal"] = status.get("total_pnl")
     stats = (await _bot_history_stats()).get("Impulse 1D")
     if stats:
         status.update(stats)
+        status["total_pnl_source"] = "okx_history"
+    else:
+        status["total_pnl_source"] = "internal"
     return status
 
 

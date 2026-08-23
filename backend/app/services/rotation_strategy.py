@@ -21,6 +21,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
@@ -669,15 +670,8 @@ class RotationStrategy:
             print(f"[Rotation] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return {}
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = close_sz * self.CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = close_sz * self.CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
+        pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee, self.CT_VAL[pos.coin])
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         partial_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -702,7 +696,7 @@ class RotationStrategy:
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz,
                     px=round(fill_px, 2), ord_id=partial_ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -716,7 +710,7 @@ class RotationStrategy:
                           coin=pos.coin, side=pos.side,
                           closed_sz=close_sz, remaining_sz=pos.size,
                           exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
-                          pnl=round(pnl, 2), fee=round(fee, 4), reason="partial_tp",
+                          pnl=round(pnl, 2), fee=round(fee_cost(fee), 4), reason="partial_tp",
                           signal_id=pos.signal_id)
 
         if self.notifier:
@@ -742,16 +736,8 @@ class RotationStrategy:
             return
 
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-
-        if pos.side == "long":
-            pnl = pos.size * self.CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = pos.size * self.CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
+        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, self.CT_VAL[pos.coin])
 
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
@@ -773,7 +759,7 @@ class RotationStrategy:
                     px=round(fill_px, 2),
                     ord_id=close_ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -787,7 +773,7 @@ class RotationStrategy:
         self.analysis.log("rotation", "close",
                           coin=pos.coin, side=pos.side, reason=reason,
                           entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
-                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           leverage=pos.leverage, signal_id=pos.signal_id)
 
         if self.notifier:
@@ -904,13 +890,8 @@ class RotationStrategy:
                                                      resp.get("message", ""))
             return
 
-        fill_px = price
-        fee = 0.0
-        ord_id = ""
-        if fills:
-            fill_px = float(fills[0].get("fillPx", price))
-            fee = float(fills[0].get("fee", 0))
-            ord_id = fills[0].get("ordId", "")
+        fill_px, fee, _ = extract_fill_avg(fills, price)
+        ord_id = (fills[0].get("ordId", "") if fills else "") or ""
 
         now = datetime.now(timezone.utc).isoformat()
         pos = RotPosition(
@@ -927,7 +908,7 @@ class RotationStrategy:
 
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
+            "size": sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
             "coin": coin, "signal_id": signal_id, "leverage": lev,
         })
@@ -940,7 +921,7 @@ class RotationStrategy:
                     bot_id=self.BOT_ID, side=order_side, sz=sz,
                     px=round(fill_px, 2), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
                 await self._sync_positions_db()
@@ -954,7 +935,7 @@ class RotationStrategy:
         self.analysis.log("rotation", "open",
                           coin=coin, side=side, price=round(fill_px, 2),
                           stop=round(stop, 2), size=sz, leverage=lev,
-                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          atr=round(atr_val, 2), fee=round(fee_cost(fee), 4),
                           inst_id=inst_id, signal_id=signal_id)
 
         if self.notifier:
@@ -1039,10 +1020,7 @@ class RotationStrategy:
                           f"— cooldown {self.MANUAL_CLOSE_COOLDOWN_SEC/3600:.1f}h",
                           flush=True)
                     ct = self.CT_VAL.get(coin, 0.01)
-                    if pos.side == "long":
-                        pnl = pos.size * ct * (fill_px - pos.entry_price)
-                    else:
-                        pnl = pos.size * ct * (pos.entry_price - fill_px)
+                    pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, 0.0, ct)
                     self._equity += pnl
                     now = datetime.now(timezone.utc).isoformat()
                     self._trade_log.append({
@@ -1855,8 +1833,9 @@ class RotationStrategy:
             rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=500)
             for t in rows:
                 db_pnl = float(t.get("pnl", 0) or 0)
-                db_fee = float(t.get("fee", 0) or 0)
+                db_fee = fee_cost(t.get("fee", 0))
                 effective_pnl = db_pnl
+                # Open rows: pnl stored as -fee; if missing, treat fee as cost
                 if db_pnl == 0 and db_fee > 0:
                     effective_pnl = -db_fee
                 self._trade_log.append({

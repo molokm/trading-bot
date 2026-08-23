@@ -22,6 +22,7 @@ from dataclasses import dataclass, asdict
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
@@ -430,15 +431,8 @@ class ImpulseStrategy:
             print(f"[Impulse] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = close_sz * CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = close_sz * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
+        pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee, CT_VAL[pos.coin])
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         partial_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -462,7 +456,7 @@ class ImpulseStrategy:
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz,
                     px=round(fill_px, 2), ord_id=partial_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -476,7 +470,7 @@ class ImpulseStrategy:
                           coin=pos.coin, side=pos.side,
                           closed_sz=close_sz, remaining_sz=pos.size,
                           exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
-                          pnl=round(pnl, 2), fee=round(fee, 4),
+                          pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
@@ -499,15 +493,8 @@ class ImpulseStrategy:
             print(f"[Impulse] Close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = pos.size * CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = pos.size * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
+        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL[pos.coin])
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         close_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -526,7 +513,7 @@ class ImpulseStrategy:
                     px=round(fill_px, 2),
                     ord_id=close_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -539,7 +526,7 @@ class ImpulseStrategy:
         self.analysis.log("impulse", "close",
                           coin=pos.coin, side=pos.side, reason=reason,
                           entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
-                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           leverage=pos.leverage, adds=pos.adds,
                           signal_id=pos.signal_id)
         if self.notifier:
@@ -625,13 +612,7 @@ class ImpulseStrategy:
                                                    resp.get("message", ""))
             return
 
-        fill_px = price
-        fee = 0.0
-        ord_id = ""
-        if fills:
-            fill_px = float(fills[0].get("fillPx", price))
-            fee = float(fills[0].get("fee", 0))
-            ord_id = fills[0].get("ordId", "")
+        fill_px, fee, _ = extract_fill_avg(fills, price)
 
         now = datetime.now(timezone.utc).isoformat()
         tp1_pct = self.config.tp1_atr * atr_val / fill_px
@@ -650,7 +631,7 @@ class ImpulseStrategy:
 
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
+            "size": sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
             "coin": coin, "signal_id": signal_id, "leverage": lev,
         })
@@ -662,7 +643,7 @@ class ImpulseStrategy:
                     bot_id=self.BOT_ID, side=order_side, sz=sz,
                     px=round(fill_px, 2), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
                 await self._sync_positions_db()
@@ -675,7 +656,7 @@ class ImpulseStrategy:
         self.analysis.log("impulse", "open",
                           coin=coin, side=side, price=round(fill_px, 2),
                           stop=round(stop, 2), size=sz, leverage=lev,
-                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          atr=round(atr_val, 2), fee=round(fee_cost(fee), 4),
                           inst_id=inst_id, signal_id=signal_id)
         if self.notifier:
             try:
@@ -720,8 +701,7 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Add error {coin}: {resp.get('message', '')}", flush=True)
             return
-        fill_px = float(fills[0].get("fillPx", ind["close_today"])) if fills else ind["close_today"]
-        fee = float(fills[0].get("fee", 0)) if fills else 0.0
+        fill_px, fee, _ = extract_fill_avg(fills, ind["close_today"])
 
         prev_size = pos.size
         pos.size += add_sz
@@ -738,7 +718,7 @@ class ImpulseStrategy:
         now = datetime.now(timezone.utc).isoformat()
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": add_sz, "pnl": -round(fee, 2), "entry": fill_px,
+            "size": add_sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px,
             "entry_price": fill_px, "reason": "add", "pos_side": pos.side,
             "coin": coin, "signal_id": pos.signal_id, "leverage": lev,
         })
@@ -753,7 +733,7 @@ class ImpulseStrategy:
                           add_sz=add_sz, total_sz=pos.size,
                           entry_px=round(pos.entry_price, 2),
                           new_stop=round(pos.stop_price, 2),
-                          leverage=lev, adds=pos.adds, fee=round(fee, 4),
+                          leverage=lev, adds=pos.adds, fee=round(fee_cost(fee), 4),
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
