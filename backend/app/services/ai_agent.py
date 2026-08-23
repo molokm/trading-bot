@@ -245,7 +245,7 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             raw = await _openai_compatible(
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-                model=os.getenv("AI_LLM_MODEL", "llama-3.1-8b-instant"),
+                model=os.getenv("AI_LLM_MODEL", "openai/gpt-oss-20b"),
                 system=SYSTEM_PROMPT,
                 user=user_msg,
             )
@@ -281,6 +281,15 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     return validate_decision(parsed, open_syms)
 
 
+# Fallback chain when a Groq model id is deprecated / not on the account
+_GROQ_MODEL_FALLBACKS = (
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-8b-instant",
+)
+
+
 async def _openai_compatible(api_key: str, base_url: str, model: str,
                              system: str, user: str,
                              json_mode: bool = True) -> str:
@@ -288,28 +297,38 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
         raise RuntimeError("missing API key")
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    body = {
-        "model": model,
-        "temperature": 0.2,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-    }
-    # Groq / many OpenAI-compatible APIs support JSON object mode
-    if json_mode:
-        body["response_format"] = {"type": "json_object"}
+    candidates = [model]
+    if "groq.com" in base_url:
+        for m in _GROQ_MODEL_FALLBACKS:
+            if m not in candidates:
+                candidates.append(m)
+    last_err = None
     async with httpx.AsyncClient(timeout=45.0) as client:
-        r = await client.post(url, headers=headers, json=body)
-        if r.status_code >= 400:
-            # Retry once without json_mode if provider rejects response_format
-            if json_mode and r.status_code in (400, 422):
+        for mid in candidates:
+            body = {
+                "model": mid,
+                "temperature": 0.2,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            if json_mode:
+                body["response_format"] = {"type": "json_object"}
+            r = await client.post(url, headers=headers, json=body)
+            if r.status_code >= 400 and json_mode and r.status_code in (400, 422):
                 body.pop("response_format", None)
                 r = await client.post(url, headers=headers, json=body)
-            if r.status_code >= 400:
-                raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:300]}")
-        data = r.json()
-    return data["choices"][0]["message"]["content"]
+            if r.status_code < 400:
+                data = r.json()
+                if mid != model:
+                    log.warning("LLM model fallback: %s -> %s", model, mid)
+                return data["choices"][0]["message"]["content"]
+            last_err = f"LLM HTTP {r.status_code}: {r.text[:300]}"
+            # only continue chain on model_not_found
+            if "model_not_found" not in (r.text or "") and "does not exist" not in (r.text or ""):
+                break
+    raise RuntimeError(last_err or "LLM request failed")
 
 
 async def _gemini(api_key: str, model: str, system: str, user: str) -> str:
@@ -340,7 +359,7 @@ def llm_status() -> dict:
     return {
         "provider": provider,
         "model": os.getenv("AI_LLM_MODEL") or (
-            "llama-3.1-8b-instant" if provider == "groq" else
+            "openai/gpt-oss-20b" if provider == "groq" else
             "gpt-4o-mini" if provider == "openai" else
             "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
         ),
