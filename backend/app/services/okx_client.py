@@ -143,6 +143,16 @@ class OKXClient:
         return await self._request("POST", "/api/v5/cancel-order",
                                     body={"instId": inst_id, "ordId": ord_id})
 
+    async def get_order(self, inst_id: str, ord_id: str = None,
+                        cl_ord_id: str = None) -> dict:
+        """GET /api/v5/trade/order — avgPx, fee, state for a single order."""
+        params = {"instId": inst_id}
+        if ord_id:
+            params["ordId"] = ord_id
+        if cl_ord_id:
+            params["clOrdId"] = cl_ord_id
+        return await self._request("GET", "/api/v5/trade/order", params=params)
+
     async def get_orders(self, inst_type: str = "SWAP", state: str = None,
                           limit: int = 20) -> dict:
         params = {"instType": inst_type, "limit": limit}

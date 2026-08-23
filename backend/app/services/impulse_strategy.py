@@ -333,6 +333,69 @@ class ImpulseStrategy:
             return None
         return self.client_manager.get_client()
 
+
+    async def _resolve_execution(self, client, inst_id: str, place_resp: dict,
+                                 fallback_px: float, side: str = "long",
+                                 size: float = 0.0, entry_px: float = 0.0,
+                                 ct_val: float = 0.01):
+        """After place_order: fetch real avgPx / fee / fillPnl from OKX.
+
+        place_order often returns only ordId (no fillPx). Without this, TG PnL
+        falls back to entry price and disagrees with the exchange / web history.
+        Returns dict: fill_px, fee, pnl, ord_id, source
+        """
+        import asyncio
+        from .pnl_utils import (
+            extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills, order_avg_from_details,
+        )
+        data = place_resp.get("data") or []
+        ord_id = ""
+        if data:
+            ord_id = str(data[0].get("ordId") or data[0].get("ordId") or "")
+        fill_px, fee, _sz = extract_fill_avg(data, fallback_px)
+        source = "place_resp"
+
+        # Poll order + fills until filled or attempts exhausted
+        for attempt in range(6):
+            if ord_id:
+                try:
+                    od = await client.get_order(inst_id, ord_id=ord_id)
+                    rows = od.get("data") or []
+                    if rows:
+                        avg, fee_o, sz_o = order_avg_from_details(rows[0], fallback_px)
+                        st = (rows[0].get("state") or "").lower()
+                        if avg > 0:
+                            fill_px, fee = avg, fee_o
+                            source = "order"
+                        if st in ("filled", "partially_filled") and avg > 0:
+                            break
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_order resolve: {e}", flush=True)
+                try:
+                    fl = await client.get_fills(inst_id=inst_id, ordId=ord_id, limit=50)
+                    frows = fl.get("data") or []
+                    if frows:
+                        net, avg, fees, _ = pnl_from_okx_fills(frows, fallback_px)
+                        if avg > 0:
+                            fill_px = avg
+                            fee = fees
+                            source = "fills"
+                        if net is not None:
+                            return {
+                                "fill_px": fill_px, "fee": fee, "pnl": net,
+                                "ord_id": ord_id, "source": "fills_pnl",
+                            }
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_fills resolve: {e}", flush=True)
+            if attempt < 5:
+                await asyncio.sleep(0.25 * (attempt + 1))
+
+        pnl = close_pnl(side, size, entry_px, fill_px, fee, ct_val)
+        return {
+            "fill_px": fill_px, "fee": fee, "pnl": pnl,
+            "ord_id": ord_id, "source": source,
+        }
+
     async def _place_order(self, client, inst_id: str, side: str, sz: float,
                            pos_side: str = None, ord_type: str = "market",
                            px: float = None) -> dict:
@@ -430,9 +493,18 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=close_sz, entry_px=pos.entry_price,
+            ct_val=CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
-        pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee, CT_VAL[pos.coin])
+        if ex.get("ord_id"):
+            if fills:
+                fills[0]["ordId"] = ex["ord_id"]
+            else:
+                fills = [{"ordId": ex["ord_id"]}]
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         partial_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -492,9 +564,18 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=pos.size, entry_px=pos.entry_price,
+            ct_val=CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px, fee, _fill_sz = extract_fill_avg(fills, pos.entry_price)
-        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL[pos.coin])
+        if ex.get("ord_id"):
+            if fills:
+                fills[0]["ordId"] = ex["ord_id"]
+            else:
+                fills = [{"ordId": ex["ord_id"]}]
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         close_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -522,7 +603,7 @@ class ImpulseStrategy:
                 print(f"[Impulse] DB save trade error: {e}", flush=True)
         print(f"[Impulse] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
-              f"pnl={pnl:+.2f} ({reason})", flush=True)
+              f"pnl={pnl:+.2f} ({reason}) src={ex.get('source', '?')}", flush=True)
         self.analysis.log("impulse", "close",
                           coin=pos.coin, side=pos.side, reason=reason,
                           entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
@@ -612,7 +693,13 @@ class ImpulseStrategy:
                                                    resp.get("message", ""))
             return
 
-        fill_px, fee, _ = extract_fill_avg(fills, price)
+        ex = await self._resolve_execution(
+            client, inst_id, resp, price,
+            side=side, size=sz, entry_px=price, ct_val=CT_VAL.get(coin, 0.01),
+        )
+        fill_px, fee = ex["fill_px"], ex["fee"]
+        ord_id = ex.get("ord_id") or ""
+        fills = resp.get("data", []) or ([{"ordId": ord_id}] if ord_id else [])
 
         now = datetime.now(timezone.utc).isoformat()
         tp1_pct = self.config.tp1_atr * atr_val / fill_px
