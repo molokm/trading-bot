@@ -99,6 +99,13 @@ class OKXClient:
         return await self._request("GET", "/api/v5/market/ticker",
                                     params={"instId": inst_id})
 
+    async def get_books(self, inst_id: str, sz: int = 20) -> dict:
+        """Order book depth. sz = levels per side (1..400)."""
+        return await self._request(
+            "GET", "/api/v5/market/books",
+            params={"instId": inst_id, "sz": str(max(1, min(int(sz), 400)))},
+        )
+
     async def get_candles(self, inst_id: str, bar: str = "1H",
                            after: str = None, before: str = None,
                            limit: int = 300) -> dict:

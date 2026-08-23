@@ -2,7 +2,7 @@ import React, { useState, useEffect, createContext, useContext, lazy, Suspense }
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
 import { Loader } from './components/ui'
@@ -14,6 +14,7 @@ const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
+const ScalpPage = lazy(() => import('./pages/ScalpPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
 const TrackerPage = lazy(() => import('./pages/TrackerPage'))
 import { api } from './services/api'
@@ -119,6 +120,7 @@ function AppLayout() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
+    { to: '/scalp', icon: Layers, label: t('nav.scalp') },
     { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
@@ -236,6 +238,7 @@ function AppLayout() {
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
           <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
+          <Route path="/scalp" element={<ScalpPage connected={connected} isGuest={isGuest} />} />
           <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />

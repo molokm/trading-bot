@@ -162,6 +162,15 @@ export const api = {
     request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
   aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),
 
+  // ── Order Book Scalp ──
+  scalpStatus: () => request('/scalp/status'),
+  scalpBook: (coin = 'BTC', levels = 12) =>
+    request(`/scalp/book?coin=${encodeURIComponent(coin)}&levels=${levels}`),
+  scalpStart: (config = {}) =>
+    request('/scalp/start', { method: 'POST', body: JSON.stringify(config) }),
+  scalpStop: () =>
+    request('/scalp/stop', { method: 'POST' }),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

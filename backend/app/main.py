@@ -32,6 +32,11 @@ from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BO
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.ai_strategy import AIStrategy, AIConfig, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
 from app.services.ai_agent import llm_status
+from app.services.orderbook_scalp_strategy import (
+    OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID,
+    STRATEGY_NAME as SCALP_NAME, STRATEGY_VERSION as SCALP_VERSION,
+    STRATEGY_DESC as SCALP_DESC, compute_book_metrics,
+)
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
@@ -95,7 +100,8 @@ equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
-ai_bot = None  # AI Discretionary instance
+ai_bot = None
+scalp_bot = None  # Order Book Scalp instance
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -1276,6 +1282,92 @@ async def ai_decide_once():
 
 # ── Health ──
 
+
+
+# ── Order Book Scalp ──────────────────────────────────────────
+@app.get("/api/scalp/status")
+async def scalp_status():
+    global scalp_bot
+    if not scalp_bot:
+        return {
+            "running": False,
+            "strategy": SCALP_NAME,
+            "version": SCALP_VERSION,
+            "description": SCALP_DESC,
+            "execute": False,
+            "books": {},
+            "open_positions": [],
+            "total_pnl": 0,
+            "recent_signals": [],
+        }
+    return scalp_bot.get_status()
+
+
+@app.get("/api/scalp/book")
+async def scalp_book(coin: str = "BTC", levels: int = 10):
+    """Live order book + OBI metrics (auth via middleware)."""
+    client = client_manager.get_client()
+    if not client:
+        return {"error": True, "message": "API not configured"}
+    inst = f"{coin.upper()}-USDT-SWAP"
+    resp = await client.get_books(inst, sz=max(1, min(int(levels), 50)))
+    if resp.get("error"):
+        return resp
+    data = (resp.get("data") or [{}])[0]
+    metrics = compute_book_metrics(
+        data.get("bids") or [], data.get("asks") or [], levels=int(levels),
+    )
+    metrics["coin"] = coin.upper()
+    metrics["inst_id"] = inst
+    return metrics
+
+
+@app.post("/api/scalp/start", dependencies=[Depends(require_admin)])
+async def scalp_start(data: dict = None):
+    global scalp_bot
+    data = data or {}
+    if scalp_bot and getattr(scalp_bot, "_running", False):
+        return {"message": "Scalp already running", **scalp_bot.get_status()}
+    _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+    if "execute" in data:
+        _exec = bool(data["execute"])
+    else:
+        env_ex = os.getenv("SCALP_EXECUTE", "").strip().lower()
+        if env_ex in ("1", "true", "yes", "on"):
+            _exec = True
+        elif env_ex in ("0", "false", "no", "off"):
+            _exec = False
+        else:
+            _exec = _demo
+    cfg = ScalpConfig(
+        capital=float(data.get("capital") or 5000),
+        max_leverage=float(data.get("max_leverage") or 3),
+        obi_threshold=float(data.get("obi_threshold") or 0.35),
+        persist_n=int(data.get("persist_n") or 3),
+        poll_interval_sec=float(data.get("poll_interval_sec") or 1.5),
+        stop_bps=float(data.get("stop_bps") or 12),
+        take_bps=float(data.get("take_bps") or 18),
+        max_hold_sec=float(data.get("max_hold_sec") or 90),
+        use_llm=bool(data.get("use_llm", True)),
+        execute=_exec,
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    scalp_bot = OrderBookScalpStrategy(
+        config=cfg, client_manager=client_manager, db=db, notifier=telegram,
+    )
+    scalp_bot.start()
+    return {"message": "Order Book Scalp started", **scalp_bot.get_status()}
+
+
+@app.post("/api/scalp/stop", dependencies=[Depends(require_admin)])
+async def scalp_stop():
+    global scalp_bot
+    if scalp_bot:
+        scalp_bot.stop()
+    return {"message": "Scalp stopped", "running": False}
+
+
 @app.get("/api/health")
 async def health():
     """Liveness + connection + bot run flags (for keep-alive monitors and UI)."""
@@ -1299,6 +1391,7 @@ async def health():
             "impulse": _bot_flag(impulse),
             "validation": _bot_flag(validation),
             "ai": _bot_flag(ai_bot),
+            "scalp": _bot_flag(scalp_bot),
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
