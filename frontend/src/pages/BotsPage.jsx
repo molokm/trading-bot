@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import {
   Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
-  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical
+  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot
 } from 'lucide-react'
 import { api } from '../services/api'
 import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
@@ -467,6 +467,8 @@ export default function BotsPage({ connected, isGuest }) {
   const [impLoading, setImpLoading] = useState(false)
   const [valStatus, setValStatus] = useState(null)
   const [valLoading, setValLoading] = useState(false)
+  const [aiStatus, setAiStatus] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
   const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [sliderOpen, setSliderOpen] = useState(false)
@@ -530,6 +532,13 @@ export default function BotsPage({ connected, isGuest }) {
         }
       }
     } catch { /* ignore */ }
+    try {
+      const a = await api.aiStatus().catch(() => null)
+      if (a) {
+        anyOk = true
+        setAiStatus(a)
+      }
+    } catch { /* ignore */ }
     setApiAlive(anyOk)
   }, [])
 
@@ -586,6 +595,25 @@ export default function BotsPage({ connected, isGuest }) {
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setValLoading(false)
+  }
+
+  const aiToggle = async () => {
+    setAiLoading(true)
+    try {
+      if (aiStatus?.running) {
+        await api.aiStop()
+      } else {
+        await api.aiStart({
+          capital: 10000,
+          provider: 'groq',
+          execute: true,
+          max_positions: 1,
+          symbols: ['BTC', 'ETH', 'SOL'],
+        })
+      }
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setAiLoading(false)
   }
 
   const handleSave = (botData) => {
@@ -648,6 +676,9 @@ export default function BotsPage({ connected, isGuest }) {
     t('bots.tag_cascade_tp'),
     t('bots.tag_trailing'),
   ]
+
+  const aiRunning = !!aiStatus?.running
+  const aiStartedAt = aiStatus?.started_at ? Date.parse(aiStatus.started_at) : null
 
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
@@ -773,6 +804,47 @@ export default function BotsPage({ connected, isGuest }) {
             t={t}
           />
         )}
+
+        {!isGuest && (
+          <BotCard
+            id="ai"
+            name={t('bots.ai_name')}
+            stratId={aiStatus?.strategy || 'ai_discretionary_1h'}
+            version={aiStatus?.version || 'v0.1'}
+            icon={Bot}
+            accentDim="bg-violet-500/15"
+            accentTxt="text-violet-400"
+            statusMode={aiRunning ? 'live' : 'stopped'}
+            statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
+            coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL']}
+            description={aiStatus?.description || t('bots.ai_desc')}
+            tags={[
+              t('bots.tag_tf_1h'),
+              'BTC · ETH · SOL',
+              t('bots.tag_ai_llm'),
+              t('bots.tag_leverage', { x: aiStatus?.config?.max_leverage || 3 }),
+              t('bots.tag_positions', { n: aiStatus?.config?.max_positions || 1 }),
+              ...((aiStatus?.execute || aiStatus?.llm?.execute) ? [t('bots.tag_demo_exec')] : []),
+            ]}
+            tagline={t('bots.ai_tagline')}
+            backtest={null}
+            pnl={aiStatus?.total_pnl || 0}
+            trades={aiStatus?.decision_count || 0}
+            winRate={aiStatus?.win_rate}
+            sparklinePnl={aiStatus?.total_pnl || 0}
+            startedAt={aiRunning ? aiStartedAt : null}
+            openPositions={aiStatus?.open_positions || []}
+            managed={aiStatus?.running}
+            lastActivity={aiStatus?.last_activity}
+            heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 120) * 3}
+            apiAlive={apiAlive}
+            onToggle={aiToggle}
+            isGuest={isGuest}
+            loading={aiLoading}
+            t={t}
+          />
+        )}
+
       </div>
 
       <SliderPanel
