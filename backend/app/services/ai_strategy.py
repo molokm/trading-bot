@@ -91,6 +91,8 @@ class AIStrategy:
         self.db = db
         self.notifier = notifier
         self.analysis = analysis or get_logger()
+        self._last_exec = None  # last open/close attempt result
+        self._exec_log = []  # recent execution attempts
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -305,6 +307,30 @@ class AIStrategy:
             "execute": self._execute_enabled(),
         }
 
+    def _fmt_sz(self, coin: str, sz: float) -> str:
+        lot = LOT_SZ.get(coin, 0.01)
+        # string without scientific notation; trim trailing zeros
+        prec = 8 if lot < 0.01 else (4 if lot < 1 else 2)
+        s = f"{float(sz):.{prec}f}".rstrip("0").rstrip(".")
+        return s or "0"
+
+    def _record_exec(self, event: str, **data):
+        rec = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **data,
+        }
+        self._last_exec = rec
+        self._exec_log.append(rec)
+        self._exec_log = self._exec_log[-50:]
+        self._decision_log.append(rec)
+        self._decision_log = self._decision_log[-200:]
+        try:
+            self.analysis.log("ai", event, **data)
+        except Exception:
+            pass
+        print(f"[AI] exec {event} {data}", flush=True)
+
     # ── sizing (anti-liq) ──────────────────────────────────────
     def _size_order(self, coin: str, entry: float, stop_pct: float) -> tuple[float, float]:
         """Return (contracts_size, leverage) with risk and margin caps."""
@@ -334,7 +360,7 @@ class AIStrategy:
         coin = inst_id.split("-")[0]
         return await client.place_order(
             inst_id=inst_id, side=side, ord_type="market",
-            sz=str(sz), td_mode="cross", pos_side=pos_side,
+            sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
         )
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
@@ -345,12 +371,13 @@ class AIStrategy:
             return
         sz, lev = self._size_order(coin, entry, stop_pct)
         if sz <= 0:
-            print(f"[AI] size=0 skip open {coin}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side, reason="size=0",
+                              entry=entry, stop_pct=stop_pct)
             return
         try:
             assert_can_open(is_reduce_only=False)
         except Exception as e:
-            print(f"[AI] risk block open: {e}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side, reason=f"risk:{e}")
             return
         inst = f"{coin}-USDT-SWAP"
         order_side = "buy" if side == "long" else "sell"
@@ -367,16 +394,58 @@ class AIStrategy:
             except Exception:
                 pass
             return
+        for ps in (side, "net", None):
+            try:
+                await client.set_leverage(inst, lev, mgn_mode="cross",
+                                         pos_side=ps if ps else "net")
+            except Exception:
+                pass
+        pos_side_try = side
         try:
-            await client.set_leverage(inst, lev, mgn_mode="cross", pos_side=side)
-        except Exception:
-            pass
-        resp = await self._place(client, inst, order_side, sz, side)
-        if resp.get("error"):
-            print(f"[AI] open error {coin}: {resp.get('message')}", flush=True)
+            resp = await self._place(client, inst, order_side, sz, pos_side_try)
+        except Exception as e:
+            self._record_exec("open_error", coin=coin, side=side, reason=str(e),
+                              size=sz, leverage=lev)
             return
+        if resp.get("error"):
+            msg = str(resp.get("message") or resp)
+            # Retry net-mode accounts (no hedge long/short)
+            if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
+                try:
+                    resp = await client.place_order(
+                        inst_id=inst, side=order_side, ord_type="market",
+                        sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=None,
+                    )
+                except Exception as e2:
+                    self._record_exec("open_error", coin=coin, side=side,
+                                      reason=str(e2), size=sz, leverage=lev)
+                    return
+            if resp.get("error"):
+                self._record_exec(
+                    "open_error", coin=coin, side=side,
+                    reason=str(resp.get("message") or resp),
+                    size=sz, leverage=lev, raw=str(resp)[:300],
+                )
+                return
         fills = resp.get("data") or []
+        # Market ack often has ordId but no avgPx — resolve via get_order
         fill_px, fee, _ = extract_fill_avg(fills, entry)
+        if (not fill_px or fill_px <= 0) and fills:
+            ord_id = fills[0].get("ordId") or fills[0].get("ord_id")
+            if ord_id:
+                for _ in range(4):
+                    await asyncio.sleep(0.35)
+                    try:
+                        o = await client.get_order(inst, ord_id=ord_id)
+                        rows = o.get("data") or []
+                        if rows:
+                            fill_px, fee, _ = extract_fill_avg(rows, entry)
+                            if fill_px and fill_px > 0:
+                                break
+                    except Exception:
+                        pass
+        if not fill_px or fill_px <= 0:
+            fill_px = entry
         if side == "long":
             stop = fill_px * (1 - stop_pct)
             take = fill_px * (1 + take_pct)
@@ -416,14 +485,10 @@ class AIStrategy:
                 ))
             except Exception:
                 pass
-        print(f"[AI] OPEN {side} {coin} @{fill_px} stop={stop:.4f} lev={lev}", flush=True)
-        try:
-            self.analysis.log(
-                "ai", "open", coin=coin, side=side, entry=fill_px,
-                stop=stop, take=take, size=sz, leverage=lev, reason=reason,
-            )
-        except Exception:
-            pass
+        self._record_exec(
+            "open_ok", coin=coin, side=side, entry=fill_px,
+            stop=stop, take=take, size=sz, leverage=lev, reason=reason,
+        )
 
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
@@ -551,9 +616,18 @@ class AIStrategy:
             await self._close(client, coin, decision.get("reason") or "ai_reduce")
             return
         if action == "open" and coin and decision.get("side"):
+            conf = float(decision.get("confidence") or 0)
+            if conf < float(self.config.min_confidence or 0):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"low_conf:{conf}")
+                return
             if coin in self._positions:
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="already_open")
                 return
             if len(self._positions) >= self.config.max_positions:
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="max_positions")
                 return
             await self._open(
                 client, coin, decision["side"],
@@ -599,6 +673,8 @@ class AIStrategy:
             "last_decision": self._last_decision,
             "recent_decisions": self._decision_log[-30:],
             "decision_count": len(self._decision_log),
+            "last_exec": self._last_exec,
+            "recent_exec": self._exec_log[-10:],
             "recent_trades": self._trade_log[-20:],
             "last_activity": self._last_activity,
             "started_at": self._started_at,
