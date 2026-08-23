@@ -577,7 +577,10 @@ export default function MiniAppPage() {
   /* ── Bot status card ── */
   const botCard = (name, s, iconColor) => {
     const running = s?.running
-    const pnl = s?.total_pnl ?? 0
+    // Align with dashboard: prefer portfolio per_bot when parent passed it on status
+    const pnl = (s?.total_pnl_source === 'okx_history' ? s?.total_pnl : null)
+      ?? s?.total_pnl
+      ?? 0
     return (
       <Card className="flex-1 min-w-0">
         <div className="flex items-center justify-between mb-1">

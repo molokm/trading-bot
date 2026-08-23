@@ -194,6 +194,26 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
   }, [pnl])
 
+  // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
+  const momentumCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per.Momentum != null) return Number(per.Momentum)
+    if (per.rotation_strategy != null) return Number(per.rotation_strategy)
+    return Number(momentumStatus?.total_pnl ?? 0)
+  }, [pnl, momentumStatus?.total_pnl])
+  const impulseCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['Impulse 1D'] != null) return Number(per['Impulse 1D'])
+    if (per.impulse_strategy != null) return Number(per.impulse_strategy)
+    return Number(impulseStatus?.total_pnl ?? 0)
+  }, [pnl, impulseStatus?.total_pnl])
+  const validationCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['MACD+Donchian Validation'] != null) return Number(per['MACD+Donchian Validation'])
+    if (per.validation_strategy != null) return Number(per.validation_strategy)
+    return Number(validationStatus?.total_pnl ?? 0)
+  }, [pnl, validationStatus?.total_pnl])
+
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
@@ -813,8 +833,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
                       <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                      <div className={`mono text-xs font-bold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        ${momentumStatus.total_pnl >= 0 ? '+' : ''}{(momentumStatus.total_pnl || 0).toFixed(2)}
+                      <div className={`mono text-xs font-bold mt-0.5 ${momentumCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        ${momentumCardPnl >= 0 ? '+' : ''}{momentumCardPnl.toFixed(2)}
                       </div>
                     </div>
                     <div className="p-1.5 rounded-md bg-[var(--bg)]">
@@ -884,8 +904,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${impulseStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${impulseStatus?.total_pnl >= 0 ? '+' : ''}{(impulseStatus?.total_pnl || 0).toFixed(2)}
+                  <div className={`mono text-xs font-bold mt-0.5 ${impulseCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    ${impulseCardPnl >= 0 ? '+' : ''}{impulseCardPnl.toFixed(2)}
                   </div>
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
@@ -944,8 +964,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${validationStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${validationStatus?.total_pnl >= 0 ? '+' : ''}{(validationStatus?.total_pnl || 0).toFixed(2)}
+                  <div className={`mono text-xs font-bold mt-0.5 ${validationCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    ${validationCardPnl >= 0 ? '+' : ''}{validationCardPnl.toFixed(2)}
                   </div>
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
