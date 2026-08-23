@@ -30,6 +30,7 @@ from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
+from app.services.ai_strategy import AIStrategy, AIConfig, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
@@ -93,6 +94,7 @@ equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
+ai_bot = None  # AI Discretionary instance
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -327,6 +329,21 @@ async def startup():
     except Exception as e:
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
+    try:
+        print("[startup] AI Discretionary (optional) ...", flush=True)
+        _ai_auto = os.getenv("AI_AUTO_START", "0").strip().lower() in ("1", "true", "yes", "on")
+        if _env_key and _env_secret and _env_pass and _ai_auto:
+            global ai_bot
+            ai_cfg = AIConfig(capital=float(os.getenv("AI_CAPITAL", "10000")))
+            ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
+                               notifier=telegram)
+            ai_bot.start()
+            print("[startup]   AI Discretionary RUNNING", flush=True)
+        else:
+            print("[startup]   AI skipped (set AI_AUTO_START=1 to enable)", flush=True)
+    except Exception as e:
+        print(f"[startup]   AI FAILED: {e}", flush=True)
+
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -352,6 +369,11 @@ async def shutdown():
         await impulse.stop()
     if validation and validation._running:
         await validation.stop()
+    if ai_bot and getattr(ai_bot, "_running", False):
+        try:
+            ai_bot.stop()
+        except Exception:
+            pass
     await db.close()
     try:
         from app.services.analysis_logger import get_logger
@@ -1096,6 +1118,80 @@ async def public_tracker():
     }
 
 
+
+# ── AI Discretionary 1H ──
+
+@app.get("/api/ai/status")
+async def ai_status():
+    global ai_bot
+    if not ai_bot:
+        return {
+            "running": False,
+            "strategy": AI_NAME,
+            "version": AI_VERSION,
+            "description": AI_DESC,
+            "provider": os.getenv("AI_LLM_PROVIDER", "mock"),
+            "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
+            "open_positions": [],
+            "total_pnl": 0,
+        }
+    return ai_bot.get_status()
+
+
+@app.post("/api/ai/start", dependencies=[Depends(require_admin)])
+async def ai_start(data: dict = None):
+    global ai_bot
+    data = data or {}
+    if ai_bot and getattr(ai_bot, "_running", False):
+        return {"message": "AI already running", **ai_bot.get_status()}
+    cfg = AIConfig(
+        capital=float(data.get("capital") or os.getenv("AI_CAPITAL", "10000")),
+        max_leverage=float(data.get("max_leverage") or 3),
+        max_positions=int(data.get("max_positions") or 1),
+        risk_per_trade=float(data.get("risk_per_trade") or 0.02),
+        poll_interval_sec=int(data.get("poll_interval_sec") or 120),
+        provider=data.get("provider"),
+        execute=bool(data["execute"]) if "execute" in data else None,
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
+    ai_bot.start()
+    return {"message": "AI Discretionary started", **ai_bot.get_status()}
+
+
+@app.post("/api/ai/stop", dependencies=[Depends(require_admin)])
+async def ai_stop():
+    global ai_bot
+    if ai_bot:
+        ai_bot.stop()
+    return {"message": "AI stopped", "running": False}
+
+
+@app.post("/api/ai/decide", dependencies=[Depends(require_admin)])
+async def ai_decide_once():
+    global ai_bot
+    if not ai_bot or not getattr(ai_bot, "_running", False):
+        raise HTTPException(status_code=400, detail="AI bot not running — start first")
+    client = client_manager.get_client() if client_manager else None
+    if not client:
+        raise HTTPException(status_code=400, detail="OKX client not ready")
+    await ai_bot._fetch_indicators(client)
+    snap = ai_bot._snapshot()
+    from app.services.ai_agent import call_llm
+    from datetime import datetime, timezone
+    decision = await call_llm(snap, provider=ai_bot._provider())
+    ai_bot._last_decision = {**decision, "time": datetime.now(timezone.utc).isoformat()}
+    return {
+        "snapshot": {
+            "indicators": snap.get("indicators"),
+            "open_positions": snap.get("open_positions"),
+            "equity": snap.get("equity"),
+        },
+        "decision": decision,
+    }
+
+
 # ── Health ──
 
 @app.get("/api/health")
@@ -1120,6 +1216,7 @@ async def health():
             "rotation": _bot_flag(rotation),
             "impulse": _bot_flag(impulse),
             "validation": _bot_flag(validation),
+            "ai": _bot_flag(ai_bot),
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
