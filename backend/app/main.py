@@ -1546,10 +1546,10 @@ async def get_portfolio():
 
 # ── Positions ──
 
-def _tag_position_bot(inst_id: str, pos_side: str) -> str:
-    """Determine which bot owns an OKX position by checking running bots' in-memory positions.
+def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = None) -> str:
+    """Determine which bot owns an OKX position.
 
-    Order: Rotation (Momentum) → Impulse → Validation → AI → Scalp.
+    Priority: in-memory _positions → trade logs → DB positions table → empty.
     """
     norm_side = pos_side.lower() if pos_side else ""
 
@@ -1598,10 +1598,29 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "Order Book Scalp"
+
+    # Fallback: DB positions table (survives restarts)
+    if db_pos_map is not None:
+        # Try exact side match first
+        bot_id = db_pos_map.get((inst_id, norm_side))
+        if not bot_id and norm_side == "net":
+            # One-way mode: OKX returns "net" but DB stores "long" or "short"
+            bot_id = db_pos_map.get((inst_id, "long")) or db_pos_map.get((inst_id, "short"))
+        if not bot_id:
+            # Last resort: any position for this instrument
+            for (iid, _), bid in db_pos_map.items():
+                if iid == inst_id:
+                    bot_id = bid
+                    break
+        if bot_id:
+            name = _db_bot_name(bot_id)
+            if name:
+                return name
+
     return ""
 
 
-def _tag_trade_bot(trade: dict) -> str:
+def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
     """Tag a paired trade with bot name. Works for both open and closed trades."""
     inst_id = trade.get("inst_id", "") or trade.get("symbol", "")
     pos_side = trade.get("pos_side", "")
@@ -1610,7 +1629,7 @@ def _tag_trade_bot(trade: dict) -> str:
     if by_id:
         return by_id
     if trade.get("reason") == "open":
-        return _tag_position_bot(inst_id, pos_side)
+        return _tag_position_bot(inst_id, pos_side, db_pos_map=db_pos_map)
     # Prefer exact ordId match against in-memory close logs (most reliable)
     ord_id = str(trade.get("ord_id") or trade.get("close_ord_id") or "").strip()
     if ord_id:
@@ -1701,10 +1720,18 @@ async def get_positions(inst_type: str = "SWAP"):
     result = await _okx_call(lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
+    # Build DB positions map for fallback tagging (survives restarts)
+    db_pos_map = {}
+    try:
+        db_rows = await db.get_all_positions()
+        for row in db_rows:
+            db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+    except Exception:
+        pass
     # Tag each position with bot name
     tagged = []
     for p in result.get("data", []):
-        p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"))
+        p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"), db_pos_map=db_pos_map)
         tagged.append(p)
     out = {"positions": tagged}
     _positions_cache = out
@@ -2158,6 +2185,14 @@ async def momentum_trades(limit: int = 20):
                 algo_map = {}
 
             trades = []
+            # Build DB positions map for fallback tagging
+            db_pos_map = {}
+            try:
+                db_rows = await db.get_all_positions()
+                for row in db_rows:
+                    db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+            except Exception:
+                pass
             for t in reversed(paired):
                 if len(trades) >= limit:
                     break
@@ -2185,7 +2220,7 @@ async def momentum_trades(limit: int = 20):
                     "ord_id": t.get("ord_id", ""),
                     "source": "okx",
                 }
-                trade["bot"] = _tag_trade_bot(trade)
+                trade["bot"] = _tag_trade_bot(trade, db_pos_map=db_pos_map)
                 if is_open and inst_id in algo_map:
                     for ao in algo_map[inst_id]:
                         sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
@@ -4511,6 +4546,14 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                      if not str(f.get("clOrdId", "")).startswith("val")]
         paired = await _pair_fills(raw_fills)
         if paired:
+            # Build DB positions map for fallback tagging
+            db_pos_map = {}
+            try:
+                db_rows = await db.get_all_positions()
+                for row in db_rows:
+                    db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+            except Exception:
+                pass
             result = []
             for t in paired[-limit:]:
                 entry_px = t.get("entry", 0) or t.get("entry_price", 0)
@@ -4531,7 +4574,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                     "reason": t.get("reason", ""),
                     "pos_side": t.get("pos_side", "long"),
                     "signal_id": t.get("ord_id", ""),
-                    "bot": _tag_trade_bot(t),
+                    "bot": _tag_trade_bot(t, db_pos_map=db_pos_map),
                 })
             print(f"[trades/paired] OKX fallback: {len(result)} trades from exchange", flush=True)
             return {"trades": result}

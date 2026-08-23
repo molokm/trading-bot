@@ -460,6 +460,14 @@ class AIStrategy:
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
+        if self.db:
+            try:
+                await self.db.save_position(
+                    bot_id=self.BOT_ID, inst_id=inst, side=side,
+                    size=sz, entry_price=round(fill_px, 4),
+                )
+            except Exception:
+                pass
         self._trade_log.append({
             "time": pos.opened_at, "side": order_side, "symbol": inst,
             "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
@@ -497,6 +505,11 @@ class AIStrategy:
         if not self._execute_enabled():
             print(f"[AI] SIGNAL close {coin} ({reason}) execute=0", flush=True)
             del self._positions[coin]
+            if self.db:
+                try:
+                    await self.db.delete_position(self.BOT_ID)
+                except Exception:
+                    pass
             return
         close_side = "sell" if pos.side == "long" else "buy"
         resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side)
@@ -533,6 +546,11 @@ class AIStrategy:
             except Exception:
                 pass
         del self._positions[coin]
+        if self.db:
+            try:
+                await self.db.delete_position(self.BOT_ID)
+            except Exception:
+                pass
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
         try:
             self.analysis.log(

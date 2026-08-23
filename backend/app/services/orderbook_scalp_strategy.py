@@ -650,6 +650,14 @@ class OrderBookScalpStrategy:
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
+        if self.db:
+            try:
+                await self.db.save_position(
+                    bot_id=self.BOT_ID, inst_id=inst, side=side,
+                    size=sz, entry_price=round(fill_px, 4),
+                )
+            except Exception:
+                pass
         self._last_exec = {
             "event": "open_ok", "coin": coin, "side": side,
             "entry": fill_px, "size": sz, "lev": lev,
@@ -714,6 +722,11 @@ class OrderBookScalpStrategy:
             return
         if not self._execute_enabled():
             del self._positions[coin]
+            if self.db:
+                try:
+                    await self.db.delete_position(self.BOT_ID)
+                except Exception:
+                    pass
             return
         close_side = "sell" if pos.side == "long" else "buy"
         try:
@@ -759,6 +772,11 @@ class OrderBookScalpStrategy:
         except Exception:
             pass
         del self._positions[coin]
+        if self.db:
+            try:
+                await self.db.delete_position(self.BOT_ID)
+            except Exception:
+                pass
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("event") == "close"]
