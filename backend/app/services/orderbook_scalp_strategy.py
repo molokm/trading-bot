@@ -191,7 +191,9 @@ class OrderBookScalpStrategy:
         self._last_activity = None
         self._started_at = None
         self._last_exec = None
-        self._avail_usdt = None  # live free USDT margin from OKX
+        self._avail_usdt = None  # USDT-bucket free
+        self._acct_avail = None  # account-level availEq (multi-ccy USD)
+        self._acct_eq = None
 
     def start(self):
         if self._running:
@@ -397,17 +399,21 @@ class OrderBookScalpStrategy:
         await self._open(client, coin, side, metrics, sig)
 
     async def _refresh_balance(self, client) -> float:
-        """Return usable USDT for *new* margin; 0 if account is tight.
+        """Usable margin budget under multi-currency collateral.
 
-        Prefer the smaller of account-level availEq and USDT detail availEq/availBal.
-        Never fall back to configured capital when free margin is unknown/zero —
-        that caused 51008 with oversized orders while other bots held margin.
+        OKX multi-ccy: account ``availEq`` is USD-equivalent free collateral
+        (BTC/ETH/… already haircut). USDT ``availEq`` can be ~0 while the
+        portfolio still has buying power — do **not** min() them together.
+
+        Sizing uses max(account availEq, USDT free). Actual opens may still
+        hit 51008 if auto-borrow is off and the engine demands pure USDT.
         """
         try:
             resp = await client.get_balance()
             if resp.get("error"):
                 print(f"[Scalp] balance error: {resp.get('message')}", flush=True)
                 self._avail_usdt = 0.0
+                self._acct_avail = 0.0
                 return 0.0
             rows = resp.get("data") or []
             acct_avail = 0.0
@@ -430,57 +436,58 @@ class OrderBookScalpStrategy:
                         usdt_eq = float(d.get("eq") or d.get("cashBal") or usdt_avail or 0)
                     except (TypeError, ValueError):
                         pass
-            # free margin = min of account and USDT bucket when both present
-            candidates = [x for x in (acct_avail, usdt_avail) if x > 0]
-            avail = min(candidates) if candidates else 0.0
-            self._avail_usdt = float(avail)
-            if usdt_eq > 0 and self._equity == self._capital:
-                self._equity = min(float(self.config.capital), usdt_eq)
-            elif acct_eq > 0 and self._equity == self._capital:
+            self._acct_avail = float(acct_avail)
+            self._acct_eq = float(acct_eq)
+            self._avail_usdt = float(usdt_avail)
+            # Multi-ccy buying power ≈ account availEq (already USD)
+            buying_power = max(acct_avail, usdt_avail)
+            if acct_eq > 0 and self._equity == self._capital:
                 self._equity = min(float(self.config.capital), acct_eq)
-            # usable budget for this bot only
-            usable = min(float(self.config.capital), avail * 0.35) if avail > 0 else 0.0
-            print(f"[Scalp] margin avail={avail:.2f} usable={usable:.2f} "
-                  f"acct_avail={acct_avail:.2f} usdt_avail={usdt_avail:.2f}", flush=True)
+            elif usdt_eq > 0 and self._equity == self._capital:
+                self._equity = min(float(self.config.capital), usdt_eq)
+            # conservative slice for this bot among others sharing the account
+            usable = min(float(self.config.capital), buying_power * 0.25) if buying_power > 0 else 0.0
+            print(
+                f"[Scalp] multi-ccy buying_power={buying_power:.2f} usable={usable:.2f} "
+                f"acct_avail={acct_avail:.2f} usdt_avail={usdt_avail:.2f} totalEq={acct_eq:.2f}",
+                flush=True,
+            )
             return usable
         except Exception as e:
             print(f"[Scalp] balance: {e}", flush=True)
             self._avail_usdt = 0.0
+            self._acct_avail = 0.0
             return 0.0
 
     def _size_order(self, coin: str, entry: float, equity_cap: float = None) -> tuple[float, float]:
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
-        avail = float(self._avail_usdt or 0)
-        # Hard stop: other bots own the margin
-        if avail < 12.0:
+        # Multi-ccy: account availEq is the real free collateral in USD
+        avail = max(float(self._acct_avail or 0), float(self._avail_usdt or 0))
+        if avail < 8.0:
             return 0.0, 1.0
         base = float(equity_cap if equity_cap is not None else 0.0)
         if base <= 0:
-            base = min(float(self.config.capital), avail * 0.35)
-        base = min(base, avail * 0.35)
+            base = min(float(self.config.capital), avail * 0.25)
+        base = min(base, avail * 0.25)
         stop_pct = max(0.0008, float(self.config.stop_bps) / 10000.0)
         risk_usd = base * float(self.config.risk_per_trade)
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = min(base * float(self.config.allocation_pct), avail * 0.25)
-        lev = min(float(self.config.max_leverage), 1.0)  # scalp default: no extra leverage pressure
-        lev = max(1.0, lev)
+        max_margin = min(base * float(self.config.allocation_pct), avail * 0.15)
+        lev = max(1.0, min(float(self.config.max_leverage), 1.0))
         if lev > 0 and notional / lev > max_margin:
             notional = max_margin * lev
-        # tiny absolute ceiling — demo shares margin with 3–4 other bots
-        notional = min(notional, 40.0)
-        # required margin check
+        notional = min(notional, 50.0)
         req_margin = notional / lev if lev else notional
-        if entry <= 0 or ct <= 0 or req_margin > avail * 0.3 or max_margin < 3:
+        if entry <= 0 or ct <= 0 or req_margin > avail * 0.2 or max_margin < 2:
             return 0.0, lev
         raw = notional / (entry * ct)
         steps = math.floor(raw / lot)
         sz = max(0.0, round(steps * lot, 8))
-        # if still too big vs avail, force minimum lot once, else 0
         min_notional = lot * entry * ct
         min_margin = min_notional / lev
         if sz <= 0:
-            if min_margin <= avail * 0.25:
+            if min_margin <= avail * 0.15:
                 sz = lot
             else:
                 return 0.0, lev
@@ -491,12 +498,18 @@ class OrderBookScalpStrategy:
         if entry <= 0:
             return
         usable = await self._refresh_balance(client)
-        if usable <= 0 or (self._avail_usdt is not None and self._avail_usdt < 12):
+        buying = max(float(self._acct_avail or 0), float(self._avail_usdt or 0))
+        if usable <= 0 or buying < 8:
             self._last_exec = {
                 "event": "skip", "reason": "insufficient_free_margin",
-                "coin": coin, "avail_usdt": self._avail_usdt, "usable": usable,
+                "coin": coin,
+                "avail_usdt": self._avail_usdt,
+            "acct_avail": self._acct_avail,
+            "acct_eq": self._acct_eq,
+                "acct_avail": self._acct_avail,
+                "usable": usable,
             }
-            print(f"[Scalp] skip {coin}: free margin {self._avail_usdt}", flush=True)
+            print(f"[Scalp] skip {coin}: buying_power={buying}", flush=True)
             return
         sz, lev = self._size_order(coin, entry, equity_cap=usable)
         if sz <= 0:
@@ -571,11 +584,24 @@ class OrderBookScalpStrategy:
             break
 
         if not resp or resp.get("error"):
+            msg = str((resp or {}).get("message") or "")
+            hint = None
+            if "51008" in msg or "Insufficient" in msg:
+                hint = (
+                    "OKX wants USDT margin for SWAP. Multi-ccy collateral is on, but "
+                    "auto-borrow is off — enable Auto-Borrow in OKX Trade settings, "
+                    "or free/convert some USDT. acct_avail="
+                    f"{self._acct_avail} usdt_avail={self._avail_usdt}"
+                )
             self._last_exec = {
-                "event": "open_error", "reason": (resp or {}).get("message"),
-                "coin": coin, "avail_usdt": self._avail_usdt, "tried_sz": size_try,
+                "event": "open_error", "reason": msg,
+                "coin": coin, "avail_usdt": self._avail_usdt,
+            "acct_avail": self._acct_avail,
+            "acct_eq": self._acct_eq,
+                "acct_avail": self._acct_avail, "tried_sz": size_try,
+                "hint": hint,
             }
-            print(f"[Scalp] open error {coin}: {(resp or {}).get('message')}", flush=True)
+            print(f"[Scalp] open error {coin}: {msg} | {hint}", flush=True)
             return
 
         fills = resp.get("data") or []
@@ -715,6 +741,8 @@ class OrderBookScalpStrategy:
             "description": STRATEGY_DESC,
             "execute": self._execute_enabled(),
             "avail_usdt": self._avail_usdt,
+            "acct_avail": self._acct_avail,
+            "acct_eq": self._acct_eq,
             "capital": self._capital,
             "equity": round(self._equity, 4),
             "total_pnl": round(self._equity - self._capital, 4),
