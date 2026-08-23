@@ -829,7 +829,7 @@ export default function BotsPage({ connected, isGuest }) {
             tagline={t('bots.ai_tagline')}
             backtest={null}
             pnl={aiStatus?.total_pnl || 0}
-            trades={aiStatus?.decision_count || 0}
+            trades={aiStatus?.total_trades || 0}
             winRate={aiStatus?.win_rate}
             sparklinePnl={aiStatus?.total_pnl || 0}
             startedAt={aiRunning ? aiStartedAt : null}

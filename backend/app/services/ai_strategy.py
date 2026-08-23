@@ -637,8 +637,12 @@ class AIStrategy:
             )
 
     def get_status(self) -> dict:
-        closed = [t for t in self._trade_log if t.get("pnl") not in (None, 0) and t.get("reason") != "open"]
-        # include fee-only opens differently
+        closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
+        opens = [t for t in self._trade_log if t.get("reason") == "open"]
+        # closed fills count as trades; opens alone are not "completed trades"
+        total_trades = len(closed)
+        wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
+        win_rate = round(100.0 * wins / total_trades, 1) if total_trades else None
         realized = self._equity - self._capital
         return {
             "running": self._running,
@@ -650,6 +654,9 @@ class AIStrategy:
             "capital": self._capital,
             "equity": round(self._equity, 2),
             "total_pnl": round(realized, 2),
+            "total_trades": total_trades,
+            "open_fills": len(opens),
+            "win_rate": win_rate,
             "open_positions": [
                 {
                     "coin": p.coin, "symbol": p.inst_id, "side": p.side,
