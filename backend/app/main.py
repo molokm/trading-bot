@@ -31,6 +31,7 @@ from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
 from app.services.ai_strategy import AIStrategy, AIConfig, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
+from app.services.ai_agent import llm_status
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
@@ -1130,8 +1131,7 @@ async def ai_status():
             "strategy": AI_NAME,
             "version": AI_VERSION,
             "description": AI_DESC,
-            "provider": os.getenv("AI_LLM_PROVIDER", "mock"),
-            "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
+            **llm_status(),
             "open_positions": [],
             "total_pnl": 0,
         }
@@ -1150,7 +1150,7 @@ async def ai_start(data: dict = None):
         max_positions=int(data.get("max_positions") or 1),
         risk_per_trade=float(data.get("risk_per_trade") or 0.02),
         poll_interval_sec=int(data.get("poll_interval_sec") or 120),
-        provider=data.get("provider"),
+        provider=data.get("provider") or ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None),
         execute=bool(data["execute"]) if "execute" in data else None,
     )
     if data.get("symbols"):

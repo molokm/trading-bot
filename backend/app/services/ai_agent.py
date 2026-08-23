@@ -217,7 +217,10 @@ def mock_decide(snapshot: dict) -> dict:
 
 async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     """Ask LLM (or mock) for a decision given market snapshot."""
-    provider = (provider or os.getenv("AI_LLM_PROVIDER", "mock")).strip().lower()
+    provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+    if not provider:
+        # Auto: prefer Groq when key is present, else mock (free, no signup)
+        provider = "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
 
     user_payload = {
@@ -242,7 +245,7 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             raw = await _openai_compatible(
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-                model=os.getenv("AI_LLM_MODEL", "llama-3.3-70b-versatile"),
+                model=os.getenv("AI_LLM_MODEL", "llama-3.1-8b-instant"),
                 system=SYSTEM_PROMPT,
                 user=user_msg,
             )
@@ -279,7 +282,8 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
 
 
 async def _openai_compatible(api_key: str, base_url: str, model: str,
-                             system: str, user: str) -> str:
+                             system: str, user: str,
+                             json_mode: bool = True) -> str:
     if not api_key:
         raise RuntimeError("missing API key")
     url = base_url.rstrip("/") + "/chat/completions"
@@ -292,9 +296,18 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             {"role": "user", "content": user},
         ],
     }
+    # Groq / many OpenAI-compatible APIs support JSON object mode
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=45.0) as client:
         r = await client.post(url, headers=headers, json=body)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            # Retry once without json_mode if provider rejects response_format
+            if json_mode and r.status_code in (400, 422):
+                body.pop("response_format", None)
+                r = await client.post(url, headers=headers, json=body)
+            if r.status_code >= 400:
+                raise RuntimeError(f"LLM HTTP {r.status_code}: {r.text[:300]}")
         data = r.json()
     return data["choices"][0]["message"]["content"]
 
@@ -316,3 +329,21 @@ async def _gemini(api_key: str, model: str, system: str, user: str) -> str:
         r.raise_for_status()
         data = r.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def llm_status() -> dict:
+    """Public-safe LLM config for /api/ai/status (no secrets)."""
+    key = os.getenv("GROQ_API_KEY", "").strip()
+    provider = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+    if not provider:
+        provider = "groq" if key else "mock"
+    return {
+        "provider": provider,
+        "model": os.getenv("AI_LLM_MODEL") or (
+            "llama-3.1-8b-instant" if provider == "groq" else
+            "gpt-4o-mini" if provider == "openai" else
+            "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
+        ),
+        "groq_key_configured": bool(key),
+        "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
+    }

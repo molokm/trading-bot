@@ -19,7 +19,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .ai_agent import call_llm, ALLOWED_SYMBOLS
+from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
 from .risk_guard import assert_can_open
 
 AI_BOT_ID = "ai_strategy"
@@ -133,7 +133,12 @@ class AIStrategy:
                 pass
 
     def _provider(self) -> str:
-        return (self.config.provider or os.getenv("AI_LLM_PROVIDER", "mock")).strip().lower()
+        if self.config.provider:
+            return str(self.config.provider).strip().lower()
+        env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+        if env:
+            return env
+        return "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
 
     def _execute_enabled(self) -> bool:
         if self.config.execute is not None:
@@ -276,6 +281,7 @@ class AIStrategy:
             "indicators": self._latest_indicators,
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
+            "llm": llm_status(),
             "execute": self._execute_enabled(),
         }
 
