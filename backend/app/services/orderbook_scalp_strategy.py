@@ -173,7 +173,7 @@ class OrderBookScalpStrategy:
         self.config = config or ScalpConfig()
         self.client_manager = client_manager
         self.db = db
-        self.notifier = notifier
+        self.notifier = None  # Telegram disabled for scalp (too many fills)
         self.analysis = analysis or get_logger()
         self._running = False
         self._thread = None

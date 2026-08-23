@@ -1354,7 +1354,7 @@ async def scalp_start(data: dict = None):
     if data.get("symbols"):
         cfg.symbols = list(data["symbols"])
     scalp_bot = OrderBookScalpStrategy(
-        config=cfg, client_manager=client_manager, db=db, notifier=telegram,
+        config=cfg, client_manager=client_manager, db=db, notifier=None,  # no TG spam
     )
     scalp_bot.start()
     return {"message": "Order Book Scalp started", **scalp_bot.get_status()}
