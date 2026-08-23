@@ -22,17 +22,17 @@ log = logging.getLogger("ai_agent")
 
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce")
 ALLOWED_SIDES = ("long", "short")
-ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL")
+ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")
 
 
 SYSTEM_PROMPT = """You are a cautious crypto futures trading agent for OKX SWAP.
-Universe: BTC, ETH, SOL only. Timeframe: 1H.
+Universe: BTC, ETH, SOL, XRP only. Timeframe: 1H.
 Account: ~$10,000, max leverage 3x, must avoid liquidation — stops must be tight
 relative to leverage (prefer stop 2.5–5% from entry at 2–3x).
 Reply with ONLY a single JSON object, no markdown:
 {
   "action": "open"|"close"|"hold"|"reduce",
-  "symbol": "BTC"|"ETH"|"SOL"|null,
+  "symbol": "BTC"|"ETH"|"SOL"|"XRP"|null,
   "side": "long"|"short"|null,
   "size_pct_equity": 0.0-0.15,
   "stop_pct": 0.015-0.05,

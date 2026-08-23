@@ -608,7 +608,7 @@ export default function BotsPage({ connected, isGuest }) {
           provider: 'groq',
           execute: true,
           max_positions: 1,
-          symbols: ['BTC', 'ETH', 'SOL'],
+          symbols: ['BTC', 'ETH', 'SOL', 'XRP'],
         })
       }
       await refreshStatus()
@@ -810,17 +810,17 @@ export default function BotsPage({ connected, isGuest }) {
             id="ai"
             name={t('bots.ai_name')}
             stratId={aiStatus?.strategy || 'ai_discretionary_1h'}
-            version={aiStatus?.version || 'v0.1'}
+            version={aiStatus?.version || 'v0.2'}
             icon={Bot}
             accentDim="bg-violet-500/15"
             accentTxt="text-violet-400"
             statusMode={aiRunning ? 'live' : 'stopped'}
             statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
-            coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL']}
+            coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
             description={aiStatus?.description || t('bots.ai_desc')}
             tags={[
               t('bots.tag_tf_1h'),
-              'BTC · ETH · SOL',
+              'BTC · ETH · SOL · XRP',
               t('bots.tag_ai_llm'),
               t('bots.tag_leverage', { x: aiStatus?.config?.max_leverage || 3 }),
               t('bots.tag_positions', { n: aiStatus?.config?.max_positions || 1 }),

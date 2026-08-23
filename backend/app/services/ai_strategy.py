@@ -1,4 +1,4 @@
-"""AI Discretionary Strategy — 1H BTC/ETH/SOL with LLM (or mock) decisions.
+"""AI Discretionary Strategy — 1H BTC/ETH/SOL/XRP with LLM (or mock) decisions.
 
 Safety envelope (anti-liquidation oriented):
   - capital baseline $10_000, max leverage 3x
@@ -25,16 +25,16 @@ from .analysis_logger import get_logger
 
 AI_BOT_ID = "ai_strategy"
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v0.1"
+STRATEGY_VERSION = "v0.2"
 STRATEGY_DESC = (
-    "AI Discretionary v0.1 — 1H BTC/ETH/SOL. LLM (или mock) предлагает вход/выход; "
+    "AI Discretionary v0.2 — 1H BTC/ETH/SOL/XRP. LLM (или mock) предлагает вход/выход; "
     "исполнение только через risk envelope: депозит-ориентир $10k, плечо ≤3×, "
     "стоп 1.5–5%, max 1–2 позиции. Без ключа LLM работает mock-эвристика. "
     "AI_EXECUTE=0 — только сигналы. Не финансовый совет; демо-рекомендовано."
 )
 
-CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0}
-LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1}
+CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
+LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
 
 
 @dataclass
