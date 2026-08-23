@@ -152,6 +152,15 @@ export const api = {
   validationTrades: (limit = 50) =>
     request(`/validation/trades?limit=${limit}`),
 
+  // ── AI Discretionary ──
+  aiStatus: () => request('/ai/status'),
+  aiStart: (config = {}) =>
+    request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
+  aiStop: () =>
+    request('/ai/stop', { method: 'POST' }),
+  aiDecide: () =>
+    request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

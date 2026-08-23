@@ -59,6 +59,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
+  const [aiStatus, setAiStatus] = useState(null)
+  const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
@@ -121,13 +123,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     if (document.hidden) return
     // Fast tier — renders immediately; the slow tier below fills in when ready.
     try {
-      const [pf, pos, tk, momStatus, impStatus, valStatus, priceTickers] = await Promise.all([
+      const [pf, pos, tk, momStatus, impStatus, valStatus, aiSt, priceTickers] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         api.momentumStatus().catch(() => null),
         api.impulseStatus().catch(() => null),
         api.validationStatus().catch(() => null),
+        api.aiStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
@@ -136,6 +139,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momStatus) setMomentumStatus(momStatus)
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
+      setAiStatus(aiSt)
+
       if (priceTickers?.tickers) {
         const byCoin = {}
         priceTickers.tickers.forEach(tp => {
@@ -1007,6 +1012,99 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </button>
                   )}
                 </>
+              )}
+            </div>
+          </div>
+
+
+          {/* ─── AI Discretionary ─── */}
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <Bot size={13} className="text-[var(--accent)]" />
+              AI Discretionary 1H
+              {aiStatus?.version && (
+                <span className="ml-1 text-2xs text-[var(--txt-muted)] mono">{aiStatus.version}</span>
+              )}
+              {aiStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!aiStatus?.running && aiStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+            </div>
+            <div className="p-3 space-y-2">
+              <div className="grid grid-cols-2 gap-1.5 text-2xs">
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-[var(--txt-muted)]">LLM</div>
+                  <div className="mono font-semibold text-[var(--txt)] mt-0.5">
+                    {aiStatus?.provider || '—'}{aiStatus?.groq_key_configured || aiStatus?.llm?.groq_key_configured ? ' ✓' : ''}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-[var(--txt-muted)]">Execute</div>
+                  <div className={`mono font-semibold mt-0.5 ${(aiStatus?.execute || aiStatus?.llm?.execute) ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+                    {(aiStatus?.execute || aiStatus?.llm?.execute) ? 'ON' : 'OFF (signals)'}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-[var(--txt-muted)]">Model</div>
+                  <div className="mono text-[var(--txt)] mt-0.5 truncate" title={aiStatus?.model || aiStatus?.llm?.model || ''}>
+                    {(aiStatus?.model || aiStatus?.llm?.model || '—').toString().slice(0, 18)}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)]">
+                  <div className="text-[var(--txt-muted)]">{t('dash.positions')}</div>
+                  <div className="mono font-semibold text-[var(--txt)] mt-0.5">
+                    {aiStatus?.open_positions?.length || 0}/{aiStatus?.config?.max_positions || 1}
+                  </div>
+                </div>
+              </div>
+              {aiStatus?.last_decision && (
+                <div className="p-1.5 rounded-md bg-[var(--bg)] text-2xs">
+                  <div className="text-[var(--txt-muted)] mb-0.5">Last decision</div>
+                  <div className="text-[var(--txt)]">
+                    <span className="font-bold mono">{aiStatus.last_decision.action}</span>
+                    {aiStatus.last_decision.symbol ? ` ${aiStatus.last_decision.symbol}` : ''}
+                    {aiStatus.last_decision.side ? ` ${aiStatus.last_decision.side}` : ''}
+                    {aiStatus.last_decision.confidence != null ? ` · conf ${aiStatus.last_decision.confidence}` : ''}
+                  </div>
+                  {aiStatus.last_decision.reason && (
+                    <div className="text-[var(--txt-muted)] mt-0.5 line-clamp-2">{aiStatus.last_decision.reason}</div>
+                  )}
+                </div>
+              )}
+              {!isGuest && (
+                <div className="flex flex-col gap-1.5">
+                  {aiStatus?.running ? (
+                    <>
+                      <button
+                        className="btn btn-secondary btn-sm w-full"
+                        disabled={aiBusy}
+                        onClick={async () => {
+                          setAiBusy(true)
+                          try {
+                            const r = await api.aiDecide()
+                            setAiStatus(prev => ({ ...(prev || {}), last_decision: r.decision }))
+                            loadData()
+                          } catch (e) { alert(e.message) }
+                          finally { setAiBusy(false) }
+                        }}
+                      >
+                        {aiBusy ? '…' : 'Decide now'}
+                      </button>
+                      <button className="btn btn-danger btn-sm w-full" onClick={async () => {
+                        try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
+                      }}>
+                        <Square size={12} /> {t('dash.stop_bot')}
+                      </button>
+                    </>
+                  ) : (
+                    <button className="btn btn-primary btn-sm w-full" onClick={async () => {
+                      try {
+                        await api.aiStart({ capital: 10000, provider: 'groq', execute: false })
+                        loadData()
+                      } catch (e) { alert(e.message) }
+                    }}>
+                      <Play size={12} /> {t('dash.start')} (signals)
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
