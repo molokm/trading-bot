@@ -1088,6 +1088,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       >
                         {aiBusy ? '…' : 'Decide now'}
                       </button>
+                      <button className="btn btn-secondary btn-sm w-full" onClick={async () => {
+                        try {
+                          const r = await api.aiLogs(100)
+                          console.log('AI logs', r)
+                          alert(`Logs: memory=${r.memory_n} file=${r.file_n} (см. console + /api/ai/logs/download)`)
+                        } catch (e) { alert(e.message) }
+                      }}>
+                        Export logs
+                      </button>
                       <button className="btn btn-danger btn-sm w-full" onClick={async () => {
                         try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
                       }}>
@@ -1097,11 +1106,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   ) : (
                     <button className="btn btn-primary btn-sm w-full" onClick={async () => {
                       try {
-                        await api.aiStart({ capital: 10000, provider: 'groq', execute: false })
+                        await api.aiStart({ capital: 10000, provider: 'groq', execute: true })
                         loadData()
                       } catch (e) { alert(e.message) }
                     }}>
-                      <Play size={12} /> {t('dash.start')} (signals)
+                      <Play size={12} /> {t('dash.start')} (demo exec)
                     </button>
                   )}
                 </div>

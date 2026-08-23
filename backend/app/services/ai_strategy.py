@@ -21,6 +21,7 @@ from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
 from .risk_guard import assert_can_open
+from .analysis_logger import get_logger
 
 AI_BOT_ID = "ai_strategy"
 STRATEGY_NAME = "AI Discretionary 1H"
@@ -83,11 +84,13 @@ class AIStrategy:
     STRATEGY_DESC = STRATEGY_DESC
 
     def __init__(self, config: AIConfig = None, client_manager=None, db=None,
-                 notifier: Optional[TelegramNotifier] = None):
+                 notifier: Optional[TelegramNotifier] = None,
+                 analysis=None):
         self.config = config or AIConfig()
         self.client_manager = client_manager
         self.db = db
         self.notifier = notifier
+        self.analysis = analysis or get_logger()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -143,7 +146,24 @@ class AIStrategy:
     def _execute_enabled(self) -> bool:
         if self.config.execute is not None:
             return bool(self.config.execute)
-        return os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on")
+        env = os.getenv("AI_EXECUTE", "").strip().lower()
+        if env in ("1", "true", "yes", "on"):
+            return True
+        if env in ("0", "false", "no", "off"):
+            return False
+        # No explicit AI_EXECUTE: allow orders only on OKX demo
+        return self._is_demo()
+
+    def _is_demo(self) -> bool:
+        if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
+            return True
+        try:
+            c = self.client_manager.get_client() if self.client_manager else None
+            if c is not None and getattr(c, "demo", False):
+                return True
+        except Exception:
+            pass
+        return False
 
     async def _client(self):
         if not self.client_manager:
@@ -336,11 +356,16 @@ class AIStrategy:
         order_side = "buy" if side == "long" else "sell"
         if not self._execute_enabled():
             print(f"[AI] SIGNAL open {side} {coin} sz={sz} lev={lev} (execute=0)", flush=True)
-            self._decision_log.append({
+            rec = {
                 "time": datetime.now(timezone.utc).isoformat(),
                 "event": "signal_open", "coin": coin, "side": side,
                 "size": sz, "leverage": lev, "reason": reason,
-            })
+            }
+            self._decision_log.append(rec)
+            try:
+                self.analysis.log("ai", "signal_open", **{k: rec[k] for k in rec if k != "time"})
+            except Exception:
+                pass
             return
         try:
             await client.set_leverage(inst, lev, mgn_mode="cross", pos_side=side)
@@ -392,6 +417,13 @@ class AIStrategy:
             except Exception:
                 pass
         print(f"[AI] OPEN {side} {coin} @{fill_px} stop={stop:.4f} lev={lev}", flush=True)
+        try:
+            self.analysis.log(
+                "ai", "open", coin=coin, side=side, entry=fill_px,
+                stop=stop, take=take, size=sz, leverage=lev, reason=reason,
+            )
+        except Exception:
+            pass
 
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
@@ -437,6 +469,13 @@ class AIStrategy:
                 pass
         del self._positions[coin]
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        try:
+            self.analysis.log(
+                "ai", "close", coin=coin, side=pos.side, entry=pos.entry_price,
+                exit=fill_px, pnl=round(pnl, 2), reason=reason,
+            )
+        except Exception:
+            pass
 
     async def _manage_stops(self, client):
         """Hard stop / take from last close price (1H bar)."""
@@ -471,10 +510,34 @@ class AIStrategy:
             **decision,
             "time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
+            "execute": self._execute_enabled(),
+            "demo": self._is_demo(),
+            "indicators": {
+                k: {kk: vv for kk, vv in (v or {}).items() if kk in (
+                    "close", "ema_fast", "ema_slow", "roc_3", "adx")}
+                for k, v in (snap.get("indicators") or {}).items()
+            },
+            "open_positions": snap.get("open_positions") or [],
+            "equity": snap.get("equity"),
         }
         self._decision_log.append(self._last_decision)
-        self._decision_log = self._decision_log[-50:]
-        print(f"[AI] decision {decision}", flush=True)
+        self._decision_log = self._decision_log[-200:]
+        print(f"[AI] decision {decision} execute={self._execute_enabled()}", flush=True)
+        try:
+            self.analysis.log(
+                "ai", "decision",
+                provider=self._provider(),
+                execute=self._execute_enabled(),
+                demo=self._is_demo(),
+                **{k: decision.get(k) for k in (
+                    "action", "symbol", "side", "size_pct_equity",
+                    "stop_pct", "take_pct", "confidence", "reason")},
+                equity=snap.get("equity"),
+                open_n=len(snap.get("open_positions") or []),
+                indicators=self._last_decision.get("indicators"),
+            )
+        except Exception as e:
+            print(f"[AI] analysis log: {e}", flush=True)
 
         action = decision.get("action")
         coin = decision.get("symbol")
@@ -534,7 +597,8 @@ class AIStrategy:
             },
             "indicators": self._latest_indicators,
             "last_decision": self._last_decision,
-            "recent_decisions": self._decision_log[-10:],
+            "recent_decisions": self._decision_log[-30:],
+            "decision_count": len(self._decision_log),
             "recent_trades": self._trade_log[-20:],
             "last_activity": self._last_activity,
             "started_at": self._started_at,

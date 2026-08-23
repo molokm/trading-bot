@@ -160,6 +160,7 @@ export const api = {
     request('/ai/stop', { method: 'POST' }),
   aiDecide: () =>
     request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
+  aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),
 
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),

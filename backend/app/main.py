@@ -1145,6 +1145,18 @@ async def ai_start(data: dict = None):
     data = data or {}
     if ai_bot and getattr(ai_bot, "_running", False):
         return {"message": "AI already running", **ai_bot.get_status()}
+    # Default execute=True on OKX demo so we accumulate real fills+logs for prompt tuning
+    _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+    if "execute" in data:
+        _exec = bool(data["execute"])
+    else:
+        env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+        if env_ex in ("1", "true", "yes", "on"):
+            _exec = True
+        elif env_ex in ("0", "false", "no", "off"):
+            _exec = False
+        else:
+            _exec = _demo  # auto on demo
     cfg = AIConfig(
         capital=float(data.get("capital") or os.getenv("AI_CAPITAL", "10000")),
         max_leverage=float(data.get("max_leverage") or 3),
@@ -1152,7 +1164,7 @@ async def ai_start(data: dict = None):
         risk_per_trade=float(data.get("risk_per_trade") or 0.02),
         poll_interval_sec=int(data.get("poll_interval_sec") or 120),
         provider=data.get("provider") or ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None),
-        execute=bool(data["execute"]) if "execute" in data else None,
+        execute=_exec,
     )
     if data.get("symbols"):
         cfg.symbols = list(data["symbols"])
@@ -1168,6 +1180,75 @@ async def ai_stop():
         ai_bot.stop()
     return {"message": "AI stopped", "running": False}
 
+
+
+
+@app.get("/api/ai/logs", dependencies=[Depends(require_admin)])
+async def ai_logs(limit: int = 200, event: str = None):
+    """Export AI decision/trade logs for prompt tuning.
+
+    Sources: in-memory decision log (running bot) + analysis.jsonl tail (bot=ai).
+    """
+    global ai_bot
+    limit = max(1, min(int(limit or 200), 2000))
+    mem = []
+    if ai_bot:
+        mem = list(getattr(ai_bot, "_decision_log", []) or [])[-limit:]
+        if event:
+            mem = [d for d in mem if (d.get("event") or d.get("action")) == event
+                   or d.get("action") == event]
+
+    file_rows = []
+    try:
+        from app.services.analysis_logger import DEFAULT_PATH
+        path = Path(DEFAULT_PATH)
+        if path.exists():
+            # read last ~N*2 lines then filter
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in lines[-(limit * 3):]:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("bot") != "ai":
+                    continue
+                if event and row.get("event") != event:
+                    continue
+                file_rows.append(row)
+            file_rows = file_rows[-limit:]
+    except Exception as e:
+        print(f"[ai/logs] file read: {e}", flush=True)
+
+    return {
+        "memory": mem,
+        "file": file_rows,
+        "memory_n": len(mem),
+        "file_n": len(file_rows),
+        "execute": bool(ai_bot and ai_bot._execute_enabled()) if ai_bot else False,
+        "running": bool(ai_bot and getattr(ai_bot, "_running", False)),
+    }
+
+
+@app.get("/api/ai/logs/download", dependencies=[Depends(require_admin)])
+async def ai_logs_download(limit: int = 500):
+    """Download AI analysis lines as JSONL attachment."""
+    from app.services.analysis_logger import DEFAULT_PATH
+    path = Path(DEFAULT_PATH)
+    out_lines = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-(int(limit) * 5):]:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("bot") == "ai":
+                out_lines.append(json.dumps(row, ensure_ascii=False))
+    body = ('\n'.join(out_lines[-int(limit):]) + ('\n' if out_lines else ''))
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=ai_decisions.jsonl"},
+    )
 
 @app.post("/api/ai/decide", dependencies=[Depends(require_admin)])
 async def ai_decide_once():
