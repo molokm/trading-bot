@@ -1557,7 +1557,7 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
         if not (bot and bot._running and bot._positions):
             return False
         for coin, pos in bot._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
+            if pos.inst_id == inst_id and (pos.side == norm_side or norm_side == "net"):
                 return True
         return False
 
