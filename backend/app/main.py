@@ -1549,8 +1549,7 @@ async def get_portfolio():
 def _tag_position_bot(inst_id: str, pos_side: str) -> str:
     """Determine which bot owns an OKX position by checking running bots' in-memory positions.
 
-    Order: Rotation (Momentum) → Impulse → Validation. Validation shares the same
-    coin universe and must not steal tags from older strategies if both claim a pos.
+    Order: Rotation (Momentum) → Impulse → Validation → AI → Scalp.
     """
     norm_side = pos_side.lower() if pos_side else ""
 
@@ -1568,6 +1567,10 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
         return "Impulse 1D"
     if _match(validation):
         return "MACD+Donchian Validation"
+    if _match(ai_bot):
+        return "AI Discretionary 1H"
+    if _match(scalp_bot):
+        return "Order Book Scalp"
 
     # Fallback: trade logs (same priority)
     if rotation and rotation._trade_log:
@@ -1585,6 +1588,16 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "MACD+Donchian Validation"
+    if ai_bot and ai_bot._trade_log:
+        for t in reversed(ai_bot._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "AI Discretionary 1H"
+    if scalp_bot and scalp_bot._trade_log:
+        for t in reversed(scalp_bot._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "Order Book Scalp"
     return ""
 
 
@@ -1605,6 +1618,8 @@ def _tag_trade_bot(trade: dict) -> str:
             ("Momentum", getattr(rotation, "_trade_log", None) if rotation else None),
             ("Impulse 1D", getattr(impulse, "_trade_log", None) if impulse else None),
             ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
+            ("AI Discretionary 1H", getattr(ai_bot, "_trade_log", None) if ai_bot else None),
+            ("Order Book Scalp", getattr(scalp_bot, "_trade_log", None) if scalp_bot else None),
         ):
             if not log:
                 continue
@@ -1625,6 +1640,14 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in validation._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "MACD+Donchian Validation"
+    if ai_bot and ai_bot._trade_log:
+        for t in ai_bot._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "AI Discretionary 1H"
+    if scalp_bot and scalp_bot._trade_log:
+        for t in scalp_bot._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "Order Book Scalp"
     # Fallback: match by symbol+side (works when entry_time is unknown)
     side = trade.get("side", "")
     if rotation and rotation._trade_log:
@@ -1639,6 +1662,14 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in validation._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
                 return "MACD+Donchian Validation"
+    if ai_bot and ai_bot._trade_log:
+        for t in ai_bot._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "AI Discretionary 1H"
+    if scalp_bot and scalp_bot._trade_log:
+        for t in scalp_bot._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "Order Book Scalp"
     # Fallback: DB bot_id stored for this trade
     return _db_bot_name(trade.get("bot_id", ""))
 
@@ -1654,6 +1685,10 @@ def _db_bot_name(bot_id: str) -> str:
         return "Impulse 1D"
     if base == VAL_BOT_ID:
         return "MACD+Donchian Validation"
+    if base == AI_BOT_ID:
+        return "AI Discretionary 1H"
+    if base == SCALP_BOT_ID:
+        return "Order Book Scalp"
     return ""
 
 
