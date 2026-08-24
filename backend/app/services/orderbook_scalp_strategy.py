@@ -1,26 +1,9 @@
-"""Order-Book Imbalance (OBI) Scalping — micro-structure strategy.
-
-Core signals (industry-standard microstructure):
-  OBI_N = (Σ bid_qty_topN − Σ ask_qty_topN) / (Σ bid + Σ ask)   ∈ [-1, 1]
-  Micro-price = (ask1 * bid1_qty + bid1 * ask1_qty) / (bid1_qty + ask1_qty)
-  Walls = levels with qty ≫ median (potential support/resistance / spoof risk)
-
-Entry (rule engine, not pure HFT):
-  • |OBI_5| ≥ threshold and same sign for `persist` consecutive snapshots
-  • spread_bps ≤ max_spread_bps (avoid thin books)
-  • optional LLM veto/confirm on a compact book summary
-
-Risk envelope (scalp):
-  • small notional, tight stop (bps), quick TP, max hold seconds
-  • execute only when enabled (default: demo auto / AI_EXECUTE-like)
-
-Not financial advice. Alpha on public L2 is noisy and decays fast.
-"""
+"""Order-Book Imbalance (OBI) Scalping — selective micro-structure strategy v0.2."""
 from __future__ import annotations
 
 import asyncio
-import math
 import json
+import math
 import os
 import threading
 import time
@@ -32,7 +15,7 @@ from typing import Any, Optional
 from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .ai_agent import _openai_compatible  # reuse Groq path
+from .ai_agent import _openai_compatible
 
 SCALP_BOT_ID = "orderbook_scalp"
 STRATEGY_NAME = "Order Book Scalp"
@@ -47,23 +30,33 @@ CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
 LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
 
 
-
-_SCALP_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scalp_state.json")
-
-def load_scalp_state():
+def _scalp_state_path() -> str:
+    base = os.getenv("DATA_DIR") or os.getenv("RENDER_DISK_PATH") or "/tmp"
     try:
-        with open(_SCALP_STATE_FILE, "r") as f:
-            data = json.load(f)
-        return float(data.get("equity", 0)), float(data.get("capital", 0)), data.get("started_at")
+        os.makedirs(base, exist_ok=True)
     except Exception:
-        return None, None, None
+        base = "/tmp"
+    return os.path.join(base, "orderbook_scalp_state.json")
 
-def save_scalp_state(equity, capital, started_at):
+
+def load_scalp_state() -> dict:
     try:
-        with open(_SCALP_STATE_FILE, "w") as f:
-            json.dump({"equity": equity, "capital": capital, "started_at": started_at}, f)
+        with open(_scalp_state_path(), "r") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_scalp_state(payload: dict) -> None:
+    try:
+        path = _scalp_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
     except Exception as e:
-        print(f"[Scalp] Error saving state: {e}")
+        print(f"[Scalp] state save error: {e}", flush=True)
+
 
 @dataclass
 class ScalpConfig:
@@ -113,7 +106,6 @@ def _now_iso() -> str:
 
 
 def compute_book_metrics(bids: list, asks: list, levels: int = 10) -> dict:
-    """bids/asks: list of [px, sz, ...] from OKX books."""
     def parse(side):
         out = []
         for row in side[:levels]:
@@ -143,41 +135,29 @@ def compute_book_metrics(bids: list, asks: list, levels: int = 10) -> dict:
         tot = bv + av
         return (bv - av) / tot if tot > 0 else 0.0
 
-    # distance-weighted OBI (closer levels matter more)
     decay = 0.85
     wb = sum(sz * (decay ** i) for i, (_, sz) in enumerate(b[:levels]))
     wa = sum(sz * (decay ** i) for i, (_, sz) in enumerate(a[:levels]))
     wtot = wb + wa
     w_obi = (wb - wa) / wtot if wtot > 0 else 0.0
-
     micro = (ask1 * bid1_sz + bid1 * ask1_sz) / (bid1_sz + ask1_sz) if (bid1_sz + ask1_sz) else mid
-
     all_sz = [sz for _, sz in b[:levels]] + [sz for _, sz in a[:levels]]
     med = sorted(all_sz)[len(all_sz) // 2] if all_sz else 0.0
     walls_bid = [{"px": px, "sz": sz} for px, sz in b if med > 0 and sz >= med * 3]
     walls_ask = [{"px": px, "sz": sz} for px, sz in a if med > 0 and sz >= med * 3]
-
     ratio = (sum(sz for _, sz in b[:5]) / max(1e-12, sum(sz for _, sz in a[:5])))
 
     return {
         "ok": True,
-        "bid1": bid1,
-        "ask1": ask1,
-        "bid1_sz": bid1_sz,
-        "ask1_sz": ask1_sz,
-        "mid": mid,
-        "micro": micro,
-        "spread": spread,
+        "bid1": bid1, "ask1": ask1, "bid1_sz": bid1_sz, "ask1_sz": ask1_sz,
+        "mid": mid, "micro": micro, "spread": spread,
         "spread_bps": round(spread_bps, 3),
-        "obi_1": round(obi_n(1), 4),
-        "obi_5": round(obi_n(5), 4),
-        "obi_10": round(obi_n(min(10, levels)), 4),
-        "w_obi": round(w_obi, 4),
+        "obi_1": round(obi_n(1), 4), "obi_5": round(obi_n(5), 4),
+        "obi_10": round(obi_n(min(10, levels)), 4), "w_obi": round(w_obi, 4),
         "bid_vol_5": round(sum(sz for _, sz in b[:5]), 4),
         "ask_vol_5": round(sum(sz for _, sz in a[:5]), 4),
         "ratio_5": round(ratio, 3),
-        "walls_bid": walls_bid[:3],
-        "walls_ask": walls_ask[:3],
+        "walls_bid": walls_bid[:3], "walls_ask": walls_ask[:3],
         "bids": [{"px": px, "sz": sz} for px, sz in b],
         "asks": [{"px": px, "sz": sz} for px, sz in a],
         "ts": _now_iso(),
@@ -196,22 +176,28 @@ class OrderBookScalpStrategy:
         self.config = config or ScalpConfig()
         self.client_manager = client_manager
         self.db = db
-        self.notifier = None  # Telegram disabled for scalp (too many fills)
+        self.notifier = None
         self.analysis = analysis or get_logger()
         self._running = False
         self._thread = None
         self._loop = None
-        self._state_file = "scalp_state.json"
+        st = load_scalp_state()
         self._capital = float(self.config.capital)
-        self._equity = float(self.config.capital)
-        # Load saved state if exists
-        _equity, _capital, _started_at = load_scalp_state()
-        if _equity is not None:
-            self._equity = _equity
-            self._capital = _capital
-        else:
-            self._equity = float(self.config.capital)
-            self._capital = float(self.config.capital)
+        self._session_pnl = 0.0
+        self._lifetime_pnl = float(st.get("lifetime_pnl") or 0.0)
+        self._lifetime_trades = int(st.get("lifetime_trades") or 0)
+        self._lifetime_wins = int(st.get("lifetime_wins") or 0)
+        self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
+        self._equity = self._capital
+        self._last_close_ts = float(st.get("last_close_ts") or 0.0)
+        self._last_open_ts = float(st.get("last_open_ts") or 0.0)
+        self._hour_trade_ts: deque = deque(maxlen=200)
+        for ts in (st.get("hour_trade_ts") or [])[-50:]:
+            try:
+                self._hour_trade_ts.append(float(ts))
+            except (TypeError, ValueError):
+                pass
+        self._seed_db = self._lifetime_trades == 0
         self._positions: dict[str, ScalpPosition] = {}
         self._history: dict[str, deque] = {
             s: deque(maxlen=max(20, self.config.persist_n * 4)) for s in self.config.symbols
@@ -223,8 +209,8 @@ class OrderBookScalpStrategy:
         self._last_activity = None
         self._started_at = None
         self._last_exec = None
-        self._avail_usdt = None  # USDT-bucket free
-        self._acct_avail = None  # account-level availEq (multi-ccy USD)
+        self._avail_usdt = None
+        self._acct_avail = None
         self._acct_eq = None
 
     def start(self):
@@ -239,6 +225,10 @@ class OrderBookScalpStrategy:
 
     def stop(self):
         self._running = False
+        try:
+            self._persist()
+        except Exception:
+            pass
         if self._loop and not self._loop.is_closed():
             try:
                 self._loop.call_soon_threadsafe(self._loop.stop)
@@ -285,7 +275,6 @@ class OrderBookScalpStrategy:
                     if abs(tp) > abs(self._lifetime_pnl):
                         self._lifetime_pnl = tp
                         self._persist()
-                        print(f"[Scalp] seeded lifetime_pnl={tp} from DB", flush=True)
             except Exception as e:
                 print(f"[Scalp] seed: {e}", flush=True)
         while self._running:
@@ -305,13 +294,10 @@ class OrderBookScalpStrategy:
         client = await self._client()
         if not client:
             return
-        # manage open positions first
         for coin in list(self._positions.keys()):
             await self._manage_position(client, coin)
-
         if len(self._positions) >= 1:
-            return  # one scalp at a time
-
+            return
         for coin in self.config.symbols:
             try:
                 await self._scan_symbol(client, coin)
@@ -325,9 +311,7 @@ class OrderBookScalpStrategy:
             return None
         data = (resp.get("data") or [{}])[0]
         metrics = compute_book_metrics(
-            data.get("bids") or [],
-            data.get("asks") or [],
-            levels=self.config.levels,
+            data.get("bids") or [], data.get("asks") or [], levels=self.config.levels,
         )
         if not metrics.get("ok"):
             return None
@@ -338,7 +322,6 @@ class OrderBookScalpStrategy:
         return metrics
 
     def _persistence_signal(self, coin: str) -> Optional[str]:
-        """Return 'long'|'short'|None based on consecutive OBI_5."""
         hist = list(self._history.get(coin) or [])
         n = int(self.config.persist_n)
         if len(hist) < n:
@@ -367,26 +350,17 @@ class OrderBookScalpStrategy:
         if not key:
             return {"confirm": True, "confidence": 0.55, "reason": "no_llm_key"}
         summary = {
-            "coin": metrics.get("coin"),
-            "side_candidate": side,
-            "obi_1": metrics.get("obi_1"),
-            "obi_5": metrics.get("obi_5"),
-            "obi_10": metrics.get("obi_10"),
-            "w_obi": metrics.get("w_obi"),
-            "spread_bps": metrics.get("spread_bps"),
-            "ratio_5": metrics.get("ratio_5"),
-            "micro": metrics.get("micro"),
-            "mid": metrics.get("mid"),
-            "walls_bid": metrics.get("walls_bid"),
-            "walls_ask": metrics.get("walls_ask"),
-            "bid1": metrics.get("bid1"),
-            "ask1": metrics.get("ask1"),
+            "coin": metrics.get("coin"), "side_candidate": side,
+            "obi_1": metrics.get("obi_1"), "obi_5": metrics.get("obi_5"),
+            "obi_10": metrics.get("obi_10"), "w_obi": metrics.get("w_obi"),
+            "spread_bps": metrics.get("spread_bps"), "ratio_5": metrics.get("ratio_5"),
+            "micro": metrics.get("micro"), "mid": metrics.get("mid"),
+            "walls_bid": metrics.get("walls_bid"), "walls_ask": metrics.get("walls_ask"),
         }
         system = (
-            "You are a crypto order-book scalper. Reply ONLY JSON: "
+            'You are a crypto order-book scalper. Reply ONLY JSON: '
             '{"confirm": true|false, "confidence": 0-1, "reason": "short"}. '
-            "confirm=true only if imbalance looks genuine (not obvious spoof wall alone) "
-            "and spread is tight. Prefer false when unsure."
+            "Prefer false when unsure."
         )
         try:
             raw = await _openai_compatible(
@@ -396,7 +370,7 @@ class OrderBookScalpStrategy:
                 system=system,
                 user=str(summary),
             )
-            import json, re
+            import re
             m = re.search(r"\{[\s\S]*\}", raw or "")
             data = json.loads(m.group(0)) if m else {}
             return {
@@ -416,27 +390,15 @@ class OrderBookScalpStrategy:
         side = self._persistence_signal(coin)
         if not side:
             return
-
         llm = await self._llm_confirm(metrics, side)
         self._last_llm = {**llm, "coin": coin, "side": side, "time": _now_iso()}
         sig = {
-            "time": _now_iso(),
-            "coin": coin,
-            "side": side,
-            "obi_5": metrics.get("obi_5"),
-            "w_obi": metrics.get("w_obi"),
-            "spread_bps": metrics.get("spread_bps"),
-            "llm": llm,
-            "mid": metrics.get("mid"),
+            "time": _now_iso(), "coin": coin, "side": side,
+            "obi_5": metrics.get("obi_5"), "w_obi": metrics.get("w_obi"),
+            "spread_bps": metrics.get("spread_bps"), "llm": llm, "mid": metrics.get("mid"),
         }
         self._signals.append(sig)
         self._signals = self._signals[-50:]
-        try:
-            self.analysis.log("scalp", "signal", **{k: sig[k] for k in sig if k != "llm"},
-                              llm_confirm=llm.get("confirm"), llm_reason=llm.get("reason"))
-        except Exception:
-            pass
-
         if self.config.use_llm:
             if not llm.get("confirm") or float(llm.get("confidence") or 0) < 0.55:
                 return
@@ -451,28 +413,14 @@ class OrderBookScalpStrategy:
         await self._open(client, coin, side, metrics, sig)
 
     async def _refresh_balance(self, client) -> float:
-        """Usable margin budget under multi-currency collateral.
-
-        OKX multi-ccy: account ``availEq`` is USD-equivalent free collateral
-        (BTC/ETH/… already haircut). USDT ``availEq`` can be ~0 while the
-        portfolio still has buying power — do **not** min() them together.
-
-        Sizing uses max(account availEq, USDT free). Actual opens may still
-        hit 51008 if auto-borrow is off and the engine demands pure USDT.
-        """
         try:
             resp = await client.get_balance()
             if resp.get("error"):
-                print(f"[Scalp] balance error: {resp.get('message')}", flush=True)
                 self._avail_usdt = 0.0
                 self._acct_avail = 0.0
                 return 0.0
-            rows = resp.get("data") or []
-            acct_avail = 0.0
-            acct_eq = 0.0
-            usdt_avail = 0.0
-            usdt_eq = 0.0
-            for row in rows:
+            acct_avail = acct_eq = usdt_avail = 0.0
+            for row in resp.get("data") or []:
                 try:
                     acct_avail = float(row.get("availEq") or 0) or acct_avail
                     acct_eq = float(row.get("totalEq") or row.get("eq") or 0) or acct_eq
@@ -482,28 +430,14 @@ class OrderBookScalpStrategy:
                     if (d.get("ccy") or "").upper() != "USDT":
                         continue
                     try:
-                        usdt_avail = float(
-                            d.get("availEq") or d.get("availBal") or d.get("cashBal") or 0
-                        )
-                        usdt_eq = float(d.get("eq") or d.get("cashBal") or usdt_avail or 0)
+                        usdt_avail = float(d.get("availEq") or d.get("availBal") or d.get("cashBal") or 0)
                     except (TypeError, ValueError):
                         pass
             self._acct_avail = float(acct_avail)
             self._acct_eq = float(acct_eq)
             self._avail_usdt = float(usdt_avail)
-            # Multi-ccy buying power ≈ account availEq (already USD)
-            buying_power = max(acct_avail, usdt_avail)
-            if acct_eq > 0 and self._equity == self._capital:
-                self._equity = min(float(self.config.capital), acct_eq)
-            elif usdt_eq > 0 and self._equity == self._capital:
-                self._equity = min(float(self.config.capital), usdt_eq)
-            # conservative slice for this bot among others sharing the account
-            usable = min(float(self.config.capital), buying_power * 0.25) if buying_power > 0 else 0.0
-            print(
-                f"[Scalp] multi-ccy buying_power={buying_power:.2f} usable={usable:.2f} "
-                f"acct_avail={acct_avail:.2f} usdt_avail={usdt_avail:.2f} totalEq={acct_eq:.2f}",
-                flush=True,
-            )
+            buying = max(acct_avail, usdt_avail)
+            usable = min(float(self.config.capital), buying * 0.25) if buying > 0 else 0.0
             return usable
         except Exception as e:
             print(f"[Scalp] balance: {e}", flush=True)
@@ -511,10 +445,9 @@ class OrderBookScalpStrategy:
             self._acct_avail = 0.0
             return 0.0
 
-    def _size_order(self, coin: str, entry: float, equity_cap: float = None) -> tuple[float, float]:
+    def _size_order(self, coin: str, entry: float, equity_cap: float = None) -> tuple:
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
-        # Multi-ccy: account availEq is the real free collateral in USD
         avail = max(float(self._acct_avail or 0), float(self._avail_usdt or 0))
         if avail < 8.0:
             return 0.0, 1.0
@@ -526,7 +459,7 @@ class OrderBookScalpStrategy:
         risk_usd = base * float(self.config.risk_per_trade)
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
         max_margin = min(base * float(self.config.allocation_pct), avail * 0.15)
-        lev = max(1.0, min(float(self.config.max_leverage), 1.0))
+        lev = 1.0
         if lev > 0 and notional / lev > max_margin:
             notional = max_margin * lev
         notional = min(notional, 50.0)
@@ -536,9 +469,8 @@ class OrderBookScalpStrategy:
         raw = notional / (entry * ct)
         steps = math.floor(raw / lot)
         sz = max(0.0, round(steps * lot, 8))
-        min_notional = lot * entry * ct
-        min_margin = min_notional / lev
         if sz <= 0:
+            min_margin = (lot * entry * ct) / lev
             if min_margin <= avail * 0.15:
                 sz = lot
             else:
@@ -554,21 +486,12 @@ class OrderBookScalpStrategy:
         if usable <= 0 or buying < 8:
             self._last_exec = {
                 "event": "skip", "reason": "insufficient_free_margin",
-                "coin": coin,
-                "avail_usdt": self._avail_usdt,
-            "acct_avail": self._acct_avail,
-            "acct_eq": self._acct_eq,
-                "acct_avail": self._acct_avail,
-                "usable": usable,
+                "coin": coin, "avail_usdt": self._avail_usdt, "acct_avail": self._acct_avail,
             }
-            print(f"[Scalp] skip {coin}: buying_power={buying}", flush=True)
             return
         sz, lev = self._size_order(coin, entry, equity_cap=usable)
         if sz <= 0:
-            self._last_exec = {
-                "event": "skip", "reason": "size=0_or_low_margin", "coin": coin,
-                "avail_usdt": self._avail_usdt, "usable": usable,
-            }
+            self._last_exec = {"event": "skip", "reason": "size=0_or_low_margin", "coin": coin}
             return
         try:
             assert_can_open(is_reduce_only=False)
@@ -586,7 +509,6 @@ class OrderBookScalpStrategy:
                 "event": "signal_only", "coin": coin, "side": side,
                 "size": sz, "lev": lev, "mid": entry,
             }
-            print(f"[Scalp] SIGNAL {side} {coin} sz={sz} (execute=0)", flush=True)
             return
 
         try:
@@ -597,16 +519,15 @@ class OrderBookScalpStrategy:
             except Exception:
                 pass
 
-        async def _try_place(size_try: float, pos_side_try):
+        async def _try_place(size_try, pos_side_try):
             return await client.place_order(
                 inst_id=inst, side=order_side, ord_type="market",
-                sz=self._fmt_sz(coin, size_try), td_mode="cross",
-                pos_side=pos_side_try,
+                sz=self._fmt_sz(coin, size_try), td_mode="cross", pos_side=pos_side_try,
             )
 
         resp = None
         size_try = sz
-        for attempt in range(4):
+        for _ in range(4):
             try:
                 resp = await _try_place(size_try, side)
             except Exception as e:
@@ -616,44 +537,25 @@ class OrderBookScalpStrategy:
                 sz = size_try
                 break
             msg = str(resp.get("message") or "")
-            # net-mode accounts
             if "pos" in msg.lower() or "posside" in msg.lower():
                 resp = await _try_place(size_try, None)
                 if not resp.get("error"):
                     sz = size_try
                     break
                 msg = str(resp.get("message") or "")
-            # insufficient margin → cut size in half
             if "51008" in msg or "Insufficient" in msg or "margin" in msg.lower():
-                size_try = round(size_try / 2, 8)
                 lot = LOT_SZ.get(coin, 0.01)
-                steps = math.floor(size_try / lot)
-                size_try = round(steps * lot, 8)
+                size_try = round(math.floor(size_try / 2 / lot) * lot, 8)
                 if size_try <= 0:
                     break
-                print(f"[Scalp] 51008 retry smaller sz={size_try} {coin}", flush=True)
                 continue
             break
 
         if not resp or resp.get("error"):
-            msg = str((resp or {}).get("message") or "")
-            hint = None
-            if "51008" in msg or "Insufficient" in msg:
-                hint = (
-                    "OKX wants USDT margin for SWAP. Multi-ccy collateral is on, but "
-                    "auto-borrow is off — enable Auto-Borrow in OKX Trade settings, "
-                    "or free/convert some USDT. acct_avail="
-                    f"{self._acct_avail} usdt_avail={self._avail_usdt}"
-                )
             self._last_exec = {
-                "event": "open_error", "reason": msg,
-                "coin": coin, "avail_usdt": self._avail_usdt,
-            "acct_avail": self._acct_avail,
-            "acct_eq": self._acct_eq,
-                "acct_avail": self._acct_avail, "tried_sz": size_try,
-                "hint": hint,
+                "event": "open_error", "reason": (resp or {}).get("message"),
+                "coin": coin, "avail_usdt": self._avail_usdt, "acct_avail": self._acct_avail,
             }
-            print(f"[Scalp] open error {coin}: {msg} | {hint}", flush=True)
             return
 
         fills = resp.get("data") or []
@@ -677,14 +579,6 @@ class OrderBookScalpStrategy:
         self._hour_trade_ts.append(self._last_open_ts)
         self._equity -= fee_cost(fee)
         self._persist()
-        if self.db:
-            try:
-                await self.db.save_position(
-                    bot_id=self.BOT_ID, inst_id=inst, side=side,
-                    size=sz, entry_price=round(fill_px, 4),
-                )
-            except Exception:
-                pass
         self._last_exec = {
             "event": "open_ok", "coin": coin, "side": side,
             "entry": fill_px, "size": sz, "lev": lev,
@@ -693,16 +587,7 @@ class OrderBookScalpStrategy:
             "time": _now_iso(), "event": "open", "coin": coin, "side": side,
             "px": fill_px, "sz": sz,
         })
-        print(f"[Scalp] OPEN {side} {coin} @{fill_px} stop={stop:.4f}", flush=True)
-        if self.notifier:
-            try:
-                self.notifier.fire(self.notifier.open_msg(
-                    coin=coin, side=side, price=round(fill_px, 4),
-                    stop=round(stop, 4), size=sz, leverage=lev,
-                    bot_name=self.BOT_NAME,
-                ))
-            except Exception:
-                pass
+        print(f"[Scalp] OPEN {side} {coin} @{fill_px}", flush=True)
         try:
             self.analysis.log("scalp", "open", coin=coin, side=side, entry=fill_px,
                               stop=stop, take=take, size=sz, leverage=lev)
@@ -731,7 +616,6 @@ class OrderBookScalpStrategy:
                 reason = "sl"
             elif mid <= pos.take_price:
                 reason = "tp"
-        # imbalance flip exit
         obi = float(metrics.get("obi_5") or 0)
         if reason is None:
             if pos.side == "long" and obi < -float(self.config.obi_threshold) * 0.7:
@@ -749,11 +633,6 @@ class OrderBookScalpStrategy:
             return
         if not self._execute_enabled():
             del self._positions[coin]
-            if self.db:
-                try:
-                    await self.db.delete_position(self.BOT_ID)
-                except Exception:
-                    pass
             return
         close_side = "sell" if pos.side == "long" else "buy"
         try:
@@ -776,34 +655,29 @@ class OrderBookScalpStrategy:
         fill_px, fee, _ = extract_fill_avg(fills, mark or pos.entry_price)
         if not fill_px:
             fill_px = mark or pos.entry_price
+        fee_c = fee_cost(fee)
         pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
-        self._save_scalp_state()
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        if pnl > 0:
+            self._lifetime_wins += 1
+        self._lifetime_fees += fee_c
+        self._last_close_ts = time.time()
         self._trade_log.append({
             "time": _now_iso(), "event": "close", "coin": coin, "side": pos.side,
-            "entry": pos.entry_price, "exit": fill_px, "pnl": round(pnl, 4), "reason": reason,
+            "entry": pos.entry_price, "exit": fill_px, "pnl": round(pnl, 4),
+            "fee": round(fee_c, 6), "reason": reason,
         })
+        self._persist()
         self._last_exec = {"event": "close_ok", "coin": coin, "pnl": round(pnl, 4), "reason": reason}
         print(f"[Scalp] CLOSE {coin} pnl={pnl:+.4f} ({reason})", flush=True)
-        if self.notifier:
-            try:
-                self.notifier.fire(self.notifier.close_msg(
-                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
-                    exit_px=round(fill_px, 4), pnl=round(pnl, 4), reason=reason,
-                    bot_name=self.BOT_NAME,
-                ))
-            except Exception:
-                pass
         try:
             self.analysis.log("scalp", "close", coin=coin, pnl=round(pnl, 4), reason=reason)
         except Exception:
             pass
         del self._positions[coin]
-        if self.db:
-            try:
-                await self.db.delete_position(self.BOT_ID)
-            except Exception:
-                pass
 
     def _persist(self):
         save_scalp_state({
@@ -817,7 +691,7 @@ class OrderBookScalpStrategy:
             "hour_trade_ts": list(self._hour_trade_ts)[-50:],
             "updated_at": _now_iso(),
         })
-        if self.db is not None and self._loop and self._loop.is_running():
+        if self.db is not None and self._loop and not self._loop.is_closed():
             try:
                 asyncio.run_coroutine_threadsafe(self._db_snapshot(), self._loop)
             except Exception:
@@ -825,14 +699,16 @@ class OrderBookScalpStrategy:
 
     async def _db_snapshot(self):
         try:
-            await self.db.ensure_bot(SCALP_BOT_ID, strategy_id="orderbook_scalp",
-                                     name=STRATEGY_NAME)
+            await self.db.ensure_bot(
+                SCALP_BOT_ID, strategy_id="orderbook_scalp", name=STRATEGY_NAME,
+            )
             wr = (100.0 * self._lifetime_wins / self._lifetime_trades) if self._lifetime_trades else None
             await self.db.save_metric(
                 bot_id=SCALP_BOT_ID,
                 equity=self._capital + self._lifetime_pnl,
                 total_pnl=self._lifetime_pnl,
                 win_rate=wr,
+                total_trades=self._lifetime_trades,
             )
         except Exception as e:
             print(f"[Scalp] db snapshot: {e}", flush=True)
@@ -843,7 +719,7 @@ class OrderBookScalpStrategy:
             self._hour_trade_ts.popleft()
         return len(self._hour_trade_ts)
 
-    def _can_open_now(self) -> tuple:
+    def _can_open_now(self):
         now = time.time()
         cd = float(self.config.cooldown_sec)
         if self._last_close_ts and now - self._last_close_ts < cd:
@@ -859,7 +735,6 @@ class OrderBookScalpStrategy:
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("event") == "close"]
-        wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
         return {
             "running": self._running,
             "strategy": STRATEGY_NAME,
@@ -907,11 +782,7 @@ class OrderBookScalpStrategy:
             "started_at": self._started_at,
         }
 
-    def _save_scalp_state(self):
-        save_scalp_state(self._equity, self._capital, self._started_at)
-
     async def snapshot(self, coin: str = "BTC") -> dict:
-        """One-shot book + metrics for UI without starting the bot."""
         client = await self._client()
         if not client:
             return {"error": "no_client"}

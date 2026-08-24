@@ -1298,9 +1298,20 @@ async def scalp_status():
             "books": {},
             "open_positions": [],
             "total_pnl": 0,
+            "lifetime_pnl": 0,
             "recent_signals": [],
         }
-    return scalp_bot.get_status()
+    try:
+        return scalp_bot.get_status()
+    except Exception as e:
+        return {
+            "running": bool(getattr(scalp_bot, "_running", False)),
+            "strategy": SCALP_NAME,
+            "version": SCALP_VERSION,
+            "error": str(e),
+            "open_positions": [],
+            "lifetime_pnl": getattr(scalp_bot, "_lifetime_pnl", 0),
+        }
 
 
 @app.get("/api/scalp/book")
@@ -1364,7 +1375,6 @@ async def scalp_start(data: dict = None):
 async def scalp_stop():
     global scalp_bot
     if scalp_bot:
-        scalp_bot._save_scalp_state()
         scalp_bot.stop()
     return {"message": "Scalp stopped", "running": False}
 
