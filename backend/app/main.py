@@ -1350,9 +1350,11 @@ async def scalp_start(data: dict = None):
             _exec = False
         else:
             _exec = _demo
+    _cap = max(50.0, min(50000.0, float(data.get("capital") or 200)))
+    _lev = max(1.0, min(3.0, float(data.get("max_leverage") or data.get("leverage") or 2)))
     cfg = ScalpConfig(
-        capital=float(data.get("capital") or 200),
-        max_leverage=float(data.get("max_leverage") or 1),
+        capital=_cap,
+        max_leverage=_lev,
         obi_threshold=float(data.get("obi_threshold") or 0.50),
         persist_n=int(data.get("persist_n") or 5),
         poll_interval_sec=float(data.get("poll_interval_sec") or 2.5),

@@ -108,6 +108,12 @@ export default function ScalpPage({ connected, isGuest }) {
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
+  const [capital, setCapital] = useState(() => {
+    try { return Number(localStorage.getItem('scalp_capital') || 200) || 200 } catch { return 200 }
+  })
+  const [leverage, setLeverage] = useState(() => {
+    try { return Number(localStorage.getItem('scalp_leverage') || 2) || 2 } catch { return 2 }
+  })
 
   const loadBook = useCallback(async () => {
     if (!connected) return
@@ -144,15 +150,28 @@ export default function ScalpPage({ connected, isGuest }) {
   const running = !!status?.running
   const liveBook = (status?.books && status.books[coin]) || book
 
+  useEffect(() => {
+    if (!status?.config) return
+    if (status.config.capital != null) setCapital(status.config.capital)
+    if (status.config.max_leverage != null) setLeverage(status.config.max_leverage)
+  }, [status?.running, status?.config?.capital, status?.config?.max_leverage])
+
   const toggle = async () => {
     if (isGuest) return
     setBusy(true)
     try {
       if (running) await api.scalpStop()
       else {
+        const cap = Math.max(50, Math.min(50000, Number(capital) || 200))
+        const lev = Math.max(1, Math.min(3, Number(leverage) || 2))
+        try {
+          localStorage.setItem('scalp_capital', String(cap))
+          localStorage.setItem('scalp_leverage', String(lev))
+        } catch { /* ignore */ }
         await api.scalpStart({
           symbols: COINS,
-          capital: 200,
+          capital: cap,
+          max_leverage: lev,
           execute: true,
           use_llm: false,
           obi_threshold: 0.50,
@@ -199,6 +218,50 @@ export default function ScalpPage({ connected, isGuest }) {
         </div>
       </div>
 
+
+      {/* Capital / leverage — applied on Start */}
+      <div className="panel p-3 flex-shrink-0">
+        <div className="flex flex-wrap items-end gap-4">
+          <div>
+            <label className="text-2xs text-[var(--txt-muted)] font-semibold block mb-1">
+              {t('scalp.capital_label') || 'Капитал стратегии (USDT)'}
+            </label>
+            <input
+              type="number"
+              min={50}
+              max={50000}
+              step={50}
+              disabled={running || isGuest}
+              value={capital}
+              onChange={(e) => setCapital(e.target.value)}
+              className="input input-sm w-36 mono"
+            />
+          </div>
+          <div>
+            <label className="text-2xs text-[var(--txt-muted)] font-semibold block mb-1">
+              {t('scalp.leverage_label') || 'Плечо'}
+            </label>
+            <select
+              disabled={running || isGuest}
+              value={leverage}
+              onChange={(e) => setLeverage(Number(e.target.value))}
+              className="input input-sm w-28 mono"
+            >
+              <option value={1}>×1</option>
+              <option value={2}>×2</option>
+              <option value={3}>×3</option>
+            </select>
+          </div>
+          <div className="text-2xs text-[var(--txt-muted)] max-w-md leading-relaxed pb-1">
+            {t('scalp.capital_hint') || 'Сумма, которую бот считает своим бюджетом (с учётом свободной маржи). Плечо до ×3 — для скальпа осторожно: выше риск ликвидации.'}
+            {running && status?.config && (
+              <span className="block mt-0.5 mono text-[var(--txt-secondary)]">
+                live: capital={status.config.capital} · lev×{status.config.max_leverage}
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
       {/* Method strip */}
       <div className="panel p-3 flex-shrink-0">
         <div className="flex items-start gap-2">

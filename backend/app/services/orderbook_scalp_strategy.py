@@ -62,7 +62,7 @@ def save_scalp_state(payload: dict) -> None:
 class ScalpConfig:
     symbols: list = None
     capital: float = 200.0
-    max_leverage: float = 1.0
+    max_leverage: float = 2.0
     risk_per_trade: float = 0.002
     allocation_pct: float = 0.04
     levels: int = 10
@@ -437,7 +437,7 @@ class OrderBookScalpStrategy:
             self._acct_eq = float(acct_eq)
             self._avail_usdt = float(usdt_avail)
             buying = max(acct_avail, usdt_avail)
-            usable = min(float(self.config.capital), buying * 0.25) if buying > 0 else 0.0
+            usable = min(float(self.config.capital), buying * 0.85) if buying > 0 else 0.0
             return usable
         except Exception as e:
             print(f"[Scalp] balance: {e}", flush=True)
@@ -451,27 +451,31 @@ class OrderBookScalpStrategy:
         avail = max(float(self._acct_avail or 0), float(self._avail_usdt or 0))
         if avail < 8.0:
             return 0.0, 1.0
-        base = float(equity_cap if equity_cap is not None else 0.0)
+        # User-allocated capital for this strategy (still capped by free margin)
+        alloc = float(self.config.capital)
+        base = float(equity_cap if equity_cap is not None else alloc)
         if base <= 0:
-            base = min(float(self.config.capital), avail * 0.25)
-        base = min(base, avail * 0.25)
+            base = alloc
+        base = min(base, alloc, avail * 0.85)
         stop_pct = max(0.0008, float(self.config.stop_bps) / 10000.0)
         risk_usd = base * float(self.config.risk_per_trade)
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = min(base * float(self.config.allocation_pct), avail * 0.15)
-        lev = 1.0
+        # Leverage 1–3× (scalp-safe); higher lev → less margin for same notional
+        lev = max(1.0, min(3.0, float(self.config.max_leverage or 1)))
+        max_margin = min(base * float(self.config.allocation_pct), avail * 0.4)
         if lev > 0 and notional / lev > max_margin:
             notional = max_margin * lev
-        notional = min(notional, 50.0)
+        # Notional ceiling scales with allocated capital
+        notional = min(notional, max(40.0, alloc * 0.5))
         req_margin = notional / lev if lev else notional
-        if entry <= 0 or ct <= 0 or req_margin > avail * 0.2 or max_margin < 2:
+        if entry <= 0 or ct <= 0 or req_margin > avail * 0.5 or max_margin < 2:
             return 0.0, lev
         raw = notional / (entry * ct)
         steps = math.floor(raw / lot)
         sz = max(0.0, round(steps * lot, 8))
         if sz <= 0:
             min_margin = (lot * entry * ct) / lev
-            if min_margin <= avail * 0.15:
+            if min_margin <= avail * 0.4:
                 sz = lot
             else:
                 return 0.0, lev
