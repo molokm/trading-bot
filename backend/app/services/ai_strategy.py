@@ -19,6 +19,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open, release_open
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
 import json
 from .risk_guard import assert_can_open
@@ -502,14 +503,9 @@ class AIStrategy:
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
-        if self.db:
-            try:
-                await self.db.save_position(
-                    bot_id=self.BOT_ID, inst_id=inst, side=side,
-                    size=sz, entry_price=round(fill_px, 4),
-                )
-            except Exception:
-                pass
+        ok_claim = await claim_open(self.db, self.BOT_ID, inst, side, sz, fill_px)
+        if not ok_claim:
+            print(f"[AI] CRITICAL: open filled but DB claim failed {coin} — risk of orphan", flush=True)
         self._trade_log.append({
             "time": pos.opened_at, "side": order_side, "symbol": inst,
             "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
@@ -675,17 +671,16 @@ class AIStrategy:
                 entry = float(p.get("avgPx") or 0)
                 if sz <= 0 or entry <= 0 or coin in self._positions:
                     continue
-                if self.db:
-                    try:
-                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
-                            continue
-                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
-                        if not mine:
-                            continue
-                    except Exception as e:
-                        print(f"[AI] restore ownership: {e}", flush=True)
+                if not self.db:
+                    continue
+                try:
+                    if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
                         continue
-                else:
+                    mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                    if not mine:
+                        continue
+                except Exception as e:
+                    print(f"[AI] restore ownership: {e}", flush=True)
                     continue
                 stop_pct = 0.03
                 take_pct = 0.06
@@ -711,6 +706,9 @@ class AIStrategy:
             return
         if not self._positions:
             await self._restore_open_positions(client)
+        # Keep DB ownership fresh so UI never loses the badge after restart
+        for coin, pos in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
         await self._fetch_indicators(client)
         await self._manage_stops(client)
         snap = self._snapshot()

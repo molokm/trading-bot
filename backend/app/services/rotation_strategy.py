@@ -22,6 +22,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
@@ -1871,6 +1872,7 @@ class RotationStrategy:
             else:
                 await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
             for coin, pos in self._positions.items():
+                await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
                 await self.db.save_position(
                     bot_id=self.BOT_ID, inst_id=pos.inst_id,
                     side=pos.side, size=pos.size,
@@ -1948,11 +1950,11 @@ class RotationStrategy:
         # Another bot already tracks it in DB
         if self.db:
             try:
-                if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
                     print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
                           flush=True)
                     return False
-                mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                 if mine:
                     return True
             except Exception as e:

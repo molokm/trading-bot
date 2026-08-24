@@ -15,6 +15,7 @@ from typing import Any, Optional
 from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open, release_open
 from .ai_agent import _openai_compatible
 
 SCALP_BOT_ID = "orderbook_scalp"
@@ -310,17 +311,16 @@ class OrderBookScalpStrategy:
                 entry = float(p.get("avgPx") or 0)
                 if sz <= 0 or entry <= 0 or coin in self._positions:
                     continue
-                if self.db:
-                    try:
-                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
-                            continue
-                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
-                        if not mine:
-                            continue
-                    except Exception as e:
-                        print(f"[Scalp] restore ownership: {e}", flush=True)
+                if not self.db:
+                    continue
+                try:
+                    if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
                         continue
-                else:
+                    mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                    if not mine:
+                        continue
+                except Exception as e:
+                    print(f"[Scalp] restore ownership: {e}", flush=True)
                     continue
                 stop_pct = float(self.config.stop_bps) / 10000.0
                 take_pct = float(self.config.take_bps) / 10000.0
@@ -345,6 +345,8 @@ class OrderBookScalpStrategy:
             return
         if not self._positions:
             await self._restore_open_positions(client)
+        for coin, pos in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
         for coin in list(self._positions.keys()):
             await self._manage_position(client, coin)
         if len(self._positions) >= 1:
@@ -634,14 +636,8 @@ class OrderBookScalpStrategy:
         self._hour_trade_ts.append(self._last_open_ts)
         self._equity -= fee_cost(fee)
         self._persist()
-        if self.db:
-            try:
-                await self.db.save_position(
-                    bot_id=self.BOT_ID, inst_id=inst, side=side,
-                    size=sz, entry_price=round(fill_px, 4),
-                )
-            except Exception:
-                pass
+        if not await claim_open(self.db, self.BOT_ID, inst, side, sz, fill_px):
+            print(f"[Scalp] CRITICAL: open filled but DB claim failed {coin}", flush=True)
         self._last_exec = {
             "event": "open_ok", "coin": coin, "side": side,
             "entry": fill_px, "size": sz, "lev": lev,

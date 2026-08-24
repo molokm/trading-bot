@@ -23,6 +23,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
@@ -535,6 +536,9 @@ class ImpulseStrategy:
             except Exception as e:
                 print(f"[Impulse] DB save partial error: {e}", flush=True)
             await self._sync_positions_db()
+        # explicit claim (survives net-mode / restart)
+        for _c, _p in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, _p.inst_id, _p.side, _p.size, _p.entry_price)
         print(f"[Impulse] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f} ({tag})", flush=True)
@@ -1126,9 +1130,9 @@ class ImpulseStrategy:
                 own = False
                 if self.db:
                     try:
-                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                        if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
                             continue
-                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                        mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                         if mine:
                             own = True
                     except Exception as e:

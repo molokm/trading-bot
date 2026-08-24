@@ -903,6 +903,49 @@ class Database:
         else:
             await self._execute("DELETE FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def claim_position(self, bot_id: str, inst_id: str, side: str,
+                              size: float, entry_price: float) -> None:
+        """Persist ownership so restarts can restore the position to THIS bot only."""
+        side_n = (side or "long").lower()
+        if side_n in ("sell", "s"):
+            side_n = "short"
+        elif side_n in ("buy", "b", "net"):
+            side_n = "long" if side_n != "short" else side_n
+        if side_n not in ("long", "short"):
+            side_n = "long"
+        await self.save_position(
+            bot_id=bot_id, inst_id=inst_id, side=side_n,
+            size=float(size), entry_price=float(entry_price),
+            current_price=float(entry_price),
+        )
+
+    async def find_position_any_side(self, bot_id: str, inst_id: str, side: str = None) -> Optional[dict]:
+        """Match long/short/net — OKX one-way mode reports posSide=net."""
+        tried = []
+        for s in (side, "long", "short", "net"):
+            if not s or s in tried:
+                continue
+            tried.append(s)
+            row = await self.find_position(bot_id, inst_id, s)
+            if row:
+                return row
+        return None
+
+    async def other_bot_owns_position_any(self, bot_id: str, inst_id: str, side: str = None) -> bool:
+        for s in (side, "long", "short", "net"):
+            if not s:
+                continue
+            if await self.other_bot_owns_position(bot_id, inst_id, s):
+                return True
+        # any other bot on this inst regardless of side
+        sql = (
+            "SELECT bot_id FROM positions WHERE inst_id = $1 AND bot_id <> $2 LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM positions WHERE inst_id = ? AND bot_id <> ? LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id, bot_id))
+        return bool(row)
+
     async def find_position(self, bot_id: str, inst_id: str, side: str) -> Optional[dict]:
         """Lookup a single open position row owned by this bot."""
         sql = (
