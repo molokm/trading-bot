@@ -56,27 +56,11 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 
-SYSTEM_PROMPT = """You are a cautious crypto futures trading agent for OKX SWAP.
-Universe: BTC, ETH, SOL, XRP only. Timeframe: 1H.
-Account: ~$10,000, max leverage 3x, must avoid liquidation — stops must be tight
-relative to leverage (prefer stop 2.5–5% from entry at 2–3x).
-Reply with ONLY a single JSON object, no markdown:
-{
-  "action": "open"|"close"|"hold"|"reduce",
-  "symbol": "BTC"|"ETH"|"SOL"|"XRP"|null,
-  "side": "long"|"short"|null,
-  "size_pct_equity": 0.0-0.15,
-  "stop_pct": 0.015-0.05,
-  "take_pct": 0.02-0.12,
-  "confidence": 0.0-1.0,
-  "reason": "short string"
-}
-Rules:
-- Prefer hold when trend is unclear or confidence < 0.55.
-- Never risk more than 15% of equity notional margin per new position.
-- One clear thesis per decision. No multiple symbols in one reply.
-- If a position is open and thesis is invalid, close or reduce.
-"""
+SYSTEM_PROMPT = """OKX SWAP agent. Reply JSON only:
+{"action":"open|close|hold|reduce","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
+"size_pct_equity":0.05-0.25,"stop_pct":0.02-0.05,"take_pct":0.04-0.12,"confidence":0-1,"reason":"short"}
+Rules: prefer hold; max 1 pos; no open if open_positions non-empty unless close first; RR>=1.5; confidence>=0.7 to open.
+No markdown."""
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -265,11 +249,19 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     }
     user_msg = (
         "Market snapshot (JSON). Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:12000]
+        + json.dumps(user_payload, ensure_ascii=False)[:3500]
     )
 
     if provider == "mock" or not provider:
         return mock_decide(snapshot)
+
+    import time as _time
+    if provider == "groq" and _time.time() < _rate_limit_until:
+        wait_left = int(_rate_limit_until - _time.time())
+        d = mock_decide(snapshot)
+        d["reason"] = f"llm_cooldown:{wait_left}s (Groq TPD/RPM); fallback: {d.get('reason')}"
+        d["confidence"] = min(float(d.get("confidence") or 0.5), 0.5)
+        return d
 
     try:
         if provider == "groq":
@@ -366,9 +358,25 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                     continue
                 break
             if r.status_code == 429:
-                # org daily/minute cap — pause further Groq calls briefly
-                _rate_limit_until = _time.time() + 180
-                log.warning("LLM 429 hard — cooldown 180s (avoid burning quota on 120b)")
+                # Parse "Please try again in 3m23.904s" or "try again in 4m16.608s"
+                wait_s = 300.0
+                try:
+                    m = re.search(
+                        r"try again in\s*(?:(\d+)m)?\s*([0-9.]+)s",
+                        r.text or "",
+                        re.I,
+                    )
+                    if m:
+                        mins = int(m.group(1) or 0)
+                        secs = float(m.group(2) or 0)
+                        wait_s = max(60.0, mins * 60 + secs + 30)
+                    # Daily TPD exhaustion — back off longer
+                    if "tokens per day" in (r.text or "").lower() or "TPD" in (r.text or ""):
+                        wait_s = max(wait_s, 900.0)  # at least 15 min
+                except Exception:
+                    wait_s = 300.0
+                _rate_limit_until = _time.time() + wait_s
+                log.warning("LLM 429 hard — cooldown %.0fs (TPD/RPM)", wait_s)
             if r.status_code >= 400 and json_mode and r.status_code in (400, 422):
                 body.pop("response_format", None)
                 r = await client.post(url, headers=headers, json=body)
@@ -406,10 +414,12 @@ async def _gemini(api_key: str, model: str, system: str, user: str) -> str:
 
 def llm_status() -> dict:
     """Public-safe LLM config for /api/ai/status (no secrets)."""
+    import time as _time
     key = os.getenv("GROQ_API_KEY", "").strip()
     provider = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
         provider = "groq" if key else "mock"
+    cool = max(0, int(_rate_limit_until - _time.time()))
     return {
         "provider": provider,
         "model": (
@@ -422,4 +432,6 @@ def llm_status() -> dict:
         ),
         "groq_key_configured": bool(key),
         "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
+        "rate_limit_cooldown_sec": cool,
+        "rate_limited": cool > 0,
     }
