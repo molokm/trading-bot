@@ -708,20 +708,13 @@ class AIStrategy:
                 entry = float(p.get("avgPx") or 0)
                 if sz <= 0 or entry <= 0 or coin in self._positions:
                     continue
-                if not self.db:
-                    continue
+                # Adopt if no OTHER bot owns this instrument (recover lost claim after deploy).
                 try:
-                    if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
-                        continue
-                    mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
-                    if not mine:
-                        # Ownership from recent trades (claim may have failed mid-deploy)
-                        mine = await self._owned_via_trades(inst_id, side)
-                    if not mine:
+                    if self.db and await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
+                        print(f"[AI] skip restore {coin}: owned by another bot", flush=True)
                         continue
                 except Exception as e:
                     print(f"[AI] restore ownership: {e}", flush=True)
-                    continue
                 stop_pct = 0.03
                 take_pct = 0.06
                 if side == "long":

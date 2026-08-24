@@ -256,19 +256,29 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   // Exchange positions with no strategy owner (manual / lost bot state)
   const orphanPositions = useMemo(() => {
+    const managedKeys = new Set(Object.keys(botMap || {}))
+    const addStatus = (arr) => {
+      for (const op of (arr || [])) {
+        const inst = op.inst_id || op.instId || (op.coin ? `${op.coin}-USDT-SWAP` : '')
+        const side = (op.side || op.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+        if (inst) managedKeys.add(`${inst}|${side}`)
+      }
+    }
+    addStatus(momentumStatus?.open_positions)
+    addStatus(impulseStatus?.open_positions)
+    addStatus(validationStatus?.open_positions)
+    addStatus(aiStatus?.open_positions)
     return (positions || []).filter((p) => {
       const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
       if (!posSz) return false
       const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
-      return !bn || bn === 'Order Book Scalp'
-    }).filter((p) => {
-      const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
-      // Scalp has its own page — still warn if OBI open shows as orphan on main
-      return !bn
+      const key = `${p.instId || ''}|${posSideKey}`
+      const bn = p.bot || botMap[key] || ''
+      if (bn && bn !== 'Order Book Scalp') return false
+      if (managedKeys.has(key)) return false
+      return true
     })
-  }, [positions, botMap])
+  }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions])
 
   // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
@@ -327,9 +337,17 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (!posSz) continue
       const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
       const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
-      const hint = p.bot || botMap[posKey] || ''
+      let hint = p.bot || botMap[posKey] || ''
+      if (!hint) {
+        const coin = (p.instId || '').replace('-USDT-SWAP', '')
+        for (const op of (aiStatus?.open_positions || [])) {
+          if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
+            hint = 'AI Discretionary 1H'
+            break
+          }
+        }
+      }
       if (hint === 'Order Book Scalp') continue
-      // No strategy ownership — do not list on main (orphan / manual / lost state)
       if (!hint) continue
       pushOpen({
         ...p,
