@@ -345,8 +345,8 @@ async def startup():
             ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
                                notifier=telegram)
             ai_bot.start()
-        global _positions_cache
-        _positions_cache = None
+            global _positions_cache
+            _positions_cache = None
             print("[startup]   AI Discretionary RUNNING", flush=True)
         else:
             print("[startup]   AI skipped (set AI_AUTO_START=1 to enable)", flush=True)
@@ -1178,8 +1178,8 @@ async def ai_start(data: dict = None):
         cfg.symbols = list(data["symbols"])
     ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
     ai_bot.start()
-        global _positions_cache
-        _positions_cache = None
+    global _positions_cache
+    _positions_cache = None
     return {"message": "AI Discretionary started", **ai_bot.get_status()}
 
 
