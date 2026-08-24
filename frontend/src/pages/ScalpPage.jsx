@@ -345,7 +345,7 @@ export default function ScalpPage({ connected, isGuest }) {
           )}
         </div>
 
-        {/* Right: signals */}
+        {/* Right: signals + trades (not on main dashboard) */}
         <div className="panel p-3 flex flex-col min-h-[240px]">
           <div className="flex items-center gap-2 mb-3">
             <Zap size={14} className="text-cyan-400" />
@@ -383,6 +383,31 @@ export default function ScalpPage({ connected, isGuest }) {
               ))}
             </div>
           )}
+          <div className="mt-3 pt-2 border-t border-[var(--border)] flex-1 min-h-0 flex flex-col">
+            <div className="text-2xs text-[var(--txt-muted)] font-semibold mb-1.5">{t('scalp.trades') || 'Сделки скальпа'}</div>
+            <div className="overflow-auto space-y-1 flex-1">
+              {(status?.recent_trades || []).length === 0 && (
+                <div className="text-2xs text-[var(--txt-muted)]">{t('scalp.no_trades') || 'Пока нет сделок'}</div>
+              )}
+              {[...(status?.recent_trades || [])].reverse().map((tr, i) => (
+                <div key={i} className="p-1.5 rounded bg-[var(--bg)] text-2xs mono flex justify-between gap-2">
+                  <span>
+                    <span className={(tr.side === 'long' || tr.event === 'open') && tr.side !== 'short' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+                      {(tr.side || tr.event || '').toString().toUpperCase()}
+                    </span>
+                    {' '}{tr.coin}
+                    {tr.reason ? ` · ${tr.reason}` : ''}
+                  </span>
+                  <span className={
+                    tr.pnl == null ? 'text-[var(--txt-muted)]'
+                    : Number(tr.pnl) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+                  }>
+                    {tr.pnl != null ? `${Number(tr.pnl) >= 0 ? '+' : ''}${Number(tr.pnl).toFixed(4)}` : (tr.px != null ? `@${tr.px}` : '—')}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
     </div>

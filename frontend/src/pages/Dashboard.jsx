@@ -303,7 +303,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
     for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
     for (const p of (aiStatus?.open_positions || [])) pushOpen(p, 'AI Discretionary 1H')
-    for (const p of (scalpStatus?.open_positions || [])) pushOpen(p, 'Order Book Scalp')
+    // Scalp opens/trades live only on /scalp — not on main dashboard
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
     for (const p of (positions || [])) {
@@ -312,6 +312,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
       const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
       const hint = p.bot || botMap[posKey] || ''
+      if (hint === 'Order Book Scalp') continue
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
@@ -327,6 +328,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
     for (const tr of allTrades) {
+      if (tr.bot === 'Order Book Scalp') continue
       const r = (tr.reason || '').toLowerCase()
       if (r === 'open' || r === 'add') continue
       if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
@@ -584,7 +586,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.map((p, i) => {
+                    {positions.filter((p) => {
+                      const posSideKey = (p.posSide || 'long').toLowerCase()
+                      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
+                      return bn !== 'Order Book Scalp'
+                    }).map((p, i) => {
                       const upl = parseFloat(p.upl || 0)
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
