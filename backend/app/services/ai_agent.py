@@ -25,6 +25,22 @@ ALLOWED_ACTIONS = ("open", "close", "hold", "reduce")
 ALLOWED_SIDES = ("long", "short")
 ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")
 
+_DEPRECATED_GROQ_MODELS = {
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+    "llama-3.1-70b-versatile",
+    "mixtral-8x7b-32768",
+}
+_GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+
+
+def _resolve_groq_model(model: str | None) -> str:
+    m = (model or "").strip() or _GROQ_DEFAULT_MODEL
+    if m in _DEPRECATED_GROQ_MODELS or m.startswith("llama-3.1-8b"):
+        return _GROQ_DEFAULT_MODEL
+    return m
+
+
 
 SYSTEM_PROMPT = """You are a cautious crypto futures trading agent for OKX SWAP.
 Universe: BTC, ETH, SOL, XRP only. Timeframe: 1H.
@@ -246,7 +262,7 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             raw = await _openai_compatible(
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-                model=os.getenv("AI_LLM_MODEL", "openai/gpt-oss-20b"),
+                model=_resolve_groq_model(os.getenv("AI_LLM_MODEL")),
                 system=SYSTEM_PROMPT,
                 user=user_msg,
             )

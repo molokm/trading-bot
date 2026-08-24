@@ -36,12 +36,11 @@ from .ai_agent import _openai_compatible  # reuse Groq path
 
 SCALP_BOT_ID = "orderbook_scalp"
 STRATEGY_NAME = "Order Book Scalp"
-STRATEGY_VERSION = "v0.1"
+STRATEGY_VERSION = "v0.2"
 STRATEGY_DESC = (
-    "Order Book Scalp v0.1 — скальпинг по дисбалансу стакана (OBI) на OKX SWAP. "
-    "Каждые 1–2 с снимается глубина L2 (top-N), считаются OBI₅/OBI₁₀, micro-price, "
-    "стены и спред. Вход при устойчивом |OBI|≥порога; стоп/тейк в bps, max hold секунды. "
-    "Опционально LLM подтверждает/ветирует сигнал. Не HFT и не гарантия прибыли."
+    "Order Book Scalp v0.2 — селективный OBI-скальп. Жёстче фильтр (|OBI|≥0.5, persist 5, "
+    "cooldown, лимит сделок/час), тейк с запасом под taker-комиссию (~10 bps RT). "
+    "Накопительный PnL (lifetime) не сбрасывается при рестарте. Не HFT / не гарантия прибыли."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -71,19 +70,24 @@ class ScalpConfig:
     symbols: list = None
     capital: float = 200.0
     max_leverage: float = 1.0
-    risk_per_trade: float = 0.002       # 0.2% equity at stop
+    risk_per_trade: float = 0.002
     allocation_pct: float = 0.04
     levels: int = 10
-    obi_threshold: float = 0.35
-    persist_n: int = 3                  # consecutive same-sign OBI
-    max_spread_bps: float = 8.0
-    stop_bps: float = 12.0              # ~0.12%
-    take_bps: float = 18.0
-    max_hold_sec: float = 90.0
-    poll_interval_sec: float = 1.5
-    use_llm: bool = True
-    execute: bool = None                # None → demo auto
-    min_wall_mult: float = 3.0          # wall if qty > mult * median
+    obi_threshold: float = 0.50
+    persist_n: int = 5
+    max_spread_bps: float = 5.0
+    stop_bps: float = 15.0
+    take_bps: float = 30.0
+    fee_bps_rt: float = 10.0
+    max_hold_sec: float = 75.0
+    poll_interval_sec: float = 2.5
+    cooldown_sec: float = 60.0
+    min_signal_gap_sec: float = 45.0
+    max_trades_per_hour: int = 8
+    use_llm: bool = False
+    execute: bool = None
+    notify_telegram: bool = False
+    min_wall_mult: float = 3.0
 
     def __post_init__(self):
         if self.symbols is None:
@@ -273,6 +277,17 @@ class OrderBookScalpStrategy:
         return s or "0"
 
     async def _run(self):
+        if getattr(self, "_seed_db", False) and self.db is not None:
+            try:
+                rows = await self.db.get_metrics(bot_id=SCALP_BOT_ID, limit=1)
+                if rows:
+                    tp = float(rows[0].get("total_pnl") or 0)
+                    if abs(tp) > abs(self._lifetime_pnl):
+                        self._lifetime_pnl = tp
+                        self._persist()
+                        print(f"[Scalp] seeded lifetime_pnl={tp} from DB", flush=True)
+            except Exception as e:
+                print(f"[Scalp] seed: {e}", flush=True)
         while self._running:
             try:
                 await self._tick()
@@ -422,7 +437,16 @@ class OrderBookScalpStrategy:
         except Exception:
             pass
 
-        if not llm.get("confirm") or float(llm.get("confidence") or 0) < 0.45:
+        if self.config.use_llm:
+            if not llm.get("confirm") or float(llm.get("confidence") or 0) < 0.55:
+                return
+        if abs(float(metrics.get("w_obi") or 0)) < float(self.config.obi_threshold) * 0.85:
+            return
+        if abs(float(metrics.get("obi_1") or 0)) < 0.25:
+            return
+        ok, why = self._can_open_now()
+        if not ok:
+            self._last_exec = {"event": "skip", "reason": why, "coin": coin, "side": side}
             return
         await self._open(client, coin, side, metrics, sig)
 
@@ -649,7 +673,10 @@ class OrderBookScalpStrategy:
             leverage=lev, opened_at=time.time(), signal=sig,
         )
         self._positions[coin] = pos
+        self._last_open_ts = time.time()
+        self._hour_trade_ts.append(self._last_open_ts)
         self._equity -= fee_cost(fee)
+        self._persist()
         if self.db:
             try:
                 await self.db.save_position(
@@ -778,6 +805,58 @@ class OrderBookScalpStrategy:
             except Exception:
                 pass
 
+    def _persist(self):
+        save_scalp_state({
+            "lifetime_pnl": self._lifetime_pnl,
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_wins": self._lifetime_wins,
+            "lifetime_fees": self._lifetime_fees,
+            "session_pnl": self._session_pnl,
+            "last_close_ts": self._last_close_ts,
+            "last_open_ts": self._last_open_ts,
+            "hour_trade_ts": list(self._hour_trade_ts)[-50:],
+            "updated_at": _now_iso(),
+        })
+        if self.db is not None and self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(self._db_snapshot(), self._loop)
+            except Exception:
+                pass
+
+    async def _db_snapshot(self):
+        try:
+            await self.db.ensure_bot(SCALP_BOT_ID, strategy_id="orderbook_scalp",
+                                     name=STRATEGY_NAME)
+            wr = (100.0 * self._lifetime_wins / self._lifetime_trades) if self._lifetime_trades else None
+            await self.db.save_metric(
+                bot_id=SCALP_BOT_ID,
+                equity=self._capital + self._lifetime_pnl,
+                total_pnl=self._lifetime_pnl,
+                win_rate=wr,
+            )
+        except Exception as e:
+            print(f"[Scalp] db snapshot: {e}", flush=True)
+
+    def _trades_last_hour(self) -> int:
+        now = time.time()
+        while self._hour_trade_ts and now - self._hour_trade_ts[0] > 3600:
+            self._hour_trade_ts.popleft()
+        return len(self._hour_trade_ts)
+
+    def _can_open_now(self) -> tuple:
+        now = time.time()
+        cd = float(self.config.cooldown_sec)
+        if self._last_close_ts and now - self._last_close_ts < cd:
+            return False, f"cooldown:{cd - (now - self._last_close_ts):.0f}s"
+        gap = float(self.config.min_signal_gap_sec)
+        if self._last_open_ts and now - self._last_open_ts < gap:
+            return False, f"signal_gap:{gap - (now - self._last_open_ts):.0f}s"
+        if self._trades_last_hour() >= int(self.config.max_trades_per_hour):
+            return False, "max_trades_per_hour"
+        if float(self.config.take_bps) <= float(self.config.fee_bps_rt) * 1.5:
+            return False, "take_bps_too_low_vs_fees"
+        return True, "ok"
+
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("event") == "close"]
         wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
@@ -792,9 +871,23 @@ class OrderBookScalpStrategy:
             "acct_eq": self._acct_eq,
             "capital": self._capital,
             "equity": round(self._equity, 4),
-            "total_pnl": round(self._equity - self._capital, 4),
-            "total_trades": len(closed),
-            "win_rate": round(100.0 * wins / len(closed), 1) if closed else None,
+            "total_pnl": round(self._session_pnl, 4),
+            "session_pnl": round(self._session_pnl, 4),
+            "lifetime_pnl": round(self._lifetime_pnl, 4),
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_wins": self._lifetime_wins,
+            "lifetime_fees": round(self._lifetime_fees, 4),
+            "lifetime_win_rate": (
+                round(100.0 * self._lifetime_wins / self._lifetime_trades, 1)
+                if self._lifetime_trades else None
+            ),
+            "total_trades": self._lifetime_trades,
+            "session_trades": len(closed),
+            "win_rate": (
+                round(100.0 * self._lifetime_wins / self._lifetime_trades, 1)
+                if self._lifetime_trades else None
+            ),
+            "trades_last_hour": self._trades_last_hour(),
             "open_positions": [
                 {
                     "coin": p.coin, "side": p.side, "size": p.size,

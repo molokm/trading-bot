@@ -3,6 +3,8 @@ const en = {
   'nav.dashboard': 'Dashboard',
   'nav.bots': 'Bots',
   'nav.scalp': 'Book Scalp',
+  'scalp.lifetime_pnl': 'Lifetime PnL (scalp only)',
+  'scalp.session_pnl': 'Session PnL',
   'scalp.title': 'Order Book Scalping (OBI)',
   'scalp.subtitle': 'OKX L2 book analysis: bid/ask imbalance, micro-price, liquidity walls. Signal on persistent OBI; AI may confirm or veto entries.',
   'scalp.method': 'OBI₅/₁₀ = (bid vol − ask vol) / sum over top levels. Entry: |OBI| ≥ threshold for several snapshots, tight spread. Exit: TP/SL in bps, OBI flip, or max hold. LLM (Groq) optional spoof/wall filter.',

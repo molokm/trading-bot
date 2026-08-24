@@ -1342,13 +1342,13 @@ async def scalp_start(data: dict = None):
     cfg = ScalpConfig(
         capital=float(data.get("capital") or 200),
         max_leverage=float(data.get("max_leverage") or 1),
-        obi_threshold=float(data.get("obi_threshold") or 0.35),
-        persist_n=int(data.get("persist_n") or 3),
-        poll_interval_sec=float(data.get("poll_interval_sec") or 1.5),
-        stop_bps=float(data.get("stop_bps") or 12),
-        take_bps=float(data.get("take_bps") or 18),
-        max_hold_sec=float(data.get("max_hold_sec") or 90),
-        use_llm=bool(data.get("use_llm", True)),
+        obi_threshold=float(data.get("obi_threshold") or 0.50),
+        persist_n=int(data.get("persist_n") or 5),
+        poll_interval_sec=float(data.get("poll_interval_sec") or 2.5),
+        stop_bps=float(data.get("stop_bps") or 15),
+        take_bps=float(data.get("take_bps") or 30),
+        max_hold_sec=float(data.get("max_hold_sec") or 75),
+        use_llm=bool(data.get("use_llm", False)),
         execute=_exec,
     )
     if data.get("symbols"):

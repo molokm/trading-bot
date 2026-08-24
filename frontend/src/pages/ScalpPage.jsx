@@ -154,9 +154,9 @@ export default function ScalpPage({ connected, isGuest }) {
           symbols: COINS,
           capital: 200,
           execute: true,
-          use_llm: true,
-          obi_threshold: 0.35,
-          persist_n: 3,
+          use_llm: false,
+          obi_threshold: 0.50,
+          persist_n: 5,
         })
       }
       await loadStatus()
@@ -175,7 +175,7 @@ export default function ScalpPage({ connected, isGuest }) {
             <Layers size={18} className="text-cyan-400" />
             <h2 className="text-lg font-bold text-[var(--txt)]">{t('scalp.title')}</h2>
             <span className="text-[0.65rem] font-bold mono px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-400">
-              {status?.version || 'v0.1'}
+              {status?.version || 'v0.2'}
             </span>
             {running ? <StatusBadge mode="live" label={t('bots.status_running')} /> : <StatusBadge mode="stopped" label={t('bots.status_stopped')} />}
           </div>
@@ -263,6 +263,19 @@ export default function ScalpPage({ connected, isGuest }) {
             <div className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider mb-2 flex items-center gap-1">
               <Gauge size={12} /> {t('scalp.bot_stats')}
             </div>
+            <div className="mb-2 p-3 rounded-lg bg-gradient-to-br from-cyan-500/10 to-transparent ring-1 ring-cyan-500/25">
+              <div className="text-2xs text-cyan-400/90 font-semibold uppercase tracking-wider mb-1">
+                {t('scalp.lifetime_pnl')}
+              </div>
+              <div className={`text-xl font-bold mono ${(status?.lifetime_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                {(status?.lifetime_pnl || 0) >= 0 ? '+' : ''}{(status?.lifetime_pnl || 0).toFixed(2)} $
+              </div>
+              <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-2xs text-[var(--txt-muted)] mono">
+                <span>trades {status?.lifetime_trades ?? 0}</span>
+                <span>WR {status?.lifetime_win_rate != null ? `${status.lifetime_win_rate}%` : '—'}</span>
+                <span>fees ~${(status?.lifetime_fees || 0).toFixed(2)}</span>
+              </div>
+            </div>
             <div className="grid grid-cols-2 gap-2 text-2xs">
               <div className="p-2 rounded-md bg-[var(--bg)]">
                 <div className="text-[var(--txt-muted)]">Execute</div>
@@ -271,18 +284,18 @@ export default function ScalpPage({ connected, isGuest }) {
                 </div>
               </div>
               <div className="p-2 rounded-md bg-[var(--bg)]">
-                <div className="text-[var(--txt-muted)]">PnL</div>
-                <div className={`mono font-bold ${(status?.total_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                  ${(status?.total_pnl || 0).toFixed(2)}
+                <div className="text-[var(--txt-muted)]">{t('scalp.session_pnl')}</div>
+                <div className={`mono font-bold ${(status?.session_pnl || status?.total_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  ${(status?.session_pnl ?? status?.total_pnl ?? 0).toFixed(2)}
                 </div>
               </div>
               <div className="p-2 rounded-md bg-[var(--bg)]">
                 <div className="text-[var(--txt-muted)]">{t('bots.trades_count')}</div>
-                <div className="mono font-semibold">{status?.total_trades ?? 0}</div>
+                <div className="mono font-semibold">{status?.lifetime_trades ?? status?.total_trades ?? 0}</div>
               </div>
               <div className="p-2 rounded-md bg-[var(--bg)]">
-                <div className="text-[var(--txt-muted)]">Open</div>
-                <div className="mono font-semibold">{status?.open_positions?.length || 0}</div>
+                <div className="text-[var(--txt-muted)]">Open / 1h</div>
+                <div className="mono font-semibold">{status?.open_positions?.length || 0} / {status?.trades_last_hour ?? 0}</div>
               </div>
             </div>
             {status?.last_llm && (

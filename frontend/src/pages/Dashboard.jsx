@@ -194,6 +194,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     momentum_strategy: 'Momentum',
     impulse_strategy: 'Impulse 1D',
     validation_strategy: 'MACD+Donchian Validation',
+    ai_strategy: 'AI Discretionary 1H',
+    orderbook_scalp: 'Order Book Scalp',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
@@ -248,6 +250,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+    addPositions(scalpStatus?.open_positions, 'Order Book Scalp')
     return m
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions])
 
@@ -300,6 +303,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
     for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
     for (const p of (aiStatus?.open_positions || [])) pushOpen(p, 'AI Discretionary 1H')
+    for (const p of (scalpStatus?.open_positions || [])) pushOpen(p, 'Order Book Scalp')
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
     for (const p of (positions || [])) {
@@ -308,7 +312,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
       const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
       const hint = p.bot || botMap[posKey] || ''
-      if (hint === 'Order Book Scalp') continue // OBI shown in scalp section only
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
@@ -327,7 +330,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const r = (tr.reason || '').toLowerCase()
       if (r === 'open' || r === 'add') continue
       if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
-      if (tr.bot === 'Order Book Scalp') continue // OBI shown in scalp section only
       const inst = tr.inst_id || tr.symbol || ''
       // Hide phantom "closed" while the SAME instrument+side is still open on
       // OKX/bots (a false close of the still-open position). Side-aware so real
@@ -590,12 +592,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const botName = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
                       const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                        : botName === 'Impulse'
+                        : (botName === 'Impulse' || botName === 'Impulse 1D')
                         ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
                         : botName === 'Validation' || botName === 'MACD+Donchian Validation'
                         ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                         : botName === 'AI Discretionary 1H'
                         ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                        : botName === 'Order Book Scalp'
+                        ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
                         : botName
                         ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
                         : { label: '—', cls: 'text-[var(--txt-muted)]' }
@@ -733,13 +737,17 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
                     const botBadge = tr.bot === 'Momentum'
                       ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      : tr.bot === 'Impulse 1D'
+                      : (tr.bot === 'Impulse 1D' || tr.bot === 'Impulse')
                         ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
-                        : tr.bot === 'MACD+Donchian Validation'
+                        : tr.bot === 'MACD+Donchian Validation' || tr.bot === 'Validation'
                           ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                           : tr.bot === 'AI Discretionary 1H'
                             ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                            : null
+                            : tr.bot === 'Order Book Scalp'
+                              ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
+                              : tr.bot
+                                ? { label: String(tr.bot).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)]' }
+                                : null
                     const mark = parseFloat(tr.mark || 0)
                     const upnl = parseFloat(tr.unrealized_pnl || 0)
                     return (
