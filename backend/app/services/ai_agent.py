@@ -31,7 +31,12 @@ _DEPRECATED_GROQ_MODELS = {
     "llama-3.1-70b-versatile",
     "mixtral-8x7b-32768",
 }
+# 120b hits free-tier TPD/RPM hard — pin to 20b unless AI_ALLOW_LARGE_MODEL=1
 _GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+_GROQ_LARGE_MODELS = {
+    "openai/gpt-oss-120b",
+    "gpt-oss-120b",
+}
 
 
 def _resolve_groq_model(model: str | None) -> str:
@@ -42,6 +47,10 @@ def _resolve_groq_model(model: str | None) -> str:
         or m.startswith("llama-3.1-8b")
     ):
         return _GROQ_DEFAULT_MODEL
+    allow_large = os.getenv("AI_ALLOW_LARGE_MODEL", "").strip().lower() in ("1", "true", "yes", "on")
+    if m in _GROQ_LARGE_MODELS or m.endswith("gpt-oss-120b"):
+        if not allow_large:
+            return _GROQ_DEFAULT_MODEL
     return m
 
 
@@ -306,8 +315,11 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
 # Fallback chain when a Groq model id is deprecated / not on the account
 _GROQ_MODEL_FALLBACKS = (
     "openai/gpt-oss-20b",
-    "openai/gpt-oss-120b",
+    # do not chain to 120b — shares org quota and returns 429 more often
 )
+
+
+_rate_limit_until: float = 0.0  # unix time; skip Groq until then after hard 429
 
 
 async def _openai_compatible(api_key: str, base_url: str, model: str,
@@ -315,6 +327,11 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                              json_mode: bool = True) -> str:
     if not api_key:
         raise RuntimeError("missing API key")
+    global _rate_limit_until
+    import time as _time
+    if "groq.com" in base_url and _time.time() < _rate_limit_until:
+        wait_left = int(_rate_limit_until - _time.time())
+        raise RuntimeError(f"LLM rate-limit cooldown {wait_left}s — using fewer tokens")
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if "groq.com" in base_url:
@@ -339,15 +356,19 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
             # Retry loop with exponential backoff for 429 rate limits
-            for attempt in range(3):
+            for attempt in range(4):
                 r = await client.post(url, headers=headers, json=body)
-                if r.status_code == 429 and attempt < 2:
-                    wait = 2 ** (attempt + 1)
-                    log.warning("LLM 429 rate limit on %s, retry in %ds (attempt %d/3)",
+                if r.status_code == 429 and attempt < 3:
+                    wait = min(60, 3 * (2 ** attempt))  # 3, 6, 12, …
+                    log.warning("LLM 429 rate limit on %s, retry in %ds (attempt %d/4)",
                                 mid, wait, attempt + 1)
                     await asyncio.sleep(wait)
                     continue
                 break
+            if r.status_code == 429:
+                # org daily/minute cap — pause further Groq calls briefly
+                _rate_limit_until = _time.time() + 180
+                log.warning("LLM 429 hard — cooldown 180s (avoid burning quota on 120b)")
             if r.status_code >= 400 and json_mode and r.status_code in (400, 422):
                 body.pop("response_format", None)
                 r = await client.post(url, headers=headers, json=body)
@@ -391,10 +412,13 @@ def llm_status() -> dict:
         provider = "groq" if key else "mock"
     return {
         "provider": provider,
-        "model": os.getenv("AI_LLM_MODEL") or (
-            "openai/gpt-oss-20b" if provider == "groq" else
-            "gpt-4o-mini" if provider == "openai" else
-            "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
+        "model": (
+            _resolve_groq_model(os.getenv("AI_LLM_MODEL"))
+            if provider == "groq"
+            else (os.getenv("AI_LLM_MODEL") or (
+                "gpt-4o-mini" if provider == "openai" else
+                "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
+            ))
         ),
         "groq_key_configured": bool(key),
         "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),

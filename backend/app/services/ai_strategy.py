@@ -77,7 +77,7 @@ class AIConfig:
     allocation_pct: float = 0.25          # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
-    poll_interval_sec: int = 120          # decision cadence
+    poll_interval_sec: int = 180          # decision cadence
     min_confidence: float = 0.70
     min_adx: float = 18.0
     min_roc_abs: float = 0.35          # % move on roc_3
