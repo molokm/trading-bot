@@ -254,6 +254,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return m
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions])
 
+  // Exchange positions with no strategy owner (manual / lost bot state)
+  const orphanPositions = useMemo(() => {
+    return (positions || []).filter((p) => {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) return false
+      const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
+      return !bn || bn === 'Order Book Scalp'
+    }).filter((p) => {
+      const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
+      // Scalp has its own page — still warn if OBI open shows as orphan on main
+      return !bn
+    })
+  }, [positions, botMap])
+
   // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
     const rows = []
@@ -313,6 +329,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
       const hint = p.bot || botMap[posKey] || ''
       if (hint === 'Order Book Scalp') continue
+      // No strategy ownership — do not list on main (orphan / manual / lost state)
+      if (!hint) continue
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
@@ -573,6 +591,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
                 <table className="data-table">
+                  {orphanPositions.length > 0 && (
+                    <div className="mb-2 px-2 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-2xs text-amber-400">
+                      {orphanPositions.length} {t('dash.orphan_positions')}{' '}
+                      <span className="mono">
+                        {orphanPositions.map(op =>
+                          `${(op.instId || '').replace('-USDT-SWAP', '')} ${(op.posSide || '').toUpperCase()}`
+                        ).join(' · ')}
+                      </span>
+                    </div>
+                  )}
                   <thead>
                     <tr>
                       <th>{t('dash.pair')}</th>
@@ -589,7 +617,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     {positions.filter((p) => {
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
-                      return bn !== 'Order Book Scalp'
+                      if (!bn || bn === 'Order Book Scalp') return false
+                      return true
                     }).map((p, i) => {
                       const upl = parseFloat(p.upl || 0)
                       const roe = parseFloat(p.uplRatio || 0) * 100

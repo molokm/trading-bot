@@ -70,6 +70,7 @@ const en = {
   'dash.btc': 'BTC',
   'dash.btc_tip': 'Current Bitcoin-USDT Perpetual Swap price',
 
+  'dash.orphan_positions': 'on exchange with no strategy (hidden). Close on OKX if needed:',
   'dash.open_positions': 'Open Positions',
   'dash.open_no_pnl': 'PnL is shown after close',
   'dash.no_positions': 'No open positions',

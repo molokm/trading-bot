@@ -70,6 +70,7 @@ const ru = {
   'dash.btc': 'BTC',
   'dash.btc_tip': 'Текущая цена Bitcoin-USDT Perpetual Swap',
 
+  'dash.orphan_positions': 'на бирже без стратегии (скрыты). При необходимости закройте в OKX:',
   'dash.open_positions': 'Открытые позиции',
   'dash.open_no_pnl': 'PnL появится после закрытия',
   'dash.no_positions': 'Нет открытых позиций',
