@@ -290,10 +290,61 @@ class OrderBookScalpStrategy:
             return None
         return self.client_manager.get_client()
 
+
+    async def _restore_open_positions(self, client):
+        """Adopt exchange positions owned by this bot after restart."""
+        if self._positions or not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+            for p in result.get("data") or []:
+                inst_id = p.get("instId") or ""
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in (self.config.symbols or []):
+                    continue
+                pos_side = (p.get("posSide") or "net").lower()
+                side = "short" if pos_side == "short" else "long"
+                sz = float(p.get("pos") or 0)
+                entry = float(p.get("avgPx") or 0)
+                if sz <= 0 or entry <= 0 or coin in self._positions:
+                    continue
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                            continue
+                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                        if not mine:
+                            continue
+                    except Exception as e:
+                        print(f"[Scalp] restore ownership: {e}", flush=True)
+                        continue
+                else:
+                    continue
+                stop_pct = float(self.config.stop_bps) / 10000.0
+                take_pct = float(self.config.take_bps) / 10000.0
+                if side == "long":
+                    stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+                else:
+                    stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+                self._positions[coin] = ScalpPosition(
+                    coin=coin, inst_id=inst_id, side=side, size=sz,
+                    entry_price=entry, stop_price=stop, take_price=take,
+                    leverage=float(self.config.max_leverage or 1),
+                    opened_at=time.time(),
+                    signal={"restored": True},
+                )
+                print(f"[Scalp] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
+        except Exception as e:
+            print(f"[Scalp] restore error: {e}", flush=True)
+
     async def _tick(self):
         client = await self._client()
         if not client:
             return
+        if not self._positions:
+            await self._restore_open_positions(client)
         for coin in list(self._positions.keys()):
             await self._manage_position(client, coin)
         if len(self._positions) >= 1:
@@ -583,6 +634,14 @@ class OrderBookScalpStrategy:
         self._hour_trade_ts.append(self._last_open_ts)
         self._equity -= fee_cost(fee)
         self._persist()
+        if self.db:
+            try:
+                await self.db.save_position(
+                    bot_id=self.BOT_ID, inst_id=inst, side=side,
+                    size=sz, entry_price=round(fill_px, 4),
+                )
+            except Exception:
+                pass
         self._last_exec = {
             "event": "open_ok", "coin": coin, "side": side,
             "entry": fill_px, "size": sz, "lev": lev,
@@ -682,6 +741,11 @@ class OrderBookScalpStrategy:
         except Exception:
             pass
         del self._positions[coin]
+        if self.db:
+            try:
+                await self.db.delete_position(self.BOT_ID)
+            except Exception:
+                pass
 
     def _persist(self):
         save_scalp_state({

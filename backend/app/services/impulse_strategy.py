@@ -1090,6 +1090,71 @@ class ImpulseStrategy:
 
     # ─── DB helpers ───
 
+
+    async def _restore_open_positions(self):
+        """After restart: adopt exchange positions this bot owns (DB proof)."""
+        if self._positions:
+            return
+        client = None
+        try:
+            if hasattr(self, "_get_client"):
+                client = await self._get_client()
+            elif self.client_manager:
+                client = self.client_manager.get_client()
+        except Exception as e:
+            print(f"[Impulse] restore client: {e}", flush=True)
+        if not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+            for p in result.get("data") or []:
+                inst_id = p.get("instId") or ""
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in getattr(self.config, "symbols", COINS):
+                    continue
+                pos_side = (p.get("posSide") or "net").lower()
+                side = "short" if pos_side == "short" else "long"
+                sz = float(p.get("pos") or 0)
+                entry = float(p.get("avgPx") or 0)
+                if sz <= 0 or entry <= 0:
+                    continue
+                if coin in self._positions:
+                    continue
+                # Ownership: only if DB says this bot owns it
+                own = False
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                            continue
+                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                        if mine:
+                            own = True
+                    except Exception as e:
+                        print(f"[Impulse] restore ownership: {e}", flush=True)
+                if not own:
+                    continue
+                atr_est = entry * 0.02
+                if side == "long":
+                    stop = entry * 0.97
+                else:
+                    stop = entry * 1.03
+                pos = ImpPosition(
+                    symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                    size=sz, size_original=sz,
+                    entry_price=entry, stop_price=stop, peak_price=entry,
+                    atr=atr_est, opened_at=datetime.now(timezone.utc).isoformat(),
+                    leverage=float(getattr(self.config, "max_leverage", 3) or 3),
+                    raw_entry=entry,
+                )
+                self._positions[coin] = pos
+                print(f"[Impulse] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
+            if self._positions:
+                await self._sync_positions_db()
+        except Exception as e:
+            print(f"[Impulse] restore error: {e}", flush=True)
+
     async def _sync_positions_db(self):
         if not self.db:
             return
@@ -1181,6 +1246,7 @@ class ImpulseStrategy:
     async def _start_async(self):
         self._started_at = datetime.now(timezone.utc).isoformat()
         await self._ensure_bot()
+        await self._restore_open_positions()
         await self._check_and_trade()
         await self._poll_loop()
 

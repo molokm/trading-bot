@@ -655,11 +655,62 @@ class AIStrategy:
                 elif px <= pos.take_price:
                     await self._close(client, coin, "take")
 
+
+    async def _restore_open_positions(self, client):
+        """Adopt exchange positions owned by this bot (DB) after restart."""
+        if self._positions or not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+            for p in result.get("data") or []:
+                inst_id = p.get("instId") or ""
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in (self.config.symbols or []):
+                    continue
+                pos_side = (p.get("posSide") or "net").lower()
+                side = "short" if pos_side == "short" else "long"
+                sz = float(p.get("pos") or 0)
+                entry = float(p.get("avgPx") or 0)
+                if sz <= 0 or entry <= 0 or coin in self._positions:
+                    continue
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, inst_id, side):
+                            continue
+                        mine = await self.db.find_position(self.BOT_ID, inst_id, side)
+                        if not mine:
+                            continue
+                    except Exception as e:
+                        print(f"[AI] restore ownership: {e}", flush=True)
+                        continue
+                else:
+                    continue
+                stop_pct = 0.03
+                take_pct = 0.06
+                if side == "long":
+                    stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+                else:
+                    stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+                self._positions[coin] = AIPosition(
+                    coin=coin, inst_id=inst_id, side=side, size=sz,
+                    entry_price=entry, stop_price=stop, take_price=take,
+                    leverage=float(self.config.max_leverage or 2),
+                    opened_at=datetime.now(timezone.utc).isoformat(),
+                    peak_price=entry,
+                )
+                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
+        except Exception as e:
+            print(f"[AI] restore error: {e}", flush=True)
+
     async def _tick(self):
         client = await self._client()
         if not client:
             print("[AI] no OKX client", flush=True)
             return
+        if not self._positions:
+            await self._restore_open_positions(client)
         await self._fetch_indicators(client)
         await self._manage_stops(client)
         snap = self._snapshot()
