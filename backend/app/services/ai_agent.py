@@ -36,9 +36,14 @@ _GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
 
 def _resolve_groq_model(model: str | None) -> str:
     m = (model or "").strip() or _GROQ_DEFAULT_MODEL
-    if m in _DEPRECATED_GROQ_MODELS or m.startswith("llama-3.1-8b"):
+    if (
+        m in _DEPRECATED_GROQ_MODELS
+        or "llama-3.1-8b" in m
+        or m.startswith("llama-3.1-8b")
+    ):
         return _GROQ_DEFAULT_MODEL
     return m
+
 
 
 
@@ -302,8 +307,6 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
 _GROQ_MODEL_FALLBACKS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
-    "llama-3.3-70b-versatile",
-    "llama-3.1-8b-instant",
 )
 
 
@@ -314,9 +317,12 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
         raise RuntimeError("missing API key")
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    if "groq.com" in base_url:
+        model = _resolve_groq_model(model)
     candidates = [model]
     if "groq.com" in base_url:
         for m in _GROQ_MODEL_FALLBACKS:
+            m = _resolve_groq_model(m)
             if m not in candidates:
                 candidates.append(m)
     last_err = None
