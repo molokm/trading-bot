@@ -169,13 +169,19 @@ export default function ScalpPage({ connected, isGuest }) {
           localStorage.setItem('scalp_leverage', String(lev))
         } catch { /* ignore */ }
         await api.scalpStart({
-          symbols: COINS,
+          symbols: ['BTC', 'ETH'],
           capital: cap,
           max_leverage: lev,
           execute: true,
           use_llm: false,
-          obi_threshold: 0.50,
-          persist_n: 5,
+          obi_threshold: 0.58,
+          persist_n: 7,
+          levels: 5,
+          max_spread_bps: 3.5,
+          take_bps: 40,
+          stop_bps: 14,
+          max_hold_sec: 45,
+          max_trades_per_hour: 4,
         })
       }
       await loadStatus()
@@ -194,7 +200,7 @@ export default function ScalpPage({ connected, isGuest }) {
             <Layers size={18} className="text-cyan-400" />
             <h2 className="text-lg font-bold text-[var(--txt)]">{t('scalp.title')}</h2>
             <span className="text-[0.65rem] font-bold mono px-1.5 py-0.5 rounded-md bg-cyan-500/15 text-cyan-400">
-              {status?.version || 'v0.2'}
+              {status?.version || 'v0.3'}
             </span>
             {running ? <StatusBadge mode="live" label={t('bots.status_running')} /> : <StatusBadge mode="stopped" label={t('bots.status_stopped')} />}
           </div>

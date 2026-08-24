@@ -20,11 +20,11 @@ from .ai_agent import _openai_compatible
 
 SCALP_BOT_ID = "orderbook_scalp"
 STRATEGY_NAME = "Order Book Scalp"
-STRATEGY_VERSION = "v0.2"
+STRATEGY_VERSION = "v0.3"
 STRATEGY_DESC = (
-    "Order Book Scalp v0.2 — селективный OBI-скальп. Жёстче фильтр (|OBI|≥0.5, persist 5, "
-    "cooldown, лимит сделок/час), тейк с запасом под taker-комиссию (~10 bps RT). "
-    "Накопительный PnL (lifetime) не сбрасывается при рестарте. Не HFT / не гарантия прибыли."
+    "Order Book Scalp v0.3 — DOM/OBI по практикам microstructure: top-5, |OBI|≥0.58 (~3:1), "
+    "persist 7, microprice alignment, узкий спред, take ≫ taker fees. Мало сделок, BTC/ETH. "
+    "Lifetime PnL. Не HFT; публичный REST L2 без гарантии прибыли."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -63,29 +63,33 @@ def save_scalp_state(payload: dict) -> None:
 class ScalpConfig:
     symbols: list = None
     capital: float = 200.0
-    max_leverage: float = 2.0
-    risk_per_trade: float = 0.002
-    allocation_pct: float = 0.04
-    levels: int = 10
-    obi_threshold: float = 0.50
-    persist_n: int = 5
-    max_spread_bps: float = 5.0
-    stop_bps: float = 15.0
-    take_bps: float = 30.0
+    max_leverage: float = 1.0          # scalp: prefer flat leverage
+    risk_per_trade: float = 0.0015
+    allocation_pct: float = 0.03
+    levels: int = 5                     # top-of-book most predictive for scalps
+    # Literature: |OBI|≥0.5–0.6 ≈ ratio ≥3:1; persist filters spoof noise
+    obi_threshold: float = 0.58
+    persist_n: int = 7
+    max_spread_bps: float = 3.5         # skip wide/toxic books
+    stop_bps: float = 14.0
+    take_bps: float = 40.0              # need ≫ ~8–12 bps taker RT
     fee_bps_rt: float = 10.0
-    max_hold_sec: float = 75.0
-    poll_interval_sec: float = 2.5
-    cooldown_sec: float = 60.0
-    min_signal_gap_sec: float = 45.0
-    max_trades_per_hour: int = 8
+    max_hold_sec: float = 45.0          # edge decays fast
+    poll_interval_sec: float = 2.0
+    cooldown_sec: float = 90.0
+    min_signal_gap_sec: float = 60.0
+    max_trades_per_hour: int = 4
     use_llm: bool = False
     execute: bool = None
     notify_telegram: bool = False
     min_wall_mult: float = 3.0
+    require_micro_align: bool = True    # microprice must lean with OBI
+    min_obi1: float = 0.35              # L1 must agree with depth OBI
 
     def __post_init__(self):
         if self.symbols is None:
-            self.symbols = ["BTC", "ETH", "SOL"]
+            # SOL thinner → worse fee/edge; focus liquid books
+            self.symbols = ["BTC", "ETH"]
 
 
 @dataclass
@@ -455,9 +459,29 @@ class OrderBookScalpStrategy:
         if self.config.use_llm:
             if not llm.get("confirm") or float(llm.get("confidence") or 0) < 0.55:
                 return
-        if abs(float(metrics.get("w_obi") or 0)) < float(self.config.obi_threshold) * 0.85:
+        obi5 = float(metrics.get("obi_5") or 0)
+        obi1 = float(metrics.get("obi_1") or 0)
+        wobi = float(metrics.get("w_obi") or 0)
+        th = float(self.config.obi_threshold)
+        # All depth views must agree (reduces spoof / single-level noise)
+        if abs(obi5) < th or abs(wobi) < th * 0.9:
             return
-        if abs(float(metrics.get("obi_1") or 0)) < 0.25:
+        if abs(obi1) < float(self.config.min_obi1 or 0.35):
+            return
+        if (obi5 > 0) != (obi1 > 0) or (obi5 > 0) != (wobi > 0):
+            return
+        # Microprice lean: queue-weighted mid should sit on trade side of mid
+        if getattr(self.config, "require_micro_align", True):
+            mid = float(metrics.get("mid") or 0)
+            micro = float(metrics.get("micro") or mid)
+            if mid > 0:
+                if side == "long" and micro < mid:
+                    return
+                if side == "short" and micro > mid:
+                    return
+        # Edge must clear fees + half stop (taker scalp math)
+        if float(self.config.take_bps) < float(self.config.fee_bps_rt) * 2.5:
+            self._last_exec = {"event": "skip", "reason": "take_vs_fees", "coin": coin}
             return
         ok, why = self._can_open_now()
         if not ok:
