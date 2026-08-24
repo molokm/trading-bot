@@ -325,7 +325,7 @@ const en = {
   'bots.tagline_validation': 'MACD+Donchian strategy: entry on a 15-day-high breakout confirmed by MACD, chandelier 4×ATR, breakeven at +1.5%, partial take-profit 8% (30%), second TP 10%, max_hold 3 days, top-4 @ 1×.',
   'bots.ai_name': 'AI Discretionary 1H',
   'bots.ai_tagline': 'Robotic 1H agent: the model reads trend/indicators; code only executes inside risk limits. Demo + logs for now.',
-  'bots.ai_desc': 'AI Discretionary 1H v0.2: an LLM (Groq / mock) every ~2 min reviews BTC, ETH, SOL, XRP on 1H bars and chooses open/close/hold. Risk envelope: ~$10k capital, leverage ≤3×, stop 1.5–5%, ~2% equity risk, max 1 position. On OKX demo execution is on to collect logs; live needs an explicit flag. Decisions go to analysis.jsonl for prompt tuning. Not a backtested system and not a profit guarantee.',
+  'bots.ai_desc': 'AI Discretionary 1H v0.3: an LLM (Groq / mock) every ~2 min reviews BTC, ETH, SOL, XRP on 1H bars and chooses open/close/hold. Risk envelope: ~$10k capital, leverage ≤3×, stop 1.5–5%, ~2% equity risk, max 1 position. On OKX demo execution is on to collect logs; live needs an explicit flag. Decisions go to analysis.jsonl for prompt tuning. Not a backtested system and not a profit guarantee.',
   'bots.tag_ai_llm': 'LLM Groq',
   'bots.tag_tf_1h': '1H candles',
   'bots.tag_demo_exec': 'demo execution',

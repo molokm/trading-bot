@@ -20,14 +20,43 @@ from typing import Optional
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
+import json
 from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
 
 AI_BOT_ID = "ai_strategy"
+
+def _ai_state_path() -> str:
+    base = os.getenv("DATA_DIR") or os.getenv("RENDER_DISK_PATH") or "/tmp"
+    try:
+        os.makedirs(base, exist_ok=True)
+    except Exception:
+        base = "/tmp"
+    return os.path.join(base, "ai_discretionary_state.json")
+
+
+def load_ai_state() -> dict:
+    try:
+        with open(_ai_state_path(), "r") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_ai_state(payload: dict) -> None:
+    try:
+        path = _ai_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"[AI] state save: {e}", flush=True)
+
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v0.2"
+STRATEGY_VERSION = "v0.3"
 STRATEGY_DESC = (
-    "AI Discretionary v0.2 — 1H BTC/ETH/SOL/XRP. LLM (или mock) предлагает вход/выход; "
+    "AI Discretionary v0.3 — 1H BTC/ETH/SOL/XRP. LLM (или mock) предлагает вход/выход; "
     "исполнение только через risk envelope: депозит-ориентир $10k, плечо ≤3×, "
     "стоп 1.5–5%, max 1–2 позиции. Без ключа LLM работает mock-эвристика. "
     "AI_EXECUTE=0 — только сигналы. Не финансовый совет; демо-рекомендовано."
@@ -43,12 +72,19 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 1
-    risk_per_trade: float = 0.02          # 2% equity at stop
+    risk_per_trade: float = 0.015          # 2% equity at stop
     allocation_pct: float = 0.25          # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 120          # decision cadence
-    min_confidence: float = 0.55
+    min_confidence: float = 0.70
+    min_adx: float = 18.0
+    min_roc_abs: float = 0.35          # % move on roc_3
+    min_stop_pct: float = 0.02
+    max_stop_pct: float = 0.05
+    min_take_pct: float = 0.04
+    max_hold_hours: float = 18.0
+    block_llm_error_opens: bool = True
     ema_fast: int = 12
     ema_slow: int = 26
     adx_period: int = 14
@@ -99,8 +135,14 @@ class AIStrategy:
         self._positions: dict[str, AIPosition] = {}
         self._trade_log: list = []
         self._decision_log: list = []
-        self._equity = float(self.config.capital)
+        st = load_ai_state()
         self._capital = float(self.config.capital)
+        self._session_pnl = 0.0
+        self._lifetime_pnl = float(st.get("lifetime_pnl") or 0.0)
+        self._lifetime_trades = int(st.get("lifetime_trades") or 0)
+        self._lifetime_wins = int(st.get("lifetime_wins") or 0)
+        self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
+        self._equity = self._capital + self._session_pnl
         self._last_activity = None
         self._started_at = None
         self._latest_indicators: dict = {}
@@ -517,14 +559,38 @@ class AIStrategy:
             print(f"[AI] close error {coin}: {resp.get('message')}", flush=True)
             return
         fills = resp.get("data") or []
-        fill_px, fee, _ = extract_fill_avg(fills, pos.entry_price)
+        # Prefer last indicator/mark so PnL is not stuck at entry when fill payload is empty
+        mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or pos.entry_price
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        if not fill_px or abs(fill_px - pos.entry_price) < 1e-12:
+            # poll order once for avgPx
+            try:
+                oid = (fills[0].get("ordId") if fills else None) or (resp.get("data") or [{}])[0].get("ordId")
+                if oid and hasattr(client, "get_order"):
+                    od = await client.get_order(pos.inst_id, oid)
+                    rows = od.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+            except Exception:
+                pass
+        if not fill_px:
+            fill_px = mark
+        fee_c = fee_cost(fee)
         pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        if pnl > 0:
+            self._lifetime_wins += 1
+        self._lifetime_fees += fee_c
+        self._persist()
         now = datetime.now(timezone.utc).isoformat()
         self._trade_log.append({
             "time": now, "side": close_side, "symbol": pos.inst_id,
             "size": pos.size, "pnl": round(pnl, 2), "entry_price": pos.entry_price,
-            "exit_price": fill_px, "reason": reason, "pos_side": pos.side, "coin": coin,
+            "exit_price": fill_px, "fee": round(fee_c, 6),
+            "reason": reason, "pos_side": pos.side, "coin": coin,
         })
         if self.db:
             try:
@@ -561,8 +627,17 @@ class AIStrategy:
             pass
 
     async def _manage_stops(self, client):
-        """Hard stop / take from last close price (1H bar)."""
+        """Hard stop / take from last close price (1H bar) + max hold."""
         for coin, pos in list(self._positions.items()):
+            # max hold
+            try:
+                opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                held_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+                if held_h >= float(self.config.max_hold_hours or 24):
+                    await self._close(client, coin, "max_hold")
+                    continue
+            except Exception:
+                pass
             ind = self._latest_indicators.get(coin) or {}
             px = float(ind.get("close") or 0)
             if px <= 0:
@@ -635,9 +710,17 @@ class AIStrategy:
             return
         if action == "open" and coin and decision.get("side"):
             conf = float(decision.get("confidence") or 0)
+            reason = str(decision.get("reason") or "")
             if conf < float(self.config.min_confidence or 0):
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason=f"low_conf:{conf}")
+                return
+            if self.config.block_llm_error_opens and (
+                "llm_error" in reason.lower() or reason.lower().startswith("fallback")
+                or "mock:" in reason.lower()
+            ):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="blocked_mock_or_llm_error")
                 return
             if coin in self._positions:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
@@ -647,21 +730,81 @@ class AIStrategy:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="max_positions")
                 return
+            ind = self._latest_indicators.get(coin) or {}
+            adx = float(ind.get("adx") or 0)
+            roc = float(ind.get("roc_3") or 0)
+            ema_f = float(ind.get("ema_fast") or 0)
+            ema_s = float(ind.get("ema_slow") or 0)
+            close = float(ind.get("close") or 0)
+            if adx < float(self.config.min_adx or 0):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"low_adx:{adx:.1f}")
+                return
+            if abs(roc) < float(self.config.min_roc_abs or 0):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"flat_roc:{roc:.2f}")
+                return
+            side = decision["side"]
+            # Require EMA alignment with side
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bullish")
+                    return
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bearish")
+                    return
+                if side == "long" and roc < 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_long")
+                    return
+                if side == "short" and roc > 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
+                    return
+            stop_pct = float(decision.get("stop_pct") or 0.03)
+            take_pct = float(decision.get("take_pct") or 0.06)
+            stop_pct = min(float(self.config.max_stop_pct), max(float(self.config.min_stop_pct), stop_pct))
+            take_pct = max(float(self.config.min_take_pct), take_pct)
+            # need RR at least ~1.3 after fees
+            if take_pct < stop_pct * 1.3:
+                take_pct = stop_pct * 1.5
             await self._open(
-                client, coin, decision["side"],
-                stop_pct=float(decision.get("stop_pct") or 0.03),
-                take_pct=float(decision.get("take_pct") or 0.06),
-                reason=decision.get("reason") or "ai_open",
+                client, coin, side,
+                stop_pct=stop_pct, take_pct=take_pct,
+                reason=reason or "ai_open",
             )
+
+    def _persist(self):
+        save_ai_state({
+            "lifetime_pnl": self._lifetime_pnl,
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_wins": self._lifetime_wins,
+            "lifetime_fees": self._lifetime_fees,
+            "session_pnl": self._session_pnl,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if self.db is not None and self._loop and not self._loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(self._db_snapshot(), self._loop)
+            except Exception:
+                pass
+
+    async def _db_snapshot(self):
+        try:
+            await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                     name=STRATEGY_NAME)
+            wr = (100.0 * self._lifetime_wins / self._lifetime_trades) if self._lifetime_trades else None
+            await self.db.save_metric(
+                bot_id=self.BOT_ID,
+                equity=self._capital + self._lifetime_pnl,
+                total_pnl=self._lifetime_pnl,
+                win_rate=wr,
+                total_trades=self._lifetime_trades,
+            )
+        except Exception as e:
+            print(f"[AI] db snapshot: {e}", flush=True)
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
-        opens = [t for t in self._trade_log if t.get("reason") == "open"]
-        # closed fills count as trades; opens alone are not "completed trades"
-        total_trades = len(closed)
-        wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
-        win_rate = round(100.0 * wins / total_trades, 1) if total_trades else None
-        realized = self._equity - self._capital
+        session_wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
         return {
             "running": self._running,
             "strategy": STRATEGY_NAME,
@@ -671,10 +814,18 @@ class AIStrategy:
             "execute": self._execute_enabled(),
             "capital": self._capital,
             "equity": round(self._equity, 2),
-            "total_pnl": round(realized, 2),
-            "total_trades": total_trades,
-            "open_fills": len(opens),
-            "win_rate": win_rate,
+            "total_pnl": round(self._lifetime_pnl, 2),
+            "session_pnl": round(self._session_pnl, 2),
+            "lifetime_pnl": round(self._lifetime_pnl, 2),
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_fees": round(self._lifetime_fees, 2),
+            "total_trades": self._lifetime_trades,
+            "session_trades": len(closed),
+            "open_fills": len([t for t in self._trade_log if t.get("reason") == "open"]),
+            "win_rate": (
+                round(100.0 * self._lifetime_wins / self._lifetime_trades, 1)
+                if self._lifetime_trades else None
+            ),
             "open_positions": [
                 {
                     "coin": p.coin, "symbol": p.inst_id, "side": p.side,

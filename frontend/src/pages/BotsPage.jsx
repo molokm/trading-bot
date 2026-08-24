@@ -810,7 +810,7 @@ export default function BotsPage({ connected, isGuest }) {
             id="ai"
             name={t('bots.ai_name')}
             stratId={aiStatus?.strategy || 'ai_discretionary_1h'}
-            version={aiStatus?.version || 'v0.2'}
+            version={aiStatus?.version || 'v0.3'}
             icon={Bot}
             accentDim="bg-violet-500/15"
             accentTxt="text-violet-400"
@@ -828,10 +828,10 @@ export default function BotsPage({ connected, isGuest }) {
             ]}
             tagline={t('bots.ai_tagline')}
             backtest={null}
-            pnl={aiStatus?.total_pnl || 0}
-            trades={aiStatus?.total_trades || 0}
+            pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+            trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
             winRate={aiStatus?.win_rate}
-            sparklinePnl={aiStatus?.total_pnl || 0}
+            sparklinePnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
             startedAt={aiRunning ? aiStartedAt : null}
             openPositions={aiStatus?.open_positions || []}
             managed={aiStatus?.running}
