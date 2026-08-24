@@ -255,53 +255,100 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     if provider == "mock" or not provider:
         return mock_decide(snapshot)
 
-    import time as _time
-    if provider == "groq" and _time.time() < _rate_limit_until:
-        wait_left = int(_rate_limit_until - _time.time())
-        d = mock_decide(snapshot)
-        d["reason"] = f"llm_cooldown:{wait_left}s (Groq TPD/RPM); fallback: {d.get('reason')}"
-        d["confidence"] = min(float(d.get("confidence") or 0.5), 0.5)
-        return d
+    chain = _provider_chain(provider)
+    errors = []
+    raw = None
+    used = None
+    for prov in chain:
+        try:
+            raw = await _call_provider(prov, user_msg)
+            used = prov
+            break
+        except Exception as e:
+            msg = str(e)
+            log.warning("LLM provider %s failed: %s", prov, msg)
+            errors.append(f"{prov}:{msg[:120]}")
+            continue
 
-    try:
-        if provider == "groq":
-            raw = await _openai_compatible(
-                api_key=os.getenv("GROQ_API_KEY", ""),
-                base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
-                model=_resolve_groq_model(os.getenv("AI_LLM_MODEL")),
-                system=SYSTEM_PROMPT,
-                user=user_msg,
-            )
-        elif provider == "openai":
-            raw = await _openai_compatible(
-                api_key=os.getenv("OPENAI_API_KEY", ""),
-                base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                model=os.getenv("AI_LLM_MODEL", "gpt-4o-mini"),
-                system=SYSTEM_PROMPT,
-                user=user_msg,
-            )
-        elif provider == "gemini":
-            raw = await _gemini(
-                api_key=os.getenv("GEMINI_API_KEY", ""),
-                model=os.getenv("AI_LLM_MODEL", "gemini-2.0-flash"),
-                system=SYSTEM_PROMPT,
-                user=user_msg,
-            )
-        else:
-            log.warning("Unknown provider %s — mock", provider)
-            return mock_decide(snapshot)
-    except Exception as e:
-        log.warning("LLM call failed: %s — mock fallback", e)
+    if raw is None:
         d = mock_decide(snapshot)
-        d["reason"] = f"llm_error:{e}; fallback: {d.get('reason')}"
+        d["reason"] = (
+            "llm_error:" + (" | ".join(errors)[:240])
+            + f"; fallback: {d.get('reason')}"
+        )
         return d
 
     parsed = _extract_json(raw) if isinstance(raw, str) else raw
     if not parsed:
         d = mock_decide(snapshot)
-        d["reason"] = f"parse_fail; fallback: {d.get('reason')}"
+        d["reason"] = f"parse_fail via {used}; fallback: {d.get('reason')}"
         return d
-    return validate_decision(parsed, open_syms)
+    dec = validate_decision(parsed, open_syms)
+    if used and used != provider:
+        dec["reason"] = f"via_{used}: {dec.get('reason')}"
+        dec["provider_used"] = used
+    return dec
+
+
+def _provider_chain(primary: str) -> list[str]:
+    """Primary + free/configured fallbacks when rate-limited or down."""
+    primary = (primary or "mock").lower()
+    # Explicit list: AI_LLM_FALLBACKS=gemini,openai
+    env_fb = [
+        x.strip().lower()
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "gemini,openai").split(",")
+        if x.strip()
+    ]
+    chain = [primary]
+    for p in env_fb:
+        if p not in chain and p != "mock":
+            chain.append(p)
+    # Only keep providers that have keys (mock always ok at end)
+    out = []
+    for p in chain:
+        if p == "groq" and os.getenv("GROQ_API_KEY", "").strip():
+            out.append(p)
+        elif p == "gemini" and os.getenv("GEMINI_API_KEY", "").strip():
+            out.append(p)
+        elif p == "openai" and os.getenv("OPENAI_API_KEY", "").strip():
+            out.append(p)
+        elif p == primary and p not in out:
+            out.append(p)
+    if not out:
+        out = ["mock"]
+    return out
+
+
+async def _call_provider(provider: str, user_msg: str) -> str:
+    import time as _time
+    provider = (provider or "").lower()
+    if provider == "groq":
+        if _time.time() < _rate_limit_until:
+            wait_left = int(_rate_limit_until - _time.time())
+            raise RuntimeError(f"rate-limit cooldown {wait_left}s")
+        return await _openai_compatible(
+            api_key=os.getenv("GROQ_API_KEY", ""),
+            base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
+            model=_resolve_groq_model(os.getenv("AI_LLM_MODEL")),
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+        )
+    if provider == "openai":
+        return await _openai_compatible(
+            api_key=os.getenv("OPENAI_API_KEY", ""),
+            base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            model=os.getenv("OPENAI_MODEL") or os.getenv("AI_LLM_MODEL") or "gpt-4o-mini",
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+        )
+    if provider == "gemini":
+        return await _gemini(
+            api_key=os.getenv("GEMINI_API_KEY", ""),
+            model=os.getenv("GEMINI_MODEL") or "gemini-2.0-flash",
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+        )
+    raise RuntimeError(f"unknown or unconfigured provider {provider}")
 
 
 # Fallback chain when a Groq model id is deprecated / not on the account
@@ -434,4 +481,7 @@ def llm_status() -> dict:
         "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
         "rate_limit_cooldown_sec": cool,
         "rate_limited": cool > 0,
+        "fallbacks": _provider_chain(provider),
+        "gemini_configured": bool(os.getenv("GEMINI_API_KEY", "").strip()),
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
     }
