@@ -216,6 +216,12 @@ class AIStrategy:
         return self.client_manager.get_client()
 
     async def _run(self):
+        try:
+            if self.db:
+                await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                         name=STRATEGY_NAME)
+        except Exception as e:
+            print(f"[AI] ensure_bot: {e}", flush=True)
         while self._running:
             try:
                 await self._tick()
@@ -652,6 +658,37 @@ class AIStrategy:
                     await self._close(client, coin, "take")
 
 
+
+    async def _owned_via_trades(self, inst_id: str, side: str) -> bool:
+        """True if latest DB trade for this inst by AI is consistent with an open."""
+        if not self.db:
+            return False
+        try:
+            rows = await self.db._fetchall(
+                (
+                    "SELECT side, pnl, state, timestamp FROM trades "
+                    "WHERE bot_id = $1 AND inst_id = $2 ORDER BY timestamp DESC LIMIT 5"
+                    if self.db._pg_mode else
+                    "SELECT side, pnl, state, timestamp FROM trades "
+                    "WHERE bot_id = ? AND inst_id = ? ORDER BY timestamp DESC LIMIT 5"
+                ),
+                (self.BOT_ID, inst_id),
+            )
+        except Exception as e:
+            print(f"[AI] trades ownership: {e}", flush=True)
+            return False
+        if not rows:
+            return False
+        # Heuristic: last fill by this bot for inst — buy implies long open, sell short open
+        last = rows[0]
+        last_side = (last.get("side") or "").lower()
+        if side == "long" and last_side == "buy":
+            return True
+        if side == "short" and last_side == "sell":
+            return True
+        # if last was closing opposite, not ours
+        return False
+
     async def _restore_open_positions(self, client):
         """Adopt exchange positions owned by this bot (DB) after restart."""
         if self._positions or not client:
@@ -678,6 +715,9 @@ class AIStrategy:
                         continue
                     mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                     if not mine:
+                        # Ownership from recent trades (claim may have failed mid-deploy)
+                        mine = await self._owned_via_trades(inst_id, side)
+                    if not mine:
                         continue
                 except Exception as e:
                     print(f"[AI] restore ownership: {e}", flush=True)
@@ -695,6 +735,7 @@ class AIStrategy:
                     opened_at=datetime.now(timezone.utc).isoformat(),
                     peak_price=entry,
                 )
+                await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
                 print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
         except Exception as e:
             print(f"[AI] restore error: {e}", flush=True)

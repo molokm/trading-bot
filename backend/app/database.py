@@ -966,9 +966,15 @@ class Database:
         return bool(row)
 
     async def get_all_positions(self) -> list[dict]:
+        # LEFT JOIN — positions must still tag even if bots row is missing
+        if self._pg_mode:
+            return await self._fetchall(
+                "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
+                "LEFT JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
+            )
         return await self._fetchall(
             "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
-            "JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
+            "LEFT JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
         )
 
     # ── Metrics ──

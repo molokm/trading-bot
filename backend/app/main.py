@@ -1570,10 +1570,19 @@ def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = 
     norm_side = pos_side.lower() if pos_side else ""
 
     def _match(bot) -> bool:
-        if not (bot and bot._running and bot._positions):
+        # Do not require _running: after redeploy memory may still be refilled
+        # while status is stopped, or restore completed on first tick.
+        if not (bot and getattr(bot, "_positions", None)):
             return False
         for coin, pos in bot._positions.items():
-            if pos.inst_id == inst_id and (pos.side == norm_side or norm_side == "net"):
+            if pos.inst_id == inst_id and (
+                pos.side == norm_side or norm_side in ("", "net")
+                or (norm_side in ("long", "short") and pos.side in ("long", "short"))
+            ):
+                # side must agree when both are directional
+                if norm_side in ("long", "short") and pos.side in ("long", "short"):
+                    if pos.side != norm_side:
+                        continue
                 return True
         return False
 
@@ -1796,7 +1805,7 @@ _positions_cache: dict = None
 _positions_cache_ts: float = 0
 _portfolio_cache: dict = None
 _portfolio_cache_ts: float = 0
-_POS_CACHE_TTL = 5  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+_POS_CACHE_TTL = 2  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
 
 
 @app.get("/api/market/ticker")
