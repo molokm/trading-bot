@@ -228,7 +228,15 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI] tick error: {e}", flush=True)
             self._last_activity = datetime.now(timezone.utc).isoformat()
-            await asyncio.sleep(max(30, int(self.config.poll_interval_sec)))
+            _sleep = max(30, int(self.config.poll_interval_sec or 180))
+            try:
+                from .ai_agent import _rate_limit_until
+                import time as _t
+                if _t.time() < _rate_limit_until:
+                    _sleep = max(_sleep, min(900, int(_rate_limit_until - _t.time()) + 5))
+            except Exception:
+                pass
+            await asyncio.sleep(_sleep)
 
     # ── indicators ─────────────────────────────────────────────
     @staticmethod
