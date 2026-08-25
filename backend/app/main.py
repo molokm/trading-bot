@@ -1218,7 +1218,6 @@ async def ai_logs(limit: int = 200, event: str = None):
     file_rows = []
     try:
         from app.services.analysis_logger import DEFAULT_PATH
-from app.services.position_claim import sweep_exchange_orphans
         path = Path(DEFAULT_PATH)
         if path.exists():
             # read last ~N*2 lines then filter
@@ -1251,7 +1250,6 @@ from app.services.position_claim import sweep_exchange_orphans
 async def ai_logs_download(limit: int = 500):
     """Download AI analysis lines as JSONL attachment."""
     from app.services.analysis_logger import DEFAULT_PATH
-from app.services.position_claim import sweep_exchange_orphans
     path = Path(DEFAULT_PATH)
     out_lines = []
     if path.exists():
