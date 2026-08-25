@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 VWAP MEAN REVERSION SCALPING — 15m BTCUSDT
 ===========================================
@@ -64,7 +66,6 @@ STRATEGY_DESC = (
     "Risk 0.8% per trade, max 2x leverage. 7y backtest: +125%, PF 1.21, MaxDD 14.1%."
 )
 
-from __future__ import annotations
 
 import asyncio
 import math
