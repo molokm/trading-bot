@@ -264,13 +264,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
-<<<<<<< HEAD
     addPositions(scalpStatus?.open_positions, 'Order Book Scalp')
-=======
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
->>>>>>> 5189afa (Deploy VWAP Mean Reversion scalping strategy)
     return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, vwapRevStatus?.open_positions])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, vwapRevStatus?.open_positions])
 
   // Exchange positions with no strategy owner (manual / lost bot state)
   const orphanPositions = useMemo(() => {
