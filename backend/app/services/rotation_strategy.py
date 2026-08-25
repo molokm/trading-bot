@@ -1566,7 +1566,12 @@ class RotationStrategy:
                 await self._daily_managed_record()
             except Exception as e:
                 print(f"[Rotation] Poll error: {e}", flush=True)
-            await asyncio.sleep(self.config.poll_interval_sec)
+            # chunked sleep so stop() is noticed quickly
+            left = float(self.config.poll_interval_sec or 60)
+            while left > 0 and self._running:
+                step = min(2.0, left)
+                await asyncio.sleep(step)
+                left -= step
 
     async def _daily_managed_record(self):
         """Once per UTC day, record whether this bot was actively managed.
@@ -1598,7 +1603,20 @@ class RotationStrategy:
     def _thread_target(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._poll_loop())
+        try:
+            self._loop.run_until_complete(self._poll_loop())
+        except RuntimeError as e:
+            # Expected when stop() ends the loop during deploy/restart
+            if "Event loop stopped" not in str(e) and "no running event loop" not in str(e).lower():
+                print(f"[Rotation] thread exit: {e}", flush=True)
+        except Exception as e:
+            print(f"[Rotation] thread error: {e}", flush=True)
+        finally:
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.close()
+            except Exception:
+                pass
 
     async def start(self):
         if self._running:
@@ -1641,10 +1659,19 @@ class RotationStrategy:
 
     async def stop(self):
         self._running = False
+        # Wake poll sleep without hard-stopping the loop (avoids
+        # "Event loop stopped before Future completed" on deploy).
         if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            try:
+                def _wake():
+                    pass
+                self._loop.call_soon_threadsafe(_wake)
+            except Exception:
+                pass
         if self._thread:
-            self._thread.join(timeout=5)
+            # allow up to one poll interval to exit cleanly
+            join_t = min(30, int(getattr(self.config, "poll_interval_sec", 60) or 60) + 3)
+            self._thread.join(timeout=join_t)
             self._thread = None
         if self.db:
             try:

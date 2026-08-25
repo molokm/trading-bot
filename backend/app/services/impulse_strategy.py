@@ -1236,7 +1236,11 @@ class ImpulseStrategy:
                 await self._daily_managed_record()
             except Exception as e:
                 print(f"[Impulse] Poll error: {e}", flush=True)
-            await asyncio.sleep(self.config.poll_interval_sec)
+            left = float(self.config.poll_interval_sec or 60)
+            while left > 0 and self._running:
+                step = min(2.0, left)
+                await asyncio.sleep(step)
+                left -= step
 
     async def _daily_managed_record(self):
         """Once per UTC day, record whether this bot was actively managed."""
@@ -1293,10 +1297,9 @@ class ImpulseStrategy:
         if not self._running:
             return
         self._running = False
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
-            self._thread.join(timeout=5)
+            join_t = min(30, int(getattr(self.config, "poll_interval_sec", 60) or 60) + 3)
+            self._thread.join(timeout=join_t)
             self._thread = None
         if self.db:
             try:
