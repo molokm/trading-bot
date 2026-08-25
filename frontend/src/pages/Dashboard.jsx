@@ -61,6 +61,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
   const [scalpStatus, setScalpStatus] = useState(null)
+  const [vwapRevStatus, setVwapRevStatus] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
@@ -124,7 +125,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     if (document.hidden) return
     // Fast tier — renders immediately; the slow tier below fills in when ready.
     try {
-      const [pf, pos, tk, momStatus, impStatus, valStatus, aiSt, scalpSt, priceTickers] = await Promise.all([
+      const [
+        pf,
+        pos,
+        tk,
+        momStatus,
+        impStatus,
+        valStatus,
+        aiSt,
+        scalpSt,
+        vwapRevSt,
+        priceTickers,
+      ] = await Promise.all([
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
@@ -133,7 +145,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.validationStatus().catch(() => null),
         api.aiStatus().catch(() => null),
         api.scalpStatus().catch(() => null),
-        api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+        api.vwapRevStatus().catch(() => null),
+        api.getTickers(PRICE_COINS.map(c => `\${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
@@ -143,6 +156,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (valStatus) setValidationStatus(valStatus)
       setAiStatus(aiSt)
       setScalpStatus(scalpSt)
+      setVwapRevStatus(vwapRevSt)
 
       if (priceTickers?.tickers) {
         const byCoin = {}
@@ -250,9 +264,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+<<<<<<< HEAD
     addPositions(scalpStatus?.open_positions, 'Order Book Scalp')
+=======
+    addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
+>>>>>>> 5189afa (Deploy VWAP Mean Reversion scalping strategy)
     return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, vwapRevStatus?.open_positions])
 
   // Exchange positions with no strategy owner (manual / lost bot state)
   const orphanPositions = useMemo(() => {

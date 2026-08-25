@@ -171,6 +171,13 @@ export const api = {
   scalpStop: () =>
     request('/scalp/stop', { method: 'POST' }),
 
+  // ── VWAP Mean Reversion ──
+  vwapRevStatus: () => request('/vwap_rev/status'),
+  vwapRevStart: (config = {}) =>
+    request('/vwap_rev/start', { method: 'POST', body: JSON.stringify(config) }),
+  vwapRevStop: () =>
+    request('/vwap_rev/stop', { method: 'POST' }),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

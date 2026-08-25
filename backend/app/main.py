@@ -37,6 +37,11 @@ from app.services.orderbook_scalp_strategy import (
     STRATEGY_NAME as SCALP_NAME, STRATEGY_VERSION as SCALP_VERSION,
     STRATEGY_DESC as SCALP_DESC, compute_book_metrics,
 )
+from app.services.scalping_vwap_rev import (
+    VWAPMeanReversion, ScalpConfig as VWAPScalpConfig, VWAP_BOT_ID,
+    STRATEGY_NAME as VWAP_NAME, STRATEGY_VERSION as VWAP_VERSION,
+    STRATEGY_DESC as VWAP_DESC,
+)
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
@@ -102,6 +107,7 @@ equity_tracker: Optional[EquityTracker] = None
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
 ai_bot = None
 scalp_bot = None  # Order Book Scalp instance
+vwap_rev_bot = None  # VWAP Mean Reversion instance
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -1318,6 +1324,23 @@ async def scalp_status():
         }
 
 
+@app.get("/api/vwap_rev/status")
+async def vwap_rev_status():
+    global vwap_rev_bot
+    if not vwap_rev_bot:
+        return {
+            "running": False,
+            "strategy": VWAP_NAME,
+            "version": VWAP_VERSION,
+            "description": VWAP_DESC,
+            "execute": False,
+            "open_positions": [],
+            "total_pnl": 0,
+            "recent_signals": [],
+        }
+    return vwap_rev_bot.get_status()
+
+
 @app.get("/api/scalp/book")
 async def scalp_book(coin: str = "BTC", levels: int = 10):
     """Live order book + OBI metrics (auth via middleware)."""
@@ -1389,6 +1412,34 @@ async def scalp_stop():
     return {"message": "Scalp stopped", "running": False}
 
 
+@app.post("/api/vwap_rev/start", dependencies=[Depends(require_admin)])
+async def vwap_rev_start(data: dict = None):
+    global vwap_rev_bot
+    data = data or {}
+    if vwap_rev_bot and getattr(vwap_rev_bot, "_running", False):
+        return {"message": "VWAP Mean Reversion already running", **vwap_rev_bot.get_status()}
+    cfg = VWAPScalpConfig(
+        capital=float(data.get("capital") or 5000),
+        max_leverage=float(data.get("max_leverage") or 2),
+        risk_per_trade=float(data.get("risk_per_trade") or 0.008),
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    vwap_rev_bot = VWAPMeanReversion(
+        config=cfg, client_manager=client_manager, db=db, notifier=None,
+    )
+    vwap_rev_bot.start()
+    return {"message": "VWAP Mean Reversion started", **vwap_rev_bot.get_status()}
+
+
+@app.post("/api/vwap_rev/stop", dependencies=[Depends(require_admin)])
+async def vwap_rev_stop():
+    global vwap_rev_bot
+    if vwap_rev_bot:
+        vwap_rev_bot.stop()
+    return {"message": "VWAP Mean Reversion stopped", "running": False}
+
+
 @app.get("/api/health")
 async def health():
     """Liveness + connection + bot run flags (for keep-alive monitors and UI)."""
@@ -1413,6 +1464,7 @@ async def health():
             "validation": _bot_flag(validation),
             "ai": _bot_flag(ai_bot),
             "scalp": _bot_flag(scalp_bot),
+            "vwap_rev": _bot_flag(vwap_rev_bot),
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
@@ -1627,6 +1679,11 @@ def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = 
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "Order Book Scalp"
+    if vwap_rev_bot and vwap_rev_bot._trade_log:
+        for t in reversed(vwap_rev_bot._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "VWAP Mean Reversion"
 
     # Fallback: DB positions table (survives restarts)
     if db_pos_map is not None:
@@ -1668,6 +1725,7 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
             ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
             ("AI Discretionary 1H", getattr(ai_bot, "_trade_log", None) if ai_bot else None),
             ("Order Book Scalp", getattr(scalp_bot, "_trade_log", None) if scalp_bot else None),
+            ("VWAP Mean Reversion", getattr(vwap_rev_bot, "_trade_log", None) if vwap_rev_bot else None),
         ):
             if not log:
                 continue
@@ -1696,6 +1754,10 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         for t in scalp_bot._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "Order Book Scalp"
+    if vwap_rev_bot and vwap_rev_bot._trade_log:
+        for t in vwap_rev_bot._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "VWAP Mean Reversion"
     # Fallback: match by symbol+side (works when entry_time is unknown)
     side = trade.get("side", "")
     if rotation and rotation._trade_log:
@@ -1718,6 +1780,10 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         for t in scalp_bot._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
                 return "Order Book Scalp"
+    if vwap_rev_bot and vwap_rev_bot._trade_log:
+        for t in vwap_rev_bot._trade_log:
+            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
+                return "VWAP Mean Reversion"
     # Fallback: DB bot_id stored for this trade
     return _db_bot_name(trade.get("bot_id", ""))
 
@@ -1737,6 +1803,8 @@ def _db_bot_name(bot_id: str) -> str:
         return "AI Discretionary 1H"
     if base == SCALP_BOT_ID:
         return "Order Book Scalp"
+    if base == VWAP_BOT_ID:
+        return "VWAP Mean Reversion"
     return ""
 
 
