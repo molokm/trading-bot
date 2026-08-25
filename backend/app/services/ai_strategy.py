@@ -19,7 +19,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .position_claim import claim_open, release_open
+from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
 import json
 from .risk_guard import assert_can_open
@@ -526,9 +526,12 @@ class AIStrategy:
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
-        ok_claim = await claim_open(self.db, self.BOT_ID, inst, side, sz, fill_px)
+        ok_claim = await claim_or_flatten(self.db, client, self.BOT_ID, inst, side, sz, fill_px)
         if not ok_claim:
-            print(f"[AI] CRITICAL: open filled but DB claim failed {coin} — risk of orphan", flush=True)
+            print(f"[AI] CRITICAL: claim failed — flattened {coin} to avoid orphan", flush=True)
+            self._positions.pop(coin, None)
+            self._record_exec("open_claim_fail_flat", coin=coin, side=side)
+            return
         self._trade_log.append({
             "time": pos.opened_at, "side": order_side, "symbol": inst,
             "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
@@ -870,6 +873,16 @@ class AIStrategy:
             return
         if not self._positions:
             await self._restore_open_positions(client)
+        # Once per process-ish: sweep unclaimed exchange positions
+        try:
+            if not getattr(self, "_orphan_swept", False):
+                mem = {(p.inst_id, p.side) for p in self._positions.values()}
+                closed = await sweep_exchange_orphans(client, self.db, mem)
+                self._orphan_swept = True
+                if closed:
+                    print(f"[AI] orphan sweep closed {len(closed)}: {closed}", flush=True)
+        except Exception as e:
+            print(f"[AI] orphan sweep: {e}", flush=True)
         # Keep DB ownership fresh so UI never loses the badge after restart
         for coin, pos in list(self._positions.items()):
             await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)

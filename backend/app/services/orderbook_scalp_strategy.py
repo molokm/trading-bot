@@ -15,7 +15,7 @@ from typing import Any, Optional
 from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .position_claim import claim_open, release_open
+from .position_claim import claim_open, release_open, claim_or_flatten
 from .ai_agent import _openai_compatible
 
 SCALP_BOT_ID = "orderbook_scalp"
@@ -660,8 +660,10 @@ class OrderBookScalpStrategy:
         self._hour_trade_ts.append(self._last_open_ts)
         self._equity -= fee_cost(fee)
         self._persist()
-        if not await claim_open(self.db, self.BOT_ID, inst, side, sz, fill_px):
-            print(f"[Scalp] CRITICAL: open filled but DB claim failed {coin}", flush=True)
+        if not await claim_or_flatten(self.db, client, self.BOT_ID, inst, side, sz, fill_px):
+            print(f"[Scalp] CRITICAL: claim failed — flattened {coin}", flush=True)
+            self._positions.pop(coin, None)
+            return
         self._last_exec = {
             "event": "open_ok", "coin": coin, "side": side,
             "entry": fill_px, "size": sz, "lev": lev,

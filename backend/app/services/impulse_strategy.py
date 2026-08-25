@@ -23,7 +23,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .position_claim import claim_open
+from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
@@ -865,6 +865,17 @@ class ImpulseStrategy:
     # ─── Core trading logic (runs once per poll cycle) ───
 
     async def _check_and_trade(self):
+        try:
+            if not getattr(self, "_orphan_swept", False):
+                client = await self._get_client()
+                if client:
+                    mem = {(p.inst_id, p.side) for p in self._positions.values()}
+                    closed = await sweep_exchange_orphans(client, self.db, mem)
+                    self._orphan_swept = True
+                    if closed:
+                        print(f"[Impulse] orphan sweep closed {len(closed)}", flush=True)
+        except Exception as e:
+            print(f"[Impulse] orphan sweep: {e}", flush=True)
         # Keep ownership badges after restarts
         for _c, _p in list(self._positions.items()):
             await claim_open(self.db, self.BOT_ID, _p.inst_id, _p.side, _p.size, _p.entry_price)

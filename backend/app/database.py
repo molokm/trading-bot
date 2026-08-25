@@ -897,6 +897,22 @@ class Database:
     async def get_position(self, bot_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM positions WHERE bot_id = $1" if self._pg_mode else "SELECT * FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def delete_position_inst(self, bot_id: str, inst_id: str, side: str = None):
+        if side:
+            sql = (
+                "DELETE FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+                if self._pg_mode else
+                "DELETE FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?"
+            )
+            await self._execute(sql, (bot_id, inst_id, side))
+        else:
+            sql = (
+                "DELETE FROM positions WHERE bot_id = $1 AND inst_id = $2"
+                if self._pg_mode else
+                "DELETE FROM positions WHERE bot_id = ? AND inst_id = ?"
+            )
+            await self._execute(sql, (bot_id, inst_id))
+
     async def delete_position(self, bot_id: str):
         if self._pg_mode:
             await self._execute("DELETE FROM positions WHERE bot_id = $1", (bot_id,))

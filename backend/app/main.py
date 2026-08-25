@@ -48,6 +48,7 @@ from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_S
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
+from app.services.position_claim import sweep_exchange_orphans
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -1217,6 +1218,7 @@ async def ai_logs(limit: int = 200, event: str = None):
     file_rows = []
     try:
         from app.services.analysis_logger import DEFAULT_PATH
+from app.services.position_claim import sweep_exchange_orphans
         path = Path(DEFAULT_PATH)
         if path.exists():
             # read last ~N*2 lines then filter
@@ -1249,6 +1251,7 @@ async def ai_logs(limit: int = 200, event: str = None):
 async def ai_logs_download(limit: int = 500):
     """Download AI analysis lines as JSONL attachment."""
     from app.services.analysis_logger import DEFAULT_PATH
+from app.services.position_claim import sweep_exchange_orphans
     path = Path(DEFAULT_PATH)
     out_lines = []
     if path.exists():
@@ -1806,6 +1809,24 @@ def _db_bot_name(bot_id: str) -> str:
     if base == VWAP_BOT_ID:
         return "VWAP Mean Reversion"
     return ""
+
+
+@app.post("/api/positions/sweep-orphans", dependencies=[Depends(require_admin)])
+async def sweep_orphans():
+    """Close exchange positions not claimed by any strategy (anti-orphan)."""
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+    mem = set()
+    for bot in (rotation, impulse, validation, ai_bot, scalp_bot):
+        if not bot or not getattr(bot, "_positions", None):
+            continue
+        for pos in bot._positions.values():
+            mem.add((pos.inst_id, getattr(pos, "side", "long")))
+    closed = await sweep_exchange_orphans(client, db, mem)
+    global _positions_cache
+    _positions_cache = None
+    return {"closed": closed, "n": len(closed)}
 
 
 @app.get("/api/positions")
