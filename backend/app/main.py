@@ -37,11 +37,25 @@ from app.services.orderbook_scalp_strategy import (
     STRATEGY_NAME as SCALP_NAME, STRATEGY_VERSION as SCALP_VERSION,
     STRATEGY_DESC as SCALP_DESC, compute_book_metrics,
 )
-from app.services.scalping_vwap_rev import (
-    VWAPMeanReversion, ScalpConfig as VWAPScalpConfig, VWAP_BOT_ID,
-    STRATEGY_NAME as VWAP_NAME, STRATEGY_VERSION as VWAP_VERSION,
-    STRATEGY_DESC as VWAP_DESC,
-)
+try:
+    from app.services.scalping_vwap_rev import (
+        VWAPMeanReversion, ScalpConfig as VWAPScalpConfig, VWAP_BOT_ID,
+        STRATEGY_NAME as VWAP_NAME, STRATEGY_VERSION as VWAP_VERSION,
+        STRATEGY_DESC as VWAP_DESC,
+    )
+except Exception as _vwap_imp_err:
+    print(f"[startup] VWAP module unavailable: {_vwap_imp_err}", flush=True)
+    VWAP_BOT_ID = "vwap_mean_rev"
+    VWAP_NAME = "VWAP Mean Reversion"
+    VWAP_VERSION = "off"
+    VWAP_DESC = "unavailable"
+    class VWAPScalpConfig:
+        def __init__(self, **kwargs): pass
+    class VWAPMeanReversion:
+        def __init__(self, *a, **k): self._running=False; self._positions={}; self._trade_log=[]
+        def start(self): pass
+        def stop(self): pass
+        def get_status(self): return {"running": False, "strategy": VWAP_NAME, "version": "off"}
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS

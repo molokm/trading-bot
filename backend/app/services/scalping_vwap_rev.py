@@ -443,3 +443,44 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# ── Live bot stub (backtest helpers above; full live engine optional) ──
+class VWAPMeanReversion:
+    """Minimal live shell so app can import/start/stop without crashing.
+
+    Full signal execution not wired yet — status only. Prevents ImportError on boot.
+    """
+    BOT_ID = VWAP_BOT_ID
+    BOT_NAME = STRATEGY_NAME
+
+    def __init__(self, config=None, client_manager=None, db=None, notifier=None, **kwargs):
+        self.config = config or ScalpConfig()
+        self.client_manager = client_manager
+        self.db = db
+        self.notifier = notifier
+        self._running = False
+        self._positions = {}
+        self._trade_log = []
+        self._started_at = None
+
+    def start(self):
+        self._running = True
+        from datetime import datetime, timezone
+        self._started_at = datetime.now(timezone.utc).isoformat()
+        print(f"[VWAP] started (stub — no live execution yet)", flush=True)
+
+    def stop(self):
+        self._running = False
+        print(f"[VWAP] stopped", flush=True)
+
+    def get_status(self) -> dict:
+        return {
+            "running": self._running,
+            "strategy": STRATEGY_NAME,
+            "version": STRATEGY_VERSION,
+            "description": STRATEGY_DESC + " [live stub]",
+            "open_positions": [],
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "started_at": self._started_at,
+        }
