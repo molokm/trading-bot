@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6.2 — dual partial ladder + alloc 0.45 (BT 2023–2026).
+"""Momentum Rotation Strategy v6.3 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -26,7 +26,7 @@ from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.2"
+STRATEGY_VERSION = "v6.3"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -41,10 +41,10 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.2 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Momentum Rotation v6.3 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
     "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
     "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
-    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; "
+    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; индикаторный exit (EMA/ROC); "
     "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, 2023-05..2026-08, не чистый OOS): "
     "full ~+573%, CAGR ~78%, Sharpe ~1.45, MaxDD −42.4%; годы ~+31%/+136%/+21%/+82%. "
     "См. external/MOMENTUM_OOS_DECISION.md."
@@ -68,7 +68,7 @@ class RotationConfig:
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
     risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
-    allocation_pct: float = 0.45   # v6.2: max margin per position = eq * this
+    allocation_pct: float = 0.45   # v6.3: max margin per position = eq * this
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.05    # move to BE after 5%
@@ -76,6 +76,13 @@ class RotationConfig:
     partial_tp_ratio: float = 0.25 # first scale-out fraction at TP1
     partial_tp2_pct: float = 0.12  # second scale-out level (0=off)
     partial_tp2_ratio: float = 0.3  # fraction of *remaining* size at TP2
+    # v6.3 indicator exits — lock small profit on regime flip (not only trail/TP)
+    indicator_exit: bool = True
+    ind_exit_min_hold_hours: float = 12.0
+    ind_exit_min_profit_pct: float = 1.0   # % move in favor before soft exit
+    ind_exit_on_ema_flip: bool = True
+    ind_exit_on_roc_flip: bool = True
+    ind_exit_weak_adx: float = 18.0
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
@@ -1381,6 +1388,54 @@ class RotationStrategy:
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price >= pos.stop_price:
                     hit_stop = True
+
+            # v6.3: indicator regime exit (EMA/ROC/ADX) — take small win instead of giving back to trail
+            if not hit_stop and getattr(cfg, "indicator_exit", True):
+                try:
+                    hold_h = 0.0
+                    try:
+                        opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                        hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+                    except Exception:
+                        hold_h = 999.0
+                    min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 12) or 0)
+                    if hold_h >= min_hold:
+                        ema_trend = bool(ind.get("ema_trend"))
+                        roc = float(ind.get("roc") or 0)
+                        adx = float(ind.get("adx") or 0)
+                        px = float(current_price or 0)
+                        entry = float(pos.entry_price or 0)
+                        if entry > 0 and px > 0:
+                            upl_pct = ((px / entry - 1) * 100) if pos.side == "long" \
+                                else ((entry / px - 1) * 100)
+                        else:
+                            upl_pct = 0.0
+                        min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 1.0) or 0)
+                        reasons = []
+                        if getattr(cfg, "ind_exit_on_ema_flip", True):
+                            if pos.side == "long" and not ema_trend:
+                                reasons.append("ema_bear")
+                            if pos.side == "short" and ema_trend:
+                                reasons.append("ema_bull")
+                        if getattr(cfg, "ind_exit_on_roc_flip", True):
+                            min_roc = float(cfg.min_roc or 3.5)
+                            if pos.side == "long" and roc < -min_roc * 0.5:
+                                reasons.append(f"roc_down:{roc:.1f}")
+                            if pos.side == "short" and roc > min_roc * 0.5:
+                                reasons.append(f"roc_up:{roc:.1f}")
+                        weak = float(getattr(cfg, "ind_exit_weak_adx", 18) or 0)
+                        if weak and adx and adx < weak and upl_pct >= min_p:
+                            reasons.append(f"adx_fade:{adx:.0f}")
+                        # Soft: in profit + any signal
+                        # Hard: ≥2 signals against (even near flat, before full trail stop)
+                        if reasons and upl_pct >= min_p:
+                            hit_stop = True
+                            reason = "ind_exit:" + "+".join(reasons[:3])
+                        elif len(reasons) >= 2 and upl_pct > -1.0:
+                            hit_stop = True
+                            reason = "ind_exit:" + "+".join(reasons[:3])
+                except Exception as e:
+                    print(f"[Rotation] indicator exit check {coin}: {e}", flush=True)
 
             if hit_stop:
                 await self._cancel_exchange_stop(client, pos)
