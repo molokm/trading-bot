@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6.3 — dual partial ladder + alloc 0.45 (BT 2023–2026).
+"""Momentum Rotation Strategy v6.4 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -26,7 +26,7 @@ from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.3"
+STRATEGY_VERSION = "v6.4"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -41,10 +41,10 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.3 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
+    "Momentum Rotation v6.4 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
     "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
     "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
-    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; индикаторный exit (EMA/ROC); "
+    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; v6.4: BE+2.5%, peak-lock, 4H/EMA/ROC exit; "
     "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, 2023-05..2026-08, не чистый OOS): "
     "full ~+573%, CAGR ~78%, Sharpe ~1.45, MaxDD −42.4%; годы ~+31%/+136%/+21%/+82%. "
     "См. external/MOMENTUM_OOS_DECISION.md."
@@ -71,18 +71,22 @@ class RotationConfig:
     allocation_pct: float = 0.45   # v6.3: max margin per position = eq * this
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
-    breakeven_pct: float = 0.05    # move to BE after 5%
+    breakeven_pct: float = 0.025   # v6.4: BE earlier (+2.5%) so green doesn't go red
     partial_tp_pct: float = 0.06   # first scale-out at +6% (dual ladder v5.2)
     partial_tp_ratio: float = 0.25 # first scale-out fraction at TP1
     partial_tp2_pct: float = 0.12  # second scale-out level (0=off)
     partial_tp2_ratio: float = 0.3  # fraction of *remaining* size at TP2
-    # v6.3 indicator exits — lock small profit on regime flip (not only trail/TP)
+    # v6.4 exits: lock profit — peak giveback + 1D/4H indicator confirm
     indicator_exit: bool = True
-    ind_exit_min_hold_hours: float = 12.0
-    ind_exit_min_profit_pct: float = 1.0   # % move in favor before soft exit
+    ind_exit_min_hold_hours: float = 2.0    # act intra-day (poll 5m)
+    ind_exit_min_profit_pct: float = 0.8    # soft exit threshold
     ind_exit_on_ema_flip: bool = True
     ind_exit_on_roc_flip: bool = True
     ind_exit_weak_adx: float = 18.0
+    peak_lock_activate_pct: float = 1.5     # after +1.5% peak, arm giveback lock
+    peak_giveback_frac: float = 0.45        # exit if gave back 55% of peak gain
+    profit_trail_atr_mult: float = 1.5      # tighter trail once in profit (vs 3.0)
+    use_4h_exit_confirm: bool = True        # 4H EMA against + in profit => exit
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
     rsi_long_max: float = 82.0     # no long if RSI > 82
@@ -1389,53 +1393,109 @@ class RotationStrategy:
                 if current_price >= pos.stop_price:
                     hit_stop = True
 
-            # v6.3: indicator regime exit (EMA/ROC/ADX) — take small win instead of giving back to trail
-            if not hit_stop and getattr(cfg, "indicator_exit", True):
+            # v6.4: peak giveback + indicator / 4H confirm — do not let green close red
+            if not hit_stop and current_price > 0 and pos.entry_price > 0:
                 try:
-                    hold_h = 0.0
-                    try:
-                        opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
-                        hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
-                    except Exception:
-                        hold_h = 999.0
-                    min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 12) or 0)
-                    if hold_h >= min_hold:
-                        ema_trend = bool(ind.get("ema_trend"))
-                        roc = float(ind.get("roc") or 0)
-                        adx = float(ind.get("adx") or 0)
-                        px = float(current_price or 0)
-                        entry = float(pos.entry_price or 0)
-                        if entry > 0 and px > 0:
-                            upl_pct = ((px / entry - 1) * 100) if pos.side == "long" \
-                                else ((entry / px - 1) * 100)
+                    entry = float(pos.entry_price)
+                    px = float(current_price)
+                    if pos.side == "long":
+                        upl_pct = (px / entry - 1) * 100
+                        peak_upl = ((pos.peak_price or px) / entry - 1) * 100
+                    else:
+                        upl_pct = (entry / px - 1) * 100
+                        peak_upl = (entry / (pos.peak_price or px) - 1) * 100 if (pos.peak_price or 0) > 0 else upl_pct
+
+                    # Tighter trail once trade is in profit (lock more of the move)
+                    act = float(getattr(cfg, "peak_lock_activate_pct", 1.5) or 1.5)
+                    if peak_upl >= act:
+                        tight = float(getattr(cfg, "profit_trail_atr_mult", 1.5) or 1.5)
+                        tight_step = (pos.atr or entry * 0.02) * tight
+                        if pos.side == "long":
+                            lock_stop = (pos.peak_price or px) - tight_step
+                            # also lock at least ~half of peak gain
+                            frac = float(getattr(cfg, "peak_giveback_frac", 0.45) or 0.45)
+                            floor = entry * (1 + peak_upl / 100.0 * frac)
+                            lock_stop = max(lock_stop, floor)
+                            if lock_stop > pos.stop_price:
+                                pos.stop_price = lock_stop
                         else:
-                            upl_pct = 0.0
-                        min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 1.0) or 0)
-                        reasons = []
-                        if getattr(cfg, "ind_exit_on_ema_flip", True):
-                            if pos.side == "long" and not ema_trend:
-                                reasons.append("ema_bear")
-                            if pos.side == "short" and ema_trend:
-                                reasons.append("ema_bull")
-                        if getattr(cfg, "ind_exit_on_roc_flip", True):
-                            min_roc = float(cfg.min_roc or 3.5)
-                            if pos.side == "long" and roc < -min_roc * 0.5:
-                                reasons.append(f"roc_down:{roc:.1f}")
-                            if pos.side == "short" and roc > min_roc * 0.5:
-                                reasons.append(f"roc_up:{roc:.1f}")
-                        weak = float(getattr(cfg, "ind_exit_weak_adx", 18) or 0)
-                        if weak and adx and adx < weak and upl_pct >= min_p:
-                            reasons.append(f"adx_fade:{adx:.0f}")
-                        # Soft: in profit + any signal
-                        # Hard: ≥2 signals against (even near flat, before full trail stop)
-                        if reasons and upl_pct >= min_p:
-                            hit_stop = True
-                            reason = "ind_exit:" + "+".join(reasons[:3])
-                        elif len(reasons) >= 2 and upl_pct > -1.0:
-                            hit_stop = True
-                            reason = "ind_exit:" + "+".join(reasons[:3])
+                            lock_stop = (pos.peak_price or px) + tight_step
+                            frac = float(getattr(cfg, "peak_giveback_frac", 0.45) or 0.45)
+                            floor = entry * (1 - peak_upl / 100.0 * frac)
+                            lock_stop = min(lock_stop, floor)
+                            if lock_stop < pos.stop_price:
+                                pos.stop_price = lock_stop
+                        # hard giveback exit (even before stop touch if price already gave back)
+                        if peak_upl >= act and upl_pct <= peak_upl * float(getattr(cfg, "peak_giveback_frac", 0.45)):
+                            if upl_pct >= 0.15:  # still green or flat-green
+                                hit_stop = True
+                                reason = f"peak_lock:peak={peak_upl:.1f}%now={upl_pct:.1f}%"
+
+                    # Indicator exit (1D) after short hold
+                    if not hit_stop and getattr(cfg, "indicator_exit", True):
+                        hold_h = 0.0
+                        try:
+                            opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                            hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+                        except Exception:
+                            hold_h = 999.0
+                        min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 2) or 0)
+                        if hold_h >= min_hold:
+                            ema_trend = bool(ind.get("ema_trend"))
+                            roc = float(ind.get("roc") or 0)
+                            adx = float(ind.get("adx") or 0)
+                            min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 0.8) or 0)
+                            reasons = []
+                            if getattr(cfg, "ind_exit_on_ema_flip", True):
+                                if pos.side == "long" and not ema_trend:
+                                    reasons.append("ema_bear")
+                                if pos.side == "short" and ema_trend:
+                                    reasons.append("ema_bull")
+                            if getattr(cfg, "ind_exit_on_roc_flip", True):
+                                min_roc = float(cfg.min_roc or 3.5)
+                                if pos.side == "long" and roc < -min_roc * 0.35:
+                                    reasons.append(f"roc_down:{roc:.1f}")
+                                if pos.side == "short" and roc > min_roc * 0.35:
+                                    reasons.append(f"roc_up:{roc:.1f}")
+                            weak = float(getattr(cfg, "ind_exit_weak_adx", 18) or 0)
+                            if weak and adx and adx < weak and upl_pct >= min_p:
+                                reasons.append(f"adx_fade:{adx:.0f}")
+                            # Was green at peak but now fading + any regime signal
+                            if reasons and (upl_pct >= min_p or (peak_upl >= act and upl_pct >= 0)):
+                                hit_stop = True
+                                reason = "ind_exit:" + "+".join(reasons[:3])
+                            elif len(reasons) >= 2 and upl_pct > -0.5:
+                                hit_stop = True
+                                reason = "ind_exit:" + "+".join(reasons[:3])
+
+                    # 4H EMA confirmation (intraday) when still in profit
+                    if (not hit_stop and getattr(cfg, "use_4h_exit_confirm", True)
+                            and upl_pct >= float(getattr(cfg, "ind_exit_min_profit_pct", 0.8) or 0.8)):
+                        try:
+                            c4 = await self._fetch_candles(client, coin, bar="4H", limit=60)
+                            if len(c4) >= 30:
+                                cl = [c["C"] for c in c4]
+                                ef = self.ema(cl, 12)
+                                es = self.ema(cl, 26)
+                                if pos.side == "long" and ef[-1] < es[-1] and cl[-1] < es[-1]:
+                                    hit_stop = True
+                                    reason = "ind_exit:4h_ema_bear"
+                                elif pos.side == "short" and ef[-1] > es[-1] and cl[-1] > es[-1]:
+                                    hit_stop = True
+                                    reason = "ind_exit:4h_ema_bull"
+                        except Exception as e4:
+                            print(f"[Rotation] 4H exit check {coin}: {e4}", flush=True)
                 except Exception as e:
-                    print(f"[Rotation] indicator exit check {coin}: {e}", flush=True)
+                    print(f"[Rotation] exit lock {coin}: {e}", flush=True)
+
+            # Re-evaluate stop after peak-lock may have raised it this cycle
+            if not hit_stop and current_price > 0:
+                if pos.side == "long" and current_price <= pos.stop_price:
+                    hit_stop = True
+                    reason = reason if reason.startswith("peak") or reason.startswith("ind") else "trail_stop"
+                elif pos.side == "short" and current_price >= pos.stop_price:
+                    hit_stop = True
+                    reason = reason if reason.startswith("peak") or reason.startswith("ind") else "trail_stop"
 
             if hit_stop:
                 await self._cancel_exchange_stop(client, pos)
