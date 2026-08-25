@@ -1957,6 +1957,9 @@ class RotationStrategy:
                 mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                 if mine:
                     return True
+                last = await self.db.last_bot_for_instrument(inst_id)
+                if last and str(last).split(":")[0] == self.BOT_ID:
+                    return True
             except Exception as e:
                 print(f"[{self.BOT_NAME}] adopt ownership check error: {e}", flush=True)
         # Our in-memory trade log: last event for this inst is an open

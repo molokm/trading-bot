@@ -865,6 +865,9 @@ class ImpulseStrategy:
     # ─── Core trading logic (runs once per poll cycle) ───
 
     async def _check_and_trade(self):
+        # Keep ownership badges after restarts
+        for _c, _p in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, _p.inst_id, _p.side, _p.size, _p.entry_price)
         client = await self._get_client()
         if not client:
             print("[Impulse] No client — skip cycle", flush=True)
@@ -1126,7 +1129,7 @@ class ImpulseStrategy:
                     continue
                 if coin in self._positions:
                     continue
-                # Ownership: only if DB says this bot owns it
+                # Ownership: DB claim, or last trade was ours, or unowned in our universe
                 own = False
                 if self.db:
                     try:
@@ -1135,8 +1138,17 @@ class ImpulseStrategy:
                         mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                         if mine:
                             own = True
+                        else:
+                            last = await self.db.last_bot_for_instrument(inst_id)
+                            if last and str(last).split(":")[0] == self.BOT_ID:
+                                own = True
+                            elif not last:
+                                # Orphan in Impulse universe — reclaim (single-tenant)
+                                own = True
                     except Exception as e:
                         print(f"[Impulse] restore ownership: {e}", flush=True)
+                else:
+                    own = True
                 if not own:
                     continue
                 atr_est = entry * 0.02
@@ -1153,6 +1165,7 @@ class ImpulseStrategy:
                     raw_entry=entry,
                 )
                 self._positions[coin] = pos
+                await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
                 print(f"[Impulse] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
             if self._positions:
                 await self._sync_positions_db()

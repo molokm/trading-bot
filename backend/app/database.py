@@ -946,6 +946,16 @@ class Database:
         row = await self._fetchone(sql, (inst_id, bot_id))
         return bool(row)
 
+    async def last_bot_for_instrument(self, inst_id: str) -> Optional[str]:
+        """bot_id of most recent trade on this instrument (ownership hint after restart)."""
+        sql = (
+            "SELECT bot_id FROM trades WHERE inst_id = $1 ORDER BY timestamp DESC LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM trades WHERE inst_id = ? ORDER BY timestamp DESC LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id,))
+        return (row or {}).get("bot_id") if row else None
+
     async def find_position(self, bot_id: str, inst_id: str, side: str) -> Optional[dict]:
         """Lookup a single open position row owned by this bot."""
         sql = (
