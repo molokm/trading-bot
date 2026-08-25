@@ -625,6 +625,7 @@ class ImpulseStrategy:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
 
     async def _open_position(self, client, coin: str, side: str, ind: dict, lev: float):
+        # Opens only from signal path (this method is only called after signal)
         """Open a new position with limit order + market fallback."""
         inst_id = SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
         price = ind["close_today"]
@@ -1153,9 +1154,7 @@ class ImpulseStrategy:
                             last = await self.db.last_bot_for_instrument(inst_id)
                             if last and str(last).split(":")[0] == self.BOT_ID:
                                 own = True
-                            elif not last:
-                                # Orphan in Impulse universe — reclaim (single-tenant)
-                                own = True
+                            # Do NOT adopt random unowned positions — only signal-backed
                     except Exception as e:
                         print(f"[Impulse] restore ownership: {e}", flush=True)
                 else:

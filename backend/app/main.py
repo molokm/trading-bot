@@ -1816,7 +1816,7 @@ async def sweep_orphans():
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")
     mem = set()
-    for bot in (rotation, impulse, validation, ai_bot, scalp_bot):
+    for bot in (rotation, impulse, validation, ai_bot, scalp_bot, vwap_rev_bot):
         if not bot or not getattr(bot, "_positions", None):
             continue
         for pos in bot._positions.values():
@@ -2097,6 +2097,14 @@ async def backtest_last():
 
 @app.post("/api/trade/order", dependencies=[Depends(require_admin)])
 async def place_order(data: dict):
+    """Manual orders disabled by default — only strategy signal path may open risk."""
+    allow = os.getenv("ALLOW_MANUAL_ORDERS", "0").strip().lower() in ("1", "true", "yes", "on")
+    if not allow:
+        raise HTTPException(
+            status_code=403,
+            detail="Manual orders disabled. Opens only via strategy signals "
+                   "(set ALLOW_MANUAL_ORDERS=1 to override).",
+        )
     client = client_manager.get_client()
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")

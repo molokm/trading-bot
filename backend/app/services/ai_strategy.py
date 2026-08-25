@@ -944,6 +944,8 @@ class AIStrategy:
             if self.config.block_llm_error_opens and (
                 "llm_error" in reason.lower() or reason.lower().startswith("fallback")
                 or "mock:" in reason.lower()
+                or "llm_cooldown" in reason.lower()
+                or "via_mock" in reason.lower()
             ):
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="blocked_mock_or_llm_error")
