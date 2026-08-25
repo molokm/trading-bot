@@ -55,12 +55,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v0.3"
+STRATEGY_VERSION = "v0.4"
 STRATEGY_DESC = (
-    "AI Discretionary v0.3 — 1H BTC/ETH/SOL/XRP. LLM (или mock) предлагает вход/выход; "
-    "исполнение только через risk envelope: депозит-ориентир $10k, плечо ≤3×, "
-    "стоп 1.5–5%, max 1–2 позиции. Без ключа LLM работает mock-эвристика. "
-    "AI_EXECUTE=0 — только сигналы. Не финансовый совет; демо-рекомендовано."
+    "AI Discretionary v0.4 — 1H LLM entries + indicator exits. "
+    "Close on EMA/ROC/ADX regime flip (lock small profit) instead of waiting for far TP. "
+    "Hard stop retained; max hold. Groq→OpenRouter fallback."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -86,6 +85,16 @@ class AIConfig:
     min_take_pct: float = 0.04
     max_hold_hours: float = 18.0
     block_llm_error_opens: bool = True
+    # Indicator-based exit (do not wait for distant TP)
+    indicator_exit: bool = True
+    min_hold_minutes: float = 45.0       # avoid instant flip-out after open
+    exit_min_profit_pct: float = 0.15    # prefer exit when ≥ this % in favor
+    exit_on_ema_cross: bool = True       # fast/slow cross against position
+    exit_on_price_vs_ema: bool = True    # close vs slow EMA against side
+    exit_on_roc_flip: bool = True        # ROC sign flips against position
+    exit_weak_adx: float = 14.0          # if ADX collapses and was in profit → exit
+    trail_activate_pct: float = 0.8      # after +0.8% move stop to breakeven+
+    trail_lock_pct: float = 0.25         # keep at least this % from peak (approx)
     ema_fast: int = 12
     ema_slow: int = 26
     adx_period: int = 14
@@ -636,13 +645,92 @@ class AIStrategy:
         except Exception:
             pass
 
+    def _unrealized_pct(self, pos, px: float) -> float:
+        if not px or not pos.entry_price:
+            return 0.0
+        if pos.side == "long":
+            return (px - pos.entry_price) / pos.entry_price * 100.0
+        return (pos.entry_price - px) / pos.entry_price * 100.0
+
+    def _indicator_exit_reason(self, pos, ind: dict, held_min: float) -> str | None:
+        """Exit on regime flip — lock small profit instead of giving it back to SL."""
+        cfg = self.config
+        if not getattr(cfg, "indicator_exit", True):
+            return None
+        if held_min < float(getattr(cfg, "min_hold_minutes", 45) or 0):
+            return None
+        px = float(ind.get("close") or 0)
+        ema_f = float(ind.get("ema_fast") or 0)
+        ema_s = float(ind.get("ema_slow") or 0)
+        roc = float(ind.get("roc_3") or 0)
+        adx = float(ind.get("adx") or 0)
+        if px <= 0:
+            return None
+        upl = self._unrealized_pct(pos, px)
+        min_p = float(getattr(cfg, "exit_min_profit_pct", 0.15) or 0)
+
+        # Hard regime break — exit even near flat if structure clearly against us
+        hard = False
+        soft = False  # only if in profit
+        reasons = []
+
+        if getattr(cfg, "exit_on_ema_cross", True) and ema_f and ema_s:
+            if pos.side == "long" and ema_f < ema_s:
+                reasons.append("ema_bear_cross")
+                hard = hard or (upl >= min_p * 0.5 or ema_f < ema_s * 0.998)
+                soft = True
+            if pos.side == "short" and ema_f > ema_s:
+                reasons.append("ema_bull_cross")
+                hard = hard or (upl >= min_p * 0.5 or ema_f > ema_s * 1.002)
+                soft = True
+
+        if getattr(cfg, "exit_on_price_vs_ema", True) and ema_s:
+            if pos.side == "long" and px < ema_s:
+                reasons.append("price_below_ema_slow")
+                soft = True
+                if upl >= min_p or px < ema_s * 0.997:
+                    hard = True
+            if pos.side == "short" and px > ema_s:
+                reasons.append("price_above_ema_slow")
+                soft = True
+                if upl >= min_p or px > ema_s * 1.003:
+                    hard = True
+
+        if getattr(cfg, "exit_on_roc_flip", True):
+            if pos.side == "long" and roc < -abs(float(cfg.min_roc_abs or 0.35)):
+                reasons.append(f"roc_down:{roc:.2f}")
+                soft = True
+                if upl >= min_p * 0.5:
+                    hard = True
+            if pos.side == "short" and roc > abs(float(cfg.min_roc_abs or 0.35)):
+                reasons.append(f"roc_up:{roc:.2f}")
+                soft = True
+                if upl >= min_p * 0.5:
+                    hard = True
+
+        weak_adx = float(getattr(cfg, "exit_weak_adx", 14) or 0)
+        if weak_adx and adx and adx < weak_adx and upl >= min_p:
+            reasons.append(f"adx_fade:{adx:.1f}")
+            soft = True
+            hard = True
+
+        # In profit + any soft signal → take the small win
+        if soft and upl >= min_p:
+            return "ind_exit:" + "+".join(reasons[:3])
+        # Strong multi-signal against even if flat/small red — cut before full SL
+        if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
+            return "ind_exit:" + "+".join(reasons[:3])
+        return None
+
     async def _manage_stops(self, client):
-        """Hard stop / take from last close price (1H bar) + max hold."""
+        """Hard SL/TP + indicator regime exit + light trailing."""
         for coin, pos in list(self._positions.items()):
-            # max hold
+            held_min = 0.0
             try:
                 opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
-                held_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+                held_sec = (datetime.now(timezone.utc) - opened).total_seconds()
+                held_min = held_sec / 60.0
+                held_h = held_sec / 3600.0
                 if held_h >= float(self.config.max_hold_hours or 24):
                     await self._close(client, coin, "max_hold")
                     continue
@@ -652,18 +740,52 @@ class AIStrategy:
             px = float(ind.get("close") or 0)
             if px <= 0:
                 continue
+
+            # Peak / trail: move stop to lock part of profit
             if pos.side == "long":
                 pos.peak_price = max(pos.peak_price or px, px)
-                if px <= pos.stop_price:
-                    await self._close(client, coin, "stop")
-                elif px >= pos.take_price:
-                    await self._close(client, coin, "take")
             else:
                 pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
+
+            upl = self._unrealized_pct(pos, px)
+            act = float(getattr(self.config, "trail_activate_pct", 0.8) or 0)
+            lock = float(getattr(self.config, "trail_lock_pct", 0.25) or 0)
+            if act > 0 and upl >= act and pos.entry_price:
+                if pos.side == "long":
+                    be = pos.entry_price * (1 + lock / 100.0)
+                    # trail under peak
+                    trail = (pos.peak_price or px) * (1 - lock / 100.0)
+                    new_stop = max(be, trail)
+                    if new_stop > pos.stop_price:
+                        pos.stop_price = new_stop
+                else:
+                    be = pos.entry_price * (1 - lock / 100.0)
+                    trail = (pos.peak_price or px) * (1 + lock / 100.0)
+                    new_stop = min(be, trail)
+                    if new_stop < pos.stop_price:
+                        pos.stop_price = new_stop
+
+            # Hard stop / take first
+            if pos.side == "long":
+                if px <= pos.stop_price:
+                    await self._close(client, coin, "stop")
+                    continue
+                if px >= pos.take_price:
+                    await self._close(client, coin, "take")
+                    continue
+            else:
                 if px >= pos.stop_price:
                     await self._close(client, coin, "stop")
-                elif px <= pos.take_price:
+                    continue
+                if px <= pos.take_price:
                     await self._close(client, coin, "take")
+                    continue
+
+            # Indicator regime exit (main request)
+            reason = self._indicator_exit_reason(pos, ind, held_min)
+            if reason:
+                print(f"[AI] indicator exit {coin} upl={upl:+.2f}% {reason}", flush=True)
+                await self._close(client, coin, reason)
 
 
 

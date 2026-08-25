@@ -810,7 +810,7 @@ export default function BotsPage({ connected, isGuest }) {
             id="ai"
             name={t('bots.ai_name')}
             stratId={aiStatus?.strategy || 'ai_discretionary_1h'}
-            version={aiStatus?.version || 'v0.3'}
+            version={aiStatus?.version || 'v0.4'}
             icon={Bot}
             accentDim="bg-violet-500/15"
             accentTxt="text-violet-400"
