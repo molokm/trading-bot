@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6.4 — dual partial ladder + alloc 0.45 (BT 2023–2026).
+"""Momentum Rotation Strategy v6.5 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -26,7 +26,7 @@ from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.4"
+STRATEGY_VERSION = "v6.5"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -41,13 +41,9 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.4 (= v6.1 + allocation 0.45). Ежедневно сканирует 10 монет (1D), до 2 сильнейших трендов. "
-    "Скоринг: ROC(14), EMA20/50, ADX(14). Фильтры: ADX≥25, |ROC|≥3.5%, EMA-тренд, RSI, "
-    "волатильность ≤2.0× avg, корреляция ≤0.85. Режим BTC SMA50/200. Риск 20% equity, "
-    "маржа ≤45% на позицию (v6.2), стоп 4.5×ATR, плечо до 2×. Выходы: BE +5%; partial +6%×25% затем +12%×30% остатка; v6.4: BE+2.5%, peak-lock, 4H/EMA/ROC exit; "
-    "трейлинг 3×ATR; min hold 11д. Full-sample BT (OKX 1D, 2023-05..2026-08, не чистый OOS): "
-    "full ~+573%, CAGR ~78%, Sharpe ~1.45, MaxDD −42.4%; годы ~+31%/+136%/+21%/+82%. "
-    "См. external/MOMENTUM_OOS_DECISION.md."
+    "Momentum Rotation v6.5 SURVIVAL. Меньше сделок, жёстче фильтры: ADX≥28, |ROC|≥5, "
+    "risk 8%/сделку, маржа ≤30%, max 1 позиция в не-bull режиме, shorts выкл по умолчанию, "
+    "пауза новых входов при дневном −3%. Peak-lock + BE 2.5% + 4H exit. Цель — не сливать в chop."
 )
 
 
@@ -61,14 +57,14 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 25.0
-    min_roc: float = 3.5            # v6.1: milder impulse gate (better full/2025 vs 4.5)
+    adx_min: float = 28.0          # v6.5: stronger trend only
+    min_roc: float = 5.0            # v6.5: fewer weak momentum entries
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
-    allocation_pct: float = 0.45   # v6.3: max margin per position = eq * this
+    risk_per_trade: float = 0.08   # v6.5 survival: 8% equity risk (was 20%)
+    allocation_pct: float = 0.30   # v6.5: smaller margin per pos
     atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.025   # v6.4: BE earlier (+2.5%) so green doesn't go red
@@ -93,7 +89,11 @@ class RotationConfig:
     rsi_short_min: float = 21.0    # no short if RSI < 21
     vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
-    allow_short: bool = True       # allow shorting bearish coins
+    allow_short: bool = False      # v6.5: long-only by default (shorts off until edge proven)
+    max_positions: int = 2
+    max_positions_non_bull: int = 1  # v6.5: only 1 slot outside clear bull
+    daily_loss_halt_pct: float = 0.03  # no new opens after -3% day
+    min_volume_ratio: float = 1.1  # require vol > 1.1x 20d avg if volume available
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
     limit_wait_sec: int = 300      # 5 min fallback to market
     poll_interval_sec: int = 300
@@ -403,6 +403,38 @@ class RotationStrategy:
         closes = [c["C"] for c in candles]
         sma = self.sma(closes, period)
         return sma[-1]
+
+
+    def _daily_pnl_pct(self) -> float:
+        """Rough day PnL vs equity from closed trades today + unrealized."""
+        try:
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            closed = 0.0
+            for tr in (self._trade_log or []):
+                ts = (tr.get("time") or tr.get("exit_time") or "")[:10]
+                if ts == day and tr.get("pnl") is not None:
+                    closed += float(tr.get("pnl") or 0)
+            # unrealized approx
+            ur = 0.0
+            for coin, pos in self._positions.items():
+                ind = (self._latest_indicators or {}).get(coin) or {}
+                px = float(ind.get("close_today") or ind.get("price") or pos.entry_price or 0)
+                if px > 0 and pos.entry_price > 0:
+                    if pos.side == "long":
+                        ur += pos.size * (px - pos.entry_price)
+                    else:
+                        ur += pos.size * (pos.entry_price - px)
+            eq = float(self._equity or 10000) or 10000
+            return (closed + ur) / eq
+        except Exception:
+            return 0.0
+
+    def _max_slots(self) -> int:
+        cfg = self.config
+        regime = getattr(self, "_regime", "unknown")
+        if regime == "bull":
+            return int(getattr(cfg, "max_positions", 2) or 2)
+        return int(getattr(cfg, "max_positions_non_bull", 1) or 1)
 
     def _get_regime(self, candles: list) -> str:
         """Market regime: 'bull' (close>200MA), 'bear' (SMA50<200MA), 'chop', 'unknown'."""
@@ -1523,7 +1555,7 @@ class RotationStrategy:
                     await self._close_position(client, pos.inst_id, pos, "roi")
                     del self._positions[coin]
         # 3. Check if we should rotate
-        slots_full = len(self._positions) >= cfg.top_k
+        slots_full = len(self._positions) >= self._max_slots()
         if slots_full and self._last_daily_check == today_str:
             return  # all slots full, already checked today
 
@@ -1665,9 +1697,9 @@ class RotationStrategy:
             opened_any = True
 
         # Update daily check only when doing a full rotation or opening a trade
-        if slots_full or opened_any:
+        if slots_full or opened_any  # end rotate:
             self._last_daily_check = today_str
-        if slots_full or opened_any:
+        if slots_full or opened_any  # end rotate:
             self._last_rotate_ts = now_ts
 
     # ─── Lifecycle ───
