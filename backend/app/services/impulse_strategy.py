@@ -27,7 +27,7 @@ from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v4"
+STRATEGY_VERSION = "v4.1"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -59,7 +59,7 @@ class ImpulseConfig:
     top_k: int = 3                    # max concurrent positions (v2)
     # entry / impulse
     impulse_bars: int = 1             # ROC window for the impulse (1 = 1-day ROC)
-    entry_roc: float = 3.0            # |ROC| % over window (v2)
+    entry_roc: float = 6.0  # survival            # |ROC| % over window (v2)
     rsi_conf_min: float = 0.0         # long confirmation RSI floor
     rsi_conf_max: float = 100.0       # not chasing extreme overbought
     ema_fast: int = 20
@@ -75,7 +75,7 @@ class ImpulseConfig:
     add_atr_mult: float = 0.5         # add when new peak >= last_add_peak + ATR*this
     # risk / sizing
     max_leverage: float = 3.0
-    risk_per_trade: float = 0.10
+    risk_per_trade: float = 0.06  # survival
     sl_atr_mult: float = 5.0          # initial stop = entry - ATR*this
     sl_atr_mult_short: float = 5.0    # short-specific stop; 0 = use sl_atr_mult
     trail_atr_mult: float = 12.0      # trail = peak - ATR*this (v2: wide)
@@ -89,7 +89,7 @@ class ImpulseConfig:
     tp2_frac: float = 0.3
     max_hold_bars: int = 28  # v3: BT OOS+full improvement           # time exit (30 days)
     exit_ema_death: bool = False
-    allow_short: bool = True
+    allow_short: bool = False  # survival long-only
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
     limit_wait_sec: int = 300

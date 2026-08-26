@@ -60,8 +60,8 @@ def make_validation_config(
     be_pct: float = 0.015,
     chandelier_atr: float = 4.0,
     max_hold_days: int = 3,
-    risk_per_trade: float = 0.14,
-    allocation_pct: float = 0.5,
+    risk_per_trade: float = 0.07,  # survival
+    allocation_pct: float = 0.30,  # survival
     max_leverage: float = 2.0,
     poll_interval_sec: int = 300,
     auto_execute: bool = True,
@@ -91,7 +91,7 @@ def make_validation_config(
         breakeven_pct=be_pct,
         partial_tp_pct=tp_pct,
         partial_tp_ratio=tp_ratio,
-        adx_min=25.0,
+        adx_min=30.0,  # survival
         min_roc=0.0,
         vol_mult=999.0,
         rsi_long_max=100.0,

@@ -55,7 +55,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v0.4"
+STRATEGY_VERSION = "v0.5"
 STRATEGY_DESC = (
     "AI Discretionary v0.4 — 1H LLM entries + indicator exits. "
     "Close on EMA/ROC/ADX regime flip (lock small profit) instead of waiting for far TP. "
@@ -72,7 +72,7 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 1
-    risk_per_trade: float = 0.015          # 2% equity at stop
+    risk_per_trade: float = 0.01  # survival          # 2% equity at stop
     allocation_pct: float = 0.25          # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120

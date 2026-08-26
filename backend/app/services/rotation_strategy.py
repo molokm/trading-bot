@@ -1697,9 +1697,9 @@ class RotationStrategy:
             opened_any = True
 
         # Update daily check only when doing a full rotation or opening a trade
-        if slots_full or opened_any  # end rotate:
+        if slots_full or opened_any:
             self._last_daily_check = today_str
-        if slots_full or opened_any  # end rotate:
+        if slots_full or opened_any:
             self._last_rotate_ts = now_ts
 
     # ─── Lifecycle ───
