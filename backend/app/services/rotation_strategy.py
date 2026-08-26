@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6.6 — dual partial ladder + alloc 0.45 (BT 2023–2026).
+"""Momentum Rotation Strategy v6.7 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -26,7 +26,7 @@ from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.6"
+STRATEGY_VERSION = "v6.7"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -41,9 +41,8 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.6 OOS-tuned. ADX≥25, risk 12%, stop 3.5×ATR (grid train 2022–mid2024, "
-    "test 2024-07..2026-08 on BTC daily). Peak-lock/BE/4H exits retained; long-only + daily halt. "
-    "Train/test consistent DD ~-20%; not max-train overfitting (ADX18 rejected)."
+    "Momentum Rotation v6.7 hybrid. OOS stop/ADX (ADX≥25, stop 3.5×ATR) + conservative risk 10%. "
+    "Peak-lock/BE 2.5%/4H exit; long-only; daily −3% halt. Баланс OOS-тюна и контроля DD на альт-universe."
 )
 
 
@@ -67,7 +66,7 @@ class RotationConfig:
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.12   # v6.6 OOS-tuned (re-validated)
+    risk_per_trade: float = 0.10   # v6.7 hybrid: between OOS 12% and survival 8%
     allocation_pct: float = 0.30   # v6.5: smaller margin per pos
     atr_stop_mult: float = 3.5     # v6.6 OOS: wider than 2.7, fewer noise stop-outs
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
