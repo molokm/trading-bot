@@ -225,7 +225,8 @@ def _corr(a, b):
     return cov / (sa * sb)
 
 
-def run_backtest(data_dict: dict, initial_capital: float):
+def run_backtest(data_dict: dict, initial_capital: float, indicator_exit: bool = False,
+                 peak_lock: bool = False, be_pct: float = None):
     """v4 momentum rotation over aligned bars.
 
     Rules match the live bot (rotation_strategy.py, STRATEGY_VERSION="v4"):
@@ -238,6 +239,7 @@ def run_backtest(data_dict: dict, initial_capital: float):
         5%, partial TP (close 50% at +8%), dynamic ROI (lower TP the longer held).
     """
     equity = initial_capital
+    _be_pct = BREAKEVEN_PCT if be_pct is None else be_pct
     positions = {}                     # sym -> pos dict
     all_trades = []
     equity_curve = [{"trade": 0, "value": initial_capital}]
@@ -298,7 +300,7 @@ def run_backtest(data_dict: dict, initial_capital: float):
                         ns = pos["peak"] - trail
                         if ns > pos["stop"]:
                             pos["stop"] = ns
-                    if not pos["breakeven"] and row["Close"] >= pos["entry_price"] * (1 + BREAKEVEN_PCT):
+                    if not pos["breakeven"] and row["Close"] >= pos["entry_price"] * (1 + _be_pct):
                         pos["stop"] = max(pos["stop"], pos["entry_price"] * 0.999)
                         pos["breakeven"] = True
                     if not pos["partial"] and row["High"] >= pos["entry_price"] * (1 + PARTIAL_TP_PCT):
@@ -313,7 +315,7 @@ def run_backtest(data_dict: dict, initial_capital: float):
                         ns = pos["peak"] + trail
                         if ns < pos["stop"]:
                             pos["stop"] = ns
-                    if not pos["breakeven"] and row["Close"] <= pos["entry_price"] * (1 - BREAKEVEN_PCT):
+                    if not pos["breakeven"] and row["Close"] <= pos["entry_price"] * (1 - _be_pct):
                         pos["stop"] = min(pos["stop"], pos["entry_price"] * 1.001)
                         pos["breakeven"] = True
                     if not pos["partial"] and row["Low"] <= pos["entry_price"] * (1 - PARTIAL_TP_PCT):
@@ -355,6 +357,45 @@ def run_backtest(data_dict: dict, initial_capital: float):
                     hit = True
                     exit_raw = row["Close"]
                     reason = "roi"
+
+            if not hit and peak_lock:
+                entry = pos["entry_price"]
+                px = float(row["Close"])
+                peak = pos.get("peak") or entry
+                if pos["side"] == "long":
+                    if px > peak:
+                        pos["peak"] = px
+                        peak = px
+                    upl = (px / entry - 1) * 100
+                    peak_upl = (peak / entry - 1) * 100
+                else:
+                    if px < peak or peak == entry:
+                        pos["peak"] = px
+                        peak = px
+                    upl = (entry / px - 1) * 100
+                    peak_upl = (entry / peak - 1) * 100 if peak > 0 else upl
+                if peak_upl >= 1.5 and upl <= peak_upl * 0.45 and upl >= 0.15:
+                    hit = True
+                    exit_raw = row["Close"]
+                    reason = "peak_lock"
+
+            if not hit and indicator_exit:
+                hold_bars = date_i - pos["entry_i"]
+                if hold_bars >= 1:
+                    ema_trend = bool(row["EMA_fast"] > row["EMA_slow"])
+                    roc_val = float(row["ROC"]) if not __import__('pandas').isna(row["ROC"]) else 0.0
+                    entry = pos["entry_price"]
+                    px = float(row["Close"])
+                    upl_pct = ((px / entry - 1) * 100) if pos["side"] == "long" else ((entry / px - 1) * 100)
+                    reasons = []
+                    if pos["side"] == "long" and not ema_trend:
+                        reasons.append("ema")
+                    if pos["side"] == "short" and ema_trend:
+                        reasons.append("ema")
+                    if reasons and upl_pct >= 0.8:
+                        hit = True
+                        exit_raw = row["Close"]
+                        reason = "ind_exit"
 
             if hit:
                 fill = exit_raw * (1 - SLIPPAGE_PCT) if pos["side"] == "long" else exit_raw * (1 + SLIPPAGE_PCT)

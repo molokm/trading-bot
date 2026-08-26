@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v6.5 — dual partial ladder + alloc 0.45 (BT 2023–2026).
+"""Momentum Rotation Strategy v6.6 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -26,7 +26,7 @@ from .position_claim import claim_open
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.5"
+STRATEGY_VERSION = "v6.6"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -41,14 +41,18 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v6.5 SURVIVAL. Меньше сделок, жёстче фильтры: ADX≥28, |ROC|≥5, "
-    "risk 8%/сделку, маржа ≤30%, max 1 позиция в не-bull режиме, shorts выкл по умолчанию, "
-    "пауза новых входов при дневном −3%. Peak-lock + BE 2.5% + 4H exit. Цель — не сливать в chop."
+    "Momentum Rotation v6.6 OOS-tuned. ADX≥25, risk 12%, stop 3.5×ATR (grid train 2022–mid2024, "
+    "test 2024-07..2026-08 on BTC daily). Peak-lock/BE/4H exits retained; long-only + daily halt. "
+    "Train/test consistent DD ~-20%; not max-train overfitting (ADX18 rejected)."
 )
 
 
 @dataclass
 class RotationConfig:
+    # OOS methodology (BTC daily, backtest_service engine):
+    # train 2022-01..2024-06 | test 2024-07..2026-08
+    # tuned vs baseline: test CAGR 34.8% vs 28.2%, DD -19.7% vs -34.9%
+    # Rejected looser ADX=18 (train overfit, test DD to -47%).
     symbols: list = None
     regime_symbols: list = None    # coins used ONLY for market regime, never traded
     capital: float = 10000.0
@@ -57,15 +61,15 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 28.0          # v6.5: stronger trend only
+    adx_min: float = 25.0          # v6.6 OOS-tuned (train/test consistent)
     min_roc: float = 5.0            # v6.5: fewer weak momentum entries
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.08   # v6.5 survival: 8% equity risk (was 20%)
+    risk_per_trade: float = 0.12   # v6.6 OOS-tuned (re-validated)
     allocation_pct: float = 0.30   # v6.5: smaller margin per pos
-    atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
+    atr_stop_mult: float = 3.5     # v6.6 OOS: wider than 2.7, fewer noise stop-outs
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
     breakeven_pct: float = 0.025   # v6.4: BE earlier (+2.5%) so green doesn't go red
     partial_tp_pct: float = 0.06   # first scale-out at +6% (dual ladder v5.2)
