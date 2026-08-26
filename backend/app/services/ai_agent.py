@@ -56,11 +56,22 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 
-SYSTEM_PROMPT = """OKX SWAP agent. Reply JSON only:
+SYSTEM_PROMPT = """You are a conservative OKX USDT-SWAP discretionary desk.
+Reply with ONE JSON object only (no markdown):
 {"action":"open|close|hold|reduce","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
-"size_pct_equity":0.05-0.25,"stop_pct":0.02-0.05,"take_pct":0.04-0.12,"confidence":0-1,"reason":"short"}
-Rules: prefer hold; max 1 pos; no open if open_positions non-empty unless close first; RR>=1.5; confidence>=0.7 to open.
-No markdown."""
+"size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
+"confidence":0-1,"regime":"bull|bear|chop|unknown","reason":"<=120 chars"}
+
+Hard rules:
+1) DEFAULT action is hold. Open only with clear edge.
+2) Never open if open_positions is non-empty (close/reduce first).
+3) Prefer setups where quant.align_score >= 0.6 and regime is bull (long) or bear (short).
+4) In regime=chop → almost always hold (no new risk).
+5) Require RR take_pct/stop_pct >= 1.8 and confidence >= 0.75 to open.
+6) Use precomputed indicators (EMA21/50/200, RSI, MACD, ADX, ATR, BB, vol_ratio, tf_4h).
+7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
+8) If quant.block_open is true → hold.
+"""
 
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -95,7 +106,7 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
         size_pct = float(raw.get("size_pct_equity") or 0)
     except (TypeError, ValueError):
         size_pct = 0.0
-    size_pct = _clip(size_pct, 0.0, 0.15)
+    size_pct = _clip(size_pct, 0.0, 0.12)
 
     try:
         stop_pct = float(raw.get("stop_pct") or 0.03)
@@ -244,12 +255,19 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         "max_leverage": snapshot.get("max_leverage"),
         "max_positions": snapshot.get("max_positions"),
         "open_positions": snapshot.get("open_positions"),
+        "quant": snapshot.get("quant"),  # precomputed regime + align scores
         "indicators": snapshot.get("indicators"),
         "server_time": snapshot.get("server_time"),
+        "policy": {
+            "prefer": "hold",
+            "min_confidence_open": 0.75,
+            "min_rr": 1.8,
+            "max_size_pct": 0.12,
+        },
     }
     user_msg = (
-        "Market snapshot (JSON). Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:3500]
+        "Quant-preprocessed market snapshot. Decide next action.\n"
+        + json.dumps(user_payload, ensure_ascii=False)[:4500]
     )
 
     if provider == "mock" or not provider:

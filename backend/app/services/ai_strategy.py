@@ -55,11 +55,12 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v0.5"
+STRATEGY_VERSION = "v1.0"
 STRATEGY_DESC = (
-    "AI Discretionary v0.4 — 1H LLM entries + indicator exits. "
-    "Close on EMA/ROC/ADX regime flip (lock small profit) instead of waiting for far TP. "
-    "Hard stop retained; max hold. Groq→OpenRouter fallback."
+    "AI Discretionary v1.0 — hybrid quant+LLM. "
+    "Precomputes EMA21/50/200, RSI, MACD, ADX, ATR, BB, volume, 4H trend; "
+    "regime+align_score hard-gate before LLM open; prefer HOLD in chop; "
+    "conf≥0.75, RR≥1.8; indicator exits + peak trail. Groq→OpenRouter."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -77,9 +78,9 @@ class AIConfig:
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 180          # decision cadence
-    min_confidence: float = 0.70
-    min_adx: float = 18.0
-    min_roc_abs: float = 0.35          # % move on roc_3
+    min_confidence: float = 0.75
+    min_adx: float = 22.0
+    min_roc_abs: float = 0.5           # % move on roc
     min_stop_pct: float = 0.02
     max_stop_pct: float = 0.05
     min_take_pct: float = 0.04
@@ -95,10 +96,14 @@ class AIConfig:
     exit_weak_adx: float = 14.0          # if ADX collapses and was in profit → exit
     trail_activate_pct: float = 0.8      # after +0.8% move stop to breakeven+
     trail_lock_pct: float = 0.25         # keep at least this % from peak (approx)
-    ema_fast: int = 12
-    ema_slow: int = 26
+    ema_fast: int = 21
+    ema_slow: int = 50
+    ema_trend: int = 200
     adx_period: int = 14
-    roc_period: int = 3
+    roc_period: int = 12
+    rsi_period: int = 14
+    quant_min_align: float = 0.55  # hard gate vs LLM open
+    block_chop_opens: bool = True
     provider: str = None                  # None → env AI_LLM_PROVIDER
     execute: bool = None                  # None → env AI_EXECUTE
 
@@ -262,6 +267,81 @@ class AIStrategy:
         return out
 
     @staticmethod
+    def _rsi(values, period=14):
+        n = len(values)
+        out = [None] * n
+        if n < period + 1:
+            return out
+        gains, losses = [], []
+        for i in range(1, period + 1):
+            d = values[i] - values[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        avg_g = sum(gains) / period
+        avg_l = sum(losses) / period
+        out[period] = 100 - 100 / (1 + (avg_g / avg_l if avg_l else 1e9))
+        for i in range(period + 1, n):
+            d = values[i] - values[i - 1]
+            avg_g = (avg_g * (period - 1) + max(d, 0.0)) / period
+            avg_l = (avg_l * (period - 1) + max(-d, 0.0)) / period
+            out[i] = 100 - 100 / (1 + (avg_g / avg_l if avg_l else 1e9))
+        return out
+
+    @staticmethod
+    def _macd(values, fast=12, slow=26, signal=9):
+        ef = AIStrategy._ema(values, fast)
+        es = AIStrategy._ema(values, slow)
+        n = len(values)
+        line = [None] * n
+        for i in range(n):
+            if ef[i] is not None and es[i] is not None:
+                line[i] = ef[i] - es[i]
+        # signal on macd line values (skip Nones)
+        vals = [(i, line[i]) for i in range(n) if line[i] is not None]
+        sig = [None] * n
+        if len(vals) >= signal:
+            series = [v for _, v in vals]
+            ema_s = AIStrategy._ema(series, signal)
+            for (i, _), s in zip(vals, ema_s):
+                sig[i] = s
+        hist = [None] * n
+        for i in range(n):
+            if line[i] is not None and sig[i] is not None:
+                hist[i] = line[i] - sig[i]
+        return line, sig, hist
+
+    @staticmethod
+    def _atr(highs, lows, closes, period=14):
+        n = len(closes)
+        tr = [0.0] * n
+        for i in range(1, n):
+            tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        out = [None] * n
+        if n <= period:
+            return out
+        s = sum(tr[1:period + 1])
+        out[period] = s / period
+        for i in range(period + 1, n):
+            out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+        return out
+
+    @staticmethod
+    def _bb(values, period=20, mult=2.0):
+        n = len(values)
+        mid = [None] * n
+        upper = [None] * n
+        lower = [None] * n
+        for i in range(period - 1, n):
+            window = values[i - period + 1:i + 1]
+            m = sum(window) / period
+            var = sum((x - m) ** 2 for x in window) / period
+            sd = var ** 0.5
+            mid[i] = m
+            upper[i] = m + mult * sd
+            lower[i] = m - mult * sd
+        return mid, upper, lower
+
+    @staticmethod
     def _roc(values, period):
         out = [None] * len(values)
         for i in range(period, len(values)):
@@ -321,36 +401,208 @@ class AIStrategy:
         return adx
 
     async def _fetch_indicators(self, client) -> dict:
+        """Multi-indicator 1H snapshot + 4H trend context (quant layer for LLM)."""
         out = {}
         cfg = self.config
         for coin in cfg.symbols:
             inst = f"{coin}-USDT-SWAP"
             try:
-                resp = await client.get_candles(inst, bar=cfg.bar, limit=cfg.candle_limit)
-                rows = resp.get("data") or []
-                # OKX: newest first
-                rows = list(reversed(rows))
-                if len(rows) < 40:
+                resp = await client.get_candles(inst, bar=cfg.bar, limit=max(cfg.candle_limit, 220))
+                rows = list(reversed(resp.get("data") or []))
+                if len(rows) < 60:
                     continue
                 closes = [float(r[4]) for r in rows]
                 highs = [float(r[2]) for r in rows]
                 lows = [float(r[3]) for r in rows]
-                ema_f = self._ema(closes, cfg.ema_fast)
-                ema_s = self._ema(closes, cfg.ema_slow)
-                roc = self._roc(closes, cfg.roc_period)
+                vols = [float(r[5]) if len(r) > 5 else 0.0 for r in rows]
+
+                ema21 = self._ema(closes, getattr(cfg, "ema_fast", 21))
+                ema50 = self._ema(closes, getattr(cfg, "ema_slow", 50))
+                ema200 = self._ema(closes, getattr(cfg, "ema_trend", 200))
+                roc = self._roc(closes, getattr(cfg, "roc_period", 12))
                 adx = self._adx(highs, lows, closes, cfg.adx_period)
+                rsi = self._rsi(closes, getattr(cfg, "rsi_period", 14))
+                macd_l, macd_s, macd_h = self._macd(closes)
+                atr = self._atr(highs, lows, closes, 14)
+                bb_m, bb_u, bb_l = self._bb(closes, 20, 2.0)
+
+                # volume ratio vs 20-bar avg
+                vol_ratio = None
+                if len(vols) >= 20 and sum(vols[-20:]) > 0:
+                    vol_ratio = vols[-1] / (sum(vols[-20:]) / 20.0)
+
+                c = closes[-1]
+                e21, e50, e200 = ema21[-1], ema50[-1], ema200[-1]
+                # Regime heuristic
+                regime = "unknown"
+                if e50 and e200 and c:
+                    if c > e200 and e21 and e21 > e50:
+                        regime = "bull"
+                    elif c < e200 and e21 and e21 < e50:
+                        regime = "bear"
+                    else:
+                        regime = "chop"
+
+                # Align scores for long/short (0..1)
+                adx_v = float(adx[-1] or 0)
+                rsi_v = float(rsi[-1] or 50)
+                macd_hv = float(macd_h[-1] or 0) if macd_h[-1] is not None else 0.0
+                long_pts = 0.0
+                short_pts = 0.0
+                if e21 and e50 and e21 > e50:
+                    long_pts += 0.2
+                if e21 and e50 and e21 < e50:
+                    short_pts += 0.2
+                if e200 and c > e200:
+                    long_pts += 0.25
+                if e200 and c < e200:
+                    short_pts += 0.25
+                if adx_v >= float(cfg.min_adx or 22):
+                    long_pts += 0.15
+                    short_pts += 0.15
+                if macd_hv > 0:
+                    long_pts += 0.15
+                if macd_hv < 0:
+                    short_pts += 0.15
+                if 40 <= rsi_v <= 65:
+                    long_pts += 0.1
+                if 35 <= rsi_v <= 60:
+                    short_pts += 0.1
+                if vol_ratio and vol_ratio >= 1.1:
+                    long_pts += 0.1
+                    short_pts += 0.1
+
+                # 4H context
+                tf4 = {}
+                try:
+                    r4 = await client.get_candles(inst, bar="4H", limit=80)
+                    rows4 = list(reversed(r4.get("data") or []))
+                    if len(rows4) >= 40:
+                        c4 = [float(r[4]) for r in rows4]
+                        e4f = self._ema(c4, 21)
+                        e4s = self._ema(c4, 50)
+                        tf4 = {
+                            "close": c4[-1],
+                            "ema21": e4f[-1],
+                            "ema50": e4s[-1],
+                            "trend_up": bool(e4f[-1] and e4s[-1] and e4f[-1] > e4s[-1]),
+                        }
+                        if tf4["trend_up"]:
+                            long_pts += 0.15
+                        else:
+                            short_pts += 0.15
+                except Exception as e4:
+                    print(f"[AI] 4H {coin}: {e4}", flush=True)
+
+                def _r(x):
+                    try:
+                        return round(float(x), 6) if x is not None else None
+                    except Exception:
+                        return None
+
                 out[coin] = {
-                    "close": closes[-1],
-                    "ema_fast": ema_f[-1],
-                    "ema_slow": ema_s[-1],
-                    "roc_3": roc[-1],
-                    "adx": adx[-1],
+                    "close": _r(c),
+                    "ema21": _r(e21),
+                    "ema50": _r(e50),
+                    "ema200": _r(e200),
+                    "ema_fast": _r(e21),  # compat exits
+                    "ema_slow": _r(e50),
+                    "roc_3": _r(roc[-1]),
+                    "roc": _r(roc[-1]),
+                    "adx": _r(adx[-1]),
+                    "rsi": _r(rsi[-1]),
+                    "macd": _r(macd_l[-1]),
+                    "macd_signal": _r(macd_s[-1]),
+                    "macd_hist": _r(macd_h[-1]),
+                    "atr": _r(atr[-1]),
+                    "bb_mid": _r(bb_m[-1]),
+                    "bb_upper": _r(bb_u[-1]),
+                    "bb_lower": _r(bb_l[-1]),
+                    "vol_ratio": _r(vol_ratio),
+                    "regime": regime,
+                    "align_long": round(min(1.0, long_pts), 3),
+                    "align_short": round(min(1.0, short_pts), 3),
+                    "tf_4h": tf4,
                     "bar": cfg.bar,
                 }
             except Exception as e:
                 print(f"[AI] candles {coin}: {e}", flush=True)
         self._latest_indicators = out
         return out
+
+    def _build_quant(self) -> dict:
+        """Aggregate quant layer for LLM + hard gates."""
+        inds = self._latest_indicators or {}
+        by_coin = {}
+        regimes = []
+        for coin, ind in inds.items():
+            al = float(ind.get("align_long") or 0)
+            ash = float(ind.get("align_short") or 0)
+            reg = ind.get("regime") or "unknown"
+            regimes.append(reg)
+            best_side = "long" if al >= ash else "short"
+            best = max(al, ash)
+            by_coin[coin] = {
+                "regime": reg,
+                "align_long": al,
+                "align_short": ash,
+                "best_side": best_side,
+                "align_score": best,
+                "adx": ind.get("adx"),
+                "rsi": ind.get("rsi"),
+                "block_open": (
+                    reg == "chop"
+                    or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+                    or float(ind.get("adx") or 0) < float(self.config.min_adx or 22)
+                ),
+            }
+        # global regime = majority of BTC/ETH if present
+        g = "unknown"
+        for pref in ("BTC", "ETH"):
+            if pref in by_coin:
+                g = by_coin[pref]["regime"]
+                break
+        if g == "unknown" and regimes:
+            g = max(set(regimes), key=regimes.count)
+        return {
+            "global_regime": g,
+            "block_open": g == "chop" and getattr(self.config, "block_chop_opens", True),
+            "coins": by_coin,
+            "min_align": float(getattr(self.config, "quant_min_align", 0.55) or 0.55),
+            "min_adx": float(self.config.min_adx or 22),
+            "min_confidence": float(self.config.min_confidence or 0.75),
+        }
+
+    def _quant_veto_open(self, decision: dict) -> str | None:
+        """Return reason string if quant layer blocks an LLM open."""
+        if (decision.get("action") or "").lower() != "open":
+            return None
+        q = self._build_quant()
+        if q.get("block_open") and getattr(self.config, "block_chop_opens", True):
+            return "quant_veto:global_chop"
+        coin = (decision.get("symbol") or "").upper()
+        side = (decision.get("side") or "").lower()
+        conf = float(decision.get("confidence") or 0)
+        if conf < float(self.config.min_confidence or 0.75):
+            return f"quant_veto:low_conf:{conf:.2f}"
+        stop = float(decision.get("stop_pct") or 0.03)
+        take = float(decision.get("take_pct") or 0.06)
+        if stop > 0 and take / stop < 1.8:
+            return f"quant_veto:rr:{take/stop:.2f}"
+        cq = (q.get("coins") or {}).get(coin) or {}
+        if cq.get("block_open"):
+            return f"quant_veto:coin_block:{coin}"
+        if side == "long" and float(cq.get("align_long") or 0) < float(q["min_align"]):
+            return f"quant_veto:weak_long_align"
+        if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]):
+            return f"quant_veto:weak_short_align"
+        # regime side match
+        reg = cq.get("regime") or q.get("global_regime")
+        if reg == "bull" and side == "short":
+            return "quant_veto:short_in_bull"
+        if reg == "bear" and side == "long":
+            return "quant_veto:long_in_bear"
+        return None
 
     def _snapshot(self) -> dict:
         open_list = []
@@ -366,6 +618,7 @@ class AIStrategy:
             "max_leverage": self.config.max_leverage,
             "max_positions": self.config.max_positions,
             "open_positions": open_list,
+            "quant": self._build_quant(),
             "indicators": self._latest_indicators,
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
