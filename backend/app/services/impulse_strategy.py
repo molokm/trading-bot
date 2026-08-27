@@ -626,10 +626,10 @@ class ImpulseStrategy:
                     self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
-                    reply_to_message_id=_reply or None,
+                    bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
                 ),
-                ))
+                    reply_to_message_id=_reply or None,
+                )
             except Exception as e:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
 
