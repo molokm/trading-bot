@@ -988,11 +988,29 @@ class AIStrategy:
         else:
             stop = fill_px * (1 + stop_pct)
             take = fill_px * (1 - take_pct)
+        signal_id = 0
+        try:
+            if self.db:
+                signal_id = int(await self.db.save_signal(
+                    bot_id=self.BOT_ID,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    side=order_side,
+                    price=fill_px,
+                    size=sz,
+                    ord_type="market",
+                    status="filled",
+                ) or 0)
+        except Exception as e:
+            print(f"[AI] save_signal: {e}", flush=True)
+            signal_id = 0
+        if not signal_id:
+            # Local fallback number so open/close still match within process life
+            signal_id = int(time.time()) % 1_000_000_000
         pos = AIPosition(
             coin=coin, inst_id=inst, side=side, size=sz,
             entry_price=fill_px, stop_price=stop, take_price=take,
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
-            peak_price=fill_px,
+            peak_price=fill_px, signal_id=int(signal_id or 0),
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
@@ -1006,6 +1024,7 @@ class AIStrategy:
             "time": pos.opened_at, "side": order_side, "symbol": inst,
             "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
             "reason": "open", "pos_side": side, "coin": coin,
+            "signal_id": pos.signal_id,
         })
         if self.db:
             try:
@@ -1014,7 +1033,7 @@ class AIStrategy:
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=inst, ord_type="market",
                     fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
-                    state="filled",
+                    state="filled", signal_id=pos.signal_id,
                 )
             except Exception as e:
                 print(f"[AI] db open: {e}", flush=True)
@@ -1023,7 +1042,7 @@ class AIStrategy:
                 self.notifier.fire(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 4),
                     stop=round(stop, 4), size=sz, leverage=lev,
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
             except Exception:
                 pass
@@ -1082,11 +1101,21 @@ class AIStrategy:
             print(f"[AI] adapt refresh: {e}", flush=True)
         self._persist()
         now = datetime.now(timezone.utc).isoformat()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        if not signal_id and self.db:
+            try:
+                open_side = "buy" if pos.side == "long" else "sell"
+                signal_id = int(await self.db.find_signal_id(pos.inst_id, open_side) or 0)
+                if signal_id:
+                    pos.signal_id = signal_id
+            except Exception as e:
+                print(f"[AI] find_signal_id: {e}", flush=True)
         self._trade_log.append({
             "time": now, "side": close_side, "symbol": pos.inst_id,
             "size": pos.size, "pnl": round(pnl, 2), "entry_price": pos.entry_price,
             "exit_price": fill_px, "fee": round(fee_c, 6),
             "reason": reason, "pos_side": pos.side, "coin": coin,
+            "signal_id": signal_id,
         })
         if self.db:
             try:
@@ -1094,7 +1123,8 @@ class AIStrategy:
                     bot_id=self.BOT_ID, side=close_side, sz=pos.size, px=fill_px,
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=pos.inst_id, ord_type="market",
-                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2), state="filled",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="filled", signal_id=signal_id or None,
                 )
             except Exception as e:
                 print(f"[AI] db close: {e}", flush=True)
@@ -1103,7 +1133,7 @@ class AIStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
                     exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME,
+                    bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
             except Exception:
                 pass
@@ -1328,15 +1358,23 @@ class AIStrategy:
                     stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
                 else:
                     stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+                restored_sid = 0
+                if self.db:
+                    try:
+                        open_side = "buy" if side == "long" else "sell"
+                        restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
+                    except Exception as e:
+                        print(f"[AI] restore signal_id: {e}", flush=True)
                 self._positions[coin] = AIPosition(
                     coin=coin, inst_id=inst_id, side=side, size=sz,
                     entry_price=entry, stop_price=stop, take_price=take,
                     leverage=float(self.config.max_leverage or 2),
                     opened_at=datetime.now(timezone.utc).isoformat(),
                     peak_price=entry,
+                    signal_id=restored_sid,
                 )
                 await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
-                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
+                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid}", flush=True)
         except Exception as e:
             print(f"[AI] restore error: {e}", flush=True)
 

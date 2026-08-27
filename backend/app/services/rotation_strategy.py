@@ -833,7 +833,7 @@ class RotationStrategy:
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
                 ))
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
@@ -903,7 +903,7 @@ class RotationStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
                 ))
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
@@ -1075,6 +1075,23 @@ class RotationStrategy:
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
 
+    async def _ensure_signal_id(self, pos) -> int:
+        """Guarantee the same trade number on close as on open."""
+        sid = int(getattr(pos, "signal_id", 0) or 0)
+        if sid:
+            return sid
+        if not self.db:
+            return 0
+        try:
+            open_side = "buy" if pos.side == "long" else "sell"
+            inst = getattr(pos, "inst_id", None) or f"{pos.coin}-USDT-SWAP"
+            sid = int(await self.db.find_signal_id(inst, open_side) or 0)
+            if sid:
+                pos.signal_id = sid
+        except Exception as e:
+            print(f"[Rotation] ensure_signal_id: {e}", flush=True)
+        return int(getattr(pos, "signal_id", 0) or 0)
+
     # ─── Core logic ───
 
     async def _reconcile_exchange_positions(self, client):
@@ -1185,7 +1202,7 @@ class RotationStrategy:
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
-                                bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                                bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
                             ))
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)

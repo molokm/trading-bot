@@ -619,7 +619,7 @@ class ImpulseStrategy:
                 self.notifier.fire(self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
                 ))
             except Exception as e:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
@@ -862,6 +862,22 @@ class ImpulseStrategy:
                 break
         except Exception as e:
             print(f"[Impulse] Sync pos error {coin}: {e}", flush=True)
+
+    async def _ensure_signal_id(self, pos) -> int:
+        sid = int(getattr(pos, "signal_id", 0) or 0)
+        if sid:
+            return sid
+        if not self.db:
+            return 0
+        try:
+            open_side = "buy" if pos.side == "long" else "sell"
+            inst = getattr(pos, "inst_id", None) or f"{pos.coin}-USDT-SWAP"
+            sid = int(await self.db.find_signal_id(inst, open_side) or 0)
+            if sid:
+                pos.signal_id = sid
+        except Exception as e:
+            print(f"[Impulse] ensure_signal_id: {e}", flush=True)
+        return int(getattr(pos, "signal_id", 0) or 0)
 
     # ─── Core trading logic (runs once per poll cycle) ───
 
