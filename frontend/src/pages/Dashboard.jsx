@@ -146,7 +146,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.aiStatus().catch(() => null),
         api.scalpStatus().catch(() => null),
         api.vwapRevStatus().catch(() => null),
-        api.getTickers(PRICE_COINS.map(c => `\${c}-USDT-SWAP`)).catch(() => null),
+        api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
       if (pos) setPositions(pos.positions || [])
