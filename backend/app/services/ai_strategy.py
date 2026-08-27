@@ -28,12 +28,28 @@ from .analysis_logger import get_logger
 AI_BOT_ID = "ai_strategy"
 
 def _ai_state_path() -> str:
-    base = os.getenv("DATA_DIR") or os.getenv("RENDER_DISK_PATH") or "/tmp"
-    try:
-        os.makedirs(base, exist_ok=True)
-    except Exception:
-        base = "/tmp"
-    return os.path.join(base, "ai_discretionary_state.json")
+    """Prefer persistent disk; /tmp is wiped on every Render deploy."""
+    candidates = [
+        os.getenv("DATA_DIR"),
+        os.getenv("RENDER_DISK_PATH"),
+        "/var/data",
+        os.path.join(os.getcwd(), "data"),
+        "/tmp",
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        try:
+            os.makedirs(base, exist_ok=True)
+            # writable check
+            probe = os.path.join(base, ".wprobe")
+            with open(probe, "w") as f:
+                f.write("1")
+            os.remove(probe)
+            return os.path.join(base, "ai_discretionary_state.json")
+        except Exception:
+            continue
+    return "/tmp/ai_discretionary_state.json"
 
 
 def load_ai_state() -> dict:
@@ -55,11 +71,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.1"
+STRATEGY_VERSION = "v1.2"
 STRATEGY_DESC = (
-    "AI Discretionary v1.1 — hybrid quant+LLM + self-adapt. "
+    "AI Discretionary v1.2 — hybrid quant+LLM + self-adapt. "
     "Rolling WR/streak подкручивает min_confidence и quant_min_align в коридоре; "
-    "reflection по последним сделкам в prompt; hard veto и risk-cap без изменений потолка."
+    "reflection; persistent PnL/trades via DB (survives Render deploy)."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -254,6 +270,11 @@ class AIStrategy:
         return self.client_manager.get_client()
 
     async def _run(self):
+        try:
+            await self._hydrate_from_db()
+            self._hydrated = True
+        except Exception as e:
+            print(f"[AI] hydrate: {e}", flush=True)
         try:
             if self.db:
                 await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
@@ -1455,8 +1476,102 @@ class AIStrategy:
                 reason=reason or "ai_open",
             )
 
+    async def _hydrate_from_db(self):
+        """Reload lifetime stats + open positions from Postgres after deploy.
+
+        File state under /tmp is lost on Render restart; DB is the source of truth.
+        """
+        if not self.db:
+            print("[AI] hydrate: no db", flush=True)
+            return
+        try:
+            await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                     name=STRATEGY_NAME)
+        except Exception as e:
+            print(f"[AI] hydrate ensure_bot: {e}", flush=True)
+
+        # 1) settings backup (JSON blob)
+        try:
+            raw = await self.db.get_setting(f"ai_lifetime:{self.BOT_ID}")
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if isinstance(data, dict):
+                    tr = int(data.get("lifetime_trades") or 0)
+                    if tr >= self._lifetime_trades:
+                        self._lifetime_trades = tr
+                        self._lifetime_wins = int(data.get("lifetime_wins") or self._lifetime_wins)
+                        self._lifetime_pnl = float(data.get("lifetime_pnl") or self._lifetime_pnl)
+                        self._lifetime_fees = float(data.get("lifetime_fees") or self._lifetime_fees)
+                    if isinstance(data.get("adapt"), dict):
+                        self._adapt.update({k: data["adapt"][k] for k in data["adapt"]
+                                            if k in ("min_confidence", "quant_min_align",
+                                                     "size_cap", "preset", "reason")})
+                    if data.get("reflection"):
+                        self._reflection = str(data.get("reflection"))
+                    print(f"[AI] hydrate settings: trades={self._lifetime_trades} "
+                          f"pnl={self._lifetime_pnl:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate settings: {e}", flush=True)
+
+        # 2) trades table aggregate (authoritative if more complete)
+        try:
+            summary = await self.db.get_trades_summary(self.BOT_ID)
+            total = int(summary.get("total") or 0)
+            wins = int(summary.get("wins") or 0)
+            pnl = float(summary.get("total_pnl") or 0)
+            if total > self._lifetime_trades or (
+                self._lifetime_trades == 0 and (total > 0 or abs(pnl) > 1e-9)
+            ):
+                self._lifetime_trades = total
+                self._lifetime_wins = wins
+                self._lifetime_pnl = pnl
+                print(f"[AI] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}",
+                      flush=True)
+            # rebuild recent trade log for UI / adapt
+            rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=40)
+            rebuilt = []
+            for r in reversed(rows or []):
+                rebuilt.append({
+                    "time": r.get("timestamp") or r.get("created_at") or "",
+                    "side": r.get("side"),
+                    "symbol": r.get("inst_id"),
+                    "size": r.get("sz") or r.get("size"),
+                    "pnl": r.get("pnl"),
+                    "entry_price": r.get("px"),
+                    "reason": r.get("state") or "db",
+                    "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                })
+            if rebuilt:
+                self._trade_log = rebuilt[-50:]
+        except Exception as e:
+            print(f"[AI] hydrate trades: {e}", flush=True)
+
+        # 3) latest metric row as fallback
+        try:
+            metrics = await self.db.get_metrics(self.BOT_ID, limit=1)
+            if metrics:
+                m = metrics[0]
+                mt = int(m.get("total_trades") or 0)
+                mp = float(m.get("total_pnl") or 0)
+                if mt > self._lifetime_trades:
+                    self._lifetime_trades = mt
+                    self._lifetime_pnl = mp
+                    wr = m.get("win_rate")
+                    if wr is not None and mt > 0:
+                        self._lifetime_wins = int(round(float(wr) / 100.0 * mt))
+                    print(f"[AI] hydrate metrics: trades={mt} pnl={mp:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate metrics: {e}", flush=True)
+
+        # equity display baseline
+        self._equity = self._capital + float(self._session_pnl or 0)
+        # rewrite file so next boot without DB still has numbers
+        self._persist()
+        print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
+              f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)
+
     def _persist(self):
-        save_ai_state({
+        payload = {
             "lifetime_pnl": self._lifetime_pnl,
             "lifetime_trades": self._lifetime_trades,
             "lifetime_wins": self._lifetime_wins,
@@ -1472,12 +1587,36 @@ class AIStrategy:
             "reflection": self._reflection,
             "adapt_log": self._adapt_log[-20:],
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        save_ai_state(payload)
         if self.db is not None and self._loop and not self._loop.is_closed():
             try:
                 asyncio.run_coroutine_threadsafe(self._db_snapshot(), self._loop)
             except Exception:
                 pass
+
+    async def _persist_db_settings(self):
+        if not self.db:
+            return
+        try:
+            blob = json.dumps({
+                "lifetime_pnl": self._lifetime_pnl,
+                "lifetime_trades": self._lifetime_trades,
+                "lifetime_wins": self._lifetime_wins,
+                "lifetime_fees": self._lifetime_fees,
+                "adapt": {
+                    "min_confidence": (self._adapt or {}).get("min_confidence"),
+                    "quant_min_align": (self._adapt or {}).get("quant_min_align"),
+                    "size_cap": (self._adapt or {}).get("size_cap"),
+                    "preset": (self._adapt or {}).get("preset"),
+                    "reason": (self._adapt or {}).get("reason"),
+                },
+                "reflection": self._reflection,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", blob)
+        except Exception as e:
+            print(f"[AI] persist settings: {e}", flush=True)
 
     async def _db_snapshot(self):
         try:
@@ -1491,6 +1630,7 @@ class AIStrategy:
                 win_rate=wr,
                 total_trades=self._lifetime_trades,
             )
+            await self._persist_db_settings()
         except Exception as e:
             print(f"[AI] db snapshot: {e}", flush=True)
 
