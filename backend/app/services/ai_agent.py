@@ -71,6 +71,7 @@ Hard rules:
 6) Use precomputed indicators (EMA21/50/200, RSI, MACD, ADX, ATR, BB, vol_ratio, tf_4h).
 7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
 8) If quant.block_open is true → hold.
+9) Respect adaptive.min_confidence and adaptive.size_cap; read reflection (recent trade outcomes) before opening.
 """
 
 
@@ -260,14 +261,18 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         "server_time": snapshot.get("server_time"),
         "policy": {
             "prefer": "hold",
-            "min_confidence_open": 0.75,
+            "min_confidence_open": (snapshot.get("adaptive") or {}).get(
+                "min_confidence", 0.75),
             "min_rr": 1.8,
-            "max_size_pct": 0.12,
+            "max_size_pct": (snapshot.get("adaptive") or {}).get("size_cap", 0.10),
+            "adapt_preset": (snapshot.get("adaptive") or {}).get("preset"),
         },
+        "reflection": snapshot.get("reflection") or "",
+        "adaptive": snapshot.get("adaptive"),
     }
     user_msg = (
-        "Quant-preprocessed market snapshot. Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:4500]
+        "Quant-preprocessed market snapshot + self-reflection. Decide next action.\n"
+        + json.dumps(user_payload, ensure_ascii=False)[:4800]
     )
 
     if provider == "mock" or not provider:

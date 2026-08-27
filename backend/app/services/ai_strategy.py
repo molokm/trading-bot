@@ -55,12 +55,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.0"
+STRATEGY_VERSION = "v1.1"
 STRATEGY_DESC = (
-    "AI Discretionary v1.0 — hybrid quant+LLM. "
-    "Precomputes EMA21/50/200, RSI, MACD, ADX, ATR, BB, volume, 4H trend; "
-    "regime+align_score hard-gate before LLM open; prefer HOLD in chop; "
-    "conf≥0.75, RR≥1.8; indicator exits + peak trail. Groq→OpenRouter."
+    "AI Discretionary v1.1 — hybrid quant+LLM + self-adapt. "
+    "Rolling WR/streak подкручивает min_confidence и quant_min_align в коридоре; "
+    "reflection по последним сделкам в prompt; hard veto и risk-cap без изменений потолка."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -104,6 +103,16 @@ class AIConfig:
     rsi_period: int = 14
     quant_min_align: float = 0.55  # hard gate vs LLM open
     block_chop_opens: bool = True
+    # v1.1 self-adapt (bounded)
+    adapt_enabled: bool = True
+    adapt_window: int = 12              # last N closed trades
+    adapt_min_trades: int = 4           # need this many before adapting
+    conf_floor: float = 0.70
+    conf_ceil: float = 0.90
+    align_floor: float = 0.50
+    align_ceil: float = 0.75
+    size_cap_floor: float = 0.05
+    size_cap_ceil: float = 0.12
     provider: str = None                  # None → env AI_LLM_PROVIDER
     execute: bool = None                  # None → env AI_EXECUTE
 
@@ -162,6 +171,21 @@ class AIStrategy:
         self._started_at = None
         self._latest_indicators: dict = {}
         self._last_decision: dict = {}
+        # v1.1 adaptive layer
+        self._adapt = {
+            "min_confidence": float(self.config.min_confidence),
+            "quant_min_align": float(self.config.quant_min_align),
+            "size_cap": 0.10,
+            "preset": "normal",
+            "reason": "init",
+            "updated_at": None,
+        }
+        if isinstance(st.get("adapt"), dict):
+            for k in ("min_confidence", "quant_min_align", "size_cap", "preset", "reason"):
+                if k in st["adapt"]:
+                    self._adapt[k] = st["adapt"][k]
+        self._reflection = str(st.get("reflection") or "")
+        self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
 
     # ── lifecycle ──────────────────────────────────────────────
     def start(self):
@@ -568,9 +592,10 @@ class AIStrategy:
             "global_regime": g,
             "block_open": g == "chop" and getattr(self.config, "block_chop_opens", True),
             "coins": by_coin,
-            "min_align": float(getattr(self.config, "quant_min_align", 0.55) or 0.55),
+            "min_align": float(self._effective_min_align()),
             "min_adx": float(self.config.min_adx or 22),
-            "min_confidence": float(self.config.min_confidence or 0.75),
+            "min_confidence": float(self._effective_min_confidence()),
+            "adapt_preset": (self._adapt or {}).get("preset"),
         }
 
     def _quant_veto_open(self, decision: dict) -> str | None:
@@ -583,8 +608,8 @@ class AIStrategy:
         coin = (decision.get("symbol") or "").upper()
         side = (decision.get("side") or "").lower()
         conf = float(decision.get("confidence") or 0)
-        if conf < float(self.config.min_confidence or 0.75):
-            return f"quant_veto:low_conf:{conf:.2f}"
+        if conf < float(self._effective_min_confidence()):
+            return f"quant_veto:low_conf:{conf:.2f}<{self._effective_min_confidence():.2f}"
         stop = float(decision.get("stop_pct") or 0.03)
         take = float(decision.get("take_pct") or 0.06)
         if stop > 0 and take / stop < 1.8:
@@ -604,6 +629,172 @@ class AIStrategy:
             return "quant_veto:long_in_bear"
         return None
 
+    def _closed_trades(self) -> list:
+        out = []
+        for t in self._trade_log:
+            if t.get("pnl") is None:
+                continue
+            if t.get("reason") in (None, "open"):
+                continue
+            out.append(t)
+        return out
+
+    def _rolling_stats(self) -> dict:
+        n = int(getattr(self.config, "adapt_window", 12) or 12)
+        closed = self._closed_trades()[-n:]
+        if not closed:
+            return {"n": 0, "win_rate": None, "avg_pnl": 0.0, "sum_pnl": 0.0,
+                    "streak": 0, "streak_kind": "none"}
+        pnls = [float(t.get("pnl") or 0) for t in closed]
+        wins = sum(1 for p in pnls if p > 0)
+        # streak from end
+        streak = 0
+        kind = "none"
+        for p in reversed(pnls):
+            if streak == 0:
+                kind = "win" if p > 0 else "loss"
+                streak = 1
+            elif (kind == "win" and p > 0) or (kind == "loss" and p <= 0):
+                streak += 1
+            else:
+                break
+        return {
+            "n": len(closed),
+            "win_rate": round(100.0 * wins / len(closed), 1),
+            "avg_pnl": round(sum(pnls) / len(pnls), 4),
+            "sum_pnl": round(sum(pnls), 4),
+            "streak": streak,
+            "streak_kind": kind,
+        }
+
+    def _build_reflection(self, stats: dict) -> str:
+        closed = self._closed_trades()[-5:]
+        parts = []
+        if stats.get("n"):
+            parts.append(
+                f"Last {stats['n']} trades: WR={stats.get('win_rate')}% "
+                f"sumPnL={stats.get('sum_pnl')} streak={stats.get('streak_kind')}x{stats.get('streak')}"
+            )
+        for t in closed:
+            parts.append(
+                f"{t.get('coin') or t.get('symbol')} {t.get('side')} "
+                f"pnl={float(t.get('pnl') or 0):+.2f} reason={t.get('reason')}"
+            )
+        preset = (self._adapt or {}).get("preset")
+        if preset:
+            parts.append(f"Active preset={preset}; conf>={(self._adapt or {}).get('min_confidence')}")
+        return " | ".join(parts)[:500]
+
+    def _refresh_adaptive(self, force_log: bool = False) -> dict:
+        """Bounded self-tune from rolling trade outcomes. Never exceeds floor/ceil."""
+        cfg = self.config
+        base_conf = float(cfg.min_confidence)
+        base_align = float(cfg.quant_min_align)
+        if not getattr(cfg, "adapt_enabled", True):
+            self._adapt = {
+                "min_confidence": base_conf,
+                "quant_min_align": base_align,
+                "size_cap": 0.10,
+                "preset": "normal",
+                "reason": "adapt_disabled",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return self._adapt
+
+        stats = self._rolling_stats()
+        min_n = int(getattr(cfg, "adapt_min_trades", 4) or 4)
+        conf = base_conf
+        align = base_align
+        size_cap = 0.10
+        preset = "normal"
+        reasons = []
+
+        if stats["n"] < min_n:
+            reasons.append(f"warmup:{stats['n']}/{min_n}")
+            preset = "warmup"
+        else:
+            wr = float(stats.get("win_rate") or 50)
+            avg = float(stats.get("avg_pnl") or 0)
+            sk = stats.get("streak_kind")
+            stn = int(stats.get("streak") or 0)
+
+            if wr < 35 or (sk == "loss" and stn >= 3) or avg < -15:
+                preset = "conservative"
+                conf = max(base_conf, 0.82)
+                align = max(base_align, 0.65)
+                size_cap = 0.06
+                reasons.append(f"defensive:wr={wr},streak={sk}{stn},avg={avg:.1f}")
+            elif wr >= 55 and avg > 5 and not (sk == "loss" and stn >= 2):
+                preset = "aggressive"
+                conf = min(base_conf, 0.72)
+                align = min(base_align, 0.52)
+                size_cap = 0.12
+                reasons.append(f"edge:wr={wr},avg={avg:.1f}")
+            else:
+                preset = "normal"
+                conf = base_conf
+                align = base_align
+                size_cap = 0.10
+                reasons.append(f"steady:wr={wr},avg={avg:.1f}")
+
+            # mild nudge from lifetime if available
+            if self._lifetime_trades >= 8:
+                lwr = 100.0 * self._lifetime_wins / max(1, self._lifetime_trades)
+                if lwr < 40:
+                    conf += 0.03
+                    align += 0.03
+                    size_cap = min(size_cap, 0.08)
+                    reasons.append(f"lifetime_wr={lwr:.0f}")
+
+        conf = max(float(cfg.conf_floor), min(float(cfg.conf_ceil), conf))
+        align = max(float(cfg.align_floor), min(float(cfg.align_ceil), align))
+        size_cap = max(float(cfg.size_cap_floor), min(float(cfg.size_cap_ceil), size_cap))
+
+        prev = dict(self._adapt or {})
+        reason = ";".join(reasons)[:200]
+        self._adapt = {
+            "min_confidence": round(conf, 3),
+            "quant_min_align": round(align, 3),
+            "size_cap": round(size_cap, 3),
+            "preset": preset,
+            "reason": reason,
+            "stats": stats,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._reflection = self._build_reflection(stats)
+
+        changed = (
+            prev.get("preset") != preset
+            or abs(float(prev.get("min_confidence") or 0) - conf) > 0.019
+            or abs(float(prev.get("quant_min_align") or 0) - align) > 0.019
+        )
+        if changed or force_log:
+            rec = {
+                "time": self._adapt["updated_at"],
+                "preset": preset,
+                "min_confidence": conf,
+                "quant_min_align": align,
+                "size_cap": size_cap,
+                "reason": reason,
+                "stats": stats,
+            }
+            self._adapt_log.append(rec)
+            self._adapt_log = self._adapt_log[-40:]
+            print(f"[AI] adapt -> {preset} conf={conf:.2f} align={align:.2f} "
+                  f"size_cap={size_cap:.2f} | {reason}", flush=True)
+            try:
+                self.analysis.log("ai", "adapt", **{k: rec[k] for k in rec if k != "stats"},
+                                  **{f"stat_{k}": v for k, v in (stats or {}).items()})
+            except Exception:
+                pass
+        return self._adapt
+
+    def _effective_min_confidence(self) -> float:
+        return float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
+
+    def _effective_min_align(self) -> float:
+        return float((self._adapt or {}).get("quant_min_align") or self.config.quant_min_align)
+
     def _snapshot(self) -> dict:
         open_list = []
         for coin, p in self._positions.items():
@@ -620,6 +811,8 @@ class AIStrategy:
             "open_positions": open_list,
             "quant": self._build_quant(),
             "indicators": self._latest_indicators,
+            "adaptive": self._adapt,
+            "reflection": self._reflection,
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
             "llm": llm_status(),
@@ -859,6 +1052,10 @@ class AIStrategy:
         if pnl > 0:
             self._lifetime_wins += 1
         self._lifetime_fees += fee_c
+        try:
+            self._refresh_adaptive()
+        except Exception as e:
+            print(f"[AI] adapt refresh: {e}", flush=True)
         self._persist()
         now = datetime.now(timezone.utc).isoformat()
         self._trade_log.append({
@@ -1142,6 +1339,11 @@ class AIStrategy:
         await self._fetch_indicators(client)
         await self._manage_stops(client)
         snap = self._snapshot()
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+        snap = self._snapshot()  # include fresh adaptive + reflection
         decision = await call_llm(snap, provider=self._provider())
         self._last_decision = {
             **decision,
@@ -1260,6 +1462,15 @@ class AIStrategy:
             "lifetime_wins": self._lifetime_wins,
             "lifetime_fees": self._lifetime_fees,
             "session_pnl": self._session_pnl,
+            "adapt": {
+                "min_confidence": (self._adapt or {}).get("min_confidence"),
+                "quant_min_align": (self._adapt or {}).get("quant_min_align"),
+                "size_cap": (self._adapt or {}).get("size_cap"),
+                "preset": (self._adapt or {}).get("preset"),
+                "reason": (self._adapt or {}).get("reason"),
+            },
+            "reflection": self._reflection,
+            "adapt_log": self._adapt_log[-20:],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         if self.db is not None and self._loop and not self._loop.is_closed():
@@ -1325,9 +1536,15 @@ class AIStrategy:
                 "bar": self.config.bar,
                 "poll_interval_sec": self.config.poll_interval_sec,
                 "min_confidence": self.config.min_confidence,
+                "effective_min_confidence": self._effective_min_confidence(),
+                "effective_min_align": self._effective_min_align(),
+                "adapt_preset": (self._adapt or {}).get("preset"),
             },
             "indicators": self._latest_indicators,
             "last_decision": self._last_decision,
+            "adaptive": self._adapt,
+            "reflection": self._reflection,
+            "adapt_log": self._adapt_log[-10:],
             "recent_decisions": self._decision_log[-30:],
             "decision_count": len(self._decision_log),
             "last_exec": self._last_exec,
