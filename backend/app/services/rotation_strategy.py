@@ -830,16 +830,15 @@ class RotationStrategy:
 
         if self.notifier:
             try:
-                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
-                await self.notifier.send_trade(
-                    self.notifier.partial_msg(
+                                _sid = await self._ensure_signal_id(pos) if hasattr(self, '_ensure_signal_id') else int(getattr(pos, 'signal_id', 0) or 0)
+                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(_sid)
+                _txt = self.notifier.partial_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
-                ),
-                    reply_to_message_id=_reply or None,
+                    signal_id=_sid,
                 )
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
         return {"fill_px": fill_px, "fee": fee, "pnl": pnl, "close_sz": close_sz}
@@ -905,15 +904,14 @@ class RotationStrategy:
 
         if self.notifier:
             try:
-                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
-                await self.notifier.send_trade(
-                    self.notifier.close_msg(
+                                _sid = await self._ensure_signal_id(pos) if hasattr(self, '_ensure_signal_id') else int(getattr(pos, 'signal_id', 0) or 0)
+                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(_sid)
+                _txt = self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
-                ),
-                    reply_to_message_id=_reply or None,
+                    signal_id=_sid,
                 )
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
 
@@ -1226,17 +1224,16 @@ class RotationStrategy:
 
                     if self.notifier:
                         try:
-                            _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
-                            await self.notifier.send_trade(
-                                self.notifier.close_msg(
+                                                        _sid = await self._ensure_signal_id(pos) if hasattr(self, '_ensure_signal_id') else int(getattr(pos, 'signal_id', 0) or 0)
+                            _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(_sid)
+                            _txt = self.notifier.close_msg(
                                 coin=coin, side=pos.side,
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
-                                bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
-                ),
-                    reply_to_message_id=_reply or None,
-                )
+                                signal_id=_sid,
+                            )
+                            await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
                     del self._positions[coin]
