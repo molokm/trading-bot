@@ -891,9 +891,11 @@ class AIStrategy:
     # ── execution helpers ──────────────────────────────────────
     async def _place(self, client, inst_id, side, sz, pos_side):
         coin = inst_id.split("-")[0]
+        cl_id = f"ai{int(time.time() * 1000)}"
         return await client.place_order(
             inst_id=inst_id, side=side, ord_type="market",
             sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
+            cl_ord_id=cl_id,
         )
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
@@ -948,6 +950,7 @@ class AIStrategy:
                     resp = await client.place_order(
                         inst_id=inst, side=order_side, ord_type="market",
                         sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=None,
+                        cl_ord_id=f"ai{int(time.time() * 1000)}",
                     )
                 except Exception as e2:
                     self._record_exec("open_error", coin=coin, side=side,

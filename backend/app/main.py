@@ -4456,13 +4456,25 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                   for f in raw_fills}
 
     def _okx_bot(ord_id: str) -> str:
-        cid = fill_clord.get(ord_id, "") or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
+        """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id."""
+        cid = (fill_clord.get(ord_id, "")
+               or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
+               or "").strip().lower()
         if cid.startswith("rot"):
             return "Momentum"
         if cid.startswith("imp"):
             return "Impulse 1D"
+        if cid.startswith("ai"):
+            return "AI Discretionary 1H"
+        if cid.startswith("val"):
+            return "MACD+Donchian Validation"
+        if cid.startswith("scl") or cid.startswith("scalp"):
+            return "Order Book Scalp"
+        if cid.startswith("vwap"):
+            return "VWAP Mean Reversion"
+        # Any bot_id stored for this ord_id (AI/Validation/Scalp/etc.)
         b = _db_bot_name(ord_to_bot.get(ord_id, ""))
-        return b if b in ("Momentum", "Impulse 1D") else ""
+        return b or ""
 
     pair_bills_err = ""
     try:
@@ -4542,6 +4554,22 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             continue
         seen.add(key)
         dedup.append(t)
+
+    # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId)
+    for t in dedup:
+        if t.get("bot"):
+            continue
+        try:
+            tagged = _tag_trade_bot(t)
+            if tagged:
+                t["bot"] = tagged
+                continue
+        except Exception:
+            pass
+        # DB ord_id map again with full bot name list
+        oid = str(t.get("ord_id") or "").strip()
+        if oid and oid in ord_to_bot:
+            t["bot"] = _db_bot_name(ord_to_bot[oid]) or t.get("bot") or ""
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
