@@ -551,16 +551,12 @@ class ImpulseStrategy:
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
-                _sid = await self._ensure_signal_id(pos)
-                _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
-                _txt = self.notifier.partial_msg(
+                self.notifier.fire(self.notifier.partial_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
                     bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                    signal_id=_sid,
-                )
-                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
+                ))
             except Exception as e:
                 print(f"[Impulse] TG partial notify error: {e}", flush=True)
 
@@ -625,9 +621,8 @@ class ImpulseStrategy:
                 _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
                 _txt = self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
-                exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
-                    signal_id=_sid,
+                    exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
+                    bot_name=self.BOT_NAME, signal_id=_sid,
                 )
                 await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
@@ -766,19 +761,10 @@ class ImpulseStrategy:
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
-                if _tg_mid:
-                    try:
-                        if coin in getattr(self, '_positions', {}):
-                            self._positions[coin].tg_message_id = int(_tg_mid)
-                        _sid = 0
-                        try:
-                            _sid = int(signal_id or 0)
-                        except Exception:
-                            _sid = 0
-                        if _sid:
-                            self.notifier.remember_open(_sid, _tg_mid)
-                    except Exception as e:
-                        print(f"[Impulse] TG remember open: {e}", flush=True)
+                if _tg_mid and coin in self._positions:
+                    self._positions[coin].tg_message_id = int(_tg_mid)
+                    if signal_id:
+                        self.notifier.remember_open(signal_id, _tg_mid)
             except Exception as e:
                 print(f"[Impulse] TG open notify error: {e}", flush=True)
 

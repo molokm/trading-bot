@@ -642,12 +642,12 @@ class RotationStrategy:
         try:
             result = await client.get_positions("SWAP", inst_id=inst_id)
             if result.get("error"):
-            return False
+                return False
             for p in result.get("data", []):
-            pos_side = p.get("posSide", "net")
-            sz = float(p.get("pos", 0) or 0)
-            if sz > 0 and pos_side == side:
-            return True
+                pos_side = p.get("posSide", "net")
+                sz = float(p.get("pos", 0) or 0)
+                if sz > 0 and pos_side == side:
+                    return True
             return False
         except Exception:
             return False
@@ -658,18 +658,18 @@ class RotationStrategy:
         0.0 if it cannot be determined."""
         try:
             result = await client.get_fills_history(inst_type="SWAP",
-            instId=inst_id, limit=20)
+                                                    instId=inst_id, limit=20)
             if result.get("error"):
-            return 0.0
+                return 0.0
             close_side = "sell" if pos_side == "long" else "buy"
             fills = result.get("data", [])
             fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
             for f in fills:
-            if f.get("side") == close_side:
-            try:
-            return float(f.get("fillPx", 0) or 0)
-            except (TypeError, ValueError):
-            return 0.0
+                if f.get("side") == close_side:
+                    try:
+                        return float(f.get("fillPx", 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
             return 0.0
         except Exception:
             return 0.0
@@ -680,15 +680,15 @@ class RotationStrategy:
         the REAL ordId so PnL dedupe against DB/OKX fills works."""
         try:
             result = await client.get_fills_history(inst_type="SWAP",
-            instId=inst_id, limit=20)
+                                                    instId=inst_id, limit=20)
             if result.get("error"):
-            return {}
+                return {}
             close_side = "sell" if pos_side == "long" else "buy"
             fills = result.get("data", [])
             fills.sort(key=lambda f: f.get("ts", "0"), reverse=True)
             for f in fills:
-            if f.get("side") == close_side:
-            return f
+                if f.get("side") == close_side:
+                    return f
             return {}
         except Exception:
             return {}
@@ -808,12 +808,12 @@ class RotationStrategy:
         if self.db:
             try:
                 await self.db.save_trade(
-                bot_id=self.BOT_ID, side=close_side, sz=close_sz,
-                px=round(fill_px, 2), ord_id=partial_ord_id,
-                inst_id=inst_id, ord_type="market",
-                fee=round(fee_cost(fee), 4), fee_ccy="USDT",
-                pnl=round(pnl, 2), state="filled",
-                signal_id=pos.signal_id,
+                    bot_id=self.BOT_ID, side=close_side, sz=close_sz,
+                    px=round(fill_px, 2), ord_id=partial_ord_id,
+                    inst_id=inst_id, ord_type="market",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
+                    pnl=round(pnl, 2), state="filled",
+                    signal_id=pos.signal_id,
                 )
             except Exception as e:
                 print(f"[Rotation] DB save partial error: {e}", flush=True)
@@ -881,13 +881,13 @@ class RotationStrategy:
         if self.db:
             try:
                 await self.db.save_trade(
-                bot_id=self.BOT_ID, side=close_side, sz=pos.size,
-                px=round(fill_px, 2),
-                ord_id=close_ord_id,
-                inst_id=inst_id, ord_type="market",
-                fee=round(fee_cost(fee), 4), fee_ccy="USDT",
-                pnl=round(pnl, 2), state="filled",
-                signal_id=pos.signal_id,
+                    bot_id=self.BOT_ID, side=close_side, sz=pos.size,
+                    px=round(fill_px, 2),
+                    ord_id=close_ord_id,
+                    inst_id=inst_id, ord_type="market",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
+                    pnl=round(pnl, 2), state="filled",
+                    signal_id=pos.signal_id,
                 )
                 await self._sync_positions_db()
             except Exception as e:
@@ -907,10 +907,8 @@ class RotationStrategy:
                 _sid = await self._ensure_signal_id(pos)
                 _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
                 _txt = self.notifier.close_msg(
-                    coin=pos.coin, side=pos.side,
-                    entry=round(pos.entry_price, 2),
-                    exit_px=round(fill_px, 2), pnl=round(pnl, 2),
-                    reason=reason,
+                    coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
+                    exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
                     bot_name=self.BOT_NAME, signal_id=_sid,
                 )
                 await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
@@ -959,10 +957,10 @@ class RotationStrategy:
         if self.db:
             try:
                 signal_id = await self.db.save_signal(
-                bot_id=self.BOT_ID,
-                timestamp=datetime.now(timezone.utc).isoformat(),
-                side=order_side, price=price, size=sz,
-                ord_type="limit", status="pending",
+                    bot_id=self.BOT_ID,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    side=order_side, price=price, size=sz,
+                    ord_type="limit", status="pending",
                 )
             except Exception as e:
                 print(f"[Rotation] DB save signal error: {e}", flush=True)
@@ -1052,13 +1050,13 @@ class RotationStrategy:
         if self.db:
             try:
                 if signal_id:
-                await self.db.update_signal_status(signal_id, "filled", ord_id)
+                    await self.db.update_signal_status(signal_id, "filled", ord_id)
                 await self.db.save_trade(
-                bot_id=self.BOT_ID, side=order_side, sz=sz,
-                px=round(fill_px, 2), ord_id=ord_id,
-                inst_id=inst_id, ord_type="market",
-                fee=round(fee_cost(fee), 4), fee_ccy="USDT",
-                pnl=0, state="filled", signal_id=signal_id,
+                    bot_id=self.BOT_ID, side=order_side, sz=sz,
+                    px=round(fill_px, 2), ord_id=ord_id,
+                    inst_id=inst_id, ord_type="market",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
+                    pnl=0, state="filled", signal_id=signal_id,
                 )
                 await self._sync_positions_db()
             except Exception as e:
@@ -1077,30 +1075,14 @@ class RotationStrategy:
         if self.notifier:
             try:
                 _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
-                coin=coin, side=side, price=round(fill_px, 2),
-                stop=round(stop, 2), size=round(sz, 4), leverage=lev,
-                bot_name=self.BOT_NAME, signal_id=signal_id,
+                    coin=coin, side=side, price=round(fill_px, 2),
+                    stop=round(stop, 2), size=round(sz, 4), leverage=lev,
+                    bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
-                if _tg_mid:
-                try:
-                if 'pos' in dir() and pos is not None:
-                pos.tg_message_id = int(_tg_mid)
-                elif 'coin' in dir() and coin in getattr(self, '_positions', {}):
-                self._positions[coin].tg_message_id = int(_tg_mid)
-                _sid = 0
-                try:
-                _sid = int(getattr(pos, 'signal_id', 0) or 0)
-                except Exception:
-                pass
-                if not _sid:
-                try:
-                _sid = int(signal_id or 0)
-                except Exception:
-                _sid = 0
-                if _sid:
-                self.notifier.remember_open(_sid, _tg_mid)
-                except Exception as e:
-                print(f"[Rotation] TG remember open: {e}", flush=True)
+                if _tg_mid and coin in self._positions:
+                    self._positions[coin].tg_message_id = int(_tg_mid)
+                    if signal_id:
+                        self.notifier.remember_open(signal_id, _tg_mid)
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
 
@@ -1116,7 +1098,7 @@ class RotationStrategy:
             inst = getattr(pos, "inst_id", None) or f"{pos.coin}-USDT-SWAP"
             sid = int(await self.db.find_signal_id(inst, open_side) or 0)
             if sid:
-            pos.signal_id = sid
+                pos.signal_id = sid
         except Exception as e:
             print(f"[Rotation] ensure_signal_id: {e}", flush=True)
         return int(getattr(pos, "signal_id", 0) or 0)
@@ -1134,16 +1116,174 @@ class RotationStrategy:
         if not self._positions:
             return
         try:
-            _sid = await self._ensure_signal_id(pos)
-            _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
-            _txt = self.notifier.close_msg(
-                coin=coin, side=pos.side,
-                entry=round(pos.entry_price, 2),
-                exit_px=round(fill_px, 2), pnl=round(pnl, 2),
-                reason=close_reason,
-                bot_name=self.BOT_NAME, signal_id=_sid,
-            )
-            await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
+            result = await client.get_positions("SWAP")
+            actual = {}
+            if not result.get("error") and result.get("data"):
+                for p in result.get("data", []):
+                    inst_id = p.get("instId", "")
+                    coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    if coin not in self.config.symbols:
+                        continue
+                    pos_side = p.get("posSide", "net")
+                    is_long = pos_side != "short"
+                    sz = float(p.get("pos", 0) or 0)
+                    if sz <= 0:
+                        continue
+                    actual[(coin, "long" if is_long else "short")] = sz
+
+            # Drop positions we adopted incorrectly (another strategy owns them)
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, pos.inst_id, pos.side):
+                            print(f"[{self.BOT_NAME}] drop foreign position {coin} {pos.side} "
+                                  f"(owned by another bot)", flush=True)
+                            del self._positions[coin]
+                            continue
+                    except Exception as e:
+                        print(f"[{self.BOT_NAME}] foreign drop check error: {e}", flush=True)
+
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                real_sz = actual.get((coin, pos.side))
+                if real_sz is None:
+                    # Position vanished from the exchange -> its SL fired (or was
+                    # closed manually/externally). Try to book PnL at the REAL
+                    # close price from fills; fall back to the stop price.
+                    fill_px = await self._last_close_fill_px(client, pos.inst_id, pos.side)
+                    close_ord_id = ""
+                    close_reason = "exchange_stop"
+                    if fill_px <= 0:
+                        fill_px = pos.stop_price
+                    else:
+                        close_reason = "manual_close"
+                        last_fill = await self._last_close_fill(client, pos.inst_id, pos.side)
+                        if last_fill:
+                            close_ord_id = str(last_fill.get("ordId", "")).strip()
+                    # Whatever the cause (stop or manual), do NOT instantly
+                    # re-enter the same coin on the next poll.
+                    cd_until = time.time() + self.MANUAL_CLOSE_COOLDOWN_SEC
+                    self._cooldowns[coin] = cd_until
+                    if self.db:
+                        try:
+                            await self.db.set_setting(
+                                f"cooldown:{self.BOT_ID}:{coin}", str(int(cd_until)))
+                        except Exception as e:
+                            print(f"[Rotation] Cooldown persist error {coin}: {e}", flush=True)
+                    print(f"[Rotation] Position gone {coin} ({close_reason} @ {fill_px:.4f}) "
+                          f"— cooldown {self.MANUAL_CLOSE_COOLDOWN_SEC/3600:.1f}h",
+                          flush=True)
+                    ct = self.CT_VAL.get(coin, 0.01)
+                    pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, 0.0, ct)
+                    self._equity += pnl
+                    now = datetime.now(timezone.utc).isoformat()
+                    self._trade_log.append({
+                        "time": now, "side": "sell" if pos.side == "long" else "buy",
+                        "symbol": pos.inst_id, "size": pos.size,
+                        "pnl": round(pnl, 2),
+                        "entry_price": pos.entry_price, "exit_price": round(fill_px, 2),
+                        "reason": close_reason, "pos_side": pos.side, "coin": coin,
+                        "signal_id": pos.signal_id, "ord_id": close_ord_id,
+                    })
+                    if self.db:
+                        try:
+                            await self.db.save_trade(
+                                bot_id=self.BOT_ID, side="sell" if pos.side == "long" else "buy",
+                                sz=pos.size, px=round(fill_px, 2), ord_id=close_ord_id,
+                                inst_id=pos.inst_id, ord_type="market",
+                                fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                                state="filled", signal_id=pos.signal_id,
+                            )
+                            await self._sync_positions_db()
+                        except Exception as e:
+                            print(f"[Rotation] DB reconcile save error: {e}", flush=True)
+                    print(f"[Rotation] RECONCILE {now[:19]} {coin:4} {pos.side:5} "
+                          f"gone from exchange, booked {close_reason} pnl={pnl:+.2f}", flush=True)
+                    self.analysis.log("rotation", "reconcile",
+                                      coin=coin, side=pos.side,
+                                      kind="position_gone", reason=close_reason,
+                                      entry_px=round(pos.entry_price, 2),
+                                      exit_px=round(fill_px, 2), pnl=round(pnl, 2))
+
+                    if self.notifier:
+                        try:
+                            _sid = await self._ensure_signal_id(pos)
+                            _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
+                            _txt = self.notifier.close_msg(
+                                coin=coin, side=pos.side,
+                                entry=round(pos.entry_price, 2),
+                                exit_px=round(fill_px, 2), pnl=round(pnl, 2),
+                                reason=close_reason,
+                                bot_name=self.BOT_NAME, signal_id=_sid,
+                            )
+                            await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
+                        except Exception as e:
+                            print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
+                    del self._positions[coin]
+                elif real_sz != pos.size:
+                    # Size drift (e.g. manual partial close on the exchange).
+                    old = pos.size
+                    pos.size = real_sz
+                    pos.size_synced = 0.0  # force the exchange stop to re-sync
+                    print(f"[Rotation] RECONCILE {coin:4} size {old} -> {real_sz} "
+                          f"(exchange drift), stop will re-sync", flush=True)
+                    self.analysis.log("rotation", "reconcile",
+                                      coin=coin, side=pos.side,
+                                      kind="size_drift", old_size=old, new_size=real_sz)
+                    if self.db:
+                        await self._sync_positions_db()
+
+            # Restore positions that exist on the exchange but are not tracked
+            # locally (e.g. after a failed close left the position open). Without
+            # this, the next cycle would open a duplicate entry on the same coin.
+            for (coin, side), real_sz in actual.items():
+                if coin in self._positions:
+                    continue
+                inst_id = self.SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
+                now = datetime.now(timezone.utc).isoformat()
+                # Re-attach the original trade number so close/partial messages
+                # keep the same "Сделка №N" as the open.
+                restored_signal_id = 0
+                if self.db:
+                    try:
+                        restored_signal_id = await self.db.find_signal_id(inst_id, side)
+                    except Exception as e:
+                        print(f"[Rotation] reconcile signal_id lookup error: {e}", flush=True)
+                pos = RotPosition(
+                    symbol=inst_id, coin=coin, inst_id=inst_id,
+                    side=side, size=real_sz, size_original=real_sz,
+                    entry_price=0.0, stop_price=0.0, peak_price=0.0,
+                    opened_at=now, atr=0.0, atr_hourly=0.0,
+                    leverage=self.config.max_leverage, signal_id=restored_signal_id,
+                    raw_entry=0.0,
+                )
+                # Re-fetch the position to get avgPx + place a fresh exchange stop.
+                pos_result = await client.get_positions("SWAP", inst_id=inst_id)
+                if not pos_result.get("error") and pos_result.get("data"):
+                    p = pos_result["data"][0]
+                    pos.entry_price = float(p.get("avgPx", 0) or 0)
+                    pos.peak_price = pos.entry_price
+                    pos.leverage = float(p.get("lever", 0) or self.config.max_leverage)
+                    est_atr = pos.entry_price * 0.015
+                    pos.atr = est_atr
+                    pos.stop_price = (pos.entry_price - est_atr * self.config.atr_stop_mult
+                                      if side == "long"
+                                      else pos.entry_price + est_atr * self.config.atr_stop_mult)
+                if pos.entry_price > 0:
+                    self._positions[coin] = pos
+                    print(f"[Rotation] RECONCILE restored {coin} {side} sz={real_sz} "
+                          f"@ {pos.entry_price:.2f}", flush=True)
+                    self.analysis.log("rotation", "reconcile",
+                                      coin=coin, side=side,
+                                      kind="restored", size=real_sz,
+                                      entry_px=round(pos.entry_price, 2))
+                    await self._place_exchange_stop(client, pos)
+                else:
+                    print(f"[Rotation] RECONCILE could not restore {coin} {side} "
+                          f"(no avgPx)", flush=True)
         except Exception as e:
             print(f"[Rotation] Reconcile error: {e}", flush=True)
 
@@ -1162,48 +1302,48 @@ class RotationStrategy:
         try:
             result = await client.get_algo_orders(ord_type="conditional", state="live")
             if result.get("error"):
-            return
+                return
             stops = result.get("data", [])
 
             # Group live stops by instrument+side.
             by_key: dict = {}
             for s in stops:
-            inst_id = s.get("instId", "")
-            coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-            if coin not in self.config.symbols:
-            continue
-            key = (inst_id, s.get("posSide", ""), s.get("side", ""))
-            by_key.setdefault(key, []).append(s)
+                inst_id = s.get("instId", "")
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in self.config.symbols:
+                    continue
+                key = (inst_id, s.get("posSide", ""), s.get("side", ""))
+                by_key.setdefault(key, []).append(s)
 
             for (inst_id, pos_side, side), group in by_key.items():
-            if len(group) < 2:
-            continue
-            # Keep the stop that protects the position most tightly.
-            # For longs (sell stop) the highest trigger is the closest;
-            # for shorts (buy stop) the lowest trigger is the closest.
-            def _trigger(s):
-            try:
-            return float(s.get("slTriggerPx") or 0)
-            except (TypeError, ValueError):
-            return 0.0
-            keep = max(group, key=_trigger) if side == "sell" else min(group, key=_trigger)
-            keep_id = keep.get("algoId", "")
-            for s in group:
-            if s.get("algoId") == keep_id:
-            continue
-            resp = await client.cancel_algo_order(inst_id, s.get("algoId", ""))
-            coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-            if resp.get("error"):
-            print(f"[Rotation] Duplicate stop cancel error {coin}: "
-            f"{resp.get('message', '')}", flush=True)
-            else:
-            print(f"[Rotation] Cancelled duplicate stop {coin} "
-            f"sl={s.get('slTriggerPx', '')} (kept sl={keep.get('slTriggerPx', '')})",
-            flush=True)
-            self.analysis.log("rotation", "stop_dedup",
-            coin=coin, pos_side=pos_side, side=side,
-            cancelled_sl=float(_trigger(s) or 0),
-            kept_sl=float(_trigger(keep) or 0))
+                if len(group) < 2:
+                    continue
+                # Keep the stop that protects the position most tightly.
+                # For longs (sell stop) the highest trigger is the closest;
+                # for shorts (buy stop) the lowest trigger is the closest.
+                def _trigger(s):
+                    try:
+                        return float(s.get("slTriggerPx") or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                keep = max(group, key=_trigger) if side == "sell" else min(group, key=_trigger)
+                keep_id = keep.get("algoId", "")
+                for s in group:
+                    if s.get("algoId") == keep_id:
+                        continue
+                    resp = await client.cancel_algo_order(inst_id, s.get("algoId", ""))
+                    coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    if resp.get("error"):
+                        print(f"[Rotation] Duplicate stop cancel error {coin}: "
+                              f"{resp.get('message', '')}", flush=True)
+                    else:
+                        print(f"[Rotation] Cancelled duplicate stop {coin} "
+                              f"sl={s.get('slTriggerPx', '')} (kept sl={keep.get('slTriggerPx', '')})",
+                              flush=True)
+                        self.analysis.log("rotation", "stop_dedup",
+                                          coin=coin, pos_side=pos_side, side=side,
+                                          cancelled_sl=float(_trigger(s) or 0),
+                                          kept_sl=float(_trigger(keep) or 0))
         except Exception as e:
             print(f"[Rotation] Sync exchange stops error: {e}", flush=True)
 
@@ -2019,15 +2159,15 @@ class RotationStrategy:
         if self.db:
             try:
                 if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
-                print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
-                flush=True)
-                return False
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
+                          flush=True)
+                    return False
                 mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                 if mine:
-                return True
+                    return True
                 last = await self.db.last_bot_for_instrument(inst_id)
                 if last and str(last).split(":")[0] == self.BOT_ID:
-                return True
+                    return True
             except Exception as e:
                 print(f"[{self.BOT_NAME}] adopt ownership check error: {e}", flush=True)
         # Our in-memory trade log: last event for this inst is an open
@@ -2055,52 +2195,52 @@ class RotationStrategy:
         try:
             result = await client.get_positions("SWAP")
             if result.get("error") or not result.get("data"):
-            return
+                return
             for p in result.get("data", []):
-            inst_id = p.get("instId", "")
-            coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-            if coin not in self.config.symbols:
-            continue
-            pos_side = p.get("posSide", "net")
-            is_long = pos_side != "short"
-            entry_px = float(p.get("avgPx", 0) or 0)
-            sz = float(p.get("pos", 0) or 0)
-            if entry_px <= 0 or sz <= 0:
-            continue
-            if coin in self._positions:
-            continue
+                inst_id = p.get("instId", "")
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in self.config.symbols:
+                    continue
+                pos_side = p.get("posSide", "net")
+                is_long = pos_side != "short"
+                entry_px = float(p.get("avgPx", 0) or 0)
+                sz = float(p.get("pos", 0) or 0)
+                if entry_px <= 0 or sz <= 0:
+                    continue
+                if coin in self._positions:
+                    continue
 
-            side = "long" if is_long else "short"
-            if not await self._should_adopt_exchange_position(coin, side, inst_id):
-            continue
-            estimated_atr = entry_px * 0.015
-            if is_long:
-            stop_price = entry_px * 0.985
-            else:
-            stop_price = entry_px * 1.015
+                side = "long" if is_long else "short"
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
+                estimated_atr = entry_px * 0.015
+                if is_long:
+                    stop_price = entry_px * 0.985
+                else:
+                    stop_price = entry_px * 1.015
 
-            # Re-attach the original trade number so close/partial messages
-            # keep the same "Сделка №N" as the open before the restart.
-            restored_signal_id = 0
-            if self.db:
-            try:
-            restored_signal_id = await self.db.find_signal_id(inst_id, side)
-            except Exception as e:
-            print(f"[Rotation] restore signal_id lookup error: {e}", flush=True)
+                # Re-attach the original trade number so close/partial messages
+                # keep the same "Сделка №N" as the open before the restart.
+                restored_signal_id = 0
+                if self.db:
+                    try:
+                        restored_signal_id = await self.db.find_signal_id(inst_id, side)
+                    except Exception as e:
+                        print(f"[Rotation] restore signal_id lookup error: {e}", flush=True)
 
-            pos = RotPosition(
-            symbol=inst_id, coin=coin, inst_id=inst_id,
-            side=side, size=sz, size_original=sz,
-            entry_price=entry_px, stop_price=stop_price,
-            peak_price=entry_px, opened_at=datetime.now(timezone.utc).isoformat(),
-            atr=estimated_atr, atr_hourly=estimated_atr,
-            leverage=self.config.max_leverage,
-            signal_id=restored_signal_id,
-            )
-            self._positions[coin] = pos
-            await self._place_exchange_stop(client, pos)
-            print(f"[Rotation] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
-            f"stop={stop_price:.2f}", flush=True)
+                pos = RotPosition(
+                    symbol=inst_id, coin=coin, inst_id=inst_id,
+                    side=side, size=sz, size_original=sz,
+                    entry_price=entry_px, stop_price=stop_price,
+                    peak_price=entry_px, opened_at=datetime.now(timezone.utc).isoformat(),
+                    atr=estimated_atr, atr_hourly=estimated_atr,
+                    leverage=self.config.max_leverage,
+                    signal_id=restored_signal_id,
+                )
+                self._positions[coin] = pos
+                await self._place_exchange_stop(client, pos)
+                print(f"[Rotation] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
+                      f"stop={stop_price:.2f}", flush=True)
             # Dedupe any leftover/duplicate stops from before the restart.
             await self._sync_exchange_stops(client)
         except Exception as e:
