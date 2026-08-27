@@ -93,24 +93,73 @@ class TelegramNotifier:
         except Exception:
             return False
 
-    def remember_open(self, signal_id, message_id) -> None:
+    def remember_open(self, signal_id, message_id, pos_key: str = "") -> None:
         try:
             sid = int(signal_id or 0)
             mid = int(message_id or 0)
         except (TypeError, ValueError):
             return
-        if sid and mid:
+        if mid and sid:
             TelegramNotifier._open_msg_by_signal[sid] = mid
-            if len(TelegramNotifier._open_msg_by_signal) > 500:
-                for k in list(TelegramNotifier._open_msg_by_signal.keys())[:100]:
-                    TelegramNotifier._open_msg_by_signal.pop(k, None)
+        if mid and pos_key:
+            TelegramNotifier._open_msg_by_signal[f"pos:{pos_key}"] = mid
+        if len(TelegramNotifier._open_msg_by_signal) > 800:
+            for k in list(TelegramNotifier._open_msg_by_signal.keys())[:150]:
+                TelegramNotifier._open_msg_by_signal.pop(k, None)
 
-    def open_message_id(self, signal_id) -> int:
+    def open_message_id(self, signal_id=0, pos_key: str = "") -> int:
         try:
             sid = int(signal_id or 0)
         except (TypeError, ValueError):
+            sid = 0
+        if sid:
+            mid = int(TelegramNotifier._open_msg_by_signal.get(sid) or 0)
+            if mid:
+                return mid
+        if pos_key:
+            return int(TelegramNotifier._open_msg_by_signal.get(f"pos:{pos_key}") or 0)
+        return 0
+
+    async def remember_open_db(self, db, signal_id, message_id, bot_id: str = "", coin: str = "") -> None:
+        """Persist open Telegram message_id so close can reply after restart."""
+        self.remember_open(signal_id, message_id, pos_key=f"{bot_id}:{coin}" if bot_id and coin else "")
+        if not db:
+            return
+        try:
+            mid = int(message_id or 0)
+            if not mid:
+                return
+            if signal_id:
+                await db.set_setting(f"tg_open_msg:{int(signal_id)}", str(mid))
+            if bot_id and coin:
+                await db.set_setting(f"tg_open_pos:{bot_id}:{coin}", str(mid))
+        except Exception as e:
+            print(f"[TG] remember_open_db: {e}", flush=True)
+
+    async def resolve_open_message_id(self, db, signal_id=0, bot_id: str = "", coin: str = "") -> int:
+        """Memory first, then DB settings."""
+        pos_key = f"{bot_id}:{coin}" if bot_id and coin else ""
+        mid = self.open_message_id(signal_id, pos_key=pos_key)
+        if mid:
+            return mid
+        if not db:
             return 0
-        return int(TelegramNotifier._open_msg_by_signal.get(sid) or 0)
+        try:
+            if signal_id:
+                raw = await db.get_setting(f"tg_open_msg:{int(signal_id)}")
+                if raw and str(raw).isdigit():
+                    mid = int(raw)
+                    self.remember_open(signal_id, mid, pos_key=pos_key)
+                    return mid
+            if bot_id and coin:
+                raw = await db.get_setting(f"tg_open_pos:{bot_id}:{coin}")
+                if raw and str(raw).isdigit():
+                    mid = int(raw)
+                    self.remember_open(signal_id, mid, pos_key=pos_key)
+                    return mid
+        except Exception as e:
+            print(f"[TG] resolve_open_message_id: {e}", flush=True)
+        return 0
 
     def fire(self, text: str, parse_mode: str = "HTML") -> None:
         """Fire-and-forget send — never blocks the trading loop or raises.

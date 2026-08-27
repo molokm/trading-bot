@@ -831,7 +831,17 @@ class RotationStrategy:
         if self.notifier:
             try:
                 _sid = await self._ensure_signal_id(pos)
-                _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, _sid,
+                        bot_id=getattr(self, "BOT_ID", ""),
+                        coin=getattr(pos, "coin", "") or "",
+                    )
+                if not _reply:
+                    print(f"[Rotation] TG close: no open message_id to reply (signal={_sid})", flush=True)
+                else:
+                    print(f"[Rotation] TG close: reply_to={_reply} signal={_sid}", flush=True)
                 _txt = self.notifier.partial_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
@@ -905,7 +915,17 @@ class RotationStrategy:
         if self.notifier:
             try:
                 _sid = await self._ensure_signal_id(pos)
-                _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, _sid,
+                        bot_id=getattr(self, "BOT_ID", ""),
+                        coin=getattr(pos, "coin", "") or "",
+                    )
+                if not _reply:
+                    print(f"[Rotation] TG close: no open message_id to reply (signal={_sid})", flush=True)
+                else:
+                    print(f"[Rotation] TG close: reply_to={_reply} signal={_sid}", flush=True)
                 _txt = self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
@@ -1079,10 +1099,17 @@ class RotationStrategy:
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
-                if _tg_mid and coin in self._positions:
-                    self._positions[coin].tg_message_id = int(_tg_mid)
-                    if signal_id:
-                        self.notifier.remember_open(signal_id, _tg_mid)
+                if _tg_mid:
+                    try:
+                        if coin in self._positions:
+                            self._positions[coin].tg_message_id = int(_tg_mid)
+                        await self.notifier.remember_open_db(
+                            self.db, signal_id, _tg_mid,
+                            bot_id=getattr(self, "BOT_ID", ""), coin=coin,
+                        )
+                        print(f"[Rotation] TG open msg_id={_tg_mid} signal={signal_id}", flush=True)
+                    except Exception as e:
+                        print(f"[Rotation] TG remember open: {e}", flush=True)
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
 
