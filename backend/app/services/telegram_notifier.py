@@ -32,6 +32,8 @@ def _esc(value) -> str:
 
 
 class TelegramNotifier:
+    _open_msg_by_signal: dict = {}
+
     def __init__(self, token: str = "", chat_id: str = "", channel_id: str = ""):
         self.token = token or os.getenv(ENV_TOKEN, "")
         self.chat_id = chat_id or os.getenv(ENV_CHAT, "")
@@ -91,6 +93,25 @@ class TelegramNotifier:
         except Exception:
             return False
 
+    def remember_open(self, signal_id, message_id) -> None:
+        try:
+            sid = int(signal_id or 0)
+            mid = int(message_id or 0)
+        except (TypeError, ValueError):
+            return
+        if sid and mid:
+            TelegramNotifier._open_msg_by_signal[sid] = mid
+            if len(TelegramNotifier._open_msg_by_signal) > 500:
+                for k in list(TelegramNotifier._open_msg_by_signal.keys())[:100]:
+                    TelegramNotifier._open_msg_by_signal.pop(k, None)
+
+    def open_message_id(self, signal_id) -> int:
+        try:
+            sid = int(signal_id or 0)
+        except (TypeError, ValueError):
+            return 0
+        return int(TelegramNotifier._open_msg_by_signal.get(sid) or 0)
+
     def fire(self, text: str, parse_mode: str = "HTML") -> None:
         """Fire-and-forget send — never blocks the trading loop or raises.
 
@@ -112,29 +133,49 @@ class TelegramNotifier:
         except Exception:
             pass
 
-    async def _send_to(self, chat_id: str, text: str, parse_mode: str) -> bool:
+    async def _send_to(
+        self,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_to_message_id=None,
+    ) -> int:
+        """Send message; return Telegram message_id (0 on failure)."""
         if not self.token:
-            return False
+            return 0
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         payload = {"chat_id": chat_id, "text": text}
         if parse_mode:
             payload["parse_mode"] = parse_mode
-        # Retry transient failures (network/429/5xx) so a single Telegram hiccup
-        # does not silently drop a trade signal. Log any final failure.
+        if reply_to_message_id:
+            try:
+                payload["reply_to_message_id"] = int(reply_to_message_id)
+                payload["allow_sending_without_reply"] = True
+            except (TypeError, ValueError):
+                pass
         for attempt in range(3):
             try:
                 async with httpx.AsyncClient(timeout=15.0) as client:
                     resp = await client.post(url, json=payload)
                     data = resp.json()
                 if data.get("ok"):
-                    return True
+                    try:
+                        return int((data.get("result") or {}).get("message_id") or 0)
+                    except (TypeError, ValueError):
+                        return 0
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
             except Exception:
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
         print(f"[TG] send FAILED chat={chat_id} text={text[:80]!r}", flush=True)
-        return False
+        return 0
+
+    async def send_trade(self, text: str, parse_mode: str = "HTML", reply_to_message_id=None) -> int:
+        """Awaitable trade notify; returns Telegram message_id."""
+        if not self.configured:
+            return 0
+        return await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
 
     # ─── Mini App helpers ───
 

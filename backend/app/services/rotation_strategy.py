@@ -138,6 +138,7 @@ class RotPosition:
     atr_hourly: float = 0.0      # hourly ATR at entry
     leverage: float = 3.0
     signal_id: int = 0
+    tg_message_id: int = 0
     raw_entry: float = 0.0
     algo_id: str = ""            # exchange-side conditional SL algo order
     stop_synced: float = 0.0     # stop price last synced to the exchange
@@ -829,11 +830,15 @@ class RotationStrategy:
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.partial_msg(
+                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
+                await self.notifier.send_trade(
+                    self.notifier.partial_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
+                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
+                    reply_to_message_id=_reply or None,
+                ),
                 ))
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
@@ -900,10 +905,14 @@ class RotationStrategy:
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.close_msg(
+                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
+                await self.notifier.send_trade(
+                    self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
+                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
+                    reply_to_message_id=_reply or None,
+                ),
                 ))
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
@@ -1067,11 +1076,31 @@ class RotationStrategy:
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.open_msg(
+                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
+                if _tg_mid:
+                    try:
+                        if 'pos' in dir() and pos is not None:
+                            pos.tg_message_id = int(_tg_mid)
+                        elif 'coin' in dir() and coin in getattr(self, '_positions', {}):
+                            self._positions[coin].tg_message_id = int(_tg_mid)
+                        _sid = 0
+                        try:
+                            _sid = int(getattr(pos, 'signal_id', 0) or 0)
+                        except Exception:
+                            pass
+                        if not _sid:
+                            try:
+                                _sid = int(signal_id or 0)
+                            except Exception:
+                                _sid = 0
+                        if _sid:
+                            self.notifier.remember_open(_sid, _tg_mid)
+                    except Exception as e:
+                        print(f"[Rotation] TG remember open: {e}", flush=True)
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
 
@@ -1197,12 +1226,16 @@ class RotationStrategy:
 
                     if self.notifier:
                         try:
-                            self.notifier.fire(self.notifier.close_msg(
+                            _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
+                            await self.notifier.send_trade(
+                                self.notifier.close_msg(
                                 coin=coin, side=pos.side,
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
-                                bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos)),
+                                bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
+                                reply_to_message_id=_reply or None,
+                            ),
                             ))
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)

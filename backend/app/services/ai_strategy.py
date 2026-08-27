@@ -149,6 +149,7 @@ class AIPosition:
     leverage: float
     opened_at: str
     signal_id: int = 0
+    tg_message_id: int = 0
     peak_price: float = 0.0
 
 
@@ -1039,11 +1040,31 @@ class AIStrategy:
                 print(f"[AI] db open: {e}", flush=True)
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.open_msg(
+                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 4),
                     stop=round(stop, 4), size=sz, leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
+                if _tg_mid:
+                    try:
+                        if 'pos' in dir() and pos is not None:
+                            pos.tg_message_id = int(_tg_mid)
+                        elif 'coin' in dir() and coin in getattr(self, '_positions', {}):
+                            self._positions[coin].tg_message_id = int(_tg_mid)
+                        _sid = 0
+                        try:
+                            _sid = int(getattr(pos, 'signal_id', 0) or 0)
+                        except Exception:
+                            pass
+                        if not _sid:
+                            try:
+                                _sid = int(signal_id or 0)
+                            except Exception:
+                                _sid = 0
+                        if _sid:
+                            self.notifier.remember_open(_sid, _tg_mid)
+                    except Exception as e:
+                        print(f"[AI] TG remember open: {e}", flush=True)
             except Exception:
                 pass
         self._record_exec(
@@ -1130,11 +1151,15 @@ class AIStrategy:
                 print(f"[AI] db close: {e}", flush=True)
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.close_msg(
+                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
+                await self.notifier.send_trade(
+                    self.notifier.close_msg(
                     coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
                     exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
-                ))
+                ),
+                    reply_to_message_id=_reply or None,
+                )
             except Exception:
                 pass
         del self._positions[coin]
