@@ -836,10 +836,10 @@ class RotationStrategy:
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
-                    reply_to_message_id=_reply or None,
+                    bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
                 ),
-                ))
+                    reply_to_message_id=_reply or None,
+                )
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
         return {"fill_px": fill_px, "fee": fee, "pnl": pnl, "close_sz": close_sz}
@@ -910,10 +910,10 @@ class RotationStrategy:
                     self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
-                    reply_to_message_id=_reply or None,
+                    bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
                 ),
-                ))
+                    reply_to_message_id=_reply or None,
+                )
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
 
@@ -1233,10 +1233,10 @@ class RotationStrategy:
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
-                                bot_name=self.BOT_NAME, signal_id=(await self._ensure_signal_id(pos),
-                                reply_to_message_id=_reply or None,
-                            ),
-                            ))
+                                bot_name=self.BOT_NAME, signal_id=await self._ensure_signal_id(pos),
+                ),
+                    reply_to_message_id=_reply or None,
+                )
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
                     del self._positions[coin]
