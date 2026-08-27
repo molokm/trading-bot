@@ -1046,27 +1046,14 @@ class AIStrategy:
                     bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                 ))
                 if _tg_mid:
-                    try:
-                        if 'pos' in dir() and pos is not None:
-                            pos.tg_message_id = int(_tg_mid)
-                        elif 'coin' in dir() and coin in getattr(self, '_positions', {}):
-                            self._positions[coin].tg_message_id = int(_tg_mid)
-                        _sid = 0
-                        try:
-                            _sid = int(getattr(pos, 'signal_id', 0) or 0)
-                        except Exception:
-                            pass
-                        if not _sid:
-                            try:
-                                _sid = int(signal_id or 0)
-                            except Exception:
-                                _sid = 0
-                        if _sid:
-                            self.notifier.remember_open(_sid, _tg_mid)
-                    except Exception as e:
-                        print(f"[AI] TG remember open: {e}", flush=True)
-            except Exception:
-                pass
+                    pos.tg_message_id = int(_tg_mid)
+                    await self.notifier.remember_open_db(
+                        self.db, pos.signal_id, _tg_mid,
+                        bot_id=self.BOT_ID, coin=coin,
+                    )
+                    print(f"[AI] TG open msg_id={_tg_mid} signal={pos.signal_id}", flush=True)
+            except Exception as e:
+                print(f"[AI] TG open: {e}", flush=True)
         self._record_exec(
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
@@ -1151,17 +1138,23 @@ class AIStrategy:
                 print(f"[AI] db close: {e}", flush=True)
         if self.notifier:
             try:
-                _reply = int(getattr(pos, 'tg_message_id', 0) or 0) or self.notifier.open_message_id(getattr(pos, 'signal_id', 0))
-                await self.notifier.send_trade(
-                    self.notifier.close_msg(
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
+                    )
+                if not _reply:
+                    print(f"[AI] TG close: no open message_id (signal={signal_id})", flush=True)
+                else:
+                    print(f"[AI] TG close: reply_to={_reply} signal={signal_id}", flush=True)
+                _txt = self.notifier.close_msg(
                     coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
                     exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
-                ),
-                    reply_to_message_id=_reply or None,
                 )
-            except Exception:
-                pass
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
+            except Exception as e:
+                print(f"[AI] TG close: {e}", flush=True)
         del self._positions[coin]
         if self.db:
             try:
