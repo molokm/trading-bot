@@ -1154,21 +1154,43 @@ async def public_tracker():
 
 @app.get("/api/ai/status")
 async def ai_status():
+    """AI status. Prefer History-sourced PnL (same as /api/pnl Total) when available."""
     global ai_bot
     if not ai_bot:
         return {
             "running": False,
-            "strategy": AI_NAME,
-            "version": AI_VERSION,
-            "description": AI_DESC,
-            **llm_status(),
-            "open_positions": [],
+            "strategy": "AI Discretionary 1H",
             "total_pnl": 0,
+            "lifetime_pnl": 0,
+            "open_positions": [],
         }
-    return ai_bot.get_status()
+    status = ai_bot.get_status()
+    internal = status.get("lifetime_pnl", status.get("total_pnl"))
+    status["total_pnl_internal"] = internal
+    status["lifetime_pnl_internal"] = internal
+    try:
+        stats = (await _bot_history_stats()).get("AI Discretionary 1H")
+        if stats and stats.get("total_trades", 0) > 0:
+            status["total_pnl"] = stats.get("total_pnl", 0)
+            status["lifetime_pnl"] = stats.get("total_pnl", 0)
+            status["total_trades"] = stats.get("total_trades", status.get("total_trades"))
+            status["win_rate"] = stats.get("win_rate", status.get("win_rate"))
+            status["total_pnl_source"] = "okx_history"
+            if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
+                print(
+                    f"[ai/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}",
+                    flush=True,
+                )
+        else:
+            status["total_pnl_source"] = "internal"
+            # Keep lifetime as shown total when no history tags yet
+            status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
+    except Exception as e:
+        print(f"[ai/status] history overlay: {e}", flush=True)
+        status["total_pnl_source"] = "internal"
+    return status
 
-
-@app.post("/api/ai/start", dependencies=[Depends(require_admin)])
+post("/api/ai/start", dependencies=[Depends(require_admin)])
 async def ai_start(data: dict = None):
     global ai_bot
     data = data or {}
@@ -4234,7 +4256,10 @@ async def _bot_history_stats() -> dict:
         counts = {}
         for tr in resp.get("trades", []):
             bot = tr.get("bot") or ""
-            if bot not in ("Momentum", "Impulse 1D", "MACD+Donchian Validation"):
+            if bot not in (
+                "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+                "AI Discretionary 1H", "Order Book Scalp",
+            ):
                 continue
             if (tr.get("reason") or "").lower() == "open":
                 continue
@@ -4254,7 +4279,10 @@ async def _bot_history_stats() -> dict:
                 mapped = _db_bot_name(bot) or bot
             else:
                 mapped = bot
-            if mapped not in ("Momentum", "Impulse 1D", "MACD+Donchian Validation"):
+            if mapped not in (
+                "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+                "AI Discretionary 1H", "Order Book Scalp",
+            ):
                 continue
             c = counts.get(mapped) or counts.get(bot) or {"total_trades": 0, "wins": 0, "losses": 0}
             total = c["total_trades"]

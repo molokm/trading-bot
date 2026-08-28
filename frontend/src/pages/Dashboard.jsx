@@ -238,6 +238,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return Number(validationStatus?.total_pnl ?? 0)
   }, [pnl, validationStatus?.total_pnl])
 
+  const aiCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
+    if (per.ai_strategy != null) return Number(per.ai_strategy)
+    return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
+
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
@@ -1164,6 +1171,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <div className="text-[var(--txt-muted)]">{t('dash.positions')}</div>
                   <div className="mono font-semibold text-[var(--txt)] mt-0.5">
                     {aiStatus?.open_positions?.length || 0}/{aiStatus?.config?.max_positions || 1}
+                  </div>
+                </div>
+                <div className="p-1.5 rounded-md bg-[var(--bg)] col-span-2">
+                  <div className="text-[var(--txt-muted)]">{t('dash.total_pnl')}</div>
+                  <div className={`mono font-semibold mt-0.5 ${aiCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {aiCardPnl >= 0 ? '+' : ''}{aiCardPnl.toFixed(2)}
+                    {aiStatus?.total_pnl_source === 'okx_history' && (
+                      <span className="text-2xs text-[var(--txt-muted)] font-normal ml-1">hist</span>
+                    )}
                   </div>
                 </div>
               </div>
