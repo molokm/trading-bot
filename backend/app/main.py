@@ -1193,6 +1193,8 @@ async def ai_status():
 
 @app.post("/api/ai/start", dependencies=[Depends(require_admin)])
 async def ai_start(data: dict = None):
+    # decorator must be @app.post (not bare post)
+
     global ai_bot
     data = data or {}
     if ai_bot and getattr(ai_bot, "_running", False):
