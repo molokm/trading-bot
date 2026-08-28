@@ -293,6 +293,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return (positions || []).filter((p) => {
       const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
       if (!posSz) return false
+      if (p.bot) return false
       const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
       const key = `${p.instId || ''}|${posSideKey}`
       const bn = p.bot || botMap[key] || ''

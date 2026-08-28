@@ -1872,7 +1872,6 @@ def _db_bot_name(bot_id: str) -> str:
     return ""
 
 
-@app.post("/api/positions/sweep-orphans", depen
 async def _orphan_sweep_loop():
     """Periodically close exchange positions not owned by any strategy."""
     import asyncio as _asyncio
@@ -1897,7 +1896,7 @@ async def _orphan_sweep_loop():
         await _asyncio.sleep(120)  # every 2 min
 
 
-dencies=[Depends(require_admin)])
+@app.post("/api/positions/sweep-orphans", dependencies=[Depends(require_admin)])
 async def sweep_orphans():
     """Close exchange positions not claimed by any strategy (anti-orphan)."""
     client = client_manager.get_client()

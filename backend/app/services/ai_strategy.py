@@ -1368,6 +1368,10 @@ class AIStrategy:
                     if self.db and await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
                         print(f"[AI] skip restore {coin}: owned by another bot", flush=True)
                         continue
+                    last = await self.db.last_bot_for_instrument(inst_id)
+                    if last and last != self.BOT_ID:
+                        print(f"[AI] skip restore {coin}: last bot was {last}", flush=True)
+                        continue
                 except Exception as e:
                     print(f"[AI] restore ownership: {e}", flush=True)
                 stop_pct = 0.03
@@ -1405,10 +1409,11 @@ class AIStrategy:
             await self._restore_open_positions(client)
         # Once per process-ish: sweep unclaimed exchange positions
         try:
-            if not getattr(self, "_orphan_swept", False):
+            n = int(getattr(self, "_orphan_tick", 0) or 0) + 1
+            self._orphan_tick = n
+            if n == 1 or n % 10 == 0:
                 mem = {(p.inst_id, p.side) for p in self._positions.values()}
                 closed = await sweep_exchange_orphans(client, self.db, mem)
-                self._orphan_swept = True
                 if closed:
                     print(f"[AI] orphan sweep closed {len(closed)}: {closed}", flush=True)
         except Exception as e:
