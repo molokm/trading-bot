@@ -62,7 +62,7 @@ from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_S
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
-from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open
+from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, orphan_close_enabled, claim_open
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -1874,6 +1874,7 @@ def _db_bot_name(bot_id: str) -> str:
 
 async def _orphan_sweep_loop():
     """Periodically close exchange positions not owned by any strategy."""
+    global _positions_cache
     import asyncio as _asyncio
     await _asyncio.sleep(45)  # let bots restore first
     while True:
@@ -1889,7 +1890,6 @@ async def _orphan_sweep_loop():
                 closed = await sweep_exchange_orphans(client, db, mem)
                 if closed:
                     print(f"[orphan-sweep] closed {len(closed)}: {closed}", flush=True)
-                    global _positions_cache
                     _positions_cache = None
         except Exception as e:
             print(f"[orphan-sweep] error: {e}", flush=True)
