@@ -1,4 +1,9 @@
-"""Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
+"""Impulse 1D Strategy — fast momentum entry + cascade / indicator exit (daily).
+
+"
+        "Exits: ATR cascade TP1/TP2, peak-giveback lock, EMA/ROC indicator exit,
+"
+        "wide trail, breakeven, time stop.
 
 Live implementation of the honest daily-bar backtest (v4, OKX native
 1D, 10 coins, 2023-05..2026-08 full-sample: CAGR ~77%, Sharpe ~1.41, MaxDD ~-36.5%; not pure OOS).
@@ -27,7 +32,7 @@ from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v4.1"
+STRATEGY_VERSION = "v2.1-indexit"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -80,7 +85,7 @@ class ImpulseConfig:
     sl_atr_mult_short: float = 5.0    # short-specific stop; 0 = use sl_atr_mult
     trail_atr_mult: float = 12.0      # trail = peak - ATR*this (v2: wide)
     trail_atr_mult_short: float = 12.0 # short-specific trail; 0 = use trail_atr_mult
-    be_pct: float = 0.005             # move stop to breakeven after +0.5%
+    be_pct: float = 0.008             # move stop to BE after +0.8% (less noise)
     cooldown_bars: int = 3            # min bars between entries on the SAME coin (v2)
     # cascade exit (выход частями)
     tp1_atr: float = 2.0
@@ -89,6 +94,16 @@ class ImpulseConfig:
     tp2_frac: float = 0.3
     max_hold_bars: int = 28  # v3: BT OOS+full improvement           # time exit (30 days)
     exit_ema_death: bool = False
+    # Protect winners: indicator exit + peak giveback lock (aligned with Momentum)
+    indicator_exit: bool = True
+    ind_exit_min_hold_hours: float = 4.0
+    ind_exit_min_profit_pct: float = 0.6
+    ind_exit_on_ema_flip: bool = True
+    ind_exit_on_roc_flip: bool = True
+    peak_lock_activate_pct: float = 1.2   # arm after +1.2% peak UPL
+    peak_lock_keep_frac: float = 0.45     # exit if now < 45% of peak profit
+    soft_partial_pct: float = 0.015       # +1.5% profit → optional extra partial
+    soft_partial_frac: float = 0.30
     allow_short: bool = False  # survival long-only
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
@@ -1005,26 +1020,95 @@ class ImpulseStrategy:
                           coins=summary)
 
     async def _check_exit(self, client, pos: ImpPosition, ind: dict, price: float) -> bool:
-        """Check stop / time-exit / breakeven / trailing. Returns True if fully closed."""
+        """Stop / peak-lock / indicator exit / trail / BE. Returns True if fully closed."""
         cfg = self.config
         trail_m = cfg.trail_atr_mult_short if pos.side == "short" and cfg.trail_atr_mult_short \
             else cfg.trail_atr_mult
+        entry = float(pos.entry_price or 0)
+        if entry <= 0 or price <= 0:
+            return False
 
-        # stop-loss
+        # Unrealized % (long/short)
+        if pos.side == "long":
+            upl_pct = (price / entry - 1.0) * 100.0
+            pos.peak_price = max(float(pos.peak_price or price), price)
+            peak_upl = (float(pos.peak_price) / entry - 1.0) * 100.0
+        else:
+            upl_pct = (entry / price - 1.0) * 100.0 if price else 0.0
+            pos.peak_price = min(float(pos.peak_price or price), price)
+            peak_upl = (entry / float(pos.peak_price) - 1.0) * 100.0 if pos.peak_price else 0.0
+
+        # 1) Hard stop
         hit = (pos.side == "long" and price <= pos.stop_price) or \
               (pos.side == "short" and price >= pos.stop_price)
         if hit:
             await self._close_position(client, pos, "stop")
             return True
 
-        # time exit
+        # 2) Peak giveback lock — do not give back a solid winner
+        act = float(getattr(cfg, "peak_lock_activate_pct", 1.2) or 1.2)
+        keep = float(getattr(cfg, "peak_lock_keep_frac", 0.45) or 0.45)
+        if peak_upl >= act and upl_pct >= 0:
+            min_keep = peak_upl * keep
+            if upl_pct < min_keep:
+                await self._close_position(
+                    client, pos,
+                    f"peak_lock:peak={peak_upl:.1f}%now={upl_pct:.1f}%",
+                )
+                return True
+
+        # 3) Indicator exit (EMA / ROC) while still green or near peak
+        if getattr(cfg, "indicator_exit", True):
+            hold_h = 0.0
+            try:
+                opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+            except Exception:
+                hold_h = 999.0
+            min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 4) or 0)
+            if hold_h >= min_hold:
+                ema_trend = bool(ind.get("ema_trend"))
+                roc = float(ind.get("roc") or 0)
+                min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 0.6) or 0)
+                reasons = []
+                if getattr(cfg, "ind_exit_on_ema_flip", True):
+                    if pos.side == "long" and not ema_trend:
+                        reasons.append("ema_bear")
+                    if pos.side == "short" and ema_trend:
+                        reasons.append("ema_bull")
+                if getattr(cfg, "ind_exit_on_roc_flip", True):
+                    # ROC against position (relative to entry impulse threshold)
+                    thr = float(getattr(cfg, "entry_roc", 6.0) or 6.0) * 0.35
+                    if pos.side == "long" and roc < -thr:
+                        reasons.append(f"roc_down:{roc:.1f}")
+                    if pos.side == "short" and roc > thr:
+                        reasons.append(f"roc_up:{roc:.1f}")
+                # Full exit: in profit + regime against us
+                if reasons and (upl_pct >= min_p or (peak_upl >= act and upl_pct >= 0)):
+                    await self._close_position(
+                        client, pos, "ind_exit:" + "+".join(reasons[:3]),
+                    )
+                    return True
+                # Soft partial: fading impulse but still green, lock some profit
+                soft_pct = float(getattr(cfg, "soft_partial_pct", 0.015) or 0)
+                soft_frac = float(getattr(cfg, "soft_partial_frac", 0.30) or 0)
+                if (
+                    reasons
+                    and not pos.tp1_done
+                    and soft_pct > 0
+                    and upl_pct >= soft_pct * 100.0
+                    and soft_frac > 0
+                ):
+                    await self._close_partial(client, pos, soft_frac, "ind_partial")
+                    # continue managing remainder
+
+        # 4) Time exit
         if self._days_held(pos) >= cfg.max_hold_bars:
             await self._close_position(client, pos, "time_exit")
             return True
 
-        # trailing stop
+        # 5) Trailing stop (wide) — after peak/ind checks so we exit on signal first
         if pos.side == "long":
-            pos.peak_price = max(pos.peak_price, price)
             trail = pos.peak_price - trail_m * pos.atr
             if trail > pos.stop_price:
                 pos.stop_price = trail
@@ -1033,7 +1117,6 @@ class ImpulseStrategy:
                                   price=round(price, 2), peak=round(pos.peak_price, 2),
                                   new_stop=round(pos.stop_price, 2))
         else:
-            pos.peak_price = min(pos.peak_price, price)
             trail = pos.peak_price + trail_m * pos.atr
             if trail < pos.stop_price:
                 pos.stop_price = trail
@@ -1042,7 +1125,7 @@ class ImpulseStrategy:
                                   price=round(price, 2), peak=round(pos.peak_price, 2),
                                   new_stop=round(pos.stop_price, 2))
 
-        # breakeven after min profit
+        # 6) Breakeven after min profit
         if not pos.breakeven:
             if pos.side == "long" and price >= pos.entry_price * (1 + cfg.be_pct):
                 pos.stop_price = max(pos.stop_price, pos.entry_price)
