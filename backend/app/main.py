@@ -1190,7 +1190,8 @@ async def ai_status():
         status["total_pnl_source"] = "internal"
     return status
 
-post("/api/ai/start", dependencies=[Depends(require_admin)])
+
+@app.post("/api/ai/start", dependencies=[Depends(require_admin)])
 async def ai_start(data: dict = None):
     global ai_bot
     data = data or {}
