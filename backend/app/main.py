@@ -62,7 +62,7 @@ from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_S
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
-from app.services.position_claim import sweep_exchange_orphans
+from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -354,6 +354,8 @@ async def startup():
     try:
         _warm_task = asyncio.create_task(_warm_dashboard_caches())
         print("[startup] Dashboard cache warmer started", flush=True)
+        asyncio.create_task(_orphan_sweep_loop())
+        print("[startup] Orphan position sweeper started (every 2m)", flush=True)
     except Exception as e:
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
@@ -1870,7 +1872,32 @@ def _db_bot_name(bot_id: str) -> str:
     return ""
 
 
-@app.post("/api/positions/sweep-orphans", dependencies=[Depends(require_admin)])
+@app.post("/api/positions/sweep-orphans", depen
+async def _orphan_sweep_loop():
+    """Periodically close exchange positions not owned by any strategy."""
+    import asyncio as _asyncio
+    await _asyncio.sleep(45)  # let bots restore first
+    while True:
+        try:
+            client = client_manager.get_client()
+            if client and orphan_close_enabled():
+                mem = set()
+                for bot in (rotation, impulse, validation, ai_bot, scalp_bot, vwap_rev_bot):
+                    if not bot or not getattr(bot, "_positions", None):
+                        continue
+                    for pos in bot._positions.values():
+                        mem.add((getattr(pos, "inst_id", None) or "", getattr(pos, "side", "long")))
+                closed = await sweep_exchange_orphans(client, db, mem)
+                if closed:
+                    print(f"[orphan-sweep] closed {len(closed)}: {closed}", flush=True)
+                    global _positions_cache
+                    _positions_cache = None
+        except Exception as e:
+            print(f"[orphan-sweep] error: {e}", flush=True)
+        await _asyncio.sleep(120)  # every 2 min
+
+
+dencies=[Depends(require_admin)])
 async def sweep_orphans():
     """Close exchange positions not claimed by any strategy (anti-orphan)."""
     client = client_manager.get_client()
@@ -1905,10 +1932,29 @@ async def get_positions(inst_type: str = "SWAP"):
             db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
     except Exception:
         pass
-    # Tag each position with bot name
+    # Tag each position with bot name; auto-reclaim if last trade was ours
     tagged = []
     for p in result.get("data", []):
-        p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"), db_pos_map=db_pos_map)
+        inst = p.get("instId", "") or ""
+        pos_side = p.get("posSide", "net") or "net"
+        side_n = "short" if str(pos_side).lower() == "short" else "long"
+        bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
+        if not bot_name and inst:
+            try:
+                last_bot = await db.last_bot_for_instrument(inst)
+                if last_bot:
+                    sz = abs(float(p.get("pos") or 0))
+                    entry = float(p.get("avgPx") or 0)
+                    if sz > 0 and entry > 0:
+                        await claim_open(db, last_bot, inst, side_n, sz, entry)
+                        db_pos_map[(inst, side_n)] = last_bot
+                        db_pos_map[(inst, "long" if side_n == "long" else "short")] = last_bot
+                        bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
+                        if bot_name:
+                            print(f"[positions] reclaimed {inst} {side_n} → {last_bot}", flush=True)
+            except Exception as e:
+                print(f"[positions] reclaim {inst}: {e}", flush=True)
+        p["bot"] = bot_name
         tagged.append(p)
     out = {"positions": tagged}
     _positions_cache = out
