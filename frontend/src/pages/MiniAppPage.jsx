@@ -126,7 +126,7 @@ function ProPreview({ t, onBack }) {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <div className="p-3 space-y-3">
+      <div className="p-3 space-y-3 pb-10 overflow-y-auto overscroll-y-contain" style={{ maxHeight: 'calc(100vh - 52px)', WebkitOverflowScrolling: 'touch' }}>
         {/* Back */}
         <button onClick={onBack} className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] active:opacity-70">
           <ArrowUpRight size={14} className="rotate-180" /> {t('mini.back')}
@@ -255,6 +255,10 @@ export default function MiniAppPage() {
   const [portfolio, setPortfolio] = useState(null)
   const [rotation, setRotation] = useState(null)
   const [impulse, setImpulse] = useState(null)
+  const [validation, setValidation] = useState(null)
+  const [aiBot, setAiBot] = useState(null)
+  const [scalp, setScalp] = useState(null)
+  const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
   const [trades, setTrades] = useState([])
 
@@ -289,6 +293,9 @@ export default function MiniAppPage() {
     for (const p of (positions || [])) pushOpen(p)
     for (const p of (rotation?.open_positions || [])) pushOpen(p)
     for (const p of (impulse?.open_positions || [])) pushOpen(p)
+    for (const p of (validation?.open_positions || [])) pushOpen(p)
+    for (const p of (aiBot?.open_positions || [])) pushOpen(p)
+    for (const p of (scalp?.open_positions || [])) pushOpen(p)
 
     const out = []
     for (const tr of (trades || [])) {
@@ -311,7 +318,7 @@ export default function MiniAppPage() {
       })
     }
     return out
-  }, [trades, positions, rotation, impulse])
+  }, [trades, positions, rotation, impulse, validation, aiBot, scalp])
 
   useEffect(() => {
     if (!showLogs) return
@@ -481,8 +488,12 @@ export default function MiniAppPage() {
       portfolio: () => isUser ? api.mePortfolio() : api.getPortfolio(),
       rotation: () => isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus(),
       impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
+      validation: () => api.validationStatus(),
+      ai: () => api.aiStatus(),
+      scalp: () => api.scalpStatus(),
+      pnl: () => api.getPnl(),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
-      trades: () => api.getPairedTrades(20),
+      trades: () => api.getPairedTrades(40),
     }
     const names = Object.keys(callers)
     const results = await Promise.all(names.map(async (name) => {
@@ -501,6 +512,10 @@ export default function MiniAppPage() {
     if (map.portfolio) setPortfolio(map.portfolio)
     if (map.rotation) setRotation(map.rotation)
     if (map.impulse) setImpulse(map.impulse)
+    if (map.validation) setValidation(map.validation)
+    if (map.ai) setAiBot(map.ai)
+    if (map.scalp) setScalp(map.scalp)
+    if (map.pnl) setPnlData(map.pnl)
     if (map.positions) setPositions(map.positions.positions || [])
     if (map.trades) setTrades(map.trades.trades || [])
     if (isUser) {
@@ -574,41 +589,30 @@ export default function MiniAppPage() {
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
 
 
-  /* ── Bot status card ── */
-  const botCard = (name, s, iconColor) => {
-    const running = s?.running
-    // Align with dashboard: prefer portfolio per_bot when parent passed it on status
-    const pnl = (s?.total_pnl_source === 'okx_history' ? s?.total_pnl : null)
+  /* ── Compact strategy card ── */
+  const botCard = (name, s, iconColor, shortLabel) => {
+    const running = !!s?.running
+    const pnl = Number(
+      (s?.total_pnl_source === 'okx_history' ? s?.total_pnl : null)
       ?? s?.total_pnl
+      ?? s?.lifetime_pnl
       ?? 0
+    )
+    const nPos = (s?.open_positions || s?.positions || []).length
+    const tradesN = s?.total_trades ?? 0
     return (
-      <Card className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1">
-          <div className="flex items-center gap-1.5">
-            <Bot size={14} className={iconColor} />
-            <span className="text-xs font-bold text-[var(--txt)] truncate">{name}</span>
+      <Card className="min-w-0 py-2.5">
+        <div className="flex items-center justify-between gap-1 mb-1">
+          <div className="flex items-center gap-1 min-w-0">
+            <Bot size={12} className={`${iconColor} flex-shrink-0`} />
+            <span className="text-2xs font-bold text-[var(--txt)] truncate">{shortLabel || name}</span>
           </div>
-          <span className={`flex items-center gap-1 text-2xs font-semibold px-1.5 py-0.5 rounded-md ${
-            running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${running ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--txt-muted)]'}`} />
-            {running ? t('mini.running') : t('mini.stopped')}
-          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--txt-muted)]'}`} title={running ? t('mini.running') : t('mini.stopped')} />
         </div>
-        <div className="flex items-end justify-between">
-          <div>
-            <div className="text-xs text-[var(--txt-secondary)]">{t('mini.pnl')}</div>
-            <div className={`text-base font-bold mono ${pnlClass(pnl)}`}>{pnlSign(pnl)}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.balance')}</div>
-            <div className="text-xs font-semibold mono text-[var(--txt)]">{fmt(s?.equity ?? 0)}</div>
-          </div>
-        </div>
-        <div className="flex gap-3 mt-2 pt-2 border-t border-[var(--border)] text-2xs text-[var(--txt-muted)]">
-          <span>Трейды: <b className="text-[var(--txt)]">{s?.total_trades ?? 0}</b></span>
-          <span>WinRate: <b className="text-[var(--txt)]">{fmt(s?.win_rate ?? 0, 0)}%</b></span>
-          <span>Позиции: <b className="text-[var(--txt)]">{(s?.open_positions || s?.positions || []).length}</b></span>
+        <div className={`text-base font-bold mono ${pnlClass(pnl)}`}>{pnlSign(pnl)}</div>
+        <div className="flex justify-between mt-1 text-2xs text-[var(--txt-muted)]">
+          <span>{running ? t('mini.running') : t('mini.stopped')}</span>
+          <span>{tradesN}t · {nPos}pos</span>
         </div>
       </Card>
     )
@@ -700,7 +704,7 @@ export default function MiniAppPage() {
 
       <div className="p-3 space-y-3">
         {/* ═══ Data unavailable banner ═══ */}
-        {loaded && !portfolio && !rotation && !impulse && (
+        {loaded && !portfolio && !rotation && !impulse && !validation && !aiBot && (
           <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--warn-dim)] border border-[var(--warn)]">
             <span className="text-xs text-[var(--txt)]">{t('mini.data_error')}</span>
             <button
@@ -833,12 +837,37 @@ export default function MiniAppPage() {
           )}
         </Card>
 
-        {/* ═══ Bots ═══ */}
+        {/* ═══ Today summary ═══ */}
+        <div className="grid grid-cols-3 gap-2">
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.today')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.['1d'] || 0))}`}>
+              {pnlSign(Number(pnlData?.['1d'] || 0))}
+            </div>
+          </Card>
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.total_pnl')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.total || 0))}`}>
+              {pnlSign(Number(pnlData?.total || 0))}
+            </div>
+          </Card>
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.unrealized')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.unrealized || positions.reduce((s, p) => s + (Number(p.upl) || 0), 0)))}`}>
+              {pnlSign(Number(pnlData?.unrealized || positions.reduce((s, p) => s + (Number(p.upl) || 0), 0)))}
+            </div>
+          </Card>
+        </div>
+
+        {/* ═══ Strategies ═══ */}
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
-          <div className="flex gap-2">
-            {botCard('Momentum', rotation, 'text-[var(--info)]')}
-            {botCard('Impulse 1D', impulse, 'text-[var(--profit)]')}
+          <div className="grid grid-cols-2 gap-2">
+            {botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
+            {botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
+            {botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
+            {botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
+            {botCard('Order Book Scalp', scalp, 'text-cyan-400', 'Scalp')}
           </div>
         </div>
 
@@ -908,20 +937,31 @@ export default function MiniAppPage() {
             </Card>
           ) : (
             <Card className="p-0 overflow-hidden">
-              <div className="divide-y divide-[var(--border)]">
-                {displayTrades.slice(0, 8).map((tr, i) => {
+              <div className="divide-y divide-[var(--border)] max-h-72 overflow-y-auto overscroll-contain">
+                {displayTrades.slice(0, 30).map((tr, i) => {
                   const pnl = Number(tr.pnl || 0)
                   const reason = tr.reason || ''
                   const isOpen = tr.isOpen || reason === 'open'
+                  const botShort = (tr.bot || '')
+                    .replace('AI Discretionary 1H', 'AI')
+                    .replace('MACD+Donchian Validation', 'Valid')
+                    .replace('Order Book Scalp', 'Scalp')
+                    .replace('Impulse 1D', 'Impulse')
+                    .replace('Momentum', 'Mom')
                   return (
-                    <div key={i} className="flex items-center justify-between px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
+                    <div key={i} className="flex items-center justify-between px-3 py-2 gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs font-bold text-[var(--txt)] truncate">
                             {tr.coin || tr.symbol || '—'}
                           </span>
+                          {botShort && (
+                            <span className="px-1 py-0.5 rounded bg-[var(--surface-overlay)] text-2xs text-[var(--txt-secondary)] font-semibold">
+                              {botShort}
+                            </span>
+                          )}
                           <span className={`text-2xs font-semibold ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
-                            {isOpen ? t('mini.open') : reason}
+                            {isOpen ? t('mini.open') : (reason && reason !== 'closed' ? reason : '')}
                           </span>
                         </div>
                         <div className="text-2xs text-[var(--txt-muted)]">

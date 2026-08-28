@@ -633,6 +633,8 @@ const en = {
   'mini.bots': 'Bots',
   'mini.running': 'Running',
   'mini.stopped': 'Stopped',
+  'mini.today': 'Today',
+  'mini.total_pnl': 'Total PnL',
   'mini.pnl': 'PnL',
   'mini.last_trades': 'Recent trades',
   'mini.no_trades': 'No trades yet',

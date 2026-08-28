@@ -633,6 +633,8 @@ const ru = {
   'mini.bots': 'Боты',
   'mini.running': 'Работает',
   'mini.stopped': 'Остановлен',
+  'mini.today': 'Сегодня',
+  'mini.total_pnl': 'Всего PnL',
   'mini.pnl': 'PnL',
   'mini.last_trades': 'Последние сделки',
   'mini.no_trades': 'Сделок пока нет',
