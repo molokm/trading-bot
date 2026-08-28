@@ -126,7 +126,7 @@ function ProPreview({ t, onBack }) {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <div className="p-3 space-y-3 pb-10 overflow-y-auto overscroll-y-contain" style={{ maxHeight: 'calc(100vh - 52px)', WebkitOverflowScrolling: 'touch' }}>
+      <div className="flex-1 min-h-0 p-3 space-y-3 pb-10 overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
         {/* Back */}
         <button onClick={onBack} className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] active:opacity-70">
           <ArrowUpRight size={14} className="rotate-180" /> {t('mini.back')}
@@ -257,7 +257,6 @@ export default function MiniAppPage() {
   const [impulse, setImpulse] = useState(null)
   const [validation, setValidation] = useState(null)
   const [aiBot, setAiBot] = useState(null)
-  const [scalp, setScalp] = useState(null)
   const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
   const [trades, setTrades] = useState([])
@@ -295,7 +294,6 @@ export default function MiniAppPage() {
     for (const p of (impulse?.open_positions || [])) pushOpen(p)
     for (const p of (validation?.open_positions || [])) pushOpen(p)
     for (const p of (aiBot?.open_positions || [])) pushOpen(p)
-    for (const p of (scalp?.open_positions || [])) pushOpen(p)
 
     const out = []
     for (const tr of (trades || [])) {
@@ -318,7 +316,7 @@ export default function MiniAppPage() {
       })
     }
     return out
-  }, [trades, positions, rotation, impulse, validation, aiBot, scalp])
+  }, [trades, positions, rotation, impulse, validation, aiBot])
 
   useEffect(() => {
     if (!showLogs) return
@@ -490,7 +488,6 @@ export default function MiniAppPage() {
       impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
       validation: () => api.validationStatus(),
       ai: () => api.aiStatus(),
-      scalp: () => api.scalpStatus(),
       pnl: () => api.getPnl(),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(40),
@@ -514,7 +511,6 @@ export default function MiniAppPage() {
     if (map.impulse) setImpulse(map.impulse)
     if (map.validation) setValidation(map.validation)
     if (map.ai) setAiBot(map.ai)
-    if (map.scalp) setScalp(map.scalp)
     if (map.pnl) setPnlData(map.pnl)
     if (map.positions) setPositions(map.positions.positions || [])
     if (map.trades) setTrades(map.trades.trades || [])
@@ -867,7 +863,6 @@ export default function MiniAppPage() {
             {botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
             {botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
             {botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
-            {botCard('Order Book Scalp', scalp, 'text-cyan-400', 'Scalp')}
           </div>
         </div>
 
@@ -879,7 +874,7 @@ export default function MiniAppPage() {
               {t('mini.no_positions')}
             </Card>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-1.5 max-h-56 overflow-y-auto overscroll-contain pr-0.5">
               {positions.map((p, i) => {
                 const upl = Number(p.upl || 0)
                 const side = (p.posSide || 'net').toLowerCase()
@@ -945,7 +940,6 @@ export default function MiniAppPage() {
                   const botShort = (tr.bot || '')
                     .replace('AI Discretionary 1H', 'AI')
                     .replace('MACD+Donchian Validation', 'Valid')
-                    .replace('Order Book Scalp', 'Scalp')
                     .replace('Impulse 1D', 'Impulse')
                     .replace('Momentum', 'Mom')
                   return (

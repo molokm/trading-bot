@@ -358,19 +358,41 @@ async def startup():
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
     try:
-        print("[startup] AI Discretionary (optional) ...", flush=True)
-        _ai_auto = os.getenv("AI_AUTO_START", "0").strip().lower() in ("1", "true", "yes", "on")
-        if _env_key and _env_secret and _env_pass and _ai_auto:
+        print("[startup] AI Discretionary auto-start ...", flush=True)
+        # Default ON with other bots (BOTS_AUTO_START). Opt out: AI_AUTO_START=0
+        _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _ai_auto:
             global ai_bot
-            ai_cfg = AIConfig(capital=float(os.getenv("AI_CAPITAL", "10000")))
+            _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+            env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+            if env_ex in ("1", "true", "yes", "on"):
+                _exec = True
+            elif env_ex in ("0", "false", "no", "off"):
+                _exec = False
+            else:
+                _exec = _demo  # auto execute on demo
+            ai_cfg = AIConfig(
+                capital=float(os.getenv("AI_CAPITAL", "10000")),
+                max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
+                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                execute=_exec,
+            )
             ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
                                notifier=telegram)
             ai_bot.start()
             global _positions_cache
             _positions_cache = None
-            print("[startup]   AI Discretionary RUNNING", flush=True)
+            print(
+                f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
+                flush=True,
+            )
         else:
-            print("[startup]   AI skipped (set AI_AUTO_START=1 to enable)", flush=True)
+            print(
+                "[startup]   AI skipped (need OKX keys + BOTS_AUTO_START; set AI_AUTO_START=0 to disable)",
+                flush=True,
+            )
     except Exception as e:
         print(f"[startup]   AI FAILED: {e}", flush=True)
 
