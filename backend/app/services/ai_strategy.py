@@ -1430,36 +1430,7 @@ class AIStrategy:
             pass
         snap = self._snapshot()  # include fresh adaptive + reflection
         decision = await call_llm(snap, provider=self._provider())
-        pulse = self._status_pulse(decision)
-        watch = self._watch_board()
-        # Prefer clear operational status over opaque LLM one-liners on hold
-        reason = str(decision.get("reason") or "")
-        if (decision.get("action") or "hold").lower() == "hold":
-            reason = pulse
-        elif reason:
-            reason = f"{reason} || {pulse}"
-        else:
-            reason = pulse
-        self._last_decision = {
-            **decision,
-            "reason": reason[:700],
-            "pulse": pulse[:700],
-            "watch": watch,
-            "symbols_scanned": list(self.config.symbols or []),
-            "time": datetime.now(timezone.utc).isoformat(),
-            "provider": self._provider(),
-            "execute": self._execute_enabled(),
-            "demo": self._is_demo(),
-            "healthy": True,
-            "indicators": {
-                k: {kk: vv for kk, vv in (v or {}).items() if kk in (
-                    "close", "ema_fast", "ema_slow", "roc_3", "adx",
-                    "align_long", "align_short", "regime")}
-                for k, v in (snap.get("indicators") or {}).items()
-            },
-            "open_positions": snap.get("open_positions") or [],
-            "equity": snap.get("equity"),
-        }
+        self._last_decision = self._enrich_decision(decision, snap)
         self._decision_log.append(self._last_decision)
         self._decision_log = self._decision_log[-200:]
         print(f"[AI] decision {decision} execute={self._execute_enabled()}", flush=True)
@@ -1734,7 +1705,48 @@ class AIStrategy:
             })
         return board
 
+    def _enrich_decision(self, decision: dict, snap: dict | None = None) -> dict:
+        """Attach Russian pulse + watch to a raw LLM decision (used by tick and /decide)."""
+        decision = dict(decision or {})
+        pulse = self._status_pulse(decision)
+        watch = self._watch_board()
+        act = (decision.get("action") or "hold").lower()
+        reason = str(decision.get("reason") or "")
+        # Always show human RU status as primary reason for UI
+        if act == "hold":
+            reason = pulse
+        elif reason and not reason.startswith("Бот работает"):
+            reason = f"{pulse} | {reason}"
+        else:
+            reason = pulse or reason
+        snap = snap or {}
+        inds = snap.get("indicators") or self._latest_indicators or {}
+        out = {
+            **decision,
+            "reason": reason[:900],
+            "pulse": pulse[:900],
+            "watch": watch,
+            "symbols_scanned": list(self.config.symbols or []),
+            "time": datetime.now(timezone.utc).isoformat(),
+            "provider": self._provider(),
+            "execute": self._execute_enabled(),
+            "demo": self._is_demo(),
+            "healthy": True,
+            "indicators": {
+                k: {kk: vv for kk, vv in (v or {}).items() if kk in (
+                    "close", "ema_fast", "ema_slow", "roc_3", "adx",
+                    "align_long", "align_short", "regime")}
+                for k, v in inds.items()
+            },
+            "open_positions": snap.get("open_positions") or [
+                {"coin": p.coin, "side": p.side} for p in self._positions.values()
+            ],
+            "equity": snap.get("equity", self._equity),
+        }
+        return out
+
     def _status_pulse(self, decision: dict) -> str:
+
         """Краткий статус по-русски: бот жив, что смотрит, почему нет входа."""
         q = self._build_quant()
         board = self._watch_board()
@@ -1878,7 +1890,10 @@ class AIStrategy:
                 "adapt_preset": (self._adapt or {}).get("preset"),
             },
             "indicators": self._latest_indicators,
-            "last_decision": self._last_decision,
+            "last_decision": (
+                self._enrich_decision(self._last_decision, None)
+                if self._last_decision else self._last_decision
+            ),
             "watch": (self._last_decision or {}).get("watch") or self._watch_board(),
             "pulse": (self._last_decision or {}).get("pulse") or "",
             "symbols_scanned": list(self.config.symbols or []),

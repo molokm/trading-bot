@@ -1348,18 +1348,22 @@ async def ai_decide_once():
     if not client:
         raise HTTPException(status_code=400, detail="OKX client not ready")
     await ai_bot._fetch_indicators(client)
+    try:
+        ai_bot._refresh_adaptive()
+    except Exception:
+        pass
     snap = ai_bot._snapshot()
     from app.services.ai_agent import call_llm
-    from datetime import datetime, timezone
     decision = await call_llm(snap, provider=ai_bot._provider())
-    ai_bot._last_decision = {**decision, "time": datetime.now(timezone.utc).isoformat()}
+    enriched = ai_bot._enrich_decision(decision, snap)
+    ai_bot._last_decision = enriched
     return {
         "snapshot": {
             "indicators": snap.get("indicators"),
             "open_positions": snap.get("open_positions"),
             "equity": snap.get("equity"),
         },
-        "decision": decision,
+        "decision": enriched,
     }
 
 
