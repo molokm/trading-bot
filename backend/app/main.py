@@ -249,7 +249,7 @@ async def startup():
                 allow_short=True,
                 gate_enabled=True,
                 gate_llm_veto=True,
-                desk_telegram=True,
+                desk_telegram=False,
                 poll_interval_sec=300,
                 auto_execute=True,
             )

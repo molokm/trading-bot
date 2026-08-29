@@ -113,7 +113,7 @@ class ImpulseConfig:
     gate_coin_rsi_max: float = 88.0
     gate_require_4h: bool = True
     gate_llm_veto: bool = True       # IMPULSE_LLM_VETO=0 to disable
-    desk_telegram: bool = True       # daily desk summary
+    desk_telegram: bool = False      # TG desk off (noise)
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
     limit_wait_sec: int = 300

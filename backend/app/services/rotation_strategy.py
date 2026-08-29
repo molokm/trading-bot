@@ -103,7 +103,7 @@ class RotationConfig:
     gate_coin_rsi_max: float = 80.0
     gate_require_4h: bool = True
     gate_llm_veto: bool = True
-    desk_telegram: bool = True
+    desk_telegram: bool = False      # TG desk off (noise)
     min_volume_ratio: float = 1.1  # require vol > 1.1x 20d avg if volume available
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
     limit_wait_sec: int = 300      # 5 min fallback to market
