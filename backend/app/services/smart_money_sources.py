@@ -133,6 +133,7 @@ async def fetch_hyperliquid(limit: int = 30, min_account: float = 50_000,
             if av >= 100_000:
                 score += 15
             verified = roi >= 10 and av >= 50_000 and not failures
+            vlm = float(block.get("vlm") or 0)
             out.append(
                 _norm_profile(
                     code=f"hl:{addr}",
@@ -147,7 +148,17 @@ async def fetch_hyperliquid(limit: int = 30, min_account: float = 50_000,
                     profile_url=f"https://app.hyperliquid.xyz/explorer/address/{addr}",
                     copyable=False,
                     note=f"Hyperliquid · окно {window} · on-chain PnL/ROI",
-                    extra={"eth_address": addr, "window": window},
+                    extra={
+                        "eth_address": addr,
+                        "window": window,
+                        "volume_usd": round(vlm, 2),
+                        "metric_label_wr": "Объём",
+                        "metric_value_wr": vlm,
+                        "metric_label_dd": "Депозит",
+                        "metric_value_dd": av,
+                        "metric_label_followers": "Окно",
+                        "metric_value_followers": window,
+                    },
                 )
             )
         log.info("Hyperliquid: %d traders", len(out))
