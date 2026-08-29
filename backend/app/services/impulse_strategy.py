@@ -1498,14 +1498,17 @@ class ImpulseStrategy:
             try:
                 self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._daily_managed_record()
             except Exception as e:
                 print(f"[Impulse] Poll error: {e}", flush=True)
+                self._last_activity = datetime.now(timezone.utc).isoformat()
             left = float(self.config.poll_interval_sec or 60)
             while left > 0 and self._running:
                 step = min(2.0, left)
                 await asyncio.sleep(step)
                 left -= step
+                self._last_activity = datetime.now(timezone.utc).isoformat()
 
     async def _daily_managed_record(self):
         """Once per UTC day, record whether this bot was actively managed."""
@@ -1540,17 +1543,24 @@ class ImpulseStrategy:
             print(f"[Impulse] Thread error: {e}", flush=True)
 
     async def _start_async(self):
-        self._started_at = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self._started_at = now
+        self._last_activity = now
         await self._ensure_bot()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
         await self._restore_open_positions()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
         await self._check_and_trade()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
         await self._poll_loop()
 
     async def start(self):
         if self._running:
             return
         self._running = True
-        self._started_at = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self._started_at = now
+        self._last_activity = now
         if self.db:
             await self._ensure_bot()
         self._thread = threading.Thread(target=self._thread_runner, daemon=True)
@@ -1623,11 +1633,22 @@ class ImpulseStrategy:
         last_activity_ts = 0.0
         if self._last_activity:
             try:
-                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+                la = str(self._last_activity).replace("Z", "+00:00")
+                last_activity_ts = datetime.fromisoformat(la).timestamp()
             except (TypeError, ValueError):
                 last_activity_ts = 0.0
-        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
-        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+        started_ts = 0.0
+        if getattr(self, "_started_at", None):
+            try:
+                sa = str(self._started_at).replace("Z", "+00:00")
+                started_ts = datetime.fromisoformat(sa).timestamp()
+            except (TypeError, ValueError):
+                started_ts = 0.0
+        # Long cycles (10 coins + gate/LLM): allow 4x poll, min 15 min
+        heartbeat_max_age = max(4 * int(self.config.poll_interval_sec or 300), 900)
+        age = (time.time() - last_activity_ts) if last_activity_ts else 1e9
+        grace = (time.time() - started_ts) if started_ts else 1e9
+        managed = bool(self._running) and (age < heartbeat_max_age or grace < heartbeat_max_age)
 
         return {
             "running": self._running,
