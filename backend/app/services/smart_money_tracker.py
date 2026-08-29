@@ -471,14 +471,15 @@ class SmartMoneyTracker:
 
     # ────────── Discovery ──────────
 
-    async def discover(self, page: str = "1", limit: str = "20") -> List[Dict]:
+    async def discover(self, page: str = "1", limit: str = "20",
+                       sort_type: str = None) -> List[Dict]:
         """Fetch OKX leaderboard and return raw trader data."""
         if not self.okx_api:
             return []
 
         try:
             resp = await self.okx_api.get_lead_traders(
-                sort_type=self.config.sort_type,
+                sort_type=sort_type or self.config.sort_type or "roi",
                 inst_type=self.config.inst_type,
                 min_lead_days=self.config.min_lead_days,
                 page=page,
@@ -489,6 +490,12 @@ class SmartMoneyTracker:
                 return []
 
             traders = resp.get("data", [])
+            # OKX sometimes nests data
+            if traders and isinstance(traders[0], dict) and "uniqueCode" not in traders[0]:
+                # try first element list
+                inner = traders[0].get("data") or traders[0].get("list") or []
+                if isinstance(inner, list) and inner:
+                    traders = inner
             self._discover_cache = traders
             self._discover_ts = time.time()
             return traders
@@ -496,9 +503,12 @@ class SmartMoneyTracker:
             self._last_error = str(e)
             return []
 
-    async def discover_and_verify(self, page="1", limit="20") -> List[Dict]:
-        """Discover traders and run verification on each."""
-        raw = await self.discover(page, limit)
+    async def discover_and_verify(self, page="1", limit="20",
+                                  sort_type: str = None,
+                                  min_roi_pct: float = None,
+                                  only_verified: bool = False) -> List[Dict]:
+        """Discover traders, verify ROI/WR/DD, rank by ROI descending."""
+        raw = await self.discover(page, limit, sort_type=sort_type)
         results = []
 
         for t_data in raw:
@@ -536,6 +546,22 @@ class SmartMoneyTracker:
 
             results.append(asdict(trader))
 
+        min_roi = float(min_roi_pct if min_roi_pct is not None else getattr(self.config, "min_roi_pct", 0) or 0)
+        if min_roi > 0:
+            results = [r for r in results if float(r.get("roi_pct") or 0) >= min_roi]
+        if only_verified:
+            results = [r for r in results if r.get("verified")]
+        # Rank: ROI desc, then verify_score, then followers
+        results.sort(
+            key=lambda r: (
+                float(r.get("roi_pct") or 0),
+                float(r.get("verify_score") or 0),
+                int(r.get("copy_traders") or 0),
+            ),
+            reverse=True,
+        )
+        for i, r in enumerate(results, 1):
+            r["rank"] = i
         return results
 
     async def get_trader_detail(self, unique_code: str) -> Dict:

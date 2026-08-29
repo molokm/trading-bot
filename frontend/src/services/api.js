@@ -180,8 +180,16 @@ export const api = {
 
   // ── Smart Money Tracker ──
   smartMoneyStatus: () => request('/smart-money/status'),
-  smartMoneyDiscover: (page = 1, limit = 20) =>
-    request(`/smart-money/discover?page=${page}&limit=${limit}`),
+  smartMoneyDiscover: (page = 1, limit = 20, opts = {}) => {
+    const q = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+      sort: opts.sort || 'roi',
+      min_roi: String(opts.min_roi ?? 0),
+      verified_only: opts.verified_only ? 'true' : 'false',
+    })
+    return request(`/smart-money/discover?${q}`)
+  },
   smartMoneyTrader: (code) => request(`/smart-money/trader/${code}`),
   smartMoneyTracked: () => request('/smart-money/tracked'),
   smartMoneyTrack: (code) =>

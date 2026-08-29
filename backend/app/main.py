@@ -1395,13 +1395,41 @@ async def smart_money_status():
 
 
 @app.get("/api/smart-money/discover")
-async def smart_money_discover(page: str = "1", limit: str = "20"):
-    """Discover traders from OKX leaderboard."""
+async def smart_money_discover(
+    page: str = "1",
+    limit: str = "20",
+    sort: str = "roi",
+    min_roi: float = 0,
+    verified_only: bool = False,
+):
+    """Discover OKX lead traders ranked by ROI (public API; tracker optional)."""
     global sm_tracker
-    if not sm_tracker:
-        return {"error": True, "message": "Tracker not initialized"}
-    traders = await sm_tracker.discover_and_verify(page=page, limit=limit)
-    return {"traders": traders, "total": len(traders)}
+    from app.services.smart_money_tracker import (
+        SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
+    )
+    tracker = sm_tracker
+    if not tracker:
+        # Public leaderboard does not need private keys — allow browse anytime
+        okx = OKXCopyAPI(
+            api_key=os.getenv("OKX_API_KEY", ""),
+            secret_key=os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+            passphrase=os.getenv("OKX_PASSPHRASE", ""),
+            demo=str(os.getenv("OKX_DEMO", "1")).lower() in ("1", "true", "yes"),
+        )
+        tracker = SmartMoneyTracker(config=TrackerConfig(sort_type=sort or "roi"), okx_api=okx)
+    traders = await tracker.discover_and_verify(
+        page=page,
+        limit=limit,
+        sort_type=sort or "roi",
+        min_roi_pct=float(min_roi or 0),
+        only_verified=bool(verified_only),
+    )
+    return {
+        "traders": traders,
+        "total": len(traders),
+        "sort": sort or "roi",
+        "min_roi": float(min_roi or 0),
+    }
 
 
 @app.get("/api/smart-money/trader/{unique_code}")
