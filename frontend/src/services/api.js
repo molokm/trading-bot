@@ -187,6 +187,7 @@ export const api = {
       sort: opts.sort || 'roi',
       min_roi: String(opts.min_roi ?? 0),
       verified_only: opts.verified_only ? 'true' : 'false',
+      sources: opts.sources || 'okx,hyperliquid,social',
     })
     return request(`/smart-money/discover?${q}`)
   },

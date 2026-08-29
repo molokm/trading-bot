@@ -506,10 +506,17 @@ class SmartMoneyTracker:
     async def discover_and_verify(self, page="1", limit="20",
                                   sort_type: str = None,
                                   min_roi_pct: float = None,
-                                  only_verified: bool = False) -> List[Dict]:
-        """Discover traders, verify ROI/WR/DD, rank by ROI descending."""
-        raw = await self.discover(page, limit, sort_type=sort_type)
+                                  only_verified: bool = False,
+                                  sources: str = None) -> List[Dict]:
+        """Discover traders from OKX + open sources, rank by ROI."""
+        src_list = [s.strip().lower() for s in (sources or "okx,hyperliquid,social").split(",") if s.strip()]
         results = []
+
+        # ── OKX ──
+        if "okx" in src_list and self.okx_api:
+            raw = await self.discover(page, limit, sort_type=sort_type)
+        else:
+            raw = []
 
         for t_data in raw:
             code = t_data.get("uniqueCode", "")
@@ -544,14 +551,39 @@ class SmartMoneyTracker:
             self.verifier.verify(trader, stats_data, weekly_data, copy_count)
             trader.copy_traders = copy_count
 
-            results.append(asdict(trader))
+            row = asdict(trader)
+            row["source"] = "okx"
+            row["copyable"] = True
+            row["profile_url"] = f"https://www.okx.com/copy-trading/account/{code}"
+            row["note"] = "OKX Copy Trading"
+            results.append(row)
+
+        # ── Hyperliquid + social (open sources) ──
+        try:
+            from .smart_money_sources import fetch_hyperliquid_cached, fetch_social
+            ext = []
+            if "hyperliquid" in src_list or "hl" in src_list:
+                ext.extend(await fetch_hyperliquid_cached(limit=int(limit) if str(limit).isdigit() else 25))
+            if "social" in src_list or "twitter" in src_list or "x" in src_list:
+                ext.extend(await fetch_social())
+            # dedupe by unique_code
+            seen = {r.get("unique_code") for r in results}
+            for e in ext:
+                c = e.get("unique_code")
+                if c and c not in seen:
+                    results.append(e)
+                    seen.add(c)
+        except Exception as ex:
+            print(f"[SmartMoney] external sources: {ex}", flush=True)
 
         min_roi = float(min_roi_pct if min_roi_pct is not None else getattr(self.config, "min_roi_pct", 0) or 0)
         if min_roi > 0:
             results = [r for r in results if float(r.get("roi_pct") or 0) >= min_roi]
         if only_verified:
             results = [r for r in results if r.get("verified")]
-        # Rank: ROI desc, then verify_score, then followers
+        if src_list:
+            results = [r for r in results if (r.get("source") or "okx").lower() in src_list
+                       or ((r.get("source") or "") == "hyperliquid" and "hl" in src_list)]
         results.sort(
             key=lambda r: (
                 float(r.get("roi_pct") or 0),

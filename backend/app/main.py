@@ -1401,15 +1401,15 @@ async def smart_money_discover(
     sort: str = "roi",
     min_roi: float = 0,
     verified_only: bool = False,
+    sources: str = "okx,hyperliquid,social",
 ):
-    """Discover OKX lead traders ranked by ROI (public API; tracker optional)."""
+    """Discover traders from OKX + Hyperliquid + social, ranked by ROI."""
     global sm_tracker
     from app.services.smart_money_tracker import (
         SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
     )
     tracker = sm_tracker
     if not tracker:
-        # Public leaderboard does not need private keys — allow browse anytime
         okx = OKXCopyAPI(
             api_key=os.getenv("OKX_API_KEY", ""),
             secret_key=os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
@@ -1423,12 +1423,14 @@ async def smart_money_discover(
         sort_type=sort or "roi",
         min_roi_pct=float(min_roi or 0),
         only_verified=bool(verified_only),
+        sources=sources or "okx,hyperliquid,social",
     )
     return {
         "traders": traders,
         "total": len(traders),
         "sort": sort or "roi",
         "min_roi": float(min_roi or 0),
+        "sources": sources or "okx,hyperliquid,social",
     }
 
 

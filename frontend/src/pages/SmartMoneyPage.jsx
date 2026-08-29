@@ -19,6 +19,21 @@ function fmtUsd(v, sign = true) {
   return `${s}$${Math.abs(n).toLocaleString('en', { maximumFractionDigits: 0 })}`
 }
 
+function SourceBadge({ source }) {
+  const s = (source || 'okx').toLowerCase()
+  const map = {
+    okx: { label: 'OKX', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
+    hyperliquid: { label: 'Hyperliquid', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' },
+    social: { label: 'Соцсети', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
+  }
+  const m = map[s] || { label: s, cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' }
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border ${m.cls}`}>
+      {m.label}
+    </span>
+  )
+}
+
 function VerifyBadge({ verified, score }) {
   if (verified) {
     return (
@@ -64,6 +79,7 @@ function TraderCard({ trader, rank, onView, onCopy, onTrack, onUntrack, isTracke
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold text-[var(--txt)] truncate">{name}</span>
+            <SourceBadge source={trader.source} />
             <VerifyBadge verified={trader.verified} score={trader.verify_score} />
             {isTracked && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30">
@@ -100,13 +116,24 @@ function TraderCard({ trader, rank, onView, onCopy, onTrack, onUntrack, isTracke
         </button>
         {!isGuest && (
           <>
-            <button
-              type="button"
-              onClick={() => onCopy(trader)}
-              className="btn btn-primary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
-            >
-              <Copy size={14} /> Копировать
-            </button>
+            {trader.copyable !== false && (trader.source || 'okx') === 'okx' ? (
+              <button
+                type="button"
+                onClick={() => onCopy(trader)}
+                className="btn btn-primary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
+              >
+                <Copy size={14} /> Копировать
+              </button>
+            ) : (
+              <a
+                href={trader.profile_url || '#'}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-secondary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
+              >
+                Профиль
+              </a>
+            )}
             <button
               type="button"
               onClick={() => (isTracked ? onUntrack(trader) : onTrack(trader))}
@@ -283,6 +310,9 @@ export default function SmartMoneyPage({ connected, isGuest }) {
   const [sort, setSort] = useState('roi')
   const [minRoi, setMinRoi] = useState(10)
   const [verifiedOnly, setVerifiedOnly] = useState(false)
+  const [srcOkx, setSrcOkx] = useState(true)
+  const [srcHl, setSrcHl] = useState(true)
+  const [srcSocial, setSrcSocial] = useState(true)
   const [q, setQ] = useState('')
   const [copyTrader, setCopyTrader] = useState(null)
   const [detailTrader, setDetailTrader] = useState(null)
@@ -308,7 +338,14 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     setLoading(true)
     setErr('')
     try {
-      const r = await api.smartMoneyDiscover(p, 20, { sort, min_roi: minRoi, verified_only: verifiedOnly })
+      const sources = [
+        srcOkx && 'okx',
+        srcHl && 'hyperliquid',
+        srcSocial && 'social',
+      ].filter(Boolean).join(',') || 'okx'
+      const r = await api.smartMoneyDiscover(p, 20, {
+        sort, min_roi: minRoi, verified_only: verifiedOnly, sources,
+      })
       if (r?.error) {
         setErr(r.message || 'Ошибка загрузки')
         setDiscoverList([])
@@ -322,7 +359,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     } finally {
       setLoading(false)
     }
-  }, [sort, minRoi, verifiedOnly])
+  }, [sort, minRoi, verifiedOnly, srcOkx, srcHl, srcSocial])
 
   const loadTracked = useCallback(async () => {
     try {
@@ -443,7 +480,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
             </h1>
             <p className="text-sm text-[var(--txt-muted)] mt-1 max-w-xl leading-relaxed">
               Лидеры OKX Copy Trading с проверкой ROI, win rate и просадки.
-              Выберите успешных инвесторов и запустите автокопирование сделок.
+              OKX (копирование), Hyperliquid (on-chain ROI) и открытые соц-профили. Автокопирование — только для OKX.
             </p>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -548,6 +585,18 @@ export default function SmartMoneyPage({ connected, isGuest }) {
               <input type="checkbox" checked={verifiedOnly} onChange={e => setVerifiedOnly(e.target.checked)} />
               Только проверенные
             </label>
+            <div className="flex flex-wrap items-center gap-2 pb-2 text-xs text-[var(--txt-muted)]">
+              <span className="opacity-70">Источники:</span>
+              <label className="inline-flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" checked={srcOkx} onChange={e => setSrcOkx(e.target.checked)} /> OKX
+              </label>
+              <label className="inline-flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" checked={srcHl} onChange={e => setSrcHl(e.target.checked)} /> Hyperliquid
+              </label>
+              <label className="inline-flex items-center gap-1 cursor-pointer">
+                <input type="checkbox" checked={srcSocial} onChange={e => setSrcSocial(e.target.checked)} /> Соцсети
+              </label>
+            </div>
             <button
               type="button"
               className="btn btn-primary btn-sm"
