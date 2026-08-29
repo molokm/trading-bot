@@ -72,9 +72,14 @@ async def llm_veto(
     provider: Optional[str] = None,
 ) -> tuple[bool, str]:
     """Optional LLM veto. Returns (allow, reason). On error → allow (fail-open)."""
-    enabled = os.getenv("IMPULSE_LLM_VETO", "1").strip().lower() not in (
-        "0", "false", "no", "off",
+    # Shared flag: IMPULSE_LLM_VETO or MOMENTUM_LLM_VETO or LLM_VETO
+    raw = (
+        os.getenv("LLM_VETO")
+        or os.getenv("MOMENTUM_LLM_VETO")
+        or os.getenv("IMPULSE_LLM_VETO")
+        or "1"
     )
+    enabled = raw.strip().lower() not in ("0", "false", "no", "off")
     if not enabled:
         return True, "llm_veto_off"
 

@@ -23,10 +23,11 @@ from typing import Optional
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .position_claim import claim_open
+from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.7"
+STRATEGY_VERSION = "v6.8-gate"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -42,7 +43,7 @@ COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
     "Momentum Rotation v6.7 hybrid. OOS stop/ADX (ADX≥25, stop 3.5×ATR) + conservative risk 10%. "
-    "Peak-lock/BE 2.5%/4H exit; long-only; daily −3% halt. Баланс OOS-тюна и контроля DD на альт-universe."
+    "v6.8-Gate: quant multi-TF + LLM veto на входе; Peak-lock/BE/4H exit; long-only; daily −3% halt."
 )
 
 
@@ -96,6 +97,13 @@ class RotationConfig:
     max_positions: int = 2
     max_positions_non_bull: int = 1  # v6.5: only 1 slot outside clear bull
     daily_loss_halt_pct: float = 0.03  # no new opens after -3% day
+    # AI desk pattern: quant multi-TF gate + optional LLM veto (never invents entries)
+    gate_enabled: bool = True
+    gate_btc_rsi_min: float = 50.0
+    gate_coin_rsi_max: float = 82.0   # align with rsi_long_max spirit
+    gate_require_4h: bool = True
+    gate_llm_veto: bool = True        # MOMENTUM_LLM_VETO=0 / IMPULSE_LLM_VETO=0
+    desk_telegram: bool = True
     min_volume_ratio: float = 1.1  # require vol > 1.1x 20d avg if volume available
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
     limit_wait_sec: int = 300      # 5 min fallback to market
@@ -1745,17 +1753,58 @@ class RotationStrategy:
                     await self._close_position(client, pos.inst_id, pos, "rotation_exit")
                     del self._positions[coin]
 
-        # 7. Open new positions (fill empty slots)
+        # 7. Open new positions (fill empty slots) — with quant/LLM gate
         opened_any = False
+        self._tf4h_cache = {}
+        btc_ind = dict(indicators.get("BTC") or {})
+        # Map regime → SMA200 flag for shared quant_gate
+        reg = getattr(self, "_regime", "unknown")
+        if "above_sma200" not in btc_ind:
+            btc_ind["above_sma200"] = reg == "bull"
+
         for coin, side in target_coins:
             if coin in self._positions:
                 continue
             ind = indicators.get(coin)
             if not ind:
                 continue
+            cfg = self.config
+            if getattr(cfg, "gate_enabled", True):
+                tf4h = {}
+                if getattr(cfg, "gate_require_4h", True):
+                    tf4h = await self._tf4h_snapshot(client, coin)
+                allow_q, q_reasons = quant_gate(
+                    side, coin, ind, btc_ind, tf4h,
+                    require_btc_sma200=True,
+                    btc_rsi_min=float(getattr(cfg, "gate_btc_rsi_min", 50) or 0),
+                    coin_rsi_max=float(getattr(cfg, "gate_coin_rsi_max", 82) or 100),
+                    require_4h_align=bool(getattr(cfg, "gate_require_4h", True)),
+                )
+                if not allow_q:
+                    self._gate_stats["block"] = self._gate_stats.get("block", 0) + 1
+                    print(f"[Rotation] GATE BLOCK {coin} {side}: {','.join(q_reasons)}", flush=True)
+                    self.analysis.log("rotation", "gate_block", coin=coin, side=side,
+                                      reasons=q_reasons)
+                    continue
+                if getattr(cfg, "gate_llm_veto", True):
+                    allow_l, l_reason = await llm_veto(
+                        coin=coin, side=side,
+                        strength=float(ind.get("roc") or 0),
+                        ind=ind, btc_ind=btc_ind, quant_reasons_ok=True,
+                    )
+                    if not allow_l:
+                        self._gate_stats["llm_block"] = self._gate_stats.get("llm_block", 0) + 1
+                        print(f"[Rotation] LLM VETO {coin} {side}: {l_reason}", flush=True)
+                        self.analysis.log("rotation", "llm_veto", coin=coin, side=side,
+                                          reason=l_reason)
+                        continue
+                self._gate_stats["allow"] = self._gate_stats.get("allow", 0) + 1
+
             lev = self._calc_dynamic_leverage(ind["atr"], ind["close_today"])
             await self._open_position(client, coin, side, ind, lev)
             opened_any = True
+
+        await self._maybe_send_desk(btc_ind)
 
         # Update daily check only when doing a full rotation or opening a trade
         if slots_full or opened_any:
@@ -1764,6 +1813,62 @@ class RotationStrategy:
             self._last_rotate_ts = now_ts
 
     # ─── Lifecycle ───
+
+
+    async def _tf4h_snapshot(self, client, coin: str) -> dict:
+        """4H EMA/RSI for entry gate (cached per cycle)."""
+        if coin in getattr(self, "_tf4h_cache", {}):
+            return self._tf4h_cache[coin]
+        out = {}
+        try:
+            candles = await self._fetch_candles(client, coin, bar="4H", limit=80)
+            if not candles or len(candles) < 30:
+                self._tf4h_cache[coin] = out
+                return out
+            closes = [c["C"] for c in candles]
+            i = len(closes) - 2
+            ema_f = self.ema(closes, 20)
+            ema_s = self.ema(closes, 50)
+            rsi_arr = self.rsi(closes, 14)
+            out = {
+                "ema_trend": ema_f[i] > ema_s[i],
+                "rsi": rsi_arr[i],
+                "close": closes[i],
+            }
+        except Exception as e:
+            print(f"[Rotation] 4H snapshot {coin}: {e}", flush=True)
+        self._tf4h_cache[coin] = out
+        return out
+
+    async def _maybe_send_desk(self, btc_ind: dict):
+        if not getattr(self.config, "desk_telegram", True):
+            return
+        if not self.notifier:
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_desk_sent_day", "") == day:
+            return
+        if datetime.now(timezone.utc).hour < 6:
+            return
+        try:
+            opens = [
+                {"coin": getattr(p, "coin", "?"), "side": getattr(p, "side", "?")}
+                for p in self._positions.values()
+            ]
+            text = format_desk(
+                btc_ind=btc_ind or {},
+                open_positions=opens,
+                gate_stats=dict(getattr(self, "_gate_stats", {}) or {}),
+                version=f"Momentum {STRATEGY_VERSION}",
+            )
+            if hasattr(self.notifier, "send"):
+                await self.notifier.send(text)
+            elif hasattr(self.notifier, "send_message"):
+                await self.notifier.send_message(text)
+            self._desk_sent_day = day
+            print(f"[Rotation] desk sent: {text[:120]}", flush=True)
+        except Exception as e:
+            print(f"[Rotation] desk error: {e}", flush=True)
 
     async def _poll_loop(self):
         """Main polling loop running in daemon thread's event loop."""
