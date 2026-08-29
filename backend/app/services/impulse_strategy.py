@@ -29,10 +29,11 @@ from typing import Optional
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
+from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v2.2-bprime"
+STRATEGY_VERSION = "v2.3-gate"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -47,11 +48,11 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v2.2-B′. Daily impulse на 10 монетах: |ROC|≥6% (1D), объём 1.5–3.5× avg (anti-climax), "
+    "Impulse 1D v2.3-Gate. Daily impulse на 10 монетах: |ROC|≥6% (1D), объём 1.5–3.5× avg (anti-climax), "
     "EMA20>EMA50. Long-only. Фильтр режима: нет новых long, если BTC < SMA200. "
     "До 3 позиций (top по |ROC|), риск 4.5% equity, стоп 5×ATR, плечо до 3×. "
     "Выход: cascade 25%@2ATR + 30%@10ATR, peak-lock после TP1, EMA/ROC exit в плюсе, trail 12×ATR, hold≤28д. "
-    "B′ подобран по BT: risk+SMA200 режут DD без top_k=2 (тот сильно бил return)."
+    "Gate: quant multi-TF (BTC RSI/SMA200, 4H align) + optional LLM veto; desk в Telegram."
 )
 
 
@@ -106,6 +107,13 @@ class ImpulseConfig:
     # B-prime regime / peak-lock
     btc_sma200_filter: bool = True   # no new longs if BTC close < SMA200
     peak_lock_after_tp1: bool = True # arm peak-lock only after first scale-out
+    # Entry gate (quant + optional LLM veto — never invents entries)
+    gate_enabled: bool = True
+    gate_btc_rsi_min: float = 50.0
+    gate_coin_rsi_max: float = 88.0
+    gate_require_4h: bool = True
+    gate_llm_veto: bool = True       # IMPULSE_LLM_VETO=0 to disable
+    desk_telegram: bool = True       # daily desk summary
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
     limit_wait_sec: int = 300
@@ -164,6 +172,9 @@ class ImpulseStrategy:
         self.db = db
         self.notifier = notifier or TelegramNotifier()
         self.analysis = analysis or get_logger()
+        self._gate_stats = {"allow": 0, "block": 0, "llm_block": 0}
+        self._desk_sent_day = ""
+        self._tf4h_cache: dict = {}
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1171,6 +1182,32 @@ class ImpulseStrategy:
         """Optional per-bar management hook (kept for symmetry with rotation bot)."""
         pass
 
+
+    async def _tf4h_snapshot(self, client, coin: str) -> dict:
+        """Lightweight 4H trend/RSI for gate (cached per cycle)."""
+        if coin in self._tf4h_cache:
+            return self._tf4h_cache[coin]
+        out = {}
+        try:
+            candles = await self._fetch_candles(client, coin, bar="4H", limit=80)
+            if not candles or len(candles) < 30:
+                self._tf4h_cache[coin] = out
+                return out
+            closes = [c["C"] for c in candles]
+            i = len(closes) - 2  # last closed 4H
+            ema_f = self.ema(closes, 20)
+            ema_s = self.ema(closes, 50)
+            rsi_arr = self.rsi(closes, 14)
+            out = {
+                "ema_trend": ema_f[i] > ema_s[i],
+                "rsi": rsi_arr[i],
+                "close": closes[i],
+            }
+        except Exception as e:
+            print(f"[Impulse] 4H snapshot {coin}: {e}", flush=True)
+        self._tf4h_cache[coin] = out
+        return out
+
     async def _new_entries(self, client, indicators: dict):
         """Rank candidate coins by impulse strength, open up to free slots."""
         cfg = self.config
@@ -1178,10 +1215,12 @@ class ImpulseStrategy:
         if free_slots <= 0:
             return
 
+        self._tf4h_cache = {}
+        btc_ind = indicators.get("BTC") or {}
+
         # B-prime: block new longs when BTC is below SMA200 (bear/chop filter)
         btc_regime_ok = True
         if getattr(cfg, "btc_sma200_filter", True):
-            btc_ind = indicators.get("BTC") or {}
             if btc_ind:
                 btc_regime_ok = bool(btc_ind.get("above_sma200", True))
             if not btc_regime_ok:
@@ -1207,12 +1246,44 @@ class ImpulseStrategy:
                 continue
             candidates.append((strength, coin, side, ind))
         if not candidates:
+            await self._maybe_send_desk(btc_ind)
             return
 
         candidates.sort(key=lambda x: -x[0])
         for strength, coin, side, ind in candidates[:free_slots]:
             if coin in self._positions:
                 continue
+            # ── Quant + optional LLM gate (veto only) ──
+            if getattr(cfg, "gate_enabled", True):
+                tf4h = {}
+                if getattr(cfg, "gate_require_4h", True):
+                    tf4h = await self._tf4h_snapshot(client, coin)
+                allow_q, q_reasons = quant_gate(
+                    side, coin, ind, btc_ind, tf4h,
+                    require_btc_sma200=bool(getattr(cfg, "btc_sma200_filter", True)),
+                    btc_rsi_min=float(getattr(cfg, "gate_btc_rsi_min", 50) or 0),
+                    coin_rsi_max=float(getattr(cfg, "gate_coin_rsi_max", 88) or 100),
+                    require_4h_align=bool(getattr(cfg, "gate_require_4h", True)),
+                )
+                if not allow_q:
+                    self._gate_stats["block"] = self._gate_stats.get("block", 0) + 1
+                    print(f"[Impulse] GATE BLOCK {coin} {side}: {','.join(q_reasons)}", flush=True)
+                    self.analysis.log("impulse", "gate_block", coin=coin, side=side,
+                                      reasons=q_reasons, strength=round(strength, 2))
+                    continue
+                if getattr(cfg, "gate_llm_veto", True):
+                    allow_l, l_reason = await llm_veto(
+                        coin=coin, side=side, strength=strength,
+                        ind=ind, btc_ind=btc_ind, quant_reasons_ok=True,
+                    )
+                    if not allow_l:
+                        self._gate_stats["llm_block"] = self._gate_stats.get("llm_block", 0) + 1
+                        print(f"[Impulse] LLM VETO {coin} {side}: {l_reason}", flush=True)
+                        self.analysis.log("impulse", "llm_veto", coin=coin, side=side,
+                                          reason=l_reason)
+                        continue
+                self._gate_stats["allow"] = self._gate_stats.get("allow", 0) + 1
+
             lev = self._calc_dynamic_leverage(ind["atr"], ind["price"])
             if not self.config.auto_execute:
                 print(f"[Impulse] SIGNAL {coin} {side} strength={strength:.1f} "
@@ -1224,6 +1295,39 @@ class ImpulseStrategy:
                                   vol=round(ind["vol"], 2), avg_vol=round(ind["avg_vol"], 2))
                 continue
             await self._open_position(client, coin, side, ind, lev)
+
+        await self._maybe_send_desk(btc_ind)
+
+
+    async def _maybe_send_desk(self, btc_ind: dict):
+        if not getattr(self.config, "desk_telegram", True):
+            return
+        if not self.notifier:
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_desk_sent_day", "") == day:
+            return
+        if datetime.now(timezone.utc).hour < 6:
+            return
+        try:
+            opens = [
+                {"coin": p.coin, "side": p.side}
+                for p in self._positions.values()
+            ]
+            text = format_desk(
+                btc_ind=btc_ind or {},
+                open_positions=opens,
+                gate_stats=dict(getattr(self, "_gate_stats", {}) or {}),
+                version=STRATEGY_VERSION,
+            )
+            if hasattr(self.notifier, "send"):
+                await self.notifier.send(text)
+            elif hasattr(self.notifier, "send_message"):
+                await self.notifier.send_message(text)
+            self._desk_sent_day = day
+            print(f"[Impulse] desk sent: {text[:120]}", flush=True)
+        except Exception as e:
+            print(f"[Impulse] desk error: {e}", flush=True)
 
     def _in_cooldown(self, coin: str, bar_date: str) -> bool:
         """Cooldown per coin (cooldown_bars days)."""
@@ -1532,6 +1636,8 @@ class ImpulseStrategy:
             "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
+            "gate_stats": dict(getattr(self, "_gate_stats", {}) or {}),
+
             "started_at": self._started_at,
             "equity": round(equity, 2),
             "capital": round(self._capital, 2),
