@@ -1562,6 +1562,20 @@ async def smart_money_my_copies():
 
 
 
+
+@app.get("/api/smart-money/pnl")
+async def smart_money_pnl():
+    """PnL and open/closed trades only for Smart Money (copy + mirror)."""
+    from app.services.smart_money_ledger import get_sm_ledger
+    return get_sm_ledger().snapshot()
+
+
+@app.get("/api/smart-money/trades")
+async def smart_money_trades(limit: int = 100):
+    from app.services.smart_money_ledger import get_sm_ledger
+    return {"trades": get_sm_ledger().trades(limit=limit), "bot_id": "smart_money"}
+
+
 @app.get("/api/smart-money/mirror/status")
 async def smart_money_mirror_status():
     from app.services.smart_money_mirror import get_mirror

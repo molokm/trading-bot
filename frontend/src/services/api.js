@@ -208,6 +208,8 @@ export const api = {
     request('/smart-money/stop', { method: 'POST' }),
   smartMoneyUpdateConfig: (config = {}) =>
     request('/smart-money/config', { method: 'POST', body: JSON.stringify(config) }),
+  smartMoneyPnl: () => request('/smart-money/pnl'),
+  smartMoneyTrades: (limit = 100) => request(`/smart-money/trades?limit=${limit}`),
   smartMoneyMirrorStatus: () => request('/smart-money/mirror/status'),
   smartMoneyMirrorStart: (body) =>
     request('/smart-money/mirror/start', { method: 'POST', body: JSON.stringify(body || {}) }),

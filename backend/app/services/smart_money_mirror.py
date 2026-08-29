@@ -408,6 +408,16 @@ class SmartMoneyMirror:
                     "side": side, "okx_sz": contracts, "inst_id": inst,
                     "hl_szi": d.get("szi"), "updated": time.time(),
                 }
+                try:
+                    from .smart_money_ledger import get_sm_ledger
+                    get_sm_ledger().record_open(
+                        kind="mirror", symbol=coin, side=side,
+                        size=float(contracts), price=float(px or 0),
+                        leader=t.address, source="hyperliquid",
+                        note=f"mirror open {inst}",
+                    )
+                except Exception:
+                    pass
                 if self.notifier:
                     try:
                         await self.notifier.send(
@@ -446,6 +456,16 @@ class SmartMoneyMirror:
                         reduce_only=True,
                     )
             self._log(t, "close", coin=coin, reason=reason, resp=str(resp)[:200] if resp else "")
+            try:
+                from .smart_money_ledger import get_sm_ledger
+                get_sm_ledger().record_close(
+                    kind="mirror", symbol=coin, side=side,
+                    size=float(m.get("okx_sz") or 0), price=0, pnl=0,
+                    leader=t.address, source="hyperliquid",
+                    note=f"mirror close ({reason})",
+                )
+            except Exception:
+                pass
         except Exception as e:
             self._log(t, "close_error", coin=coin, reason=str(e))
         t.mirrored.pop(coin, None)

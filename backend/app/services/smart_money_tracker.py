@@ -866,6 +866,15 @@ class SmartMoneyTracker:
                 self._lifetime_copies += 1
                 self._session_copies += 1
                 self._persist()
+                try:
+                    from .smart_money_ledger import get_sm_ledger
+                    get_sm_ledger().record_open(
+                        kind="copy", symbol="PORTFOLIO", side="copy",
+                        size=float(amt or 0), price=0, leader=unique_code,
+                        source="okx", note=f"OKX copy start {amt} USDT",
+                    )
+                except Exception:
+                    pass
                 return {"ok": True, "msg": f"copying started with {amt} USDT"}
             else:
                 msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
@@ -884,6 +893,15 @@ class SmartMoneyTracker:
                 unique_code=unique_code,
             )
             if resp.get("code") == "0":
+                try:
+                    from .smart_money_ledger import get_sm_ledger
+                    get_sm_ledger().record_close(
+                        kind="copy", symbol="PORTFOLIO", side="copy",
+                        size=0, price=0, pnl=0, leader=unique_code,
+                        source="okx", note="OKX copy stopped",
+                    )
+                except Exception:
+                    pass
                 return {"ok": True, "msg": "copying stopped"}
             else:
                 msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))

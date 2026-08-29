@@ -424,6 +424,8 @@ export default function SmartMoneyPage({ connected, isGuest }) {
   const [copyTrader, setCopyTrader] = useState(null)
   const [mirrorTrader, setMirrorTrader] = useState(null)
   const [mirrors, setMirrors] = useState([])
+  const [smPnl, setSmPnl] = useState(null)
+  const [smTrades, setSmTrades] = useState([])
   const [detailTrader, setDetailTrader] = useState(null)
   const [history, setHistory] = useState([])
   const [busy, setBusy] = useState(false)
@@ -497,13 +499,27 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     }
   }, [])
 
+  const loadSmPnl = useCallback(async () => {
+    try {
+      const r = await api.smartMoneyPnl()
+      setSmPnl(r)
+      setSmTrades(r?.trades || [])
+    } catch {
+      setSmPnl(null)
+      setSmTrades([])
+    }
+  }, [])
+
   useEffect(() => {
     loadStatus()
     fetchDiscover(1)
     loadTracked()
     loadCopies()
     loadMirrors()
-  }, [loadStatus, fetchDiscover, loadTracked, loadCopies, loadMirrors])
+    loadSmPnl()
+    const iv = setInterval(() => { loadSmPnl(); loadMirrors() }, 15000)
+    return () => clearInterval(iv)
+  }, [loadStatus, fetchDiscover, loadTracked, loadCopies, loadMirrors, loadSmPnl])
 
   const filtered = useMemo(() => {
     const list = discoverList || []
@@ -615,6 +631,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     { id: 'tracked', label: 'Отслеживание', icon: Star },
     { id: 'copies', label: 'Мои копии', icon: Copy },
     { id: 'mirrors', label: 'Зеркала', icon: RefreshCw },
+    { id: 'deals', label: 'Сделки SM', icon: BarChart3 },
   ]
 
   return (
@@ -669,6 +686,44 @@ export default function SmartMoneyPage({ connected, isGuest }) {
           <div className="rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] p-3">
             <div className="text-[10px] text-[var(--txt-muted)]">Активные копии</div>
             <div className="text-lg font-bold text-[var(--txt)]">{copies.length}</div>
+          </div>
+        </div>
+      </div>
+
+
+      {/* Smart Money only PnL */}
+      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold text-[var(--txt)] flex items-center gap-2">
+            <DollarSign size={16} className="text-amber-400" />
+            PnL · Умные деньги
+          </div>
+          <span className="text-[10px] text-[var(--txt-muted)]">только copy + зеркало · не в общей статистике ботов</span>
+        </div>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
+            <div className={`text-xl font-bold mono ${(smPnl?.realized_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {(smPnl?.realized_pnl || 0) >= 0 ? '+' : ''}{Number(smPnl?.realized_pnl || 0).toFixed(2)}$
+            </div>
+            <div className="text-[10px] text-[var(--txt-muted)]">Реализованный PnL</div>
+          </div>
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
+            <div className="text-xl font-bold mono text-[var(--txt)]">{smPnl?.open_count ?? 0}</div>
+            <div className="text-[10px] text-[var(--txt-muted)]">Открыто</div>
+          </div>
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
+            <div className="text-xl font-bold mono text-[var(--txt)]">{smPnl?.closed_count ?? 0}</div>
+            <div className="text-[10px] text-[var(--txt-muted)]">Закрыто</div>
+          </div>
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
+            <div className="text-xl font-bold mono text-emerald-400">{smPnl?.win_count ?? 0}</div>
+            <div className="text-[10px] text-[var(--txt-muted)]">В плюс</div>
+          </div>
+          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
+            <div className="text-xl font-bold mono text-[var(--txt)]">
+              {smPnl?.win_rate != null ? `${(Number(smPnl.win_rate) * 100).toFixed(0)}%` : '—'}
+            </div>
+            <div className="text-[10px] text-[var(--txt-muted)]">Win rate</div>
           </div>
         </div>
       </div>
@@ -870,6 +925,61 @@ export default function SmartMoneyPage({ connected, isGuest }) {
                   )}
                 </div>
               ))}
+            </div>
+          )}
+        </div>
+      )}
+
+
+      {tab === 'deals' && (
+        <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] overflow-hidden">
+          <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
+            <span className="text-sm font-semibold text-[var(--txt)]">Сделки копирования и зеркала</span>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={loadSmPnl}>
+              <RefreshCw size={14} />
+            </button>
+          </div>
+          {!smTrades.length ? (
+            <div className="text-center py-10 text-sm text-[var(--txt-muted)]">Пока нет сделок Smart Money</div>
+          ) : (
+            <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 bg-[var(--bg-elevated)] text-[var(--txt-muted)]">
+                  <tr>
+                    <th className="text-left px-3 py-2">Время</th>
+                    <th className="text-left px-3 py-2">Тип</th>
+                    <th className="text-left px-3 py-2">Событие</th>
+                    <th className="text-left px-3 py-2">Инстр.</th>
+                    <th className="text-left px-3 py-2">Сторона</th>
+                    <th className="text-right px-3 py-2">Размер</th>
+                    <th className="text-right px-3 py-2">PnL</th>
+                    <th className="text-left px-3 py-2">Лидер</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {smTrades.map((tr, i) => {
+                    const pnl = Number(tr.pnl || 0)
+                    return (
+                      <tr key={tr.id || i} className="border-t border-[var(--border)]">
+                        <td className="px-3 py-2 mono text-[var(--txt-muted)]">
+                          {(tr.time || tr.opened_at || '').replace('T', ' ').slice(0, 19)}
+                        </td>
+                        <td className="px-3 py-2">{tr.kind === 'mirror' ? 'Зеркало' : 'Copy'}</td>
+                        <td className="px-3 py-2">{tr.event}</td>
+                        <td className="px-3 py-2 font-medium text-[var(--txt)]">{tr.symbol || '—'}</td>
+                        <td className="px-3 py-2">{tr.side || '—'}</td>
+                        <td className="px-3 py-2 text-right mono">{tr.size || '—'}</td>
+                        <td className={`px-3 py-2 text-right mono font-semibold ${pnl > 0 ? 'text-[var(--profit)]' : pnl < 0 ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+                          {tr.event === 'close' ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` : '—'}
+                        </td>
+                        <td className="px-3 py-2 mono text-[var(--txt-muted)] truncate max-w-[120px]">
+                          {(tr.leader || '').slice(0, 12)}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
