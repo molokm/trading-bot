@@ -1186,7 +1186,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               </div>
               {aiStatus?.last_decision && (
                 <div className="p-1.5 rounded-md bg-[var(--bg)] text-2xs">
-                  <div className="text-[var(--txt-muted)] mb-0.5">Last decision</div>
+                  <div className="text-[var(--txt-muted)] mb-0.5">Last decision{aiStatus.symbols_scanned?.length ? ` · scan ${aiStatus.symbols_scanned.join("/")}` : (aiStatus.last_decision?.symbols_scanned?.length ? ` · scan ${aiStatus.last_decision.symbols_scanned.join("/")}` : "")}</div>
                   <div className="text-[var(--txt)]">
                     <span className="font-bold mono">{aiStatus.last_decision.action}</span>
                     {aiStatus.last_decision.symbol ? ` ${aiStatus.last_decision.symbol}` : ''}

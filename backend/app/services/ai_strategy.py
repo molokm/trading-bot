@@ -124,7 +124,7 @@ class AIConfig:
     adapt_window: int = 12              # last N closed trades
     adapt_min_trades: int = 4           # need this many before adapting
     conf_floor: float = 0.70
-    conf_ceil: float = 0.90
+    conf_ceil: float = 0.82
     align_floor: float = 0.50
     align_ceil: float = 0.75
     size_cap_floor: float = 0.05
@@ -639,9 +639,9 @@ class AIStrategy:
         cq = (q.get("coins") or {}).get(coin) or {}
         if cq.get("block_open"):
             return f"quant_veto:coin_block:{coin}"
-        if side == "long" and float(cq.get("align_long") or 0) < float(q["min_align"]):
+        if side == "long" and float(cq.get("align_long") or 0) < float(q["min_align"]) - 1e-9:
             return f"quant_veto:weak_long_align"
-        if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]):
+        if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]) - 1e-9:
             return f"quant_veto:weak_short_align"
         # regime side match
         reg = cq.get("regime") or q.get("global_regime")
@@ -1430,15 +1430,31 @@ class AIStrategy:
             pass
         snap = self._snapshot()  # include fresh adaptive + reflection
         decision = await call_llm(snap, provider=self._provider())
+        pulse = self._status_pulse(decision)
+        watch = self._watch_board()
+        # Prefer clear operational status over opaque LLM one-liners on hold
+        reason = str(decision.get("reason") or "")
+        if (decision.get("action") or "hold").lower() == "hold":
+            reason = pulse
+        elif reason:
+            reason = f"{reason} || {pulse}"
+        else:
+            reason = pulse
         self._last_decision = {
             **decision,
+            "reason": reason[:500],
+            "pulse": pulse[:500],
+            "watch": watch,
+            "symbols_scanned": list(self.config.symbols or []),
             "time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
             "execute": self._execute_enabled(),
             "demo": self._is_demo(),
+            "healthy": True,
             "indicators": {
                 k: {kk: vv for kk, vv in (v or {}).items() if kk in (
-                    "close", "ema_fast", "ema_slow", "roc_3", "adx")}
+                    "close", "ema_fast", "ema_slow", "roc_3", "adx",
+                    "align_long", "align_short", "regime")}
                 for k, v in (snap.get("indicators") or {}).items()
             },
             "open_positions": snap.get("open_positions") or [],
@@ -1698,6 +1714,70 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] db snapshot: {e}", flush=True)
 
+
+    def _watch_board(self) -> list:
+        """Per-symbol quant snapshot for UI status (all configured coins)."""
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        board = []
+        for coin in (self.config.symbols or list(coins.keys())):
+            c = coins.get(coin) or {}
+            board.append({
+                "coin": coin,
+                "regime": c.get("regime") or "—",
+                "align_long": c.get("align_long"),
+                "align_short": c.get("align_short"),
+                "best_side": c.get("best_side"),
+                "align_score": c.get("align_score"),
+                "adx": c.get("adx"),
+                "block_open": bool(c.get("block_open")),
+            })
+        return board
+
+    def _status_pulse(self, decision: dict) -> str:
+        """Human-readable line: system alive + multi-coin scan + thresholds."""
+        q = self._build_quant()
+        board = self._watch_board()
+        parts = []
+        for b in board:
+            al = b.get("align_long")
+            ash = b.get("align_short")
+            al_s = f"{al:.2f}" if al is not None else "—"
+            ash_s = f"{ash:.2f}" if ash is not None else "—"
+            flag = "🚫" if b.get("block_open") else "✓"
+            parts.append(f"{b['coin']}{flag} L{al_s}/S{ash_s}")
+        watch = " · ".join(parts) if parts else "no-data"
+        act = (decision.get("action") or "hold").lower()
+        conf = decision.get("confidence")
+        conf_s = f"{float(conf):.2f}" if conf is not None else "—"
+        min_c = self._effective_min_confidence()
+        min_a = self._effective_min_align()
+        reg = q.get("global_regime") or "?"
+        preset = (self._adapt or {}).get("preset") or "normal"
+        provider = self._provider()
+        poll = int(self.config.poll_interval_sec or 360)
+        # Why hold
+        why = ""
+        if act == "hold":
+            # Best candidate under threshold?
+            best = None
+            for b in board:
+                sc = float(b.get("align_score") or 0)
+                if best is None or sc > best[0]:
+                    best = (sc, b)
+            if best and best[0] + 1e-9 >= min_a and not best[1].get("block_open"):
+                why = f" | best {best[1]['coin']} {best[1].get('best_side')} align={best[0]:.2f} — need conf≥{min_c:.2f}"
+            elif best:
+                why = f" | best {best[1]['coin']} align={best[0]:.2f}<{min_a:.2f} or blocked"
+            else:
+                why = " | scanning — no edge yet"
+        pulse = (
+            f"OK · {provider} · regime={reg} · preset={preset} · "
+            f"min_conf={min_c:.2f} min_align={min_a:.2f} · poll={poll}s · "
+            f"act={act} conf={conf_s}{why}"
+        )
+        return pulse + " || " + watch
+
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
         session_wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
@@ -1746,6 +1826,9 @@ class AIStrategy:
             },
             "indicators": self._latest_indicators,
             "last_decision": self._last_decision,
+            "watch": (self._last_decision or {}).get("watch") or self._watch_board(),
+            "pulse": (self._last_decision or {}).get("pulse") or "",
+            "symbols_scanned": list(self.config.symbols or []),
             "adaptive": self._adapt,
             "reflection": self._reflection,
             "adapt_log": self._adapt_log[-10:],
