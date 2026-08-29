@@ -194,6 +194,9 @@ class RotationStrategy:
         self._last_daily_check: str = ""
         self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
         self._regime: str = "unknown"        # market regime: bull/bear/chop
+        self._gate_stats = {"allow": 0, "block": 0, "llm_block": 0}
+        self._desk_sent_day = ""
+        self._tf4h_cache: dict = {}
         # cooldowns[coin] = epoch seconds until which the bot must not reopen
         # that coin (set after a manual/external close so it doesn't instantly
         # re-enter the same position the user just closed).
