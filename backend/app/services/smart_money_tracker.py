@@ -87,6 +87,8 @@ class TraderProfile:
     max_drawdown: float = 0.0
     # Extended stats
     total_trades: int = 0
+    period_label: str = ""          # e.g. "30д", "месяц", "739д ведения"
+    period_days: int = 0
     avg_hold_hours: float = 0.0
     preferred_coins: List[str] = field(default_factory=list)
     weekly_pnl: List[Dict] = field(default_factory=list)
@@ -551,9 +553,17 @@ class SmartMoneyTracker:
             stats_data = []
             weekly_data = []
 
+            # Period: OKX ranking ROI is cumulative over lead tenure
+            if trader.lead_days and trader.lead_days > 0:
+                trader.period_days = int(trader.lead_days)
+                trader.period_label = f"{trader.lead_days}д ведения"
+            else:
+                trader.period_label = "OKX рейтинг"
+
             # Optional enrichment (non-fatal; rate-limit friendly)
+            # lastDays: 1=7д, 2=30д, 3=90д, 4=180д
             try:
-                stats_resp = await self.okx_api.get_trader_stats(code)
+                stats_resp = await self.okx_api.get_trader_stats(code, last_days="2")
                 if stats_resp.get("code") == "0":
                     stats_data = stats_resp.get("data") or []
                     if stats_data and isinstance(stats_data[0], dict):
@@ -566,6 +576,16 @@ class SmartMoneyTracker:
                             trader.max_drawdown = dd / 100.0 if dd > 1 else dd
                         if s.get("totalTrades") not in (None, ""):
                             trader.total_trades = int(float(s.get("totalTrades") or 0))
+                        # profitDays + lossDays ≈ activity days in window (proxy for trade activity)
+                        pd = int(float(s.get("profitDays") or 0))
+                        ld = int(float(s.get("lossDays") or 0))
+                        if trader.total_trades <= 0 and (pd or ld):
+                            trader.total_trades = pd + ld
+                            # annotate that count is trading-days in 30d window
+                            if not trader.period_label or "ведения" in trader.period_label:
+                                pass  # keep tenure for ROI; trades refer to 30d activity
+                        # Store 30d window hint for UI
+                        row_period_stats = f"WR 30д; активность {pd + ld}д"
             except Exception:
                 pass
 
@@ -577,6 +597,21 @@ class SmartMoneyTracker:
                         trader.weekly_pnl = weekly_data
             except Exception:
                 pass
+
+            # Closed positions count (up to 50 recent) as trade-count proxy
+            if trader.total_trades <= 0:
+                try:
+                    hist = await self.okx_api.get_trader_position_history(code, limit="50")
+                    if hist.get("code") == "0":
+                        hdata = hist.get("data") or []
+                        if hdata:
+                            trader.total_trades = len(hdata)
+                            if len(hdata) >= 50:
+                                # indicate 50+ 
+                                trader.total_trades = 50
+                                row_trades_cap = True
+                except Exception:
+                    pass
 
             self.verifier.verify(trader, stats_data, weekly_data, copy_count)
             if not trader.copy_traders:
@@ -590,6 +625,16 @@ class SmartMoneyTracker:
                 or f"https://www.okx.com/copy-trading/account/{code}"
             )
             row["note"] = "OKX Copy Trading"
+            row["period_label"] = trader.period_label or "OKX"
+            row["period_days"] = int(trader.period_days or trader.lead_days or 0)
+            row["total_trades"] = int(trader.total_trades or 0)
+            row["trades_label"] = (
+                f"{row['total_trades']}+" if row["total_trades"] >= 50 else str(row["total_trades"] or "н/д")
+            )
+            row["pnl_period_note"] = (
+                f"PnL/ROI за {row['period_label']}"
+                if row.get("period_label") else "PnL/ROI за период рейтинга"
+            )
             results.append(row)
 
         # ── Hyperliquid + social (open sources) ──

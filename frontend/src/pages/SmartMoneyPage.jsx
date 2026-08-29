@@ -95,12 +95,22 @@ function TraderCard({ trader, rank, onView, onCopy, onTrack, onUntrack, isTracke
           <div className={`text-xl font-bold mono ${roi >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
             {fmtPct(roi)}
           </div>
-          <div className="text-[10px] text-[var(--txt-muted)]">ROI</div>
+          <div className="text-[10px] text-[var(--txt-muted)]">
+            ROI · {trader.period_label || trader.pnl_period_note || 'период н/д'}
+          </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-4 gap-2 mb-3 py-2 border-y border-[var(--border)]">
-        <Stat label="PnL" value={fmtUsd(pnl)} color={pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'} />
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3 py-2 border-y border-[var(--border)]">
+        <Stat
+          label={`PnL${trader.period_label ? ` (${trader.period_label})` : ''}`}
+          value={fmtUsd(pnl)}
+          color={pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}
+        />
+        <Stat
+          label="Сделок"
+          value={trader.trades_label || (trader.total_trades > 0 ? String(trader.total_trades) : 'н/д')}
+        />
         <Stat
           label={trader.metric_label_wr || 'Win rate'}
           value={
