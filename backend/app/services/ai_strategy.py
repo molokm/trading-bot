@@ -1442,8 +1442,8 @@ class AIStrategy:
             reason = pulse
         self._last_decision = {
             **decision,
-            "reason": reason[:500],
-            "pulse": pulse[:500],
+            "reason": reason[:700],
+            "pulse": pulse[:700],
             "watch": watch,
             "symbols_scanned": list(self.config.symbols or []),
             "time": datetime.now(timezone.utc).isoformat(),
@@ -1735,48 +1735,101 @@ class AIStrategy:
         return board
 
     def _status_pulse(self, decision: dict) -> str:
-        """Human-readable line: system alive + multi-coin scan + thresholds."""
+        """Краткий статус по-русски: бот жив, что смотрит, почему нет входа."""
         q = self._build_quant()
         board = self._watch_board()
-        parts = []
+        min_c = self._effective_min_confidence()
+        min_a = self._effective_min_align()
+        reg = (q.get("global_regime") or "неизвестно").lower()
+        reg_ru = {
+            "bull": "бычий", "bear": "медвежий", "chop": "боковик",
+            "unknown": "неясный", "неизвестно": "неясный",
+        }.get(reg, reg)
+        preset = (self._adapt or {}).get("preset") or "normal"
+        preset_ru = {
+            "conservative": "осторожный",
+            "normal": "обычный",
+            "aggressive": "агрессивный",
+        }.get(str(preset).lower(), str(preset))
+        provider = self._provider()
+        poll = int(self.config.poll_interval_sec or 360)
+        act = (decision.get("action") or "hold").lower()
+        conf = decision.get("confidence")
+        try:
+            conf_f = float(conf) if conf is not None else None
+        except (TypeError, ValueError):
+            conf_f = None
+
+        # Лучший кандидат среди всех монет
+        best = None
+        for b in board:
+            sc = float(b.get("align_score") or 0)
+            if best is None or sc > best[0]:
+                best = (sc, b)
+
+        lines = []
+        lines.append(
+            f"Бот работает: сканирую BTC, ETH, SOL, XRP каждые {poll // 60 or 1} мин "
+            f"({provider}). Рынок: {reg_ru}, режим риска: {preset_ru}."
+        )
+
+        if act == "hold":
+            lines.append("Сейчас сделку не открываю.")
+            if best:
+                b = best[1]
+                side = b.get("best_side") or "—"
+                side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
+                sc = best[0]
+                coin = b.get("coin")
+                if b.get("block_open"):
+                    lines.append(
+                        f"Ближе всех {coin} ({side_ru}), сила сигнала {sc:.2f}, "
+                        f"но вход заблокирован (боковик / слабый тренд / ADX)."
+                    )
+                elif sc + 1e-9 < min_a:
+                    lines.append(
+                        f"Ближе всех {coin} ({side_ru}): сила сигнала {sc:.2f} — "
+                        f"не дотянула до порога {min_a:.2f}."
+                    )
+                elif conf_f is not None and conf_f + 1e-9 < min_c:
+                    lines.append(
+                        f"По {coin} ({side_ru}) сигнал есть (сила {sc:.2f}), "
+                        f"но уверенность {conf_f:.2f} ниже порога {min_c:.2f}."
+                    )
+                else:
+                    lines.append(
+                        f"Лучший кандидат {coin} ({side_ru}, сила {sc:.2f}), "
+                        f"пороги: сила ≥{min_a:.2f}, уверенность ≥{min_c:.2f} — жду подтверждения."
+                    )
+            else:
+                lines.append("Чёткого кандидата среди монет пока нет.")
+        elif act == "open":
+            sym = decision.get("symbol") or "?"
+            side = decision.get("side") or ""
+            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
+            lines.append(
+                f"Сигнал на вход: {sym} {side_ru}"
+                + (f", уверенность {conf_f:.2f}." if conf_f is not None else ".")
+            )
+        elif act in ("close", "reduce"):
+            sym = decision.get("symbol") or "?"
+            lines.append(f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}.")
+        else:
+            lines.append(f"Действие: {act}.")
+
+        # Краткая таблица по монетам
+        bits = []
         for b in board:
             al = b.get("align_long")
             ash = b.get("align_short")
-            al_s = f"{al:.2f}" if al is not None else "—"
-            ash_s = f"{ash:.2f}" if ash is not None else "—"
-            flag = "🚫" if b.get("block_open") else "✓"
-            parts.append(f"{b['coin']}{flag} L{al_s}/S{ash_s}")
-        watch = " · ".join(parts) if parts else "no-data"
-        act = (decision.get("action") or "hold").lower()
-        conf = decision.get("confidence")
-        conf_s = f"{float(conf):.2f}" if conf is not None else "—"
-        min_c = self._effective_min_confidence()
-        min_a = self._effective_min_align()
-        reg = q.get("global_regime") or "?"
-        preset = (self._adapt or {}).get("preset") or "normal"
-        provider = self._provider()
-        poll = int(self.config.poll_interval_sec or 360)
-        # Why hold
-        why = ""
-        if act == "hold":
-            # Best candidate under threshold?
-            best = None
-            for b in board:
-                sc = float(b.get("align_score") or 0)
-                if best is None or sc > best[0]:
-                    best = (sc, b)
-            if best and best[0] + 1e-9 >= min_a and not best[1].get("block_open"):
-                why = f" | best {best[1]['coin']} {best[1].get('best_side')} align={best[0]:.2f} — need conf≥{min_c:.2f}"
-            elif best:
-                why = f" | best {best[1]['coin']} align={best[0]:.2f}<{min_a:.2f} or blocked"
-            else:
-                why = " | scanning — no edge yet"
-        pulse = (
-            f"OK · {provider} · regime={reg} · preset={preset} · "
-            f"min_conf={min_c:.2f} min_align={min_a:.2f} · poll={poll}s · "
-            f"act={act} conf={conf_s}{why}"
-        )
-        return pulse + " || " + watch
+            al_s = f"{float(al):.2f}" if al is not None else "—"
+            ash_s = f"{float(ash):.2f}" if ash is not None else "—"
+            st = "блок" if b.get("block_open") else "ок"
+            bits.append(f"{b['coin']}: лонг {al_s} / шорт {ash_s} ({st})")
+        if bits:
+            lines.append("Монеты — " + "; ".join(bits) + ".")
+
+        return " ".join(lines)
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
