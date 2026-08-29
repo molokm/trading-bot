@@ -128,6 +128,7 @@ ai_bot = None
 scalp_bot = None  # Order Book Scalp instance (retired)
 vwap_rev_bot = None  # VWAP Mean Reversion instance
 sm_tracker = None  # Smart Money Tracker instance
+sm_mirror = None  # HL→OKX position mirror
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -1558,6 +1559,46 @@ async def smart_money_my_copies():
     tracker = _ensure_sm_tracker()
     copies = await tracker.get_my_copies()
     return {"copies": copies}
+
+
+
+@app.get("/api/smart-money/mirror/status")
+async def smart_money_mirror_status():
+    from app.services.smart_money_mirror import get_mirror
+    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    return m.get_status()
+
+
+@app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
+async def smart_money_mirror_start(data: dict = None):
+    """Start mirroring a public Hyperliquid trader onto OKX."""
+    from app.services.smart_money_mirror import get_mirror
+    data = data or {}
+    address = data.get("address") or data.get("unique_code") or ""
+    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    # ensure OKX client
+    if client_manager and not client_manager.get_client():
+        try:
+            if _env_key and _env_secret and _env_pass:
+                await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        except Exception as e:
+            return {"ok": False, "msg": f"OKX connect failed: {e}"}
+    return await m.start_mirror(
+        address=address,
+        alias=str(data.get("alias") or ""),
+        capital_usdt=float(data.get("capital_usdt") or data.get("copy_amt") or 100),
+        max_leverage=float(data.get("max_leverage") or 3),
+        execute=bool(data.get("execute", True)),
+    )
+
+
+@app.post("/api/smart-money/mirror/stop", dependencies=[Depends(require_admin)])
+async def smart_money_mirror_stop(data: dict = None):
+    from app.services.smart_money_mirror import get_mirror
+    data = data or {}
+    address = data.get("address") or data.get("unique_code") or ""
+    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    return await m.stop_mirror(address, close_positions=bool(data.get("close_positions", False)))
 
 
 @app.post("/api/smart-money/start", dependencies=[Depends(require_admin)])
