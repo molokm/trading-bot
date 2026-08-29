@@ -32,7 +32,7 @@ from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v2.1-indexit"
+STRATEGY_VERSION = "v2.2-bprime"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -47,13 +47,11 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v4. Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
-    "импульсные движения. Сигнал: |ROC|≥3% за 1 день, объём ≥1.5× среднего и ≤3.5× среднего "
-    "(anti-climax: отсев дней истощения/FOMO), тренд EMA20>EMA50; шорты — симметрично. "
-    "До 3 позиций, ранжирование по |ROC|. Пирамидинг отключён. Стоп = 5×ATR, риск 10% капитала, "
-    "плечо до 3×. Выход: 25% на +2 ATR, 30% на +10 ATR, остаток с трейлингом 12×ATR, max hold 28 дней. "
-    "Full-sample BT (OKX 1D, 10 монет, 2023-05..2026-08): full ~+555%, CAGR ~77%, Sharpe ~1.41, MaxDD −36.5%; "
-    "по годам ~+125% / +141% / −9% / +28% (2023–2026). Не чистый OOS. Cross margin, demo/live через env."
+    "Impulse 1D v2.2-B′. Daily impulse на 10 монетах: |ROC|≥6% (1D), объём 1.5–3.5× avg (anti-climax), "
+    "EMA20>EMA50. Long-only. Фильтр режима: нет новых long, если BTC < SMA200. "
+    "До 3 позиций (top по |ROC|), риск 4.5% equity, стоп 5×ATR, плечо до 3×. "
+    "Выход: cascade 25%@2ATR + 30%@10ATR, peak-lock после TP1, EMA/ROC exit в плюсе, trail 12×ATR, hold≤28д. "
+    "B′ подобран по BT: risk+SMA200 режут DD без top_k=2 (тот сильно бил return)."
 )
 
 
@@ -80,7 +78,7 @@ class ImpulseConfig:
     add_atr_mult: float = 0.5         # add when new peak >= last_add_peak + ATR*this
     # risk / sizing
     max_leverage: float = 3.0
-    risk_per_trade: float = 0.06  # survival
+    risk_per_trade: float = 0.045  # B-prime: milder size, keep edge
     sl_atr_mult: float = 5.0          # initial stop = entry - ATR*this
     sl_atr_mult_short: float = 5.0    # short-specific stop; 0 = use sl_atr_mult
     trail_atr_mult: float = 12.0      # trail = peak - ATR*this (v2: wide)
@@ -105,6 +103,9 @@ class ImpulseConfig:
     soft_partial_pct: float = 0.015       # +1.5% profit → optional extra partial
     soft_partial_frac: float = 0.30
     allow_short: bool = False  # survival long-only
+    # B-prime regime / peak-lock
+    btc_sma200_filter: bool = True   # no new longs if BTC close < SMA200
+    peak_lock_after_tp1: bool = True # arm peak-lock only after first scale-out
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
     limit_wait_sec: int = 300
@@ -180,6 +181,18 @@ class ImpulseStrategy:
     # ─── Indicators (no look-ahead) ───
 
     @staticmethod
+    @staticmethod
+    def sma(data, period):
+        n = len(data)
+        out = [0.0] * n
+        s = 0.0
+        for i, x in enumerate(data):
+            s += float(x)
+            if i >= period:
+                s -= float(data[i - period])
+            out[i] = s / min(i + 1, period)
+        return out
+
     def ema(data, period):
         if len(data) < period:
             return data[:]
@@ -267,6 +280,8 @@ class ImpulseStrategy:
     def _compute_daily_indicators(self, candles: list) -> dict:
         if len(candles) < 70:
             return None
+        if getattr(self.config, "btc_sma200_filter", False) and len(candles) < 210:
+            return None
         closes = [c["C"] for c in candles]
         highs = [c["H"] for c in candles]
         lows = [c["L"] for c in candles]
@@ -285,6 +300,7 @@ class ImpulseStrategy:
         vols = [c["V"] for c in candles[v_lo:i + 1] if c["V"] > 0]
         avg_vol = sum(vols) / len(vols) if vols else 0.0
 
+        sma200_arr = self.sma(closes, 200)
         return {
             "roc": roc_arr[i],
             "ema_fast": ema_f[i],
@@ -295,6 +311,8 @@ class ImpulseStrategy:
             "price": closes[i],
             "vol": candles[i]["V"],
             "avg_vol": avg_vol,
+            "sma200": sma200_arr[i],
+            "above_sma200": closes[i] >= sma200_arr[i] if sma200_arr[i] else True,
             "close_today": closes[-1],
             "date": candles[i]["datetime"].strftime("%Y-%m-%d"),
             "date_today": candles[-1]["datetime"].strftime("%Y-%m-%d"),
@@ -944,7 +962,7 @@ class ImpulseStrategy:
         # 1) Refresh candles & indicators for every coin
         indicators = {}
         for coin in self.config.symbols:
-            candles = await self._fetch_candles(client, coin, bar="1D", limit=250)
+            candles = await self._fetch_candles(client, coin, bar="1D", limit=300)
             ind = self._compute_daily_indicators(candles)
             indicators[coin] = ind
             if ind:
@@ -1045,10 +1063,13 @@ class ImpulseStrategy:
             await self._close_position(client, pos, "stop")
             return True
 
-        # 2) Peak giveback lock — do not give back a solid winner
+        # 2) Peak giveback lock — B-prime: only after TP1 so early runners can develop
         act = float(getattr(cfg, "peak_lock_activate_pct", 1.2) or 1.2)
         keep = float(getattr(cfg, "peak_lock_keep_frac", 0.45) or 0.45)
-        if peak_upl >= act and upl_pct >= 0:
+        lock_ok = True
+        if getattr(cfg, "peak_lock_after_tp1", True) and not getattr(pos, "tp1_done", False):
+            lock_ok = False
+        if lock_ok and peak_upl >= act and upl_pct >= 0:
             min_keep = peak_upl * keep
             if upl_pct < min_keep:
                 await self._close_position(
@@ -1157,6 +1178,20 @@ class ImpulseStrategy:
         if free_slots <= 0:
             return
 
+        # B-prime: block new longs when BTC is below SMA200 (bear/chop filter)
+        btc_regime_ok = True
+        if getattr(cfg, "btc_sma200_filter", True):
+            btc_ind = indicators.get("BTC") or {}
+            if btc_ind:
+                btc_regime_ok = bool(btc_ind.get("above_sma200", True))
+            if not btc_regime_ok:
+                self.analysis.log(
+                    "impulse", "regime_block",
+                    reason="btc_below_sma200",
+                    btc_px=round(float(btc_ind.get("price") or 0), 2),
+                    sma200=round(float(btc_ind.get("sma200") or 0), 2),
+                )
+
         candidates = []
         for coin, ind in indicators.items():
             if not ind:
@@ -1167,6 +1202,8 @@ class ImpulseStrategy:
                 continue
             side, strength = self._entry_signal(coin, ind)
             if not side:
+                continue
+            if side == "long" and not btc_regime_ok:
                 continue
             candidates.append((strength, coin, side, ind))
         if not candidates:

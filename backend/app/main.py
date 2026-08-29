@@ -264,9 +264,9 @@ async def startup():
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
                 top_k=3,
-                entry_roc=3.0,
+                entry_roc=6.0,
                 max_adds=0,
-                risk_per_trade=0.10,
+                risk_per_trade=0.045,
                 sl_atr_mult=5.0,
                 sl_atr_mult_short=5.0,
                 trail_atr_mult=12.0,
@@ -280,6 +280,9 @@ async def startup():
                 max_leverage=3.0,
                 poll_interval_sec=300,
                 auto_execute=True,
+                allow_short=False,
+                btc_sma200_filter=True,
+                peak_lock_after_tp1=True,
             )
             imp = ImpulseStrategy(config=imp_config, client_manager=client_manager, db=db,
                                   notifier=telegram)
