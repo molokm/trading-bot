@@ -824,15 +824,20 @@ class SmartMoneyTracker:
     async def start_copying(self, unique_code: str,
                              copy_amt: str = None) -> Dict:
         """Start copying a trader on OKX."""
-        if not self.okx_api or not self.client_manager:
-            return {"ok": False, "msg": "no API connection"}
+        if not self.okx_api:
+            return {"ok": False, "msg": "no OKX copy API client"}
+        if not (getattr(self.okx_api, "api_key", None) or "").strip():
+            return {"ok": False, "msg": "OKX API keys not configured"}
 
-        client = self.client_manager.get_client()
-        if not client:
-            return {"ok": False, "msg": "OKX client not connected"}
+        # Prefer live trading client if present, but private copy API uses okx_api keys
+        if self.client_manager:
+            client = self.client_manager.get_client()
+            if not client:
+                return {"ok": False, "msg": "OKX client not connected — проверьте ключи / подключение"}
 
         if not self.config.execute:
-            return {"ok": False, "msg": "execution disabled (execute=False)"}
+            # Explicit copy action enables execution for this session
+            self.config.execute = True
 
         # Check daily loss limit
         if self._daily_loss >= self.config.max_daily_loss_pct * self.config.capital:

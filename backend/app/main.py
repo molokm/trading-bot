@@ -1377,6 +1377,50 @@ async def ai_decide_once():
 
 
 # ── Smart Money Tracker ──────────────────────────────────────
+
+def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
+    """Create global Smart Money tracker on first use (browse/copy without manual Start)."""
+    global sm_tracker
+    from app.services.smart_money_tracker import (
+        SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
+    )
+    if sm_tracker is None:
+        okx = OKXCopyAPI(
+            api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+            secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+            passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+            demo=_env_demo,
+        )
+        cfg = TrackerConfig(
+            sort_type="pnl_ratio",
+            execute=bool(execute) if execute is not None else False,
+        )
+        sm_tracker = SmartMoneyTracker(
+            config=cfg,
+            client_manager=client_manager,
+            db=db,
+            notifier=telegram,
+            okx_api=okx,
+        )
+    else:
+        if execute is True:
+            try:
+                sm_tracker.config.execute = True
+            except Exception:
+                pass
+        # refresh keys if tracker was created empty
+        try:
+            if sm_tracker.okx_api and not getattr(sm_tracker.okx_api, "api_key", None):
+                sm_tracker.okx_api.api_key = _env_key
+                sm_tracker.okx_api.secret_key = _env_secret
+                sm_tracker.okx_api.passphrase = _env_pass
+        except Exception:
+            pass
+    if start and not getattr(sm_tracker, "_running", False):
+        sm_tracker.start()
+    return sm_tracker
+
+
 @app.get("/api/smart-money/status")
 async def smart_money_status():
     global sm_tracker
@@ -1437,10 +1481,8 @@ async def smart_money_discover(
 @app.get("/api/smart-money/trader/{unique_code}")
 async def smart_money_trader_detail(unique_code: str):
     """Get full details for a single trader."""
-    global sm_tracker
-    if not sm_tracker:
-        return {"error": True, "message": "Tracker not initialized"}
-    detail = await sm_tracker.get_trader_detail(unique_code)
+    tracker = _ensure_sm_tracker()
+    detail = await tracker.get_trader_detail(unique_code)
     return detail
 
 
@@ -1461,9 +1503,8 @@ async def smart_money_track(data: dict = None):
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    if not sm_tracker:
-        return {"ok": False, "message": "Tracker not initialized"}
-    return await sm_tracker.track_trader(code)
+    tracker = _ensure_sm_tracker(start=True)
+    return await tracker.track_trader(code)
 
 
 @app.post("/api/smart-money/untrack", dependencies=[Depends(require_admin)])
@@ -1474,22 +1515,21 @@ async def smart_money_untrack(data: dict = None):
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    if not sm_tracker:
-        return {"ok": False, "msg": "Tracker not initialized"}
-    return sm_tracker.untrack_trader(code)
+    tracker = _ensure_sm_tracker()
+    return tracker.untrack_trader(code)
 
 
 @app.post("/api/smart-money/copy", dependencies=[Depends(require_admin)])
 async def smart_money_copy(data: dict = None):
-    """Start copying a trader on OKX."""
-    global sm_tracker
+    """Start copying a trader on OKX (auto-inits tracker + enables execute)."""
     data = data or {}
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    if not sm_tracker:
-        return {"ok": False, "msg": "Tracker not initialized"}
-    return await sm_tracker.start_copying(code, copy_amt=data.get("copy_amt"))
+    if str(code).startswith("hl:") or str(code).startswith("social:"):
+        return {"ok": False, "msg": "Копирование доступно только для трейдеров OKX"}
+    tracker = _ensure_sm_tracker(execute=True, start=True)
+    return await tracker.start_copying(code, copy_amt=data.get("copy_amt"))
 
 
 @app.post("/api/smart-money/stop-copy", dependencies=[Depends(require_admin)])
@@ -1500,18 +1540,15 @@ async def smart_money_stop_copy(data: dict = None):
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    if not sm_tracker:
-        return {"ok": False, "msg": "Tracker not initialized"}
-    return await sm_tracker.stop_copying(code)
+    tracker = _ensure_sm_tracker()
+    return await tracker.stop_copying(code)
 
 
 @app.get("/api/smart-money/my-copies")
 async def smart_money_my_copies():
     """Get list of traders we're currently copying."""
-    global sm_tracker
-    if not sm_tracker:
-        return {"copies": []}
-    copies = await sm_tracker.get_my_copies()
+    tracker = _ensure_sm_tracker()
+    copies = await tracker.get_my_copies()
     return {"copies": copies}
 
 
@@ -1520,7 +1557,7 @@ async def smart_money_start(data: dict = None):
     """Start the Smart Money Tracker."""
     global sm_tracker
     data = data or {}
-    if sm_tracker and sm_tracker._running:
+    if sm_tracker and getattr(sm_tracker, "_running", False):
         return {"message": "Already running", **sm_tracker.get_status()}
     cfg = TrackerConfig(
         capital=float(data.get("capital") or 500),
