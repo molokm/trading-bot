@@ -1528,6 +1528,53 @@ async def smart_money_stop():
     return {"message": "Smart Money Tracker stopped", "running": False}
 
 
+@app.post("/api/smart-money/config", dependencies=[Depends(require_admin)])
+async def smart_money_update_config(data: dict = None):
+    """Update tracker config at runtime (capital, TP/SL, leverage, etc)."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"ok": False, "msg": "Tracker not initialized"}
+    data = data or {}
+    allowed = {
+        "capital", "max_leverage", "tp_ratio", "sl_ratio",
+        "max_daily_loss_pct", "max_open_copies", "copy_mode",
+        "min_roi_pct", "min_win_rate", "max_max_drawdown",
+        "min_lead_days", "poll_interval_sec", "execute",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed and v is not None}
+    return sm_tracker.update_config(**filtered)
+
+
+@app.get("/api/smart-money/trader/{unique_code}/history")
+async def smart_money_trader_history(unique_code: str, limit: int = 50):
+    """Get closed trade history for a trader."""
+    global sm_tracker
+    if not sm_tracker or not sm_tracker.okx_api:
+        return {"trades": []}
+    try:
+        resp = await sm_tracker.okx_api.get_trader_position_history(
+            unique_code, limit=str(limit)
+        )
+        if resp.get("code") == "0":
+            trades = []
+            for h in resp.get("data", []):
+                trades.append({
+                    "instId": h.get("instId", ""),
+                    "side": h.get("side", ""),
+                    "sz": h.get("sz", ""),
+                    "avgPx": h.get("avgPx", ""),
+                    "pnl": float(h.get("pnl", 0)),
+                    "pnlRatio": float(h.get("pnlRatio", 0)),
+                    "openTime": h.get("cTime", ""),
+                    "closeTime": h.get("uTime", ""),
+                    "lever": h.get("lever", ""),
+                })
+            return {"trades": trades}
+        return {"trades": []}
+    except Exception as e:
+        return {"trades": [], "error": str(e)}
+
+
 @app.get("/api/vwap_rev/status")
 async def vwap_rev_status():
     global vwap_rev_bot

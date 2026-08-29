@@ -550,11 +550,12 @@ class SmartMoneyTracker:
             trader = TraderProfile(unique_code=unique_code)
 
         # Fetch all data in parallel
-        stats_r, pnl_r, weekly_r, pos_r, pref_r, copy_r = await asyncio.gather(
+        stats_r, pnl_r, weekly_r, pos_r, hist_r, pref_r, copy_r = await asyncio.gather(
             self.okx_api.get_trader_stats(unique_code),
             self.okx_api.get_trader_pnl(unique_code),
             self.okx_api.get_trader_weekly_pnl(unique_code),
             self.okx_api.get_trader_positions(unique_code),
+            self.okx_api.get_trader_position_history(unique_code, limit="50"),
             self.okx_api.get_trader_preferences(unique_code),
             self.okx_api.get_trader_copy_count(unique_code),
             return_exceptions=True,
@@ -585,6 +586,22 @@ class SmartMoneyTracker:
             trader.current_positions = pos_r.get("data", [])
             trader.last_positions_fetch = time.time()
 
+        # Parse position history (closed trades)
+        trade_history = []
+        if isinstance(hist_r, dict) and hist_r.get("code") == "0":
+            for h in hist_r.get("data", []):
+                trade_history.append({
+                    "instId": h.get("instId", ""),
+                    "side": h.get("side", ""),
+                    "sz": h.get("sz", ""),
+                    "avgPx": h.get("avgPx", ""),
+                    "pnl": float(h.get("pnl", 0)),
+                    "pnlRatio": float(h.get("pnlRatio", 0)),
+                    "openTime": h.get("cTime", ""),
+                    "closeTime": h.get("uTime", ""),
+                    "杠杆": h.get("lever", ""),
+                })
+
         # Parse preferences
         if isinstance(pref_r, dict) and pref_r.get("code") == "0" and pref_r.get("data"):
             trader.preferred_coins = [
@@ -599,7 +616,9 @@ class SmartMoneyTracker:
         self.verifier.verify(trader, stats_r.get("data") if isinstance(stats_r, dict) else None,
                               trader.weekly_pnl, trader.copy_traders)
 
-        return asdict(trader)
+        result = asdict(trader)
+        result["trade_history"] = trade_history
+        return result
 
     # ────────── Tracking ──────────
 
@@ -644,6 +663,24 @@ class SmartMoneyTracker:
     def get_tracked(self) -> List[Dict]:
         """Return all tracked traders."""
         return [asdict(t) for t in self._traders.values() if t.tracked]
+
+    # ────────── Config Update ──────────
+
+    def update_config(self, **kwargs) -> Dict:
+        """Update tracker config at runtime."""
+        for k, v in kwargs.items():
+            if hasattr(self.config, k):
+                old = getattr(self.config, k)
+                if isinstance(old, int):
+                    setattr(self.config, k, int(v))
+                elif isinstance(old, float):
+                    setattr(self.config, k, float(v))
+                elif isinstance(old, bool):
+                    setattr(self.config, k, bool(v))
+                else:
+                    setattr(self.config, k, v)
+        self._persist()
+        return {"ok": True, "config": asdict(self.config)}
 
     # ────────── Copy Trading ──────────
 
