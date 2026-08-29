@@ -2,7 +2,7 @@ const ru = {
   // ── Navigation ──
   'nav.dashboard': 'Панель',
   'nav.bots': 'Боты',
-  'nav.scalp': 'Скальп стакан',
+  'nav.smartMoney': 'Умные Деньги',
   'scalp.lifetime_pnl': 'Накопительный PnL (только скальп)',
   'scalp.session_pnl': 'PnL сессии',
   'scalp.trades': 'Сделки скальпа',

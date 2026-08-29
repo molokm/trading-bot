@@ -60,7 +60,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
-  const [scalpStatus, setScalpStatus] = useState(null)
+  const [smartMoneyStatus, setSmartMoneyStatus] = useState(null)
   const [vwapRevStatus, setVwapRevStatus] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
@@ -133,7 +133,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         impStatus,
         valStatus,
         aiSt,
-        scalpSt,
+        smartMoneySt,
         vwapRevSt,
         priceTickers,
       ] = await Promise.all([
@@ -144,7 +144,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.impulseStatus().catch(() => null),
         api.validationStatus().catch(() => null),
         api.aiStatus().catch(() => null),
-        api.scalpStatus().catch(() => null),
+        api.smartMoneyStatus().catch(() => null),
         api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
@@ -155,7 +155,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
       setAiStatus(aiSt)
-      setScalpStatus(scalpSt)
+      setSmartMoneyStatus(smartMoneySt)
       setVwapRevStatus(vwapRevSt)
 
       if (priceTickers?.tickers) {
@@ -209,7 +209,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     impulse_strategy: 'Impulse 1D',
     validation_strategy: 'MACD+Donchian Validation',
     ai_strategy: 'AI Discretionary 1H',
-    orderbook_scalp: 'Order Book Scalp',
+    orderbook_scalp: 'Smart Money',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
@@ -271,10 +271,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
-    addPositions(scalpStatus?.open_positions, 'Order Book Scalp')
+    addPositions(smartMoneyStatus?.open_positions, 'Smart Money')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, vwapRevStatus?.open_positions])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
 
   // Exchange positions with no strategy owner (manual / lost bot state)
   const orphanPositions = useMemo(() => {
@@ -297,7 +297,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
       const key = `${p.instId || ''}|${posSideKey}`
       const bn = p.bot || botMap[key] || ''
-      if (bn && bn !== 'Order Book Scalp') return false
+      if (bn && bn !== 'Smart Money') return false
       if (managedKeys.has(key)) return false
       return true
     })
@@ -352,7 +352,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
     for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
     for (const p of (aiStatus?.open_positions || [])) pushOpen(p, 'AI Discretionary 1H')
-    // Scalp opens/trades live only on /scalp — not on main dashboard
+    // Smart Money opens/trades live only on /smart-money — not on main dashboard
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
     for (const p of (positions || [])) {
@@ -370,7 +370,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
         }
       }
-      if (hint === 'Order Book Scalp') continue
+      if (hint === 'Smart Money') continue
       if (!hint) continue
       pushOpen({
         ...p,
@@ -387,7 +387,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
     for (const tr of allTrades) {
-      if (tr.bot === 'Order Book Scalp') continue
+      if (tr.bot === 'Smart Money') continue
       const r = (tr.reason || '').toLowerCase()
       if (r === 'open' || r === 'add') continue
       if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
@@ -420,7 +420,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, scalpStatus?.open_positions, positions, allTrades, botMap])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
@@ -658,7 +658,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     {positions.filter((p) => {
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
-                      if (!bn || bn === 'Order Book Scalp') return false
+                      if (!bn || bn === 'Smart Money') return false
                       return true
                     }).map((p, i) => {
                       const upl = parseFloat(p.upl || 0)
@@ -674,7 +674,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                         : botName === 'AI Discretionary 1H'
                         ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                        : botName === 'Order Book Scalp'
+                        : botName === 'Smart Money'
                         ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
                         : botName
                         ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
@@ -819,7 +819,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                           : tr.bot === 'AI Discretionary 1H'
                             ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                            : tr.bot === 'Order Book Scalp'
+                            : tr.bot === 'Smart Money'
                               ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
                               : tr.bot
                                 ? { label: String(tr.bot).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)]' }

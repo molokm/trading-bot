@@ -1,0 +1,862 @@
+"""Smart Money Tracker — discovery, verification, tracking & copy of OKX lead traders.
+
+Replaces the Order Book Scalp (OBI) strategy.
+Uses OKX Copy Trading public API for leaderboard + stats,
+and private API for copy-trading execution.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import time
+import threading
+from dataclasses import dataclass, field, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+logger = logging.getLogger("smart_money")
+
+BOT_ID = "smart_money"
+STRATEGY_NAME = "Smart Money Tracker"
+STRATEGY_VERSION = "v1.0"
+
+DATA_DIR = os.environ.get("DATA_DIR", "/tmp")
+if not os.path.isdir(DATA_DIR):
+    DATA_DIR = "/tmp"
+
+
+# ──────────────────────── Config ────────────────────────
+
+@dataclass
+class TrackerConfig:
+    """Configuration for the Smart Money Tracker."""
+    # Discovery
+    sort_type: str = "roi"          # roi | copyRatio | pnl
+    inst_type: str = "SWAP"
+    min_lead_days: int = 14         # minimum days as lead trader
+    min_assets: float = 0.0         # min AUM filter
+    max_assets: float = 0.0         # max AUM filter (0 = no limit)
+    page_size: int = 20
+
+    # Verification thresholds
+    min_roi_pct: float = 5.0        # minimum ROI % to pass verification
+    min_win_rate: float = 0.45      # minimum win rate (0-1)
+    max_max_drawdown: float = 0.30  # maximum allowed drawdown (0-1)
+    min_profitable_weeks: int = 3   # out of last 4 weeks
+    min_copy_traders: int = 5       # social proof
+
+    # Copy settings
+    capital: float = 500.0          # USDT per copy trade
+    max_leverage: int = 3
+    copy_mode: str = "fixed_amt"    # fixed_amt | fixed_ratio | fixed_qty
+    tp_ratio: float = 0.10          # 10% TP
+    sl_ratio: float = 0.05          # 5% SL
+    max_daily_loss_pct: float = 0.05
+    max_open_copies: int = 5
+
+    # Monitoring
+    poll_interval_sec: int = 60     # how often to check tracked traders
+    snapshot_interval_sec: int = 3600  # how often to snapshot performance
+
+    # Execution
+    execute: bool = False
+    notify_telegram: bool = False
+
+
+# ──────────────────────── Data Classes ────────────────────────
+
+@dataclass
+class TraderProfile:
+    """A lead trader from OKX leaderboard."""
+    unique_code: str
+    alias: str = ""
+    inst_type: str = "SWAP"
+    roi_pct: float = 0.0
+    pnl_usd: float = 0.0
+    copy_ratio: float = 0.0
+    copy_traders: int = 0
+    lead_days: int = 0
+    aum: float = 0.0
+    win_rate: float = 0.0
+    max_drawdown: float = 0.0
+    # Extended stats
+    total_trades: int = 0
+    avg_hold_hours: float = 0.0
+    preferred_coins: List[str] = field(default_factory=list)
+    weekly_pnl: List[Dict] = field(default_factory=list)
+    # Verification
+    verified: bool = False
+    verify_score: float = 0.0
+    verify_failures: List[str] = field(default_factory=list)
+    last_verified: float = 0.0
+    # Tracking state
+    tracked: bool = False
+    tracking_since: float = 0.0
+    last_snapshot: float = 0.0
+    # Current positions
+    current_positions: List[Dict] = field(default_factory=list)
+    last_positions_fetch: float = 0.0
+
+
+@dataclass
+class CopyTrade:
+    """Record of a copy trade executed."""
+    id: str = ""
+    trader_code: str = ""
+    inst_id: str = ""
+    side: str = ""
+    size: str = ""
+    entry_price: str = ""
+    entry_time: float = 0.0
+    close_price: str = ""
+    close_time: float = 0.0
+    pnl: float = 0.0
+    reason: str = ""
+
+
+# ──────────────────────── OKX API Client ────────────────────────
+
+class OKXCopyAPI:
+    """Thin wrapper around OKX Copy Trading API endpoints."""
+
+    BASE = "https://www.okx.com"
+
+    def __init__(self, api_key: str = "", secret_key: str = "",
+                 passphrase: str = "", demo: bool = False):
+        self.api_key = api_key
+        self.secret_key = secret_key
+        self.passphrase = passphrase
+        self.demo = demo
+
+    def _sign(self, ts: str, method: str, path: str, body: str = "") -> str:
+        import hmac, hashlib, base64
+        msg = f"{ts}{method}{path}{body}"
+        mac = hmac.new(self.secret_key.encode(), msg.encode(), hashlib.sha256)
+        return base64.b64encode(mac.digest()).decode()
+
+    def _auth_headers(self, method: str, path: str, body: str = "") -> dict:
+        from datetime import datetime as _dt
+        now = _dt.utcnow()
+        ts = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+        h = {
+            "OK-ACCESS-KEY": self.api_key,
+            "OK-ACCESS-SIGN": self._sign(ts, method, path, body),
+            "OK-ACCESS-TIMESTAMP": ts,
+            "OK-ACCESS-PASSPHRASE": self.passphrase,
+            "Content-Type": "application/json",
+        }
+        if self.demo:
+            h["x-simulated-trading"] = "1"
+        return h
+
+    async def _get(self, path: str, params: dict = None) -> dict:
+        url = f"{self.BASE}{path}"
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
+            if qs:
+                url += f"?{qs}"
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(url)
+            return r.json()
+
+    async def _get_auth(self, path: str, params: dict = None) -> dict:
+        url = f"{self.BASE}{path}"
+        qs = ""
+        if params:
+            qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
+            if qs:
+                url += f"?{qs}"
+        sign_path = f"{path}?{qs}" if qs else path
+        headers = self._auth_headers("GET", sign_path)
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(url, headers=headers)
+            return r.json()
+
+    async def _post_auth(self, path: str, body: dict = None) -> dict:
+        body_str = json.dumps(body) if body else ""
+        headers = self._auth_headers("POST", path, body_str)
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(f"{self.BASE}{path}", headers=headers, content=body_str)
+            return r.json()
+
+    # ── Public endpoints (no auth) ──
+
+    async def get_lead_traders(self, sort_type="roi", inst_type="SWAP",
+                                min_lead_days=0, min_assets=0.0, max_assets=0.0,
+                                page="1", limit="20") -> dict:
+        params = {
+            "instType": inst_type,
+            "sortType": sort_type,
+            "page": page,
+            "limit": limit,
+        }
+        if min_lead_days:
+            params["minLeadDays"] = str(min_lead_days)
+        if min_assets:
+            params["minAssets"] = str(min_assets)
+        if max_assets:
+            params["maxAssets"] = str(max_assets)
+        return await self._get("/api/v5/copytrading/public-lead-traders", params)
+
+    async def get_trader_stats(self, unique_code: str, inst_type="SWAP",
+                                last_days: str = "30") -> dict:
+        return await self._get("/api/v5/copytrading/public-stats", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+            "lastDays": last_days,
+        })
+
+    async def get_trader_pnl(self, unique_code: str, inst_type="SWAP",
+                              last_days: str = "30") -> dict:
+        return await self._get("/api/v5/copytrading/public-pnl", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+            "lastDays": last_days,
+        })
+
+    async def get_trader_weekly_pnl(self, unique_code: str,
+                                     inst_type="SWAP") -> dict:
+        return await self._get("/api/v5/copytrading/public-weekly-pnl", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+        })
+
+    async def get_trader_positions(self, unique_code: str,
+                                    inst_type="SWAP") -> dict:
+        return await self._get("/api/v5/copytrading/public-current-subpositions", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+        })
+
+    async def get_trader_position_history(self, unique_code: str,
+                                           inst_type="SWAP",
+                                           limit: str = "20") -> dict:
+        return await self._get("/api/v5/copytrading/public-subpositions-history", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+            "limit": limit,
+        })
+
+    async def get_trader_preferences(self, unique_code: str,
+                                      inst_type="SWAP") -> dict:
+        return await self._get("/api/v5/copytrading/public-preference-currency", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+        })
+
+    async def get_trader_copy_count(self, unique_code: str,
+                                     inst_type="SWAP") -> dict:
+        return await self._get("/api/v5/copytrading/public-copy-traders", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+        })
+
+    # ── Private endpoints (auth required) ──
+
+    async def start_copy(self, inst_type, unique_code, copy_mode="fixed_amt",
+                          copy_total_amt="", copy_amt="", copy_ratio="",
+                          tp_ratio="", sl_ratio="", copy_mgn_mode="cross",
+                          inst_id="") -> dict:
+        body = {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+            "copyMode": copy_mode,
+            "copyMgnMode": copy_mgn_mode,
+        }
+        if copy_total_amt:
+            body["copyTotalAmt"] = copy_total_amt
+        if copy_amt:
+            body["copyAmt"] = copy_amt
+        if copy_ratio:
+            body["copyRatio"] = copy_ratio
+        if tp_ratio:
+            body["tpRatio"] = tp_ratio
+        if sl_ratio:
+            body["slRatio"] = sl_ratio
+        if inst_id:
+            body["instId"] = inst_id
+            body["copyInstIdType"] = "1"
+        return await self._post_auth("/api/v5/copytrading/first-copy-settings", body)
+
+    async def amend_copy(self, inst_type, unique_code, **kwargs) -> dict:
+        body = {"instType": inst_type, "uniqueCode": unique_code}
+        body.update(kwargs)
+        return await self._post_auth("/api/v5/copytrading/amend-copy-settings", body)
+
+    async def stop_copy(self, inst_type, unique_code,
+                         sub_pos_close_type="0") -> dict:
+        return await self._post_auth("/api/v5/copytrading/stop-copy-trading", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+            "subPosCloseType": sub_pos_close_type,
+        })
+
+    async def get_my_lead_traders(self, inst_type="SWAP") -> dict:
+        return await self._get_auth("/api/v5/copytrading/current-lead-traders", {
+            "instType": inst_type,
+        })
+
+    async def get_copy_settings(self, inst_type, unique_code) -> dict:
+        return await self._get_auth("/api/v5/copytrading/copy-settings", {
+            "instType": inst_type,
+            "uniqueCode": unique_code,
+        })
+
+    async def get_copy_config(self) -> dict:
+        return await self._get_auth("/api/v5/copytrading/config")
+
+
+# ──────────────────────── Verification Engine ────────────────────────
+
+class TraderVerifier:
+    """Scores and verifies traders before allowing copy."""
+
+    def __init__(self, config: TrackerConfig):
+        self.cfg = config
+
+    def verify(self, trader: TraderProfile, stats: dict = None,
+               weekly_pnl: list = None, copy_count: int = 0) -> TraderProfile:
+        """Run all verification checks on a trader. Sets verified=True/False."""
+        failures = []
+        score = 0.0
+
+        # 1. ROI check
+        if trader.roi_pct < self.cfg.min_roi_pct:
+            failures.append(f"ROI {trader.roi_pct:.1f}% < {self.cfg.min_roi_pct}%")
+        else:
+            score += min(trader.roi_pct / self.cfg.min_roi_pct, 2.0) * 20
+
+        # 2. Win rate check
+        if trader.win_rate > 0 and trader.win_rate < self.cfg.min_win_rate:
+            failures.append(f"WR {trader.win_rate:.1%} < {self.cfg.min_win_rate:.0%}")
+        elif trader.win_rate > 0:
+            score += min(trader.win_rate / 0.6, 1.5) * 20
+
+        # 3. Max drawdown check
+        if trader.max_drawdown > 0 and trader.max_drawdown > self.cfg.max_max_drawdown:
+            failures.append(f"MaxDD {trader.max_drawdown:.1%} > {self.cfg.max_max_drawdown:.0%}")
+        elif trader.max_drawdown > 0:
+            score += max(0, (1 - trader.max_drawdown / self.cfg.max_max_drawdown)) * 15
+
+        # 4. Consistency (profitable weeks)
+        if weekly_pnl:
+            profitable_weeks = sum(
+                1 for w in weekly_pnl
+                if float(w.get("pnl", 0)) > 0
+            )
+            if profitable_weeks < self.cfg.min_profitable_weeks:
+                failures.append(
+                    f"Profitable weeks {profitable_weeks}/"
+                    f"{len(weekly_pnl)} < {self.cfg.min_profitable_weeks}"
+                )
+            else:
+                score += (profitable_weeks / max(len(weekly_pnl), 1)) * 25
+        else:
+            # No weekly data — partial score
+            score += 10
+
+        # 5. Social proof (copy traders)
+        if copy_count > 0 and copy_count < self.cfg.min_copy_traders:
+            failures.append(f"Copy traders {copy_count} < {self.cfg.min_copy_traders}")
+        elif copy_count > 0:
+            score += min(copy_count / 20, 1.5) * 10
+
+        # 6. Lead days bonus
+        if trader.lead_days >= 30:
+            score += 10
+        elif trader.lead_days >= 14:
+            score += 5
+
+        trader.verify_failures = failures
+        trader.verified = len(failures) == 0
+        trader.verify_score = round(min(score, 100), 1)
+        trader.last_verified = time.time()
+        return trader
+
+
+# ──────────────────────── Main Tracker ────────────────────────
+
+class SmartMoneyTracker:
+    """Main orchestrator: discovery → verification → tracking → copy."""
+
+    def __init__(self, config: TrackerConfig = None, client_manager=None,
+                 db=None, notifier=None, okx_api: OKXCopyAPI = None):
+        self.config = config or TrackerConfig()
+        self.client_manager = client_manager
+        self.db = db
+        self.notifier = notifier
+        self.okx_api = okx_api
+
+        self.verifier = TraderVerifier(self.config)
+
+        # State
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._traders: Dict[str, TraderProfile] = {}
+        self._copy_trades: List[CopyTrade] = []
+        self._discover_cache: List[Dict] = []
+        self._discover_ts: float = 0.0
+        self._last_error: str = ""
+        self._lifetime_pnl: float = 0.0
+        self._lifetime_copies: int = 0
+        self._session_copies: int = 0
+        self._daily_loss: float = 0.0
+        self._daily_reset_ts: float = 0.0
+
+        # Load persisted state
+        self._load_state()
+
+    # ────────── Lifecycle ──────────
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._thread_main, daemon=True,
+                                         name="sm-tracker")
+        self._thread.start()
+        logger.info("Smart Money Tracker started")
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=10)
+        self._persist()
+        logger.info("Smart Money Tracker stopped")
+
+    def _thread_main(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(self._run())
+
+    async def _run(self):
+        while self._running:
+            try:
+                await self._tick()
+            except Exception as e:
+                self._last_error = str(e)
+                logger.error(f"Tick error: {e}", exc_info=True)
+            await asyncio.sleep(self.config.poll_interval_sec)
+        self._persist()
+
+    async def _tick(self):
+        """Main monitoring loop tick."""
+        # Reset daily loss counter
+        now = time.time()
+        if now - self._daily_reset_ts > 86400:
+            self._daily_loss = 0.0
+            self._daily_reset_ts = now
+
+        # Update tracked traders
+        for code, trader in list(self._traders.items()):
+            if not trader.tracked:
+                continue
+            try:
+                await self._update_trader(trader)
+            except Exception as e:
+                logger.error(f"Update trader {code} error: {e}")
+
+        # Snapshot periodically
+        if now - self._last_snapshot_time() > self.config.snapshot_interval_sec:
+            self._db_snapshot()
+
+    def _last_snapshot_time(self) -> float:
+        return max((t.last_snapshot for t in self._traders.values()), default=0)
+
+    # ────────── Discovery ──────────
+
+    async def discover(self, page: str = "1", limit: str = "20") -> List[Dict]:
+        """Fetch OKX leaderboard and return raw trader data."""
+        if not self.okx_api:
+            return []
+
+        try:
+            resp = await self.okx_api.get_lead_traders(
+                sort_type=self.config.sort_type,
+                inst_type=self.config.inst_type,
+                min_lead_days=self.config.min_lead_days,
+                page=page,
+                limit=limit,
+            )
+            if resp.get("code") != "0":
+                self._last_error = resp.get("msg", "discover failed")
+                return []
+
+            traders = resp.get("data", [])
+            self._discover_cache = traders
+            self._discover_ts = time.time()
+            return traders
+        except Exception as e:
+            self._last_error = str(e)
+            return []
+
+    async def discover_and_verify(self, page="1", limit="20") -> List[Dict]:
+        """Discover traders and run verification on each."""
+        raw = await self.discover(page, limit)
+        results = []
+
+        for t_data in raw:
+            code = t_data.get("uniqueCode", "")
+            if not code:
+                continue
+
+            trader = self._parse_trader(t_data)
+
+            # Fetch extended stats
+            stats_resp = await self.okx_api.get_trader_stats(code)
+            stats_data = stats_resp.get("data", [{}]) if stats_resp.get("code") == "0" else [{}]
+
+            weekly_resp = await self.okx_api.get_trader_weekly_pnl(code)
+            weekly_data = weekly_resp.get("data", []) if weekly_resp.get("code") == "0" else []
+
+            copy_resp = await self.okx_api.get_trader_copy_count(code)
+            copy_data = copy_resp.get("data", [{}]) if copy_resp.get("code") == "0" else [{}]
+            copy_count = int(copy_data[0].get("copyTraders", 0)) if copy_data else 0
+
+            # Enrich trader with stats
+            if stats_data:
+                s = stats_data[0]
+                trader.win_rate = float(s.get("winRate", 0))
+                trader.total_trades = int(s.get("totalTrades", 0))
+                trader.avg_hold_hours = float(s.get("avgHoldTime", 0))
+                trader.max_drawdown = float(s.get("maxDrawdown", 0))
+
+            if weekly_data:
+                trader.weekly_pnl = weekly_data
+
+            # Run verification
+            self.verifier.verify(trader, stats_data, weekly_data, copy_count)
+            trader.copy_traders = copy_count
+
+            results.append(asdict(trader))
+
+        return results
+
+    async def get_trader_detail(self, unique_code: str) -> Dict:
+        """Get full details for a single trader."""
+        if not self.okx_api:
+            return {}
+
+        # Check if we already track this trader
+        if unique_code in self._traders:
+            trader = self._traders[unique_code]
+        else:
+            trader = TraderProfile(unique_code=unique_code)
+
+        # Fetch all data in parallel
+        stats_r, pnl_r, weekly_r, pos_r, pref_r, copy_r = await asyncio.gather(
+            self.okx_api.get_trader_stats(unique_code),
+            self.okx_api.get_trader_pnl(unique_code),
+            self.okx_api.get_trader_weekly_pnl(unique_code),
+            self.okx_api.get_trader_positions(unique_code),
+            self.okx_api.get_trader_preferences(unique_code),
+            self.okx_api.get_trader_copy_count(unique_code),
+            return_exceptions=True,
+        )
+
+        # Parse stats
+        if isinstance(stats_r, dict) and stats_r.get("code") == "0" and stats_r.get("data"):
+            s = stats_r["data"][0]
+            trader.win_rate = float(s.get("winRate", 0))
+            trader.total_trades = int(s.get("totalTrades", 0))
+            trader.avg_hold_hours = float(s.get("avgHoldTime", 0))
+            trader.max_drawdown = float(s.get("maxDrawdown", 0))
+            trader.aum = float(s.get("aum", 0))
+            trader.lead_days = int(s.get("leadDays", 0))
+
+        # Parse PnL
+        if isinstance(pnl_r, dict) and pnl_r.get("code") == "0" and pnl_r.get("data"):
+            p = pnl_r["data"][0]
+            trader.roi_pct = float(p.get("roi", 0)) * 100
+            trader.pnl_usd = float(p.get("pnl", 0))
+
+        # Parse weekly PnL
+        if isinstance(weekly_r, dict) and weekly_r.get("code") == "0":
+            trader.weekly_pnl = weekly_r.get("data", [])
+
+        # Parse positions
+        if isinstance(pos_r, dict) and pos_r.get("code") == "0":
+            trader.current_positions = pos_r.get("data", [])
+            trader.last_positions_fetch = time.time()
+
+        # Parse preferences
+        if isinstance(pref_r, dict) and pref_r.get("code") == "0" and pref_r.get("data"):
+            trader.preferred_coins = [
+                p.get("ccy", "") for p in pref_r["data"]
+            ]
+
+        # Parse copy count
+        if isinstance(copy_r, dict) and copy_r.get("code") == "0" and copy_r.get("data"):
+            trader.copy_traders = int(copy_r["data"][0].get("copyTraders", 0))
+
+        # Verify
+        self.verifier.verify(trader, stats_r.get("data") if isinstance(stats_r, dict) else None,
+                              trader.weekly_pnl, trader.copy_traders)
+
+        return asdict(trader)
+
+    # ────────── Tracking ──────────
+
+    async def track_trader(self, unique_code: str) -> Dict:
+        """Add a trader to tracked list."""
+        if unique_code in self._traders and self._traders[unique_code].tracked:
+            return {"ok": True, "msg": "already tracked"}
+
+        detail = await self.get_trader_detail(unique_code)
+        if not detail:
+            return {"ok": False, "msg": "trader not found"}
+
+        trader = TraderProfile(
+            unique_code=unique_code,
+            alias=detail.get("alias", ""),
+            roi_pct=detail.get("roi_pct", 0),
+            pnl_usd=detail.get("pnl_usd", 0),
+            win_rate=detail.get("win_rate", 0),
+            max_drawdown=detail.get("max_drawdown", 0),
+            aum=detail.get("aum", 0),
+            lead_days=detail.get("lead_days", 0),
+            copy_traders=detail.get("copy_traders", 0),
+            verified=detail.get("verified", False),
+            verify_score=detail.get("verify_score", 0),
+            tracked=True,
+            tracking_since=time.time(),
+            current_positions=detail.get("current_positions", []),
+        )
+        self._traders[unique_code] = trader
+        self._persist()
+
+        return {"ok": True, "msg": f"now tracking {trader.alias or unique_code}"}
+
+    def untrack_trader(self, unique_code: str) -> Dict:
+        """Remove a trader from tracked list."""
+        if unique_code not in self._traders:
+            return {"ok": False, "msg": "not tracked"}
+        self._traders[unique_code].tracked = False
+        self._persist()
+        return {"ok": True, "msg": "untracked"}
+
+    def get_tracked(self) -> List[Dict]:
+        """Return all tracked traders."""
+        return [asdict(t) for t in self._traders.values() if t.tracked]
+
+    # ────────── Copy Trading ──────────
+
+    async def start_copying(self, unique_code: str,
+                             copy_amt: str = None) -> Dict:
+        """Start copying a trader on OKX."""
+        if not self.okx_api or not self.client_manager:
+            return {"ok": False, "msg": "no API connection"}
+
+        client = self.client_manager.get_client()
+        if not client:
+            return {"ok": False, "msg": "OKX client not connected"}
+
+        if not self.config.execute:
+            return {"ok": False, "msg": "execution disabled (execute=False)"}
+
+        # Check daily loss limit
+        if self._daily_loss >= self.config.max_daily_loss_pct * self.config.capital:
+            return {"ok": False, "msg": "daily loss limit reached"}
+
+        # Check max open copies
+        active = sum(1 for t in self._traders.values()
+                     if t.tracked and t.current_positions)
+        if active >= self.config.max_open_copies:
+            return {"ok": False, "msg": f"max {self.config.max_open_copies} copies reached"}
+
+        amt = copy_amt or str(self.config.capital)
+
+        try:
+            resp = await self.okx_api.start_copy(
+                inst_type=self.config.inst_type,
+                unique_code=unique_code,
+                copy_mode=self.config.copy_mode,
+                copy_total_amt=amt if self.config.copy_mode == "fixed_amt" else "",
+                copy_ratio=str(self.config.copy_ratio) if self.config.copy_mode == "fixed_ratio" else "",
+                tp_ratio=str(self.config.tp_ratio),
+                sl_ratio=str(self.config.sl_ratio),
+            )
+
+            if resp.get("code") == "0":
+                self._lifetime_copies += 1
+                self._session_copies += 1
+                self._persist()
+                return {"ok": True, "msg": f"copying started with {amt} USDT"}
+            else:
+                msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
+                return {"ok": False, "msg": msg}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+
+    async def stop_copying(self, unique_code: str) -> Dict:
+        """Stop copying a trader on OKX."""
+        if not self.okx_api:
+            return {"ok": False, "msg": "no API connection"}
+
+        try:
+            resp = await self.okx_api.stop_copy(
+                inst_type=self.config.inst_type,
+                unique_code=unique_code,
+            )
+            if resp.get("code") == "0":
+                return {"ok": True, "msg": "copying stopped"}
+            else:
+                msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
+                return {"ok": False, "msg": msg}
+        except Exception as e:
+            return {"ok": False, "msg": str(e)}
+
+    async def get_my_copies(self) -> List[Dict]:
+        """Get list of traders we're currently copying."""
+        if not self.okx_api:
+            return []
+        try:
+            resp = await self.okx_api.get_my_lead_traders()
+            if resp.get("code") == "0":
+                return resp.get("data", [])
+            return []
+        except Exception:
+            return []
+
+    # ────────── Internal ──────────
+
+    async def _update_trader(self, trader: TraderProfile):
+        """Refresh a tracked trader's positions and stats."""
+        if not self.okx_api:
+            return
+
+        now = time.time()
+
+        # Refresh positions every 60s
+        if now - trader.last_positions_fetch > 60:
+            try:
+                resp = await self.okx_api.get_trader_positions(trader.unique_code)
+                if resp.get("code") == "0":
+                    trader.current_positions = resp.get("data", [])
+                    trader.last_positions_fetch = now
+            except Exception as e:
+                logger.error(f"Fetch positions for {trader.unique_code}: {e}")
+
+        # Refresh stats every 5 min
+        if now - trader.last_snapshot > 300:
+            try:
+                stats_r = await self.okx_api.get_trader_stats(trader.unique_code)
+                if isinstance(stats_r, dict) and stats_r.get("code") == "0" and stats_r.get("data"):
+                    s = stats_r["data"][0]
+                    trader.win_rate = float(s.get("winRate", 0))
+                    trader.total_trades = int(s.get("totalTrades", 0))
+
+                pnl_r = await self.okx_api.get_trader_pnl(trader.unique_code)
+                if isinstance(pnl_r, dict) and pnl_r.get("code") == "0" and pnl_r.get("data"):
+                    p = pnl_r["data"][0]
+                    trader.roi_pct = float(p.get("roi", 0)) * 100
+                    trader.pnl_usd = float(p.get("pnl", 0))
+
+                trader.last_snapshot = now
+            except Exception as e:
+                logger.error(f"Refresh stats for {trader.unique_code}: {e}")
+
+    def _parse_trader(self, data: dict) -> TraderProfile:
+        """Parse raw leaderboard data into TraderProfile."""
+        return TraderProfile(
+            unique_code=data.get("uniqueCode", ""),
+            alias=data.get("alias", ""),
+            inst_type=data.get("instType", "SWAP"),
+            roi_pct=float(data.get("roi", 0)) * 100,
+            pnl_usd=float(data.get("pnl", 0)),
+            copy_ratio=float(data.get("copyRatio", 0)),
+            copy_traders=int(data.get("copyTraders", 0)),
+            lead_days=int(data.get("leadDays", 0)),
+            aum=float(data.get("aum", 0)),
+        )
+
+    # ────────── Status ──────────
+
+    def get_status(self) -> Dict:
+        tracked = [t for t in self._traders.values() if t.tracked]
+        verified = [t for t in tracked if t.verified]
+        copying = [t for t in tracked if t.current_positions]
+
+        return {
+            "running": self._running,
+            "execute": self.config.execute,
+            "strategy": STRATEGY_NAME,
+            "version": STRATEGY_VERSION,
+            "tracked_count": len(tracked),
+            "verified_count": len(verified),
+            "copying_count": len(copying),
+            "lifetime_copies": self._lifetime_copies,
+            "session_copies": self._session_copies,
+            "lifetime_pnl": round(self._lifetime_pnl, 2),
+            "daily_loss": round(self._daily_loss, 2),
+            "last_error": self._last_error,
+            "config": asdict(self.config),
+            "tracked": [asdict(t) for t in tracked],
+        }
+
+    # ────────── Persistence ──────────
+
+    def _state_path(self) -> str:
+        return os.path.join(DATA_DIR, "smart_money_state.json")
+
+    def _load_state(self):
+        try:
+            path = self._state_path()
+            if os.path.exists(path):
+                with open(path) as f:
+                    data = json.load(f)
+                self._lifetime_pnl = data.get("lifetime_pnl", 0)
+                self._lifetime_copies = data.get("lifetime_copies", 0)
+                self._daily_loss = data.get("daily_loss", 0)
+                self._daily_reset_ts = data.get("daily_reset_ts", 0)
+                # Restore tracked traders
+                for td in data.get("traders", []):
+                    tp = TraderProfile(**{
+                        k: v for k, v in td.items()
+                        if k in TraderProfile.__dataclass_fields__
+                    })
+                    self._traders[tp.unique_code] = tp
+        except Exception as e:
+            logger.error(f"Load state: {e}")
+
+    def _persist(self):
+        try:
+            data = {
+                "lifetime_pnl": self._lifetime_pnl,
+                "lifetime_copies": self._lifetime_copies,
+                "daily_loss": self._daily_loss,
+                "daily_reset_ts": self._daily_reset_ts,
+                "traders": [asdict(t) for t in self._traders.values()],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            path = self._state_path()
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2, default=str)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.error(f"Persist state: {e}")
+
+    def _db_snapshot(self):
+        """Save performance metrics to DB."""
+        if not self.db:
+            return
+        try:
+            self.db.save_metric(
+                bot_id=BOT_ID,
+                equity=self.config.capital + self._lifetime_pnl,
+                total_pnl=self._lifetime_pnl,
+                win_rate=0,
+                total_trades=self._lifetime_copies,
+            )
+            for t in self._traders.values():
+                if t.tracked:
+                    t.last_snapshot = time.time()
+        except Exception as e:
+            logger.error(f"DB snapshot: {e}")

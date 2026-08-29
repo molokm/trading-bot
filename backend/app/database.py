@@ -316,12 +316,52 @@ class Database:
                 active_until  TEXT,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT
-            );
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tg_processed_updates (
                 update_id     BIGINT PRIMARY KEY,
                 processed_at  TEXT NOT NULL
-            );
-
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_traders (
+                unique_code   TEXT PRIMARY KEY,
+                alias         TEXT,
+                inst_type     TEXT DEFAULT 'SWAP',
+                roi_pct       DOUBLE PRECISION DEFAULT 0,
+                pnl_usd       DOUBLE PRECISION DEFAULT 0,
+                win_rate      DOUBLE PRECISION DEFAULT 0,
+                max_drawdown  DOUBLE PRECISION DEFAULT 0,
+                aum           DOUBLE PRECISION DEFAULT 0,
+                lead_days     INTEGER DEFAULT 0,
+                copy_traders  INTEGER DEFAULT 0,
+                verified      INTEGER DEFAULT 0,
+                verify_score  DOUBLE PRECISION DEFAULT 0,
+                tracked       INTEGER DEFAULT 1,
+                tracking_since DOUBLE PRECISION,
+                last_snapshot DOUBLE PRECISION,
+                created_at    TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS copy_trades (
+                id            TEXT PRIMARY KEY,
+                trader_code   TEXT NOT NULL,
+                inst_id       TEXT NOT NULL,
+                side          TEXT NOT NULL,
+                size          TEXT,
+                entry_price   TEXT,
+                entry_time    DOUBLE PRECISION,
+                close_price   TEXT,
+                close_time    DOUBLE PRECISION,
+                pnl           DOUBLE PRECISION DEFAULT 0,
+                reason        TEXT,
+                created_at    TEXT NOT NULL,
+                FOREIGN KEY (trader_code) REFERENCES tracked_traders(unique_code)
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
                 id            BIGSERIAL PRIMARY KEY,
                 ts            TEXT NOT NULL,

@@ -178,6 +178,26 @@ export const api = {
   vwapRevStop: () =>
     request('/vwap_rev/stop', { method: 'POST' }),
 
+  // ── Smart Money Tracker ──
+  smartMoneyStatus: () => request('/smart-money/status'),
+  smartMoneyDiscover: (page = 1, limit = 20) =>
+    request(`/smart-money/discover?page=${page}&limit=${limit}`),
+  smartMoneyTrader: (code) => request(`/smart-money/trader/${code}`),
+  smartMoneyTracked: () => request('/smart-money/tracked'),
+  smartMoneyTrack: (code) =>
+    request('/smart-money/track', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyUntrack: (code) =>
+    request('/smart-money/untrack', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyCopy: (code, amt) =>
+    request('/smart-money/copy', { method: 'POST', body: JSON.stringify({ unique_code: code, copy_amt: amt }) }),
+  smartMoneyStopCopy: (code) =>
+    request('/smart-money/stop-copy', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyMyCopies: () => request('/smart-money/my-copies'),
+  smartMoneyStart: (config = {}) =>
+    request('/smart-money/start', { method: 'POST', body: JSON.stringify(config) }),
+  smartMoneyStop: () =>
+    request('/smart-money/stop', { method: 'POST' }),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 

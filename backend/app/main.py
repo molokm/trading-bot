@@ -56,6 +56,10 @@ except Exception as _vwap_imp_err:
         def start(self): pass
         def stop(self): pass
         def get_status(self): return {"running": False, "strategy": VWAP_NAME, "version": "off"}
+from app.services.smart_money_tracker import (
+    SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
+    BOT_ID as SM_BOT_ID, STRATEGY_NAME as SM_NAME, STRATEGY_VERSION as SM_VERSION,
+)
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
@@ -121,8 +125,9 @@ equity_tracker: Optional[EquityTracker] = None
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
 ai_bot = None
-scalp_bot = None  # Order Book Scalp instance
+scalp_bot = None  # Order Book Scalp instance (retired)
 vwap_rev_bot = None  # VWAP Mean Reversion instance
+sm_tracker = None  # Smart Money Tracker instance
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -1371,34 +1376,156 @@ async def ai_decide_once():
 
 
 
-# ── Order Book Scalp ──────────────────────────────────────────
-@app.get("/api/scalp/status")
-async def scalp_status():
-    global scalp_bot
-    if not scalp_bot:
+# ── Smart Money Tracker ──────────────────────────────────────
+@app.get("/api/smart-money/status")
+async def smart_money_status():
+    global sm_tracker
+    if not sm_tracker:
         return {
             "running": False,
-            "strategy": SCALP_NAME,
-            "version": SCALP_VERSION,
-            "description": SCALP_DESC,
+            "strategy": SM_NAME,
+            "version": SM_VERSION,
             "execute": False,
-            "books": {},
-            "open_positions": [],
-            "total_pnl": 0,
-            "lifetime_pnl": 0,
-            "recent_signals": [],
+            "tracked_count": 0,
+            "verified_count": 0,
+            "copying_count": 0,
+            "tracked": [],
         }
-    try:
-        return scalp_bot.get_status()
-    except Exception as e:
-        return {
-            "running": bool(getattr(scalp_bot, "_running", False)),
-            "strategy": SCALP_NAME,
-            "version": SCALP_VERSION,
-            "error": str(e),
-            "open_positions": [],
-            "lifetime_pnl": getattr(scalp_bot, "_lifetime_pnl", 0),
-        }
+    return sm_tracker.get_status()
+
+
+@app.get("/api/smart-money/discover")
+async def smart_money_discover(page: str = "1", limit: str = "20"):
+    """Discover traders from OKX leaderboard."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"error": True, "message": "Tracker not initialized"}
+    traders = await sm_tracker.discover_and_verify(page=page, limit=limit)
+    return {"traders": traders, "total": len(traders)}
+
+
+@app.get("/api/smart-money/trader/{unique_code}")
+async def smart_money_trader_detail(unique_code: str):
+    """Get full details for a single trader."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"error": True, "message": "Tracker not initialized"}
+    detail = await sm_tracker.get_trader_detail(unique_code)
+    return detail
+
+
+@app.get("/api/smart-money/tracked")
+async def smart_money_tracked():
+    """List all tracked traders."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"tracked": []}
+    return {"tracked": sm_tracker.get_tracked()}
+
+
+@app.post("/api/smart-money/track", dependencies=[Depends(require_admin)])
+async def smart_money_track(data: dict = None):
+    """Start tracking a trader."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    if not sm_tracker:
+        return {"ok": False, "message": "Tracker not initialized"}
+    return await sm_tracker.track_trader(code)
+
+
+@app.post("/api/smart-money/untrack", dependencies=[Depends(require_admin)])
+async def smart_money_untrack(data: dict = None):
+    """Stop tracking a trader."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    if not sm_tracker:
+        return {"ok": False, "msg": "Tracker not initialized"}
+    return sm_tracker.untrack_trader(code)
+
+
+@app.post("/api/smart-money/copy", dependencies=[Depends(require_admin)])
+async def smart_money_copy(data: dict = None):
+    """Start copying a trader on OKX."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    if not sm_tracker:
+        return {"ok": False, "msg": "Tracker not initialized"}
+    return await sm_tracker.start_copying(code, copy_amt=data.get("copy_amt"))
+
+
+@app.post("/api/smart-money/stop-copy", dependencies=[Depends(require_admin)])
+async def smart_money_stop_copy(data: dict = None):
+    """Stop copying a trader."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    if not sm_tracker:
+        return {"ok": False, "msg": "Tracker not initialized"}
+    return await sm_tracker.stop_copying(code)
+
+
+@app.get("/api/smart-money/my-copies")
+async def smart_money_my_copies():
+    """Get list of traders we're currently copying."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"copies": []}
+    copies = await sm_tracker.get_my_copies()
+    return {"copies": copies}
+
+
+@app.post("/api/smart-money/start", dependencies=[Depends(require_admin)])
+async def smart_money_start(data: dict = None):
+    """Start the Smart Money Tracker."""
+    global sm_tracker
+    data = data or {}
+    if sm_tracker and sm_tracker._running:
+        return {"message": "Already running", **sm_tracker.get_status()}
+    cfg = TrackerConfig(
+        capital=float(data.get("capital") or 500),
+        max_leverage=int(data.get("max_leverage") or 3),
+        execute=bool(data.get("execute", False)),
+        sort_type=data.get("sort_type", "roi"),
+        min_roi_pct=float(data.get("min_roi_pct") or 5.0),
+        min_win_rate=float(data.get("min_win_rate") or 0.45),
+        max_max_drawdown=float(data.get("max_max_drawdown") or 0.30),
+        tp_ratio=float(data.get("tp_ratio") or 0.10),
+        sl_ratio=float(data.get("sl_ratio") or 0.05),
+        poll_interval_sec=float(data.get("poll_interval_sec") or 60),
+    )
+    # Create OKX copy trading API client
+    okx_api = OKXCopyAPI(
+        api_key=_env_key,
+        secret_key=_env_secret,
+        passphrase=_env_pass,
+        demo=_env_demo,
+    )
+    sm_tracker = SmartMoneyTracker(
+        config=cfg, client_manager=client_manager, db=db,
+        notifier=telegram, okx_api=okx_api,
+    )
+    sm_tracker.start()
+    return {"message": "Smart Money Tracker started", **sm_tracker.get_status()}
+
+
+@app.post("/api/smart-money/stop", dependencies=[Depends(require_admin)])
+async def smart_money_stop():
+    """Stop the Smart Money Tracker."""
+    global sm_tracker
+    if sm_tracker:
+        sm_tracker.stop()
+    return {"message": "Smart Money Tracker stopped", "running": False}
 
 
 @app.get("/api/vwap_rev/status")
@@ -1416,77 +1543,6 @@ async def vwap_rev_status():
             "recent_signals": [],
         }
     return vwap_rev_bot.get_status()
-
-
-@app.get("/api/scalp/book")
-async def scalp_book(coin: str = "BTC", levels: int = 10):
-    """Live order book + OBI metrics (auth via middleware)."""
-    client = client_manager.get_client()
-    if not client:
-        return {"error": True, "message": "API not configured"}
-    inst = f"{coin.upper()}-USDT-SWAP"
-    resp = await client.get_books(inst, sz=max(1, min(int(levels), 50)))
-    if resp.get("error"):
-        return resp
-    data = (resp.get("data") or [{}])[0]
-    metrics = compute_book_metrics(
-        data.get("bids") or [], data.get("asks") or [], levels=int(levels),
-    )
-    metrics["coin"] = coin.upper()
-    metrics["inst_id"] = inst
-    return metrics
-
-
-@app.post("/api/scalp/start", dependencies=[Depends(require_admin)])
-async def scalp_start(data: dict = None):
-    global scalp_bot
-    data = data or {}
-    if scalp_bot and getattr(scalp_bot, "_running", False):
-        return {"message": "Scalp already running", **scalp_bot.get_status()}
-    _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
-    if "execute" in data:
-        _exec = bool(data["execute"])
-    else:
-        env_ex = os.getenv("SCALP_EXECUTE", "").strip().lower()
-        if env_ex in ("1", "true", "yes", "on"):
-            _exec = True
-        elif env_ex in ("0", "false", "no", "off"):
-            _exec = False
-        else:
-            _exec = _demo
-    _cap = max(50.0, min(50000.0, float(data.get("capital") or 200)))
-    _lev = max(1.0, min(3.0, float(data.get("max_leverage") or data.get("leverage") or 2)))
-    cfg = ScalpConfig(
-        capital=_cap,
-        max_leverage=_lev,
-        obi_threshold=float(data.get("obi_threshold") or 0.58),
-        persist_n=int(data.get("persist_n") or 7),
-        poll_interval_sec=float(data.get("poll_interval_sec") or 2.0),
-        stop_bps=float(data.get("stop_bps") or 14),
-        take_bps=float(data.get("take_bps") or 40),
-        max_hold_sec=float(data.get("max_hold_sec") or 45),
-        use_llm=bool(data.get("use_llm", False)),
-        levels=int(data.get("levels") or 5),
-        max_spread_bps=float(data.get("max_spread_bps") or 3.5),
-        max_trades_per_hour=int(data.get("max_trades_per_hour") or 4),
-        cooldown_sec=float(data.get("cooldown_sec") or 90),
-        execute=_exec,
-    )
-    if data.get("symbols"):
-        cfg.symbols = list(data["symbols"])
-    scalp_bot = OrderBookScalpStrategy(
-        config=cfg, client_manager=client_manager, db=db, notifier=None,  # no TG spam
-    )
-    scalp_bot.start()
-    return {"message": "Order Book Scalp started", **scalp_bot.get_status()}
-
-
-@app.post("/api/scalp/stop", dependencies=[Depends(require_admin)])
-async def scalp_stop():
-    global scalp_bot
-    if scalp_bot:
-        scalp_bot.stop()
-    return {"message": "Scalp stopped", "running": False}
 
 
 @app.post("/api/vwap_rev/start", dependencies=[Depends(require_admin)])
@@ -1540,8 +1596,9 @@ async def health():
             "impulse": _bot_flag(impulse),
             "validation": _bot_flag(validation),
             "ai": _bot_flag(ai_bot),
-            "scalp": _bot_flag(scalp_bot),
+            "scalp": False,
             "vwap_rev": _bot_flag(vwap_rev_bot),
+            "smart_money": bool(getattr(sm_tracker, "_running", False)),
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
@@ -1727,8 +1784,6 @@ def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = 
         return "MACD+Donchian Validation"
     if _match(ai_bot):
         return "AI Discretionary 1H"
-    if _match(scalp_bot):
-        return "Order Book Scalp"
 
     # Fallback: trade logs (same priority)
     if rotation and rotation._trade_log:
@@ -1751,11 +1806,6 @@ def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = 
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "AI Discretionary 1H"
-    if scalp_bot and scalp_bot._trade_log:
-        for t in reversed(scalp_bot._trade_log):
-            sym = t.get("symbol", "") or t.get("inst_id", "")
-            if sym == inst_id and t.get("reason") == "open":
-                return "Order Book Scalp"
     if vwap_rev_bot and vwap_rev_bot._trade_log:
         for t in reversed(vwap_rev_bot._trade_log):
             sym = t.get("symbol", "") or t.get("inst_id", "")
@@ -1801,7 +1851,6 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
             ("Impulse 1D", getattr(impulse, "_trade_log", None) if impulse else None),
             ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
             ("AI Discretionary 1H", getattr(ai_bot, "_trade_log", None) if ai_bot else None),
-            ("Order Book Scalp", getattr(scalp_bot, "_trade_log", None) if scalp_bot else None),
             ("VWAP Mean Reversion", getattr(vwap_rev_bot, "_trade_log", None) if vwap_rev_bot else None),
         ):
             if not log:
@@ -1827,10 +1876,6 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         for t in ai_bot._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "AI Discretionary 1H"
-    if scalp_bot and scalp_bot._trade_log:
-        for t in scalp_bot._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "Order Book Scalp"
     if vwap_rev_bot and vwap_rev_bot._trade_log:
         for t in vwap_rev_bot._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
@@ -1853,10 +1898,6 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         for t in ai_bot._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
                 return "AI Discretionary 1H"
-    if scalp_bot and scalp_bot._trade_log:
-        for t in scalp_bot._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Order Book Scalp"
     if vwap_rev_bot and vwap_rev_bot._trade_log:
         for t in vwap_rev_bot._trade_log:
             if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
@@ -1895,7 +1936,7 @@ async def _orphan_sweep_loop():
             client = client_manager.get_client()
             if client and orphan_close_enabled():
                 mem = set()
-                for bot in (rotation, impulse, validation, ai_bot, scalp_bot, vwap_rev_bot):
+                for bot in (rotation, impulse, validation, ai_bot, vwap_rev_bot, sm_tracker):
                     if not bot or not getattr(bot, "_positions", None):
                         continue
                     for pos in bot._positions.values():
@@ -1916,7 +1957,7 @@ async def sweep_orphans():
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")
     mem = set()
-    for bot in (rotation, impulse, validation, ai_bot, scalp_bot, vwap_rev_bot):
+    for bot in (rotation, impulse, validation, ai_bot, vwap_rev_bot, sm_tracker):
         if not bot or not getattr(bot, "_positions", None):
             continue
         for pos in bot._positions.values():

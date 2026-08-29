@@ -2,7 +2,7 @@ const en = {
   // ── Navigation ──
   'nav.dashboard': 'Dashboard',
   'nav.bots': 'Bots',
-  'nav.scalp': 'Book Scalp',
+  'nav.smartMoney': 'Smart Money',
   'scalp.lifetime_pnl': 'Lifetime PnL (scalp only)',
   'scalp.session_pnl': 'Session PnL',
   'scalp.trades': 'Scalp trades',
