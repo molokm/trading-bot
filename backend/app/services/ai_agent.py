@@ -32,7 +32,7 @@ _DEPRECATED_GROQ_MODELS = {
     "mixtral-8x7b-32768",
 }
 # 120b hits free-tier TPD/RPM hard — pin to 20b unless AI_ALLOW_LARGE_MODEL=1
-_GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"
+_GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"  # free tier ~2M TPD vs gpt-oss ~200k
 _GROQ_LARGE_MODELS = {
     "openai/gpt-oss-120b",
     "gpt-oss-120b",
@@ -51,6 +51,10 @@ def _resolve_groq_model(model: str | None) -> str:
     if m in _GROQ_LARGE_MODELS or m.endswith("gpt-oss-120b"):
         if not allow_large:
             return _GROQ_DEFAULT_MODEL
+    # Prefer Qwen when env still points at low-TPD gpt-oss-20b unless forced
+    force = os.getenv("AI_FORCE_MODEL", "").strip().lower() in ("1", "true", "yes", "on")
+    if not force and m in ("openai/gpt-oss-20b", "gpt-oss-20b"):
+        return _GROQ_DEFAULT_MODEL
     return m
 
 
@@ -272,7 +276,7 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     }
     user_msg = (
         "Quant-preprocessed market snapshot + self-reflection. Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:4800]
+        + json.dumps(user_payload, ensure_ascii=False)[:2200]
     )
 
     if provider == "mock" or not provider:
@@ -316,24 +320,35 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
 def _provider_chain(primary: str) -> list[str]:
     """Primary + free/configured fallbacks when rate-limited or down."""
     primary = (primary or "mock").lower()
-    # Explicit list: AI_LLM_FALLBACKS=gemini,openai
+    # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "gemini,openai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
         if x.strip()
     ]
     chain = [primary]
     for p in env_fb:
         if p not in chain and p != "mock":
             chain.append(p)
-    # Only keep providers that have keys (mock always ok at end)
     out = []
     for p in chain:
         if p == "groq" and os.getenv("GROQ_API_KEY", "").strip():
             out.append(p)
         elif p == "gemini" and os.getenv("GEMINI_API_KEY", "").strip():
             out.append(p)
+        elif p == "openrouter" and (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or (os.getenv("OPENAI_API_KEY", "").strip()
+                and "openrouter" in (os.getenv("OPENAI_BASE_URL") or "").lower())
+        ):
+            out.append(p)
         elif p == "openai" and os.getenv("OPENAI_API_KEY", "").strip():
+            # Skip openai if base is openrouter (handled above) or key is openrouter-only
+            base = (os.getenv("OPENAI_BASE_URL") or "").lower()
+            if "openrouter" in base:
+                if "openrouter" not in out:
+                    out.append("openrouter")
+                continue
             out.append(p)
         elif p == primary and p not in out:
             out.append(p)
@@ -357,10 +372,32 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             user=user_msg,
         )
     if provider == "openai":
+        # Never pass Groq-only model ids to OpenAI
+        om = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+        if "gpt-oss" in om or om.startswith("qwen/") or om.startswith("llama"):
+            om = "gpt-4o-mini"
         return await _openai_compatible(
             api_key=os.getenv("OPENAI_API_KEY", ""),
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=os.getenv("OPENAI_MODEL") or os.getenv("AI_LLM_MODEL") or "gpt-4o-mini",
+            model=om,
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+        )
+    if provider == "openrouter":
+        key = (
+            os.getenv("OPENROUTER_API_KEY", "").strip()
+            or os.getenv("OPENAI_API_KEY", "").strip()
+        )
+        # Prefer free-tier OpenRouter models
+        om = (
+            os.getenv("OPENROUTER_MODEL")
+            or os.getenv("AI_OPENROUTER_MODEL")
+            or "openrouter/free"
+        )
+        return await _openai_compatible(
+            api_key=key,
+            base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            model=om,
             system=SYSTEM_PROMPT,
             user=user_msg,
         )
@@ -376,8 +413,10 @@ async def _call_provider(provider: str, user_msg: str) -> str:
 
 # Fallback chain when a Groq model id is deprecated / not on the account
 _GROQ_MODEL_FALLBACKS = (
-    "openai/gpt-oss-20b",
-    # do not chain to 120b — shares org quota and returns 429 more often
+    "qwen/qwen3.8-27b",   # highest free TPD on Groq (~2M)
+    "qwen/qwen3.6-27b",
+    "openai/gpt-oss-20b",  # last resort — low TPD (~200k)
+    # never auto-chain 120b — burns org quota
 )
 
 
@@ -405,11 +444,13 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             if m not in candidates:
                 candidates.append(m)
     last_err = None
+    tpd_hit = False
     async with httpx.AsyncClient(timeout=45.0) as client:
-        for mid in candidates:
+        for i, mid in enumerate(candidates):
             body = {
                 "model": mid,
                 "temperature": 0.2,
+                "max_tokens": 280,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -417,19 +458,16 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             }
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
-            # Retry loop with exponential backoff for 429 rate limits
-            for attempt in range(4):
-                r = await client.post(url, headers=headers, json=body)
-                if r.status_code == 429 and attempt < 3:
-                    wait = min(60, 3 * (2 ** attempt))  # 3, 6, 12, …
-                    log.warning("LLM 429 rate limit on %s, retry in %ds (attempt %d/4)",
-                                mid, wait, attempt + 1)
-                    await asyncio.sleep(wait)
-                    continue
-                break
+            r = await client.post(url, headers=headers, json=body)
+            if r.status_code == 200:
+                data = r.json()
+                if mid != model:
+                    log.warning("LLM model fallback: %s -> %s", model, mid)
+                return data["choices"][0]["message"]["content"]
+            last_err = f"LLM HTTP {r.status_code}: {r.text[:300]}"
+            txt = (r.text or "").lower()
             if r.status_code == 429:
-                # Parse "Please try again in 3m23.904s" or "try again in 4m16.608s"
-                wait_s = 300.0
+                wait_s = 120.0
                 try:
                     m = re.search(
                         r"try again in\s*(?:(\d+)m)?\s*([0-9.]+)s",
@@ -439,27 +477,32 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                     if m:
                         mins = int(m.group(1) or 0)
                         secs = float(m.group(2) or 0)
-                        wait_s = max(60.0, mins * 60 + secs + 30)
-                    # Daily TPD exhaustion — back off longer
-                    if "tokens per day" in (r.text or "").lower() or "TPD" in (r.text or ""):
-                        wait_s = max(wait_s, 900.0)  # at least 15 min
+                        wait_s = max(45.0, mins * 60 + secs + 15)
                 except Exception:
-                    wait_s = 300.0
-                _rate_limit_until = _time.time() + wait_s
-                log.warning("LLM 429 hard — cooldown %.0fs (TPD/RPM)", wait_s)
-            if r.status_code >= 400 and json_mode and r.status_code in (400, 422):
-                body.pop("response_format", None)
-                r = await client.post(url, headers=headers, json=body)
-            if r.status_code < 400:
-                data = r.json()
-                if mid != model:
-                    log.warning("LLM model fallback: %s -> %s", model, mid)
-                return data["choices"][0]["message"]["content"]
-            last_err = f"LLM HTTP {r.status_code}: {r.text[:300]}"
-            # Continue fallback chain on rate limit or model_not_found
-            if r.status_code == 429 or "model_not_found" in (r.text or "") or "does not exist" in (r.text or ""):
+                    pass
+                if "tokens per day" in txt or "tpd" in txt:
+                    tpd_hit = True
+                    wait_s = max(wait_s, 180.0)
+                    # TPD is often per-model — try next model before org-wide cool
+                    log.warning("LLM 429 TPD on %s — try next model", mid)
+                    continue
+                # RPM: short cool then try next model
+                if i < len(candidates) - 1:
+                    log.warning("LLM 429 RPM on %s — try next model", mid)
+                    await asyncio.sleep(min(8.0, wait_s))
+                    continue
+                _rate_limit_until = _time.time() + min(wait_s, 600.0)
+                log.warning("LLM 429 hard — cooldown %.0fs", min(wait_s, 600.0))
+            if r.status_code == 404 or "model_not_found" in txt or "does not exist" in txt \
+                    or "unavailable for free" in txt:
+                log.warning("LLM model unavailable %s — next", mid)
                 continue
+            # other errors: stop this provider
             break
+    if tpd_hit:
+        # All models exhausted TPD — cool so we don't spin
+        _rate_limit_until = _time.time() + 600.0
+        log.warning("LLM all Groq models TPD — cooldown 600s")
     raise RuntimeError(last_err or "LLM request failed")
 
 

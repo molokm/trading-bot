@@ -92,7 +92,7 @@ class AIConfig:
     allocation_pct: float = 0.25          # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
-    poll_interval_sec: int = 180          # decision cadence
+    poll_interval_sec: int = 360          # 6m — save free-tier TPD
     min_confidence: float = 0.75
     min_adx: float = 22.0
     min_roc_abs: float = 0.5           # % move on roc
