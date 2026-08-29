@@ -223,6 +223,7 @@ async def startup():
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
         if _env_key and _env_secret and _env_pass and _bots_auto_start:
+            # v6.9-AI: match RotationConfig defaults (gate-aware). Do not re-inflate risk.
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -231,19 +232,24 @@ async def startup():
                 ema_fast=20,
                 ema_slow=50,
                 atr_period=14,
-                adx_min=25.0,
-                min_roc=3.5,
+                adx_min=26.0,
+                min_roc=4.5,
                 sma_long=200,
                 min_hold_days=11,
                 max_leverage=2.0,
-                risk_per_trade=0.20,
-                allocation_pct=0.45,
-                atr_stop_mult=4.5,
+                risk_per_trade=0.08,
+                allocation_pct=0.30,
+                atr_stop_mult=3.5,
                 trail_atr_mult=3.0,
-                breakeven_pct=0.05,
-                partial_tp_pct=0.08,
-                partial_tp_ratio=0.5,
-                allow_short=True,
+                breakeven_pct=0.025,
+                partial_tp_pct=0.06,
+                partial_tp_ratio=0.30,
+                partial_tp2_pct=0.12,
+                partial_tp2_ratio=0.30,
+                allow_short=False,
+                gate_enabled=True,
+                gate_llm_veto=True,
+                desk_telegram=True,
                 poll_interval_sec=300,
                 auto_execute=True,
             )

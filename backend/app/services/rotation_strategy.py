@@ -27,7 +27,7 @@ from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.8-gate"
+STRATEGY_VERSION = "v6.9-ai"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -43,7 +43,7 @@ COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
     "Momentum Rotation v6.7 hybrid. OOS stop/ADX (ADX≥25, stop 3.5×ATR) + conservative risk 10%. "
-    "v6.8-Gate: quant multi-TF + LLM veto на входе; Peak-lock/BE/4H exit; long-only; daily −3% halt."
+    "v6.9-AI: settings aligned with gate — risk 8%, ADX26, ROC4.5, long-only, TP1 30%, peak-lock 1.8/50%, daily halt −2.5%; quant+LLM veto on entry."
 )
 
 
@@ -61,21 +61,21 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 25.0          # v6.6 OOS-tuned (train/test consistent)
-    min_roc: float = 5.0            # v6.5: fewer weak momentum entries
+    adx_min: float = 26.0          # v6.9-ai: slightly stricter; gate adds regime quality
+    min_roc: float = 4.5            # v6.9-ai: between weak 3.5 and tight 5.0
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.10   # v6.7 hybrid: between OOS 12% and survival 8%
-    allocation_pct: float = 0.30   # v6.5: smaller margin per pos
-    atr_stop_mult: float = 3.5     # v6.6 OOS: wider than 2.7, fewer noise stop-outs
+    risk_per_trade: float = 0.08   # v6.9-ai: fewer but gated trades → size moderate
+    allocation_pct: float = 0.30   # cap margin per name
+    atr_stop_mult: float = 3.5     # OOS-validated width
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
-    breakeven_pct: float = 0.025   # v6.4: BE earlier (+2.5%) so green doesn't go red
-    partial_tp_pct: float = 0.06   # first scale-out at +6% (dual ladder v5.2)
-    partial_tp_ratio: float = 0.25 # first scale-out fraction at TP1
-    partial_tp2_pct: float = 0.12  # second scale-out level (0=off)
-    partial_tp2_ratio: float = 0.3  # fraction of *remaining* size at TP2
+    breakeven_pct: float = 0.025   # BE at +2.5%
+    partial_tp_pct: float = 0.06   # TP1 +6%
+    partial_tp_ratio: float = 0.30 # v6.9-ai: lock a bit more at TP1 (gate = higher quality)
+    partial_tp2_pct: float = 0.12  # TP2 +12%
+    partial_tp2_ratio: float = 0.30
     # v6.4 exits: lock profit — peak giveback + 1D/4H indicator confirm
     indicator_exit: bool = True
     ind_exit_min_hold_hours: float = 2.0    # act intra-day (poll 5m)
@@ -83,26 +83,26 @@ class RotationConfig:
     ind_exit_on_ema_flip: bool = True
     ind_exit_on_roc_flip: bool = True
     ind_exit_weak_adx: float = 18.0
-    peak_lock_activate_pct: float = 1.5     # after +1.5% peak, arm giveback lock
-    peak_giveback_frac: float = 0.45        # exit if gave back 55% of peak gain
+    peak_lock_activate_pct: float = 1.8     # v6.9-ai: slightly later — let gated winners breathe
+    peak_giveback_frac: float = 0.50        # keep ≥50% of peak UPL
     profit_trail_atr_mult: float = 1.5      # tighter trail once in profit (vs 3.0)
     use_4h_exit_confirm: bool = True        # 4H EMA against + in profit => exit
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
-    rsi_long_max: float = 82.0     # no long if RSI > 82
+    rsi_long_max: float = 80.0     # v6.9-ai: align with gate coin RSI cap spirit
     rsi_short_min: float = 21.0    # no short if RSI < 21
     vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
-    allow_short: bool = False      # v6.5: long-only by default (shorts off until edge proven)
+    allow_short: bool = False      # long-only — shorts unproven with AI gate
     max_positions: int = 2
-    max_positions_non_bull: int = 1  # v6.5: only 1 slot outside clear bull
-    daily_loss_halt_pct: float = 0.03  # no new opens after -3% day
+    max_positions_non_bull: int = 1  # outside bull: 1 slot max
+    daily_loss_halt_pct: float = 0.025  # v6.9-ai: halt new opens at -2.5% day
     # AI desk pattern: quant multi-TF gate + optional LLM veto (never invents entries)
     gate_enabled: bool = True
-    gate_btc_rsi_min: float = 50.0
-    gate_coin_rsi_max: float = 82.0   # align with rsi_long_max spirit
+    gate_btc_rsi_min: float = 48.0   # v6.9-ai: soft floor; hard regime still SMA200
+    gate_coin_rsi_max: float = 80.0
     gate_require_4h: bool = True
-    gate_llm_veto: bool = True        # MOMENTUM_LLM_VETO=0 / IMPULSE_LLM_VETO=0
+    gate_llm_veto: bool = True
     desk_telegram: bool = True
     min_volume_ratio: float = 1.1  # require vol > 1.1x 20d avg if volume available
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
