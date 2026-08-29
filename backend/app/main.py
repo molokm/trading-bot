@@ -246,7 +246,7 @@ async def startup():
                 partial_tp_ratio=0.30,
                 partial_tp2_pct=0.12,
                 partial_tp2_ratio=0.30,
-                allow_short=False,
+                allow_short=True,
                 gate_enabled=True,
                 gate_llm_veto=True,
                 desk_telegram=True,

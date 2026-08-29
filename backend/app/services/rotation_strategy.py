@@ -27,7 +27,7 @@ from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v6.9-ai"
+STRATEGY_VERSION = "v6.10-ls"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -43,7 +43,7 @@ COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
     "Momentum Rotation v6.7 hybrid. OOS stop/ADX (ADX≥25, stop 3.5×ATR) + conservative risk 10%. "
-    "v6.9-AI: settings aligned with gate — risk 8%, ADX26, ROC4.5, long-only, TP1 30%, peak-lock 1.8/50%, daily halt −2.5%; quant+LLM veto on entry."
+    "v6.10-LS: long+short by regime (bull long / bear short / chop cash); risk 8%, ADX26, ROC4.5, gate both sides, TP1 30%, peak-lock 1.8/50%, daily halt −2.5%."
 )
 
 
@@ -93,7 +93,7 @@ class RotationConfig:
     rsi_short_min: float = 21.0    # no short if RSI < 21
     vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
-    allow_short: bool = False      # long-only — shorts unproven with AI gate
+    allow_short: bool = True       # v6.10: both sides — long in bull, short in bear
     max_positions: int = 2
     max_positions_non_bull: int = 1  # outside bull: 1 slot max
     daily_loss_halt_pct: float = 0.025  # v6.9-ai: halt new opens at -2.5% day

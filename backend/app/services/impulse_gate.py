@@ -52,11 +52,24 @@ def quant_gate(
             if r4 is not None and float(r4) < 45:
                 reasons.append(f"4h_rsi_weak:{float(r4):.0f}")
     elif side == "short":
+        # Prefer risk-off: block shorts when BTC clearly bullish above SMA200
         if require_btc_sma200 and btc and bool(btc.get("above_sma200", False)):
-            # optional: only short in risk-off — leave permissive
-            pass
-        if require_4h_align and tf4h and bool(tf4h.get("ema_trend")):
-            reasons.append("4h_ema_bull")
+            reasons.append("btc_above_sma200")
+        if btc and btc_rsi_min > 0:
+            br = float(btc.get("rsi") or 0)
+            # mirror of long floor: shorts need soft bearish BTC RSI
+            if br and br > (100.0 - float(btc_rsi_min) + 5.0):  # e.g. > 57 if min=48
+                reasons.append(f"btc_rsi_high:{br:.0f}")
+        cr = float(ind.get("rsi") or 0)
+        # avoid shorting already-crashed RSI (exhaustion bounce risk)
+        if cr and cr < 22:
+            reasons.append(f"coin_rsi_washed:{cr:.0f}")
+        if require_4h_align and tf4h:
+            if "ema_trend" in tf4h and bool(tf4h.get("ema_trend")):
+                reasons.append("4h_ema_bull")
+            r4 = tf4h.get("rsi")
+            if r4 is not None and float(r4) > 55:
+                reasons.append(f"4h_rsi_strong:{float(r4):.0f}")
 
     return (len(reasons) == 0, reasons)
 
@@ -104,7 +117,7 @@ async def llm_veto(
         },
         "quant_passed": quant_reasons_ok,
         "rules": (
-            "Daily crypto impulse LONG strategy. Reply JSON only: "
+            "Daily crypto momentum/impulse. Side is given (long or short). Reply JSON only: "
             '{"allow": true|false, "reason": "short"}. '
             "BLOCK only on clear bear/chop/exhaustion; otherwise ALLOW."
         ),
