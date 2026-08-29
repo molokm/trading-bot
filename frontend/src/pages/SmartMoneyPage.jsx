@@ -101,9 +101,33 @@ function TraderCard({ trader, rank, onView, onCopy, onTrack, onUntrack, isTracke
 
       <div className="grid grid-cols-4 gap-2 mb-3 py-2 border-y border-[var(--border)]">
         <Stat label="PnL" value={fmtUsd(pnl)} color={pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'} />
-        <Stat label="Win rate" value={`${wrPct.toFixed(0)}%`} />
-        <Stat label="Max DD" value={`${ddPct.toFixed(0)}%`} color={ddPct > 25 ? 'text-[var(--loss)]' : undefined} />
-        <Stat label="Подписчики" value={followers.toLocaleString()} />
+        <Stat
+          label={trader.metric_label_wr || 'Win rate'}
+          value={
+            trader.metric_value_wr != null && trader.metric_label_wr
+              ? (Number(trader.metric_value_wr) >= 1000
+                  ? `$${(Number(trader.metric_value_wr) / 1e6).toFixed(2)}M`
+                  : String(trader.metric_value_wr))
+              : (wrPct > 0 ? `${wrPct.toFixed(0)}%` : 'н/д')
+          }
+        />
+        <Stat
+          label={trader.metric_label_dd || 'Max DD'}
+          value={
+            trader.metric_value_dd != null && trader.metric_label_dd
+              ? fmtUsd(trader.metric_value_dd, false)
+              : (ddPct > 0 ? `${ddPct.toFixed(0)}%` : 'н/д')
+          }
+          color={ddPct > 25 ? 'text-[var(--loss)]' : undefined}
+        />
+        <Stat
+          label={trader.metric_label_followers || 'Подписчики'}
+          value={
+            trader.metric_value_followers != null && trader.metric_label_followers
+              ? String(trader.metric_value_followers)
+              : (followers > 0 ? followers.toLocaleString() : (trader.aum ? fmtUsd(trader.aum, false) : 'н/д'))
+          }
+        />
       </div>
 
       <div className="flex flex-wrap gap-2">
@@ -469,7 +493,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
   ]
 
   return (
-    <div className="max-w-5xl mx-auto space-y-5 pb-10">
+    <div className="h-full overflow-y-auto overscroll-contain max-w-5xl mx-auto space-y-5 px-1 pb-16">
       {/* Header */}
       <div className="rounded-2xl border border-[var(--border)] bg-gradient-to-br from-[var(--bg-card)] to-[var(--bg-elevated)] p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

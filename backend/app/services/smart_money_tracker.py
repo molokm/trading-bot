@@ -37,7 +37,7 @@ if not os.path.isdir(DATA_DIR):
 class TrackerConfig:
     """Configuration for the Smart Money Tracker."""
     # Discovery
-    sort_type: str = "roi"          # roi | copyRatio | pnl
+    sort_type: str = "pnl_ratio"          # roi | copyRatio | pnl
     inst_type: str = "SWAP"
     min_lead_days: int = 14         # minimum days as lead trader
     min_assets: float = 0.0         # min AUM filter
@@ -187,17 +187,36 @@ class OKXCopyAPI:
 
     # ── Public endpoints (no auth) ──
 
-    async def get_lead_traders(self, sort_type="roi", inst_type="SWAP",
+    async def get_lead_traders(self, sort_type="pnl_ratio", inst_type="SWAP",
                                 min_lead_days=0, min_assets=0.0, max_assets=0.0,
                                 page="1", limit="20") -> dict:
-        params = {
-            "instType": inst_type,
-            "sortType": sort_type,
-            "page": page,
-            "limit": limit,
+        # OKX: overview | pnl | aum | win_ratio | pnl_ratio | current_copy_trader_pnl
+        st_map = {
+            "roi": "pnl_ratio",
+            "pnl_ratio": "pnl_ratio",
+            "pnl": "pnl",
+            "aum": "aum",
+            "win_ratio": "win_ratio",
+            "winRatio": "win_ratio",
+            "overview": "overview",
+            "copyRatio": "overview",
+            "followers": "overview",
         }
-        if min_lead_days:
-            params["minLeadDays"] = str(min_lead_days)
+        st = st_map.get(str(sort_type or "pnl_ratio"), "pnl_ratio")
+        # minLeadDays: 1=7d, 2=30d, 3=90d, 4=180d (not raw day count)
+        mld = min_lead_days
+        if isinstance(mld, (int, float)) and mld >= 7:
+            mld = "2" if mld < 90 else ("3" if mld < 180 else "4")
+        elif mld in (0, "0", None, ""):
+            mld = None
+        params = {
+            "instType": inst_type or "SWAP",
+            "sortType": st,
+            "page": str(page or "1"),
+            "limit": str(min(int(limit or 20), 20)),
+        }
+        if mld:
+            params["minLeadDays"] = str(mld)
         if min_assets:
             params["minAssets"] = str(min_assets)
         if max_assets:
@@ -490,12 +509,15 @@ class SmartMoneyTracker:
                 return []
 
             traders = resp.get("data", [])
-            # OKX sometimes nests data
+            # OKX returns [{ dataVer, ranks: [ {...}, ... ] }]
             if traders and isinstance(traders[0], dict) and "uniqueCode" not in traders[0]:
-                # try first element list
-                inner = traders[0].get("data") or traders[0].get("list") or []
-                if isinstance(inner, list) and inner:
-                    traders = inner
+                ranks = traders[0].get("ranks")
+                if isinstance(ranks, list) and ranks:
+                    traders = ranks
+                else:
+                    inner = traders[0].get("data") or traders[0].get("list") or []
+                    if isinstance(inner, list) and inner:
+                        traders = inner
             self._discover_cache = traders
             self._discover_ts = time.time()
             return traders
@@ -524,37 +546,49 @@ class SmartMoneyTracker:
                 continue
 
             trader = self._parse_trader(t_data)
+            # Rank already has winRatio / copyTraderNum — use as baseline
+            copy_count = int(trader.copy_traders or 0)
+            stats_data = []
+            weekly_data = []
 
-            # Fetch extended stats
-            stats_resp = await self.okx_api.get_trader_stats(code)
-            stats_data = stats_resp.get("data", [{}]) if stats_resp.get("code") == "0" else [{}]
+            # Optional enrichment (non-fatal; rate-limit friendly)
+            try:
+                stats_resp = await self.okx_api.get_trader_stats(code)
+                if stats_resp.get("code") == "0":
+                    stats_data = stats_resp.get("data") or []
+                    if stats_data and isinstance(stats_data[0], dict):
+                        s = stats_data[0]
+                        if s.get("winRate") not in (None, ""):
+                            wr = float(s.get("winRate") or 0)
+                            trader.win_rate = wr / 100.0 if wr > 1 else wr
+                        if s.get("maxDrawdown") not in (None, ""):
+                            dd = float(s.get("maxDrawdown") or 0)
+                            trader.max_drawdown = dd / 100.0 if dd > 1 else dd
+                        if s.get("totalTrades") not in (None, ""):
+                            trader.total_trades = int(float(s.get("totalTrades") or 0))
+            except Exception:
+                pass
 
-            weekly_resp = await self.okx_api.get_trader_weekly_pnl(code)
-            weekly_data = weekly_resp.get("data", []) if weekly_resp.get("code") == "0" else []
+            try:
+                weekly_resp = await self.okx_api.get_trader_weekly_pnl(code)
+                if weekly_resp.get("code") == "0":
+                    weekly_data = weekly_resp.get("data") or []
+                    if weekly_data:
+                        trader.weekly_pnl = weekly_data
+            except Exception:
+                pass
 
-            copy_resp = await self.okx_api.get_trader_copy_count(code)
-            copy_data = copy_resp.get("data", [{}]) if copy_resp.get("code") == "0" else [{}]
-            copy_count = int(copy_data[0].get("copyTraders", 0)) if copy_data else 0
-
-            # Enrich trader with stats
-            if stats_data:
-                s = stats_data[0]
-                trader.win_rate = float(s.get("winRate", 0))
-                trader.total_trades = int(s.get("totalTrades", 0))
-                trader.avg_hold_hours = float(s.get("avgHoldTime", 0))
-                trader.max_drawdown = float(s.get("maxDrawdown", 0))
-
-            if weekly_data:
-                trader.weekly_pnl = weekly_data
-
-            # Run verification
             self.verifier.verify(trader, stats_data, weekly_data, copy_count)
-            trader.copy_traders = copy_count
+            if not trader.copy_traders:
+                trader.copy_traders = copy_count
 
             row = asdict(trader)
             row["source"] = "okx"
             row["copyable"] = True
-            row["profile_url"] = f"https://www.okx.com/copy-trading/account/{code}"
+            row["profile_url"] = (
+                t_data.get("portLink")
+                or f"https://www.okx.com/copy-trading/account/{code}"
+            )
             row["note"] = "OKX Copy Trading"
             results.append(row)
 
@@ -858,17 +892,53 @@ class SmartMoneyTracker:
                 logger.error(f"Refresh stats for {trader.unique_code}: {e}")
 
     def _parse_trader(self, data: dict) -> TraderProfile:
-        """Parse raw leaderboard data into TraderProfile."""
+        """Parse raw OKX leaderboard rank into TraderProfile."""
+        def _f(*keys, default=0.0):
+            for k in keys:
+                if data.get(k) is not None and data.get(k) != "":
+                    try:
+                        return float(data.get(k))
+                    except (TypeError, ValueError):
+                        continue
+            return float(default)
+
+        def _i(*keys, default=0):
+            for k in keys:
+                if data.get(k) is not None and data.get(k) != "":
+                    try:
+                        return int(float(data.get(k)))
+                    except (TypeError, ValueError):
+                        continue
+            return int(default)
+
+        # pnlRatio from OKX is a fraction (0.727 = 72.7%) or already large
+        ratio = _f("pnlRatio", "roi", "pnl_ratio", default=0.0)
+        if abs(ratio) <= 5:  # treat as fraction
+            roi_pct = ratio * 100.0
+        else:
+            roi_pct = ratio
+
+        wr = _f("winRatio", "win_rate", "winRate", default=0.0)
+        # keep 0-1 scale for verifier; UI multiplies if <=1
+        if wr > 1:
+            wr = wr / 100.0
+
+        dd = _f("maxDrawdown", "max_drawdown", default=0.0)
+        if dd > 1:
+            dd = dd / 100.0
+
         return TraderProfile(
-            unique_code=data.get("uniqueCode", ""),
-            alias=data.get("alias", ""),
-            inst_type=data.get("instType", "SWAP"),
-            roi_pct=float(data.get("roi", 0)) * 100,
-            pnl_usd=float(data.get("pnl", 0)),
-            copy_ratio=float(data.get("copyRatio", 0)),
-            copy_traders=int(data.get("copyTraders", 0)),
-            lead_days=int(data.get("leadDays", 0)),
-            aum=float(data.get("aum", 0)),
+            unique_code=str(data.get("uniqueCode") or data.get("unique_code") or ""),
+            alias=str(data.get("nickName") or data.get("alias") or data.get("nick_name") or ""),
+            inst_type=str(data.get("instType") or "SWAP"),
+            roi_pct=roi_pct,
+            pnl_usd=_f("pnl", "pnl_usd", default=0.0),
+            copy_ratio=_f("copyRatio", default=0.0),
+            copy_traders=_i("copyTraderNum", "copyTraders", "copy_traders", default=0),
+            lead_days=_i("leadDays", "lead_days", default=0),
+            aum=_f("aum", default=0.0),
+            win_rate=wr,
+            max_drawdown=dd,
         )
 
     # ────────── Status ──────────
