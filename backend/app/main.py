@@ -1526,8 +1526,16 @@ async def smart_money_copy(data: dict = None):
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    if str(code).startswith("hl:") or str(code).startswith("social:"):
-        return {"ok": False, "msg": "Копирование доступно только для трейдеров OKX"}
+    code_s = str(code or "").strip()
+    if code_s.startswith("hl:") or code_s.startswith("social:"):
+        return {
+            "ok": False,
+            "msg": (
+                "Этот трейдер не с OKX (Hyperliquid/соцсети). "
+                "Автокопирование запускается только для лидеров OKX Copy Trading — "
+                "в списке включите источник OKX и нажмите «Копировать» на карточке с бейджем OKX."
+            ),
+        }
     tracker = _ensure_sm_tracker(execute=True, start=True)
     return await tracker.start_copying(code, copy_amt=data.get("copy_amt"))
 

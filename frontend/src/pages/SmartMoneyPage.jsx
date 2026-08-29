@@ -19,7 +19,18 @@ function fmtUsd(v, sign = true) {
   return `${s}$${Math.abs(n).toLocaleString('en', { maximumFractionDigits: 0 })}`
 }
 
+function isOkxTrader(t) {
+  if (!t) return false
+  const code = String(t.unique_code || '')
+  if (code.startsWith('hl:') || code.startsWith('social:')) return false
+  const src = (t.source || 'okx').toLowerCase()
+  if (src === 'hyperliquid' || src === 'social') return false
+  if (t.copyable === false && src !== 'okx') return false
+  return src === 'okx' || (!!code && !code.includes(':'))
+}
+
 function SourceBadge({ source }) {
+
   const s = (source || 'okx').toLowerCase()
   const map = {
     okx: { label: 'OKX', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
@@ -150,7 +161,7 @@ function TraderCard({ trader, rank, onView, onCopy, onTrack, onUntrack, isTracke
         </button>
         {!isGuest && (
           <>
-            {trader.copyable !== false && (trader.source || 'okx') === 'okx' ? (
+            {isOkxTrader(trader) ? (
               <button
                 type="button"
                 onClick={() => onCopy(trader)}
@@ -243,8 +254,8 @@ function CopyModal({ trader, onClose, onConfirm, busy }) {
         </div>
 
         <p className="text-[11px] text-[var(--txt-muted)] mb-4 leading-relaxed">
-          Сделки лидера будут копироваться на OKX с выбранной суммой. Это не гарантия прибыли —
-          проверяйте ROI, просадку и историю перед запуском.
+          Сделки лидера OKX будут копироваться на ваш аккаунт OKX с выбранной суммой.
+          Нужны API-ключи с правом copy-trading. Это не гарантия прибыли.
         </p>
 
         <div className="flex gap-2">
@@ -325,9 +336,23 @@ function DetailModal({ trader, onClose, onCopy, history }) {
           )}
         </div>
 
-        <button type="button" className="btn btn-primary w-full" onClick={() => onCopy(trader)}>
-          Копировать этого трейдера
-        </button>
+        {isOkxTrader(trader) ? (
+          <button type="button" className="btn btn-primary w-full" onClick={() => onCopy(trader)}>
+            Копировать этого трейдера (OKX)
+          </button>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-[var(--txt-muted)] leading-relaxed">
+              Автокопирование на OKX доступно только для лидеров OKX Copy Trading.
+              У этого трейдера источник «{trader?.source || 'не OKX'}» — можно открыть профиль и следить вручную.
+            </p>
+            {trader?.profile_url ? (
+              <a href={trader.profile_url} target="_blank" rel="noreferrer" className="btn btn-secondary w-full inline-flex justify-center">
+                Открыть профиль
+              </a>
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   )
@@ -468,6 +493,11 @@ export default function SmartMoneyPage({ connected, isGuest }) {
 
   const handleCopyConfirm = async ({ amount }) => {
     if (!copyTrader || isGuest) return
+    if (!isOkxTrader(copyTrader)) {
+      alert('Автокопирование работает только с лидерами OKX. Выберите карточку с бейджем OKX.')
+      setCopyTrader(null)
+      return
+    }
     setBusy(true)
     try {
       const r = await api.smartMoneyCopy(copyTrader.unique_code, amount)
