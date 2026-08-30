@@ -2334,10 +2334,12 @@ async def sweep_orphans():
 
 @app.get("/api/positions")
 async def get_positions(inst_type: str = "SWAP"):
-    global _positions_cache, _positions_cache_ts
+    global _positions_cache, _positions_cache_ts, _POS_RECLAIM_TS
     now_s = _time.time()
     if _positions_cache is not None and (now_s - _positions_cache_ts) < _POS_CACHE_TTL:
         return _positions_cache
+    # Heavy OKX fills/algo reclaim — at most once per _POS_RECLAIM_TTL
+    do_heavy_reclaim = (now_s - float(_POS_RECLAIM_TS or 0)) >= float(_POS_RECLAIM_TTL or 90)
     result = await _okx_call(lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
@@ -2484,9 +2486,9 @@ async def get_positions(inst_type: str = "SWAP"):
             except Exception as e:
                 print(f"[positions] reclaim {inst}: {e}", flush=True)
 
-        if not bot_name and inst:
+        if not bot_name and inst and do_heavy_reclaim:
             try:
-                fills = await _fetch_okx_fills(limit=1000)
+                fills = await _fetch_okx_fills(limit=100)
                 prefix_map = {
                     "rot": (ROT_BOT_ID, "Momentum"),
                     "imp": (IMP_BOT_ID, "Impulse 1D"),
@@ -2512,7 +2514,7 @@ async def get_positions(inst_type: str = "SWAP"):
                 print(f"[positions] fill-tag {inst}: {e}", flush=True)
 
         # Pending algo / stop orders often keep clOrdId longer than fills window
-        if not bot_name and inst:
+        if not bot_name and inst and do_heavy_reclaim:
             try:
                 client = client_manager.get_client()
                 if client and hasattr(client, "get_order_list"):
@@ -2718,7 +2720,13 @@ _positions_cache: dict = None
 _positions_cache_ts: float = 0
 _portfolio_cache: dict = None
 _portfolio_cache_ts: float = 0
-_POS_CACHE_TTL = 2  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+_POS_CACHE_TTL = 3  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+_POS_RECLAIM_TS = 0.0
+_POS_RECLAIM_TTL = 90.0  # heavy fill/algo reclaim at most once per 90s
+_FUNDING_CACHE = 0.0
+_FUNDING_CACHE_TS = 0.0
+_FUNDING_TTL = 120.0
+
 
 
 @app.get("/api/market/ticker")
@@ -5043,36 +5051,43 @@ async def get_pnl():
     except Exception:
         pass
 
-    # Funding (OKX bills type=8) — not inside trade fillPnl; surface separately
+    # Funding (OKX bills type=8) — cached to avoid extra OKX load every poll
     funding = 0.0
     funding_source = "none"
     funding_n = 0
     try:
-        epoch = await get_pnl_epoch()
-        resp_f = await _okx_call(
-            lambda c: c.get_bills(inst_type="SWAP", type="8", limit=100)
-        )
-        if not resp_f.get("error"):
-            for b in resp_f.get("data") or []:
-                ts = b.get("ts") or b.get("cTime") or ""
-                # best-effort epoch filter on bill time
-                try:
-                    if epoch and ts:
-                        from datetime import datetime as _dt, timezone as _tz
-                        t_iso = _dt.fromtimestamp(int(ts) / 1000, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
-                        if t_iso[:19] < str(epoch)[:19]:
-                            continue
-                except Exception:
-                    pass
-                try:
-                    v = b.get("pnl")
-                    if v is None or v == "":
-                        v = b.get("balChg")
-                    funding += float(v or 0)
-                    funding_n += 1
-                except (TypeError, ValueError):
-                    continue
-            funding_source = "okx_bills_type8"
+        global _FUNDING_CACHE, _FUNDING_CACHE_TS
+        now_f = _time.time()
+        if _FUNDING_CACHE_TS and (now_f - _FUNDING_CACHE_TS) < _FUNDING_TTL:
+            funding = float(_FUNDING_CACHE or 0)
+            funding_source = "cache"
+        else:
+            epoch = await get_pnl_epoch()
+            resp_f = await _okx_call(
+                lambda c: c.get_bills(inst_type="SWAP", type="8", limit=50)
+            )
+            if not resp_f.get("error"):
+                for b in resp_f.get("data") or []:
+                    ts = b.get("ts") or b.get("cTime") or ""
+                    try:
+                        if epoch and ts:
+                            from datetime import datetime as _dt, timezone as _tz
+                            t_iso = _dt.fromtimestamp(int(ts) / 1000, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                            if t_iso[:19] < str(epoch)[:19]:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        v = b.get("pnl")
+                        if v is None or v == "":
+                            v = b.get("balChg")
+                        funding += float(v or 0)
+                        funding_n += 1
+                    except (TypeError, ValueError):
+                        continue
+                funding_source = "okx_bills_type8"
+                _FUNDING_CACHE = funding
+                _FUNDING_CACHE_TS = now_f
     except Exception as e:
         print(f"[pnl] funding: {e}", flush=True)
 
@@ -5432,16 +5447,18 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
 
 
 _warm_task: Optional[asyncio.Task] = None
-_WARM_INTERVAL = 30
+_WARM_INTERVAL = 45.0
 
 
 async def _warm_dashboard_caches() -> None:
-    """Keep the expensive dashboard caches hot in the background so the first
-    (and every 30s) user request never pays the 3-8s bills/fills/DB pipeline."""
+    """Keep dashboard caches warm without saturating the free-tier instance."""
     while True:
         try:
             await asyncio.sleep(_WARM_INTERVAL)
-            await get_paired_trades(limit=500)
+            try:
+                await asyncio.wait_for(get_paired_trades(limit=300), timeout=25.0)
+            except asyncio.TimeoutError:
+                print("[warm] paired cache timed out (25s) — skip", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:

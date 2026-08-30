@@ -9,8 +9,9 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      # PORT is set by Render; entrypoint uses PORT first
       - key: BACKEND_PORT
-        value: "8000"
+        value: "10000"
       - key: BACKEND_HOST
         value: "0.0.0.0"
       - key: OKX_DEMO
