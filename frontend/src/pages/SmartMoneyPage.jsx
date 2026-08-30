@@ -517,7 +517,10 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     loadCopies()
     loadMirrors()
     loadSmPnl()
-    const iv = setInterval(() => { loadSmPnl(); loadMirrors() }, 15000)
+    const iv = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      loadSmPnl(); loadMirrors()
+    }, 45000)
     return () => clearInterval(iv)
   }, [loadStatus, fetchDiscover, loadTracked, loadCopies, loadMirrors, loadSmPnl])
 

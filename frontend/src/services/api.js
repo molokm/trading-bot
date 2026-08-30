@@ -1,11 +1,34 @@
 const BASE = '/api';
 
+/** Global client backoff after 429/502/503 — stops hammering Render free tier */
+let apiBackoffUntil = 0;
+let apiBackoffMs = 0;
+
 function getToken() {
   // Legacy fallback; primary auth is httpOnly cookie (credentials: include)
   return localStorage.getItem('auth_token') || '';
 }
 
+function noteApiFailure(status) {
+  if (status === 429 || status === 503 || status === 502) {
+    apiBackoffMs = Math.min(120000, Math.max(5000, (apiBackoffMs || 3000) * 2));
+    apiBackoffUntil = Date.now() + apiBackoffMs;
+  }
+}
+
+function noteApiSuccess() {
+  apiBackoffMs = 0;
+  apiBackoffUntil = 0;
+}
+
 async function request(path, options = {}) {
+  if (Date.now() < apiBackoffUntil) {
+    const wait = Math.ceil((apiBackoffUntil - Date.now()) / 1000);
+    const e = new Error(`Сервер перегружен / лимит запросов. Подождите ~${wait}с`);
+    e.status = 429;
+    e.backoff = true;
+    throw e;
+  }
   const url = `${BASE}${path}`;
   const token = getToken();
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
@@ -15,7 +38,18 @@ async function request(path, options = {}) {
     ...options,
     headers: { ...headers, ...(options.headers || {}) },
   };
-  const resp = await fetch(url, config);
+  let resp;
+  try {
+    resp = await fetch(url, config);
+  } catch (netErr) {
+    noteApiFailure(503);
+    throw netErr;
+  }
+  if (resp.status === 429 || resp.status === 503 || resp.status === 502) {
+    noteApiFailure(resp.status);
+  } else if (resp.ok) {
+    noteApiSuccess();
+  }
   if (resp.status === 401) {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_role');

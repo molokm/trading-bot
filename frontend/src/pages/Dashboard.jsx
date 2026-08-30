@@ -108,7 +108,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(loadData, 10000)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      loadData()
+    }, 20000)
     return () => clearInterval(interval)
   }, [connected])
 

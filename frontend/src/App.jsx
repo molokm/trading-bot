@@ -106,7 +106,10 @@ function AppLayout() {
       }
     }
     check()
-    const interval = setInterval(check, 15000)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      check()
+    }, 30000)
     return () => clearInterval(interval)
   }, [])
 
