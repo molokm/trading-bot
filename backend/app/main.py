@@ -2123,6 +2123,14 @@ def _db_bot_name(bot_id: str) -> str:
         return "Order Book Scalp"
     if base == VWAP_BOT_ID:
         return "VWAP Mean Reversion"
+    if base in ("smart_money", "smart_money_mirror", "sm_mirror"):
+        return "Умные деньги"
+    # already a UI label?
+    if base in (
+        "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги", "Unassigned",
+    ):
+        return base
     return ""
 
 
@@ -4261,7 +4269,19 @@ async def get_pnl():
     try:
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", [])
-        closed = [t for t in trades if (t.get("reason") or "").lower() != "open"]
+        # Closed = has numeric pnl and not an open marker (open rows use pnl=None)
+        closed = []
+        for t in trades:
+            reason = (t.get("reason") or "").lower()
+            if reason in ("open", "add"):
+                continue
+            if t.get("pnl") is None:
+                continue
+            try:
+                float(t.get("pnl"))
+            except (TypeError, ValueError):
+                continue
+            closed.append(t)
         if closed:
             source = "history"
             now = dt.now(tz.utc)
@@ -4271,9 +4291,20 @@ async def get_pnl():
                     pnl = float(t.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-                bot = t.get("bot") or ""
-                if bot:
-                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+                bot = (t.get("bot") or "").strip()
+                if not bot:
+                    try:
+                        bot = (_tag_trade_bot(t) or "").strip()
+                    except Exception:
+                        bot = ""
+                if not bot:
+                    try:
+                        bot = (_db_bot_name(t.get("bot_id") or "") or "").strip()
+                    except Exception:
+                        bot = ""
+                if not bot:
+                    bot = "Unassigned"
+                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                 total_realized += pnl
                 account_total += pnl
                 try:
@@ -4301,9 +4332,15 @@ async def get_pnl():
                         realized_30d += pnl
                 else:
                     realized_30d += pnl
+            # Guarantee sum(per_bot) == total_realized (UI cards must add up)
+            pb_sum = sum(float(v or 0) for v in per_bot.values())
+            drift = round(total_realized - pb_sum, 6)
+            if abs(drift) > 0.005:
+                per_bot["Unassigned"] = per_bot.get("Unassigned", 0.0) + drift
             print(f"[pnl] History (primary): total={total_realized:.2f} account_total={account_total:.2f} "
                   f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed={len(closed)} per_bot={per_bot}", flush=True)
+                  f"fees={total_fees:.2f} closed={len(closed)} per_bot={per_bot} "
+                  f"per_bot_sum={sum(per_bot.values()):.2f}", flush=True)
     except Exception as e:
         import traceback
         print(f"[pnl] History source error: {e}", flush=True)

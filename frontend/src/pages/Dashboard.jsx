@@ -206,15 +206,28 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const botNameMap = {
     rotation_strategy: 'Momentum',
     momentum_strategy: 'Momentum',
+    Momentum: 'Momentum',
     impulse_strategy: 'Impulse 1D',
+    'Impulse 1D': 'Impulse 1D',
     validation_strategy: 'MACD+Donchian Validation',
+    'MACD+Donchian Validation': 'MACD+Donchian Validation',
     ai_strategy: 'AI Discretionary 1H',
-    orderbook_scalp: 'Smart Money',
+    'AI Discretionary 1H': 'AI Discretionary 1H',
+    orderbook_scalp: 'Order Book Scalp',
+    smart_money: 'Умные деньги',
+    'Умные деньги': 'Умные деньги',
+    Unassigned: 'Прочее / без стратегии',
+    'Прочее / без стратегии': 'Прочее / без стратегии',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
-    return Object.entries(per)
-      .map(([bid, val]) => ({ name: botNameMap[bid] || bid, val }))
+    const merged = {}
+    for (const [bid, val] of Object.entries(per)) {
+      const name = botNameMap[bid] || bid
+      merged[name] = (merged[name] || 0) + Number(val || 0)
+    }
+    return Object.entries(merged)
+      .map(([name, val]) => ({ name, val }))
       .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
   }, [pnl])
 
