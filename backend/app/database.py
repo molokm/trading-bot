@@ -1031,7 +1031,45 @@ class Database:
         row = await self._fetchone(sql, (inst_id, bot_id))
         return bool(row)
 
+
+    async def reassign_trades_instrument(
+        self, from_bot: str, to_bot: str, inst_id: str
+    ) -> dict:
+        """Move trades for inst_id from one bot to another; return pnl/count deltas."""
+        if self._pg_mode:
+            rows = await self._fetchall(
+                "SELECT id, pnl FROM trades WHERE bot_id = $1 AND inst_id = $2",
+                (from_bot, inst_id),
+            ) or []
+        else:
+            rows = await self._fetchall(
+                "SELECT id, pnl FROM trades WHERE bot_id = ? AND inst_id = ?",
+                (from_bot, inst_id),
+            ) or []
+        n = 0
+        pnl = 0.0
+        wins = 0
+        for r in rows:
+            n += 1
+            p = float((r.get("pnl") if isinstance(r, dict) else r[1]) or 0)
+            pnl += p
+            if p > 0:
+                wins += 1
+        if n:
+            if self._pg_mode:
+                await self._execute(
+                    "UPDATE trades SET bot_id = $1 WHERE bot_id = $2 AND inst_id = $3",
+                    (to_bot, from_bot, inst_id),
+                )
+            else:
+                await self._execute(
+                    "UPDATE trades SET bot_id = ? WHERE bot_id = ? AND inst_id = ?",
+                    (to_bot, from_bot, inst_id),
+                )
+        return {"moved": n, "pnl": pnl, "wins": wins}
+
     async def last_bot_for_instrument(self, inst_id: str) -> Optional[str]:
+
         """bot_id of most recent trade on this instrument (ownership hint after restart)."""
         sql = (
             "SELECT bot_id FROM trades WHERE inst_id = $1 ORDER BY timestamp DESC LIMIT 1"

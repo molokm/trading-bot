@@ -1230,6 +1230,29 @@ async def ai_status():
     return status
 
 
+
+@app.post("/api/ai/correct-attribution", dependencies=[Depends(require_admin)])
+async def ai_correct_attribution(data: dict = None):
+    """Move mis-attributed trades (default SOL) off AI PnL onto Impulse."""
+    global ai_bot
+    data = data or {}
+    symbol = str(data.get("symbol") or "SOL").upper()
+    to_bot = str(data.get("to_bot") or "impulse_strategy")
+    if ai_bot and hasattr(ai_bot, "correct_misattributed"):
+        return await ai_bot.correct_misattributed(symbol, to_bot)
+    # offline fix via DB only
+    from app.services.ai_strategy import AI_BOT_ID
+    inst = f"{symbol}-USDT-SWAP"
+    stats = await db.reassign_trades_instrument(AI_BOT_ID, to_bot, inst)
+    try:
+        from app.services.position_claim import release_open
+        await release_open(db, AI_BOT_ID, inst, "long")
+        await release_open(db, AI_BOT_ID, inst, "short")
+    except Exception:
+        pass
+    return {"ok": True, "offline": True, **stats, "symbol": symbol, "to_bot": to_bot}
+
+
 @app.post("/api/ai/start", dependencies=[Depends(require_admin)])
 async def ai_start(data: dict = None):
     # decorator must be @app.post (not bare post)

@@ -1543,6 +1543,97 @@ class AIStrategy:
                 reason=reason or "ai_open",
             )
 
+
+    async def correct_misattributed(
+        self,
+        symbol: str = "SOL",
+        to_bot: str = "impulse_strategy",
+    ) -> dict:
+        """Remove a wrongly attached instrument from AI PnL / claims.
+
+        Moves DB trades to `to_bot`, adjusts lifetime counters, drops in-memory
+        position and DB claim. Used when e.g. Impulse SOL was adopted by AI.
+        """
+        coin = (symbol or "SOL").upper().replace("-USDT-SWAP", "")
+        inst_id = f"{coin}-USDT-SWAP"
+        out = {
+            "symbol": coin,
+            "inst_id": inst_id,
+            "to_bot": to_bot,
+            "moved": 0,
+            "pnl_removed": 0.0,
+            "memory_dropped": False,
+        }
+        if not self.db:
+            out["error"] = "no db"
+            return out
+
+        try:
+            stats = await self.db.reassign_trades_instrument(
+                self.BOT_ID, to_bot, inst_id
+            )
+            out["moved"] = int(stats.get("moved") or 0)
+            out["pnl_removed"] = float(stats.get("pnl") or 0)
+            wins = int(stats.get("wins") or 0)
+        except Exception as e:
+            out["error"] = f"reassign: {e}"
+            return out
+
+        # lifetime / session
+        if out["moved"]:
+            self._lifetime_pnl = float(self._lifetime_pnl or 0) - out["pnl_removed"]
+            self._lifetime_trades = max(0, int(self._lifetime_trades or 0) - out["moved"])
+            self._lifetime_wins = max(0, int(self._lifetime_wins or 0) - wins)
+            # session approx
+            self._session_pnl = float(getattr(self, "_session_pnl", 0) or 0) - out["pnl_removed"]
+            self._equity = self._capital + float(self._session_pnl or 0)
+
+        # drop memory position
+        if coin in self._positions:
+            del self._positions[coin]
+            out["memory_dropped"] = True
+
+        # release claim
+        try:
+            from .position_claim import release_open
+            await release_open(self.db, self.BOT_ID, inst_id, "long")
+            await release_open(self.db, self.BOT_ID, inst_id, "short")
+        except Exception as e:
+            out["release_err"] = str(e)
+
+        # give claim hint to impulse if exchange still open — leave to Impulse restore
+        try:
+            await self._persist_lifetime()
+        except Exception:
+            try:
+                blob = {
+                    "lifetime_pnl": self._lifetime_pnl,
+                    "lifetime_trades": self._lifetime_trades,
+                    "lifetime_wins": self._lifetime_wins,
+                    "lifetime_fees": getattr(self, "_lifetime_fees", 0),
+                    "adapt": getattr(self, "_adapt", {}),
+                    "reflection": getattr(self, "_reflection", ""),
+                }
+                await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", json.dumps(blob))
+            except Exception as e:
+                out["persist_err"] = str(e)
+
+        # flag so we don't loop
+        try:
+            await self.db.set_setting(
+                f"ai_misattr_fixed:{self.BOT_ID}:{coin}",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            pass
+
+        print(
+            f"[AI] corrected misattribution {coin}: moved={out['moved']} "
+            f"pnl_removed={out['pnl_removed']:.4f} -> {to_bot}",
+            flush=True,
+        )
+        return out
+
     async def _hydrate_from_db(self):
         """Reload lifetime stats + open positions from Postgres after deploy.
 
@@ -1634,6 +1725,15 @@ class AIStrategy:
         self._equity = self._capital + float(self._session_pnl or 0)
         # rewrite file so next boot without DB still has numbers
         self._persist()
+
+        # One-shot: SOL was often stolen from Impulse after redeploy — move off AI PnL
+        try:
+            flag = await self.db.get_setting(f"ai_misattr_fixed:{self.BOT_ID}:SOL")
+            if not flag:
+                await self.correct_misattributed("SOL", "impulse_strategy")
+        except Exception as e:
+            print(f"[AI] auto-correct SOL misattr: {e}", flush=True)
+
         print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
               f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)
 
