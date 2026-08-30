@@ -217,6 +217,23 @@ async def startup():
         print("[startup] 2/7 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        
+        # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
+        try:
+            from app.services.smart_money_mirror import get_mirror
+            m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+            await m.hydrate_from_db()
+            print(f"[startup] SM mirror targets={len(getattr(m, '_targets', {}) or {})}", flush=True)
+        except Exception as e:
+            print(f"[startup] SM mirror hydrate: {e}", flush=True)
+        try:
+            tr = _ensure_sm_tracker(execute=False, start=False)
+            if tr and hasattr(tr, "hydrate_from_db"):
+                await tr.hydrate_from_db()
+            print("[startup] SM tracker hydrated", flush=True)
+        except Exception as e:
+            print(f"[startup] SM tracker hydrate: {e}", flush=True)
+
         print("[startup] 3/7 Migration check ...", flush=True)
         # One-time cleanup: check if any old momentum data exists, wipe it all.
         # Checks trades table for old bot_id - most reliable signal.
@@ -4432,13 +4449,12 @@ async def admin_reset_trading_stats(data: dict = None):
         except Exception as e:
             print(f"[reset] mem {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
 
-    # smart money ledger file
+    # Smart Money ledger (realized PnL counter) only — NEVER wipe mirror/tracker state
     try:
         import os
         from app.services.smart_money_ledger import LEDGER_PATH, get_sm_ledger
         if os.path.exists(LEDGER_PATH):
             os.remove(LEDGER_PATH)
-        # re-init empty
         import app.services.smart_money_ledger as sml
         sml._ledger = None
         get_sm_ledger()

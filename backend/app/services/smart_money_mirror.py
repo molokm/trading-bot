@@ -515,53 +515,114 @@ class SmartMoneyMirror:
     def _state_path(self) -> str:
         return os.path.join(DATA_DIR, "smart_money_mirror.json")
 
+    def _snapshot(self) -> dict:
+        return {
+            "config": asdict(self.config),
+            "targets": {
+                a: {
+                    "address": t.address,
+                    "alias": t.alias,
+                    "capital_usdt": t.capital_usdt,
+                    "max_leverage": t.max_leverage,
+                    "active": t.active,
+                    "started_at": t.started_at,
+                    "mirrored": t.mirrored,
+                }
+                for a, t in self._targets.items()
+            },
+        }
+
+    def _apply_snapshot(self, data: dict):
+        if not data:
+            return
+        cfg = data.get("config") or {}
+        for k, v in cfg.items():
+            if hasattr(self.config, k):
+                setattr(self.config, k, v)
+        for a, td in (data.get("targets") or {}).items():
+            t = MirrorTarget(
+                address=td.get("address") or a,
+                alias=td.get("alias") or "",
+                capital_usdt=float(td.get("capital_usdt") or 100),
+                max_leverage=float(td.get("max_leverage") or 3),
+                active=bool(td.get("active", True)),
+                started_at=float(td.get("started_at") or 0),
+                mirrored=td.get("mirrored") or {},
+            )
+            self._targets[t.address] = t
+
     def _persist(self):
+        data = self._snapshot()
+        # 1) local file (best-effort)
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
-            data = {
-                "config": asdict(self.config),
-                "targets": {
-                    a: {
-                        "address": t.address,
-                        "alias": t.alias,
-                        "capital_usdt": t.capital_usdt,
-                        "max_leverage": t.max_leverage,
-                        "active": t.active,
-                        "started_at": t.started_at,
-                        "mirrored": t.mirrored,
-                    }
-                    for a, t in self._targets.items()
-                },
-            }
             with open(self._state_path(), "w") as f:
                 json.dump(data, f)
         except Exception as e:
-            log.warning("persist mirror: %s", e)
+            log.warning("persist mirror file: %s", e)
+        # 2) durable DB (survives Render redeploy)
+        try:
+            if self.db and hasattr(self.db, "set_setting"):
+                import asyncio
+                payload = json.dumps(data, default=str)
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(self.db.set_setting("sm_mirror_state", payload))
+                    else:
+                        loop.run_until_complete(self.db.set_setting("sm_mirror_state", payload))
+                except RuntimeError:
+                    asyncio.run(self.db.set_setting("sm_mirror_state", payload))
+        except Exception as e:
+            log.warning("persist mirror db: %s", e)
+
+    async def persist_to_db(self):
+        if not self.db:
+            return
+        try:
+            await self.db.set_setting("sm_mirror_state", json.dumps(self._snapshot(), default=str))
+        except Exception as e:
+            log.warning("persist_to_db mirror: %s", e)
 
     def _load(self):
+        # file first (fast), DB overrides on async hydrate
         try:
             path = self._state_path()
-            if not os.path.exists(path):
-                return
-            with open(path) as f:
-                data = json.load(f)
-            cfg = data.get("config") or {}
-            for k, v in cfg.items():
-                if hasattr(self.config, k):
-                    setattr(self.config, k, v)
-            for a, td in (data.get("targets") or {}).items():
-                t = MirrorTarget(
-                    address=td.get("address") or a,
-                    alias=td.get("alias") or "",
-                    capital_usdt=float(td.get("capital_usdt") or 100),
-                    max_leverage=float(td.get("max_leverage") or 3),
-                    active=bool(td.get("active", True)),
-                    started_at=float(td.get("started_at") or 0),
-                    mirrored=td.get("mirrored") or {},
-                )
-                self._targets[t.address] = t
+            if os.path.exists(path):
+                with open(path) as f:
+                    data = json.load(f)
+                self._apply_snapshot(data)
         except Exception as e:
-            log.warning("load mirror: %s", e)
+            log.warning("load mirror file: %s", e)
+
+    async def hydrate_from_db(self):
+        """Load durable mirror targets after deploy (Render /tmp is wiped)."""
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting("sm_mirror_state")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            if not isinstance(data, dict):
+                return
+            # Prefer DB when it has targets
+            if data.get("targets"):
+                self._targets.clear()
+                self._apply_snapshot(data)
+                # also refresh local file
+                try:
+                    os.makedirs(DATA_DIR, exist_ok=True)
+                    with open(self._state_path(), "w") as f:
+                        json.dump(data, f)
+                except Exception:
+                    pass
+                log.info("mirror hydrated from DB: %d targets", len(self._targets))
+                # auto-resume polling if any active
+                if any(t.active for t in self._targets.values()) and not self._running:
+                    self.start()
+        except Exception as e:
+            log.warning("hydrate mirror db: %s", e)
 
 
 # singleton helper for main

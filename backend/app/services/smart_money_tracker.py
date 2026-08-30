@@ -1044,37 +1044,79 @@ class SmartMoneyTracker:
             if os.path.exists(path):
                 with open(path) as f:
                     data = json.load(f)
-                self._lifetime_pnl = data.get("lifetime_pnl", 0)
-                self._lifetime_copies = data.get("lifetime_copies", 0)
-                self._daily_loss = data.get("daily_loss", 0)
-                self._daily_reset_ts = data.get("daily_reset_ts", 0)
-                # Restore tracked traders
-                for td in data.get("traders", []):
-                    tp = TraderProfile(**{
-                        k: v for k, v in td.items()
-                        if k in TraderProfile.__dataclass_fields__
-                    })
-                    self._traders[tp.unique_code] = tp
+                self._apply_state(data)
         except Exception as e:
             logger.error(f"Load state: {e}")
 
+    def _apply_state(self, data: dict):
+        if not data:
+            return
+        self._lifetime_pnl = data.get("lifetime_pnl", self._lifetime_pnl)
+        self._lifetime_copies = data.get("lifetime_copies", self._lifetime_copies)
+        self._daily_loss = data.get("daily_loss", self._daily_loss)
+        self._daily_reset_ts = data.get("daily_reset_ts", self._daily_reset_ts)
+        for td in data.get("traders", []) or []:
+            try:
+                tp = TraderProfile(**{
+                    k: v for k, v in td.items()
+                    if k in TraderProfile.__dataclass_fields__
+                })
+                self._traders[tp.unique_code] = tp
+            except Exception:
+                continue
+
+    def _state_blob(self) -> dict:
+        return {
+            "lifetime_pnl": self._lifetime_pnl,
+            "lifetime_copies": self._lifetime_copies,
+            "daily_loss": self._daily_loss,
+            "daily_reset_ts": self._daily_reset_ts,
+            "traders": [asdict(t) for t in self._traders.values()],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def _persist(self):
+        data = self._state_blob()
         try:
-            data = {
-                "lifetime_pnl": self._lifetime_pnl,
-                "lifetime_copies": self._lifetime_copies,
-                "daily_loss": self._daily_loss,
-                "daily_reset_ts": self._daily_reset_ts,
-                "traders": [asdict(t) for t in self._traders.values()],
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
             path = self._state_path()
             tmp = path + ".tmp"
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(tmp, "w") as f:
                 json.dump(data, f, indent=2, default=str)
             os.replace(tmp, path)
         except Exception as e:
-            logger.error(f"Persist state: {e}")
+            logger.error(f"Persist state file: {e}")
+        try:
+            if self.db and hasattr(self.db, "set_setting"):
+                import asyncio
+                payload = json.dumps(data, default=str)
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.ensure_future(self.db.set_setting("sm_tracker_state", payload))
+                    else:
+                        loop.run_until_complete(self.db.set_setting("sm_tracker_state", payload))
+                except RuntimeError:
+                    asyncio.run(self.db.set_setting("sm_tracker_state", payload))
+        except Exception as e:
+            logger.error(f"Persist state db: {e}")
+
+    async def hydrate_from_db(self):
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting("sm_tracker_state")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(data, dict):
+                self._apply_state(data)
+                logger.info("SM tracker hydrated from DB: traders=%s", len(self._traders))
+                if self.config.execute and any(getattr(t, "tracked", False) for t in self._traders.values()):
+                    if not self._running:
+                        self.start()
+        except Exception as e:
+            logger.error(f"hydrate tracker db: {e}")
 
     def _db_snapshot(self):
         """Save performance metrics to DB."""
