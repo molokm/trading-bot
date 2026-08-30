@@ -4313,8 +4313,8 @@ async def get_pnl():
     # same rows; open rows (pnl=None) contribute nothing.
     try:
         resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", [])
-        # Account total: all closed history rows (OKX-backed) — exchange truth
+        trades = resp.get("trades", []) or []
+        # Closed trades with realized pnl — single source for TOTAL and per-strategy
         closed = []
         for tr in trades:
             reason = (tr.get("reason") or "").lower()
@@ -4327,17 +4327,47 @@ async def get_pnl():
             except (TypeError, ValueError):
                 continue
             closed.append(tr)
+
         if closed:
             source = "history"
             now = dt.now(tz.utc)
             week_start = (now - td(days=now.weekday())).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
+            per_bot = {}
             for tr in closed:
                 try:
                     pnl = float(tr.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
+
+                # Strategy link: already tagged in pairing, else resolve
+                bot = (tr.get("bot") or "").strip()
+                if not bot:
+                    try:
+                        bot = (_tag_trade_bot(tr) or "").strip()
+                    except Exception:
+                        bot = ""
+                if not bot:
+                    try:
+                        bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
+                    except Exception:
+                        bot = ""
+                # Normalize aliases → stable UI labels used by dashboard cards
+                if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
+                    bot = "Momentum"
+                elif bot in ("impulse_strategy", IMP_BOT_ID):
+                    bot = "Impulse 1D"
+                elif bot in (VAL_BOT_ID, "validation_strategy"):
+                    bot = "MACD+Donchian Validation"
+                elif bot in (AI_BOT_ID, "ai_strategy"):
+                    bot = "AI Discretionary 1H"
+                elif bot in ("smart_money", "smart_money_mirror"):
+                    bot = "Умные деньги"
+
+                if bot:
+                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+
                 total_realized += pnl
                 account_total += pnl
                 try:
@@ -4345,6 +4375,7 @@ async def get_pnl():
                 except (TypeError, ValueError):
                     fee = 0.0
                 total_fees += fee
+
                 time_str = tr.get("time", "") or tr.get("exit_time", "")
                 if time_str:
                     try:
@@ -4365,43 +4396,56 @@ async def get_pnl():
                 else:
                     realized_30d += pnl
 
-            # Per-strategy PnL: ONLY each bot's own DB trades (honest formed PnL).
-            # Do NOT force strategy cards to sum to account total — orphans/manual
-            # and mis-tags stay outside strategy stats.
-            known = [
-                (ROT_BOT_ID, "Momentum"),
-                (MOM_BOT_ID, "Momentum"),
-                (IMP_BOT_ID, "Impulse 1D"),
-                (VAL_BOT_ID, "MACD+Donchian Validation"),
-                (AI_BOT_ID, "AI Discretionary 1H"),
-            ]
-            try:
-                from app.services.orderbook_scalp_strategy import SCALP_BOT_ID as _SCALP
-                known.append((_SCALP, "Order Book Scalp"))
-            except Exception:
-                pass
-            try:
-                known.append(("smart_money", "Умные деньги"))
-            except Exception:
-                pass
-            per_bot = {}
-            for bid, label in known:
+            # If pairing left almost everything untagged, enrich from DB ord_id map
+            if sum(abs(v) for v in per_bot.values()) < abs(total_realized) * 0.2 and abs(total_realized) > 1:
                 try:
-                    sm = await db.get_trades_summary(bid)
-                    p = float(sm.get("total_pnl") or 0)
-                    if label in per_bot:
-                        # same label (momentum aliases) — keep max abs / sum of distinct bots
-                        if bid == MOM_BOT_ID:
-                            continue  # avoid double-count rotation+momentum if shared
-                        per_bot[label] = per_bot.get(label, 0.0) + p
+                    if db._pg_mode:
+                        rows = await db._fetchall(
+                            "SELECT ord_id, bot_id FROM trades "
+                            "WHERE ord_id IS NOT NULL AND ord_id <> '' "
+                            "ORDER BY timestamp DESC LIMIT 5000"
+                        ) or []
                     else:
-                        per_bot[label] = p
+                        rows = await db._fetchall(
+                            "SELECT ord_id, bot_id FROM trades "
+                            "WHERE ord_id IS NOT NULL AND ord_id <> '' "
+                            "ORDER BY timestamp DESC LIMIT 5000"
+                        ) or []
+                    omap = {
+                        str(r.get("ord_id") or "").strip(): str(r.get("bot_id") or "").split(":")[0]
+                        for r in rows if r.get("ord_id")
+                    }
+                    per_bot = {}
+                    for tr in closed:
+                        try:
+                            pnl = float(tr.get("pnl", 0) or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        bot = (tr.get("bot") or "").strip()
+                        if not bot:
+                            oid = str(tr.get("ord_id") or "").strip()
+                            bot = _db_bot_name(omap.get(oid, "")) or ""
+                        if not bot:
+                            try:
+                                bot = (_tag_trade_bot(tr) or "").strip()
+                            except Exception:
+                                bot = ""
+                        if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
+                            bot = "Momentum"
+                        elif bot in ("impulse_strategy", IMP_BOT_ID):
+                            bot = "Impulse 1D"
+                        elif bot in (VAL_BOT_ID, "validation_strategy"):
+                            bot = "MACD+Donchian Validation"
+                        elif bot in (AI_BOT_ID, "ai_strategy"):
+                            bot = "AI Discretionary 1H"
+                        if bot:
+                            per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                 except Exception as e:
-                    print(f"[pnl] summary {bid}: {e}", flush=True)
+                    print(f"[pnl] ord_id enrich: {e}", flush=True)
 
             print(
-                f"[pnl] History total={total_realized:.2f} (account) | "
-                f"strategy DB per_bot={per_bot} | closed={len(closed)}",
+                f"[pnl] history: total={total_realized:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
+                f"closed={len(closed)} tagged={sum(1 for tr in closed if tr.get('bot'))}",
                 flush=True,
             )
     except Exception as e:

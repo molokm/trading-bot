@@ -235,6 +235,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const per = pnl?.per_bot || {}
     if (per.Momentum != null) return Number(per.Momentum)
     if (per.rotation_strategy != null) return Number(per.rotation_strategy)
+    if (per.momentum_strategy != null) return Number(per.momentum_strategy)
     return Number(momentumStatus?.total_pnl ?? 0)
   }, [pnl, momentumStatus?.total_pnl])
   const impulseCardPnl = useMemo(() => {
