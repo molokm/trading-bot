@@ -1406,24 +1406,48 @@ class ImpulseStrategy:
                     continue
                 if coin in self._positions:
                     continue
-                # Ownership: DB claim, or last trade was ours, or unowned in our universe
+                # Ownership: our DB claim, or last trade on instrument was Impulse.
+                # If AI/other wrongly claimed after deploy but trades say Impulse — reclaim.
                 own = False
                 if self.db:
                     try:
-                        if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
-                            continue
                         mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
                         if mine:
                             own = True
-                        else:
-                            last = await self.db.last_bot_for_instrument(inst_id)
-                            if last and str(last).split(":")[0] == self.BOT_ID:
-                                own = True
-                            # Do NOT adopt random unowned positions — only signal-backed
+                        last = await self.db.last_bot_for_instrument(inst_id)
+                        last_root = str(last).split(":")[0] if last else ""
+                        if last_root == self.BOT_ID:
+                            own = True
+                        # trade_log proof: last event for this inst is open by us
+                        if not own:
+                            for tr in reversed(getattr(self, "_trade_log", []) or []):
+                                sym = tr.get("symbol") or tr.get("inst_id") or ""
+                                if sym != inst_id:
+                                    continue
+                                reason = (tr.get("reason") or tr.get("event") or "").lower()
+                                if reason in ("open", "signal_open", ""):
+                                    own = True
+                                break
+                        if own and await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
+                            # Foreign claim (e.g. AI after redeploy) — drop it so Impulse reclaims
+                            try:
+                                if self.db._pg_mode:
+                                    await self.db._execute(
+                                        "DELETE FROM positions WHERE inst_id = $1 AND bot_id <> $2",
+                                        (inst_id, self.BOT_ID),
+                                    )
+                                else:
+                                    await self.db._execute(
+                                        "DELETE FROM positions WHERE inst_id = ? AND bot_id <> ?",
+                                        (inst_id, self.BOT_ID),
+                                    )
+                                print(f"[Impulse] reclaimed {coin} from foreign claim (proof={last_root or 'trade_log'})", flush=True)
+                            except Exception as e:
+                                print(f"[Impulse] reclaim delete: {e}", flush=True)
                     except Exception as e:
                         print(f"[Impulse] restore ownership: {e}", flush=True)
                 else:
-                    own = True
+                    own = False  # without DB never adopt exchange orphans
                 if not own:
                     continue
                 atr_est = entry * 0.02
@@ -1451,10 +1475,33 @@ class ImpulseStrategy:
         if not self.db:
             return
         try:
-            if self.db._pg_mode:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (self.BOT_ID,))
-            else:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
+            # Never DELETE-all when memory is empty — that wiped Impulse claims on
+            # restart races and let AI/other bots steal SOL etc.
+            if not self._positions:
+                return
+            # Upsert current; remove only Impulse rows for coins no longer held
+            held_inst = {pos.inst_id for pos in self._positions.values()}
+            rows = []
+            try:
+                if self.db._pg_mode:
+                    rows = await self.db._fetchall(
+                        "SELECT inst_id, side FROM positions WHERE bot_id = $1",
+                        (self.BOT_ID,),
+                    ) or []
+                else:
+                    rows = await self.db._fetchall(
+                        "SELECT inst_id, side FROM positions WHERE bot_id = ?",
+                        (self.BOT_ID,),
+                    ) or []
+            except Exception:
+                rows = []
+            for r in rows:
+                iid = (r.get("inst_id") if isinstance(r, dict) else r[0]) if r else None
+                if iid and iid not in held_inst:
+                    try:
+                        await self.db.delete_position_inst(self.BOT_ID, iid, None)
+                    except Exception:
+                        pass
             for coin, pos in self._positions.items():
                 await self.db.save_position(
                     bot_id=self.BOT_ID, inst_id=pos.inst_id,
