@@ -1467,7 +1467,7 @@ def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
             config=cfg,
             client_manager=client_manager,
             db=db,
-            notifier=telegram,
+            notifier=None,  # no TG for Smart Money
             okx_api=okx,
         )
     else:
@@ -1646,7 +1646,7 @@ async def smart_money_trades(limit: int = 100):
 @app.get("/api/smart-money/mirror/status")
 async def smart_money_mirror_status():
     from app.services.smart_money_mirror import get_mirror
-    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
+    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
     return m.get_status()
 
 
@@ -1656,7 +1656,7 @@ async def smart_money_mirror_start(data: dict = None):
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
-    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
+    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
     # ensure OKX client
     if client_manager and not client_manager.get_client():
         try:
@@ -1678,7 +1678,7 @@ async def smart_money_mirror_stop(data: dict = None):
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
-    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
+    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
     return await m.stop_mirror(address, close_positions=bool(data.get("close_positions", False)))
 
 
@@ -1710,7 +1710,7 @@ async def smart_money_start(data: dict = None):
     )
     sm_tracker = SmartMoneyTracker(
         config=cfg, client_manager=client_manager, db=db,
-        notifier=telegram, okx_api=okx_api,
+        notifier=None, okx_api=okx_api,
     )
     sm_tracker.start()
     return {"message": "Smart Money Tracker started", **sm_tracker.get_status()}

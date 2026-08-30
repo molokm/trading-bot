@@ -75,7 +75,7 @@ class MirrorTarget:
 class SmartMoneyMirror:
     def __init__(self, client_manager=None, notifier=None, db=None):
         self.client_manager = client_manager
-        self.notifier = notifier
+        self.notifier = None  # TG off for Smart Money
         self.db = db
         self.config = MirrorConfig()
         self._targets: Dict[str, MirrorTarget] = {}
@@ -425,13 +425,7 @@ class SmartMoneyMirror:
                         await claim_open(self.db, "smart_money", inst, side, float(contracts), float(px or entry or 0))
                 except Exception:
                     pass
-                if self.notifier:
-                    try:
-                        await self.notifier.send(
-                            f" Mirror HL→OKX\n{coin} {side.upper()} sz={sz_str}\nlead {t.address[:10]}…"
-                        )
-                    except Exception:
-                        pass
+                # Telegram notifications disabled for Smart Money (too noisy)
         except Exception as e:
             self._log(t, "open_error", coin=coin, reason=str(e))
             t.last_error = str(e)
@@ -581,8 +575,7 @@ def get_mirror(client_manager=None, notifier=None, db=None) -> SmartMoneyMirror:
     else:
         if client_manager and not _mirror.client_manager:
             _mirror.client_manager = client_manager
-        if notifier and not _mirror.notifier:
-            _mirror.notifier = notifier
+        # do not attach telegram notifier to Smart Money mirror
         if db and not getattr(_mirror, 'db', None):
             _mirror.db = db
     return _mirror

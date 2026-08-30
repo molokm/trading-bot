@@ -66,7 +66,7 @@ class TrackerConfig:
 
     # Execution
     execute: bool = False
-    notify_telegram: bool = False
+    notify_telegram: bool = False  # always off
 
 
 # ──────────────────────── Data Classes ────────────────────────
@@ -411,7 +411,7 @@ class SmartMoneyTracker:
         self.config = config or TrackerConfig()
         self.client_manager = client_manager
         self.db = db
-        self.notifier = notifier
+        self.notifier = None  # Telegram disabled for Smart Money
         self.okx_api = okx_api
 
         self.verifier = TraderVerifier(self.config)
