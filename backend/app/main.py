@@ -201,6 +201,15 @@ async def startup():
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
+
+        # Optional one-shot trading stats reset (env RESET_TRADING_STATS=1)
+        try:
+            if (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes"):
+                print("[startup] RESET_TRADING_STATS=1 → wiping trading stats ...", flush=True)
+                await admin_reset_trading_stats({})
+        except Exception as e:
+            print(f"[startup] reset trading stats: {e}", flush=True)
+
         print("[startup] 2/7 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
@@ -1213,10 +1222,13 @@ async def ai_status():
         ai_pnl = 0.0
         ai_n = 0
         ai_wins = 0
+        epoch = await get_pnl_epoch()
         for tr in resp.get("trades", []) or []:
             if (tr.get("reason") or "").lower() in ("open", "add"):
                 continue
             if tr.get("pnl") is None:
+                continue
+            if not _trade_after_epoch(tr, epoch):
                 continue
             try:
                 pnl = float(tr.get("pnl") or 0)
@@ -2140,7 +2152,37 @@ def _db_bot_name(bot_id: str) -> str:
     return ""
 
 
+async def get_pnl_epoch() -> str:
+    """ISO timestamp; trades before this are ignored for strategy cards & total stats."""
+    try:
+        v = await db.get_setting("pnl_epoch")
+        if v and str(v).strip():
+            return str(v).strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _trade_after_epoch(tr: dict, epoch: str) -> bool:
+    if not epoch:
+        return True
+    ts = (
+        tr.get("exit_time")
+        or tr.get("time")
+        or tr.get("entry_time")
+        or tr.get("timestamp")
+        or ""
+    )
+    if not ts:
+        return True
+    try:
+        return str(ts)[:19] >= str(epoch)[:19]
+    except Exception:
+        return True
+
+
 async def _orphan_sweep_loop():
+
     """Periodically close exchange positions not owned by any strategy."""
     global _positions_cache
     import asyncio as _asyncio
@@ -4294,7 +4336,106 @@ async def pnl_rebuild_strategy(data: dict = None):
     return out
 
 
+@app.post("/api/admin/reset-trading-stats", dependencies=[Depends(require_admin)])
+async def admin_reset_trading_stats(data: dict = None):
+    """Wipe strategy trading history and start PnL counting from now (UTC).
+
+    Does not close exchange positions. Does not change strategy code/params.
+    Sets pnl_epoch so OKX history before this moment is ignored in cards.
+    """
+    from datetime import datetime as dt, timezone as tz
+    data = data or {}
+    # start of today UTC unless explicit epoch provided
+    if data.get("epoch"):
+        epoch = str(data["epoch"])
+    else:
+        epoch = dt.now(tz.utc).strftime("%Y-%m-%dT00:00:00")
+
+    bot_ids = [
+        ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID,
+        "smart_money",
+    ]
+    try:
+        from app.services.orderbook_scalp_strategy import SCALP_BOT_ID
+        bot_ids.append(SCALP_BOT_ID)
+    except Exception:
+        pass
+    # unique preserve order
+    seen = set()
+    bot_ids = [b for b in bot_ids if b and not (b in seen or seen.add(b))]
+
+    wipe = await db.wipe_strategy_trading_data(bot_ids)
+    await db.set_setting("pnl_epoch", epoch)
+    # clear lifetime blobs
+    for key in (
+        f"ai_lifetime:{AI_BOT_ID}",
+        f"ai_misattr_fixed:{AI_BOT_ID}:SOL",
+    ):
+        try:
+            await db.set_setting(key, "")
+        except Exception:
+            pass
+
+    # in-memory reset for running bots
+    global rotation, impulse, validation, ai_bot
+    for bot in (rotation, impulse, validation, ai_bot):
+        if not bot:
+            continue
+        try:
+            if hasattr(bot, "_trade_log"):
+                bot._trade_log = []
+            if hasattr(bot, "_session_pnl"):
+                bot._session_pnl = 0.0
+            if hasattr(bot, "_lifetime_pnl"):
+                bot._lifetime_pnl = 0.0
+            if hasattr(bot, "_lifetime_trades"):
+                bot._lifetime_trades = 0
+            if hasattr(bot, "_lifetime_wins"):
+                bot._lifetime_wins = 0
+            if hasattr(bot, "_lifetime_fees"):
+                bot._lifetime_fees = 0.0
+            if hasattr(bot, "_equity") and hasattr(bot, "_capital"):
+                bot._equity = float(getattr(bot, "_capital", 0) or 0)
+        except Exception as e:
+            print(f"[reset] mem {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
+
+    # smart money ledger file
+    try:
+        import os
+        from app.services.smart_money_ledger import LEDGER_PATH, get_sm_ledger
+        if os.path.exists(LEDGER_PATH):
+            os.remove(LEDGER_PATH)
+        # re-init empty
+        import app.services.smart_money_ledger as sml
+        sml._ledger = None
+        get_sm_ledger()
+    except Exception as e:
+        print(f"[reset] sm ledger: {e}", flush=True)
+
+    # clear caches
+    global _bot_stats_cache, _paired_cache
+    try:
+        _bot_stats_cache["ts"] = 0
+        _bot_stats_cache["data"] = {}
+    except Exception:
+        pass
+    try:
+        _paired_cache.clear()
+    except Exception:
+        pass
+
+    print(f"[reset] trading stats wiped epoch={epoch} bots={bot_ids}", flush=True)
+    return {
+        "ok": True,
+        "epoch": epoch,
+        "bots": bot_ids,
+        "wipe": wipe,
+        "message": "PnL and trade cards reset. Counting from epoch. Open exchange positions unchanged.",
+    }
+
+
 @app.get("/api/pnl")
+
 async def get_pnl():
     """PNL for Dashboard metric cards — all realized figures are computed
     directly from the History rows (get_paired_trades: DB + OKX bills/fills),
@@ -4322,6 +4463,7 @@ async def get_pnl():
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", []) or []
         # Closed trades with realized pnl — single source for TOTAL and per-strategy
+        epoch = await get_pnl_epoch()
         closed = []
         for tr in trades:
             reason = (tr.get("reason") or "").lower()
@@ -4332,6 +4474,8 @@ async def get_pnl():
             try:
                 float(tr.get("pnl"))
             except (TypeError, ValueError):
+                continue
+            if not _trade_after_epoch(tr, epoch):
                 continue
             closed.append(tr)
 
@@ -4735,6 +4879,7 @@ async def _bot_history_stats() -> dict:
         # Also count trades for win_rate from paired list
         resp = await get_paired_trades(limit=5000)
         counts = {}
+        epoch = await get_pnl_epoch()
         for tr in resp.get("trades", []):
             bot = tr.get("bot") or ""
             if bot not in (
@@ -4743,6 +4888,8 @@ async def _bot_history_stats() -> dict:
             ):
                 continue
             if (tr.get("reason") or "").lower() == "open":
+                continue
+            if not _trade_after_epoch(tr, epoch):
                 continue
             try:
                 pnl = float(tr.get("pnl", 0) or 0)

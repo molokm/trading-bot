@@ -1032,6 +1032,23 @@ class Database:
         return bool(row)
 
 
+    async def wipe_strategy_trading_data(self, bot_ids: list) -> dict:
+        """Delete trades/signals/metrics/positions for given bot_ids."""
+        out = {"bots": list(bot_ids), "ok": True}
+        for table in ("trades", "signals", "performance_metrics", "positions"):
+            deleted = 0
+            for bid in bot_ids:
+                try:
+                    if self._pg_mode:
+                        await self._execute(f"DELETE FROM {table} WHERE bot_id = $1", (bid,))
+                    else:
+                        await self._execute(f"DELETE FROM {table} WHERE bot_id = ?", (bid,))
+                    deleted += 1
+                except Exception as e:
+                    out[f"err_{table}_{bid}"] = str(e)
+            out[table] = deleted
+        return out
+
     async def reassign_trades_instrument(
         self, from_bot: str, to_bot: str, inst_id: str
     ) -> dict:
