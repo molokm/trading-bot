@@ -23,12 +23,14 @@ class Database:
         if DATABASE_URL and DATABASE_URL.startswith("file:"):
             self.db_path = DATABASE_URL.replace("file:", "")
         self._pg_mode = _is_pg_url(DATABASE_URL)
+        self._fallback_reason = ""
 
     async def init(self):
         if self._pg_mode:
             import asyncpg
             print("[db] Connecting to PostgreSQL ...", flush=True)
             last_err = None
+            conn = None
             for attempt in range(1, 4):
                 try:
                     conn = await asyncio.wait_for(
@@ -40,21 +42,48 @@ class Database:
                     if attempt < 3:
                         await asyncio.sleep(3 * attempt)
             else:
-                raise last_err  # type: ignore
+                # Neon/Render free tier often hits compute-time quota — do not
+                # take down the whole trading app; fall back to local SQLite.
+                err_s = str(last_err or "")
+                quota = any(
+                    x in err_s.lower()
+                    for x in (
+                        "compute time quota",
+                        "exceeded the compute",
+                        "insufficientresources",
+                        "quota",
+                        "too many connections",
+                    )
+                )
+                print(
+                    f"[db] PostgreSQL unavailable ({last_err}). "
+                    f"{'Quota/limit hit — ' if quota else ''}"
+                    f"falling back to SQLite at {self.db_path}",
+                    flush=True,
+                )
+                self._pg_mode = False
+                self._fallback_reason = err_s
+                await self._init_sqlite()
+                return
             print("[db] Connected, running migrations ...", flush=True)
             try:
                 await self._migrate_pg(conn)
             finally:
                 await conn.close()
             print("[db] PG init done", flush=True)
+            self._fallback_reason = ""
         else:
-            import aiosqlite
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            self._conn = await aiosqlite.connect(self.db_path)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.execute("PRAGMA journal_mode=WAL")
-            await self._conn.execute("PRAGMA foreign_keys=ON")
-            await self._migrate_sqlite()
+            await self._init_sqlite()
+
+    async def _init_sqlite(self):
+        import aiosqlite
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._conn = await aiosqlite.connect(self.db_path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA foreign_keys=ON")
+        await self._migrate_sqlite()
+        print(f"[db] SQLite ready at {self.db_path}", flush=True)
 
     async def close(self):
         # PG mode opens a fresh connection per operation (no persistent pool to
