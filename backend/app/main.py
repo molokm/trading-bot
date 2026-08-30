@@ -1579,7 +1579,7 @@ async def smart_money_trades(limit: int = 100):
 @app.get("/api/smart-money/mirror/status")
 async def smart_money_mirror_status():
     from app.services.smart_money_mirror import get_mirror
-    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
     return m.get_status()
 
 
@@ -1589,7 +1589,7 @@ async def smart_money_mirror_start(data: dict = None):
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
-    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
     # ensure OKX client
     if client_manager and not client_manager.get_client():
         try:
@@ -1611,7 +1611,7 @@ async def smart_money_mirror_stop(data: dict = None):
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
-    m = get_mirror(client_manager=client_manager, notifier=telegram)
+    m = get_mirror(client_manager=client_manager, notifier=telegram, db=db)
     return await m.stop_mirror(address, close_positions=bool(data.get("close_positions", False)))
 
 

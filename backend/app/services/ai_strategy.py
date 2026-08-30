@@ -1363,17 +1363,33 @@ class AIStrategy:
                 entry = float(p.get("avgPx") or 0)
                 if sz <= 0 or entry <= 0 or coin in self._positions:
                     continue
-                # Adopt if no OTHER bot owns this instrument (recover lost claim after deploy).
+                # STRICT: only restore positions already claimed by THIS bot in DB.
+                # Never adopt orphans / Smart Money / other strategies — that falsely
+                # attaches e.g. SOL mirror/copy fills to AI after redeploy.
                 try:
-                    if self.db and await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
-                        print(f"[AI] skip restore {coin}: owned by another bot", flush=True)
+                    if not self.db:
+                        print(f"[AI] skip restore {coin}: no db — refuse orphan adopt", flush=True)
                         continue
-                    last = await self.db.last_bot_for_instrument(inst_id)
-                    if last and last != self.BOT_ID:
-                        print(f"[AI] skip restore {coin}: last bot was {last}", flush=True)
-                        continue
+                    owned = None
+                    if hasattr(self.db, "find_position_any_side"):
+                        owned = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                    if not owned and hasattr(self.db, "find_position"):
+                        owned = await self.db.find_position(self.BOT_ID, inst_id, side)
+                    if not owned:
+                        # Also check last_bot only as positive signal for THIS bot
+                        last = None
+                        if hasattr(self.db, "last_bot_for_instrument"):
+                            last = await self.db.last_bot_for_instrument(inst_id)
+                        if last != self.BOT_ID:
+                            print(
+                                f"[AI] skip restore {coin}: not claimed by AI "
+                                f"(last={last or 'none'}) — leave for owner/orphan policy",
+                                flush=True,
+                            )
+                            continue
                 except Exception as e:
-                    print(f"[AI] restore ownership: {e}", flush=True)
+                    print(f"[AI] restore ownership: {e} — skip adopt", flush=True)
+                    continue
                 stop_pct = 0.03
                 take_pct = 0.06
                 if side == "long":

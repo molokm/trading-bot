@@ -73,9 +73,10 @@ class MirrorTarget:
 
 
 class SmartMoneyMirror:
-    def __init__(self, client_manager=None, notifier=None):
+    def __init__(self, client_manager=None, notifier=None, db=None):
         self.client_manager = client_manager
         self.notifier = notifier
+        self.db = db
         self.config = MirrorConfig()
         self._targets: Dict[str, MirrorTarget] = {}
         self._running = False
@@ -418,6 +419,12 @@ class SmartMoneyMirror:
                     )
                 except Exception:
                     pass
+                try:
+                    from .position_claim import claim_open
+                    if self.db:
+                        await claim_open(self.db, "smart_money", inst, side, float(contracts), float(px or entry or 0))
+                except Exception:
+                    pass
                 if self.notifier:
                     try:
                         await self.notifier.send(
@@ -464,6 +471,12 @@ class SmartMoneyMirror:
                     leader=t.address, source="hyperliquid",
                     note=f"mirror close ({reason})",
                 )
+            except Exception:
+                pass
+            try:
+                from .position_claim import release_open
+                if self.db:
+                    await release_open(self.db, "smart_money", inst, side)
             except Exception:
                 pass
         except Exception as e:
@@ -561,13 +574,15 @@ class SmartMoneyMirror:
 _mirror: Optional[SmartMoneyMirror] = None
 
 
-def get_mirror(client_manager=None, notifier=None) -> SmartMoneyMirror:
+def get_mirror(client_manager=None, notifier=None, db=None) -> SmartMoneyMirror:
     global _mirror
     if _mirror is None:
-        _mirror = SmartMoneyMirror(client_manager=client_manager, notifier=notifier)
+        _mirror = SmartMoneyMirror(client_manager=client_manager, notifier=notifier, db=db)
     else:
         if client_manager and not _mirror.client_manager:
             _mirror.client_manager = client_manager
         if notifier and not _mirror.notifier:
             _mirror.notifier = notifier
+        if db and not getattr(_mirror, 'db', None):
+            _mirror.db = db
     return _mirror
