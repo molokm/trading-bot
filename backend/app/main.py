@@ -2349,27 +2349,170 @@ async def get_positions(inst_type: str = "SWAP"):
         pass
     # Tag each position with bot name; auto-reclaim if last trade was ours
     tagged = []
+
+    async def _inject_rotation_memory(inst_id: str, side: str, sz: float, entry: float):
+        """Put position back into Momentum in-memory book so UI + botMap see it."""
+        global rotation
+        if not rotation:
+            return
+        coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+        try:
+            from app.services.rotation_strategy import RotPosition
+            if coin in (getattr(rotation, "_positions", None) or {}):
+                return
+            entry = float(entry or 0)
+            sz = float(sz or 0)
+            if entry <= 0 or sz <= 0:
+                return
+            stop = entry * 0.985 if side == "long" else entry * 1.015
+            pos = RotPosition(
+                symbol=inst_id, coin=coin, inst_id=inst_id,
+                side=side, size=sz, size_original=sz,
+                entry_price=entry, stop_price=stop,
+                peak_price=entry,
+                opened_at=__import__("datetime").datetime.now(
+                    __import__("datetime").timezone.utc
+                ).isoformat(),
+                atr=entry * 0.015, atr_hourly=entry * 0.015,
+                leverage=float(getattr(getattr(rotation, "config", None), "max_leverage", 3) or 3),
+            )
+            rotation._positions[coin] = pos
+            try:
+                await rotation._persist_open_snapshot()
+            except Exception:
+                pass
+            print(f"[positions] injected {coin} {side} into Momentum memory", flush=True)
+        except Exception as e:
+            print(f"[positions] inject rotation: {e}", flush=True)
+
     for p in result.get("data", []):
         inst = p.get("instId", "") or ""
-        pos_side = p.get("posSide", "net") or "net"
-        side_n = "short" if str(pos_side).lower() == "short" else "long"
+        pos_side = (p.get("posSide", "net") or "net").lower()
+        try:
+            pos_raw = float(p.get("pos") or 0)
+        except (TypeError, ValueError):
+            pos_raw = 0.0
+        # One-way mode: posSide=net, sign of pos indicates direction
+        if pos_side == "short" or pos_raw < 0:
+            side_n = "short"
+        else:
+            side_n = "long"
+        sz = abs(pos_raw)
+        try:
+            entry = float(p.get("avgPx") or 0)
+        except (TypeError, ValueError):
+            entry = 0.0
+
         bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
+        if not bot_name:
+            bot_name = _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
+
         if not bot_name and inst:
             try:
                 last_bot = await db.last_bot_for_instrument(inst)
-                if last_bot:
-                    sz = abs(float(p.get("pos") or 0))
-                    entry = float(p.get("avgPx") or 0)
-                    if sz > 0 and entry > 0:
-                        await claim_open(db, last_bot, inst, side_n, sz, entry)
-                        db_pos_map[(inst, side_n)] = last_bot
-                        db_pos_map[(inst, "long" if side_n == "long" else "short")] = last_bot
-                        bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
-                        if bot_name:
-                            print(f"[positions] reclaimed {inst} {side_n} → {last_bot}", flush=True)
+                if last_bot and sz > 0 and entry > 0:
+                    await claim_open(db, last_bot, inst, side_n, sz, entry)
+                    db_pos_map[(inst, side_n)] = last_bot
+                    db_pos_map[(inst, "net")] = last_bot
+                    bot_name = _db_bot_name(last_bot) or _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
+                    if bot_name:
+                        print(f"[positions] reclaimed {inst} {side_n} → {last_bot}", flush=True)
             except Exception as e:
                 print(f"[positions] reclaim {inst}: {e}", flush=True)
+
+        if not bot_name and inst:
+            try:
+                fills = await _fetch_okx_fills(limit=1000)
+                prefix_map = {
+                    "rot": (ROT_BOT_ID, "Momentum"),
+                    "imp": (IMP_BOT_ID, "Impulse 1D"),
+                    "ai": (AI_BOT_ID, "AI Discretionary 1H"),
+                    "val": (VAL_BOT_ID, "MACD+Donchian Validation"),
+                }
+                for f in fills or []:
+                    if (f.get("instId") or "") != inst:
+                        continue
+                    cid = str(f.get("clOrdId") or "").lower()
+                    for pref, (bid, label) in prefix_map.items():
+                        if cid.startswith(pref):
+                            if sz > 0 and entry > 0:
+                                await claim_open(db, bid, inst, side_n, sz, entry)
+                                db_pos_map[(inst, side_n)] = bid
+                                db_pos_map[(inst, "net")] = bid
+                                bot_name = label
+                                print(f"[positions] reclaimed via clOrdId {cid[:20]} → {label}", flush=True)
+                            break
+                    if bot_name:
+                        break
+            except Exception as e:
+                print(f"[positions] fill-tag {inst}: {e}", flush=True)
+
+        # Pending algo / stop orders often keep clOrdId longer than fills window
+        if not bot_name and inst:
+            try:
+                client = client_manager.get_client()
+                if client and hasattr(client, "get_order_list"):
+                    pass
+                # OKX pending algos via generic call if available
+                if client:
+                    for meth in ("get_orders_pending", "get_order_list", "orders_pending"):
+                        fn = getattr(client, meth, None)
+                        if not callable(fn):
+                            continue
+                        try:
+                            ores = await fn(inst_type="SWAP")
+                        except TypeError:
+                            try:
+                                ores = await fn("SWAP")
+                            except Exception:
+                                continue
+                        except Exception:
+                            continue
+                        for o in (ores.get("data") or []) if isinstance(ores, dict) else []:
+                            if (o.get("instId") or "") != inst:
+                                continue
+                            cid = str(o.get("clOrdId") or "").lower()
+                            if cid.startswith("rot"):
+                                await claim_open(db, ROT_BOT_ID, inst, side_n, sz, entry)
+                                bot_name = "Momentum"
+                                print(f"[positions] reclaimed via pending order {cid[:20]} → Momentum", flush=True)
+                                break
+                            if cid.startswith("imp"):
+                                await claim_open(db, IMP_BOT_ID, inst, side_n, sz, entry)
+                                bot_name = "Impulse 1D"
+                                break
+                        if bot_name:
+                            break
+            except Exception as e:
+                print(f"[positions] pending-tag {inst}: {e}", flush=True)
+
+        # Last resort for orphan that only Momentum (rotation) can own in this app:
+        # if rotation is running and coin is in its universe and nobody else claims it.
+        if not bot_name and inst and rotation and sz > 0 and entry > 0:
+            try:
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                univ = list(getattr(getattr(rotation, "config", None), "symbols", None) or [])
+                if not univ:
+                    from app.services.rotation_strategy import COINS as _RC
+                    univ = list(_RC)
+                other = False
+                try:
+                    other = await db.other_bot_owns_position_any(ROT_BOT_ID, inst, side_n)
+                except Exception:
+                    other = False
+                if coin in univ and not other:
+                    await claim_open(db, ROT_BOT_ID, inst, side_n, sz, entry)
+                    db_pos_map[(inst, side_n)] = ROT_BOT_ID
+                    bot_name = "Momentum"
+                    print(f"[positions] last-resort claim {inst} → Momentum (rotation universe)", flush=True)
+            except Exception as e:
+                print(f"[positions] last-resort {inst}: {e}", flush=True)
+
+        if bot_name == "Momentum" and inst and sz > 0:
+            await _inject_rotation_memory(inst, side_n, sz, entry)
+
         p["bot"] = bot_name
+        p["_side_norm"] = side_n
         tagged.append(p)
     out = {"positions": tagged}
     _positions_cache = out
@@ -2377,7 +2520,80 @@ async def get_positions(inst_type: str = "SWAP"):
     return out
 
 
+@app.post("/api/positions/bind", dependencies=[Depends(require_admin)])
+async def positions_bind(data: dict = None):
+    """Force-bind an OKX position to a strategy (claim + Momentum memory if needed)."""
+    data = data or {}
+    inst = (data.get("instId") or data.get("inst_id") or "").strip()
+    side = (data.get("side") or data.get("posSide") or "long").lower()
+    if side in ("sell", "s"):
+        side = "short"
+    elif side not in ("long", "short"):
+        side = "long"
+    bot = (data.get("bot") or data.get("bot_id") or "Momentum").strip()
+    inv = {
+        "Momentum": ROT_BOT_ID,
+        "rotation_strategy": ROT_BOT_ID,
+        ROT_BOT_ID: ROT_BOT_ID,
+        "Impulse 1D": IMP_BOT_ID,
+        "impulse_strategy": IMP_BOT_ID,
+        IMP_BOT_ID: IMP_BOT_ID,
+        "AI Discretionary 1H": AI_BOT_ID,
+        AI_BOT_ID: AI_BOT_ID,
+        "MACD+Donchian Validation": VAL_BOT_ID,
+        VAL_BOT_ID: VAL_BOT_ID,
+    }
+    bid = inv.get(bot) or inv.get(bot.replace(" ", "_"))
+    if not inst or not bid:
+        raise HTTPException(status_code=400, detail="instId and bot required")
+    # size/entry from exchange
+    sz, entry = 0.0, 0.0
+    client = client_manager.get_client()
+    if client:
+        res = await client.get_positions("SWAP")
+        for p in res.get("data") or []:
+            if p.get("instId") == inst:
+                try:
+                    sz = abs(float(p.get("pos") or 0))
+                    entry = float(p.get("avgPx") or 0)
+                except (TypeError, ValueError):
+                    pass
+                break
+    if sz <= 0 or entry <= 0:
+        sz = float(data.get("size") or 0)
+        entry = float(data.get("entry") or 0)
+    if sz <= 0 or entry <= 0:
+        raise HTTPException(status_code=400, detail="Cannot resolve size/entry from OKX")
+    await claim_open(db, bid, inst, side, sz, entry)
+    if bid == ROT_BOT_ID:
+        # inject memory via internal helper path: call get_positions logic lightly
+        try:
+            from app.services.rotation_strategy import RotPosition
+            global rotation
+            if rotation:
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                stop = entry * 0.985 if side == "long" else entry * 1.015
+                rotation._positions[coin] = RotPosition(
+                    symbol=inst, coin=coin, inst_id=inst, side=side,
+                    size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                    peak_price=entry,
+                    opened_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    atr=entry * 0.015, atr_hourly=entry * 0.015,
+                    leverage=3.0,
+                )
+                try:
+                    await rotation._persist_open_snapshot()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[bind] inject: {e}", flush=True)
+    global _positions_cache
+    _positions_cache = None
+    return {"ok": True, "inst_id": inst, "side": side, "bot_id": bid, "size": sz, "entry": entry}
+
+
 @app.post("/api/positions/close", dependencies=[Depends(require_admin)])
+
 async def close_position(data: dict):
     client = client_manager.get_client()
     if not client:
