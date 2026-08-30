@@ -202,11 +202,15 @@ async def startup():
         await db.init()
         await telegram.load_from_db(db)
 
-        # Optional one-shot trading stats reset (env RESET_TRADING_STATS=1)
+        # One-shot wipe of strategy PnL/trades — cards count from today
         try:
-            if (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes"):
-                print("[startup] RESET_TRADING_STATS=1 → wiping trading stats ...", flush=True)
+            marker = "trading_stats_reset_v1_2026_08_30"
+            prev = await db.get_setting("trading_stats_reset_marker")
+            force = (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes")
+            if force or (prev or "") != marker:
+                print(f"[startup] trading stats reset (marker={marker}) ...", flush=True)
                 await admin_reset_trading_stats({})
+                await db.set_setting("trading_stats_reset_marker", marker)
         except Exception as e:
             print(f"[startup] reset trading stats: {e}", flush=True)
 
