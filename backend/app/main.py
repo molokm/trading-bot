@@ -1208,25 +1208,53 @@ async def ai_status():
     status["total_pnl_internal"] = internal
     status["lifetime_pnl_internal"] = internal
     try:
-        stats = (await _bot_history_stats()).get("AI Discretionary 1H")
-        if stats and stats.get("total_trades", 0) > 0:
-            status["total_pnl"] = stats.get("total_pnl", 0)
-            status["lifetime_pnl"] = stats.get("total_pnl", 0)
-            status["total_trades"] = stats.get("total_trades", status.get("total_trades"))
-            status["win_rate"] = stats.get("win_rate", status.get("win_rate"))
-            status["total_pnl_source"] = "okx_history"
-            if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
-                print(
-                    f"[ai/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}",
-                    flush=True,
-                )
+        # High-confidence AI only: clOrdId ai* or DB bot_id=ai_strategy
+        resp = await get_paired_trades(limit=5000)
+        ai_pnl = 0.0
+        ai_n = 0
+        ai_wins = 0
+        for tr in resp.get("trades", []) or []:
+            if (tr.get("reason") or "").lower() in ("open", "add"):
+                continue
+            if tr.get("pnl") is None:
+                continue
+            try:
+                pnl = float(tr.get("pnl") or 0)
+            except (TypeError, ValueError):
+                continue
+            bot = (tr.get("bot") or "").strip()
+            # Reject weak tags; require explicit AI label after strict tagging
+            if bot != "AI Discretionary 1H":
+                continue
+            # Extra guard: SOL without ai clOrd / bot_id never counts as AI
+            inst = (tr.get("inst_id") or tr.get("symbol") or "").upper()
+            cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+            bid = str(tr.get("bot_id") or "")
+            if "SOL" in inst and not (cid.startswith("ai") or "ai_strategy" in bid):
+                continue
+            ai_pnl += pnl
+            ai_n += 1
+            if pnl > 0:
+                ai_wins += 1
+        if ai_n > 0:
+            status["total_pnl"] = round(ai_pnl, 2)
+            status["lifetime_pnl"] = round(ai_pnl, 2)
+            status["total_trades"] = ai_n
+            status["win_rate"] = round(ai_wins / ai_n * 100, 1) if ai_n else 0
+            status["total_pnl_source"] = "okx_history_strict"
         else:
             status["total_pnl_source"] = "internal"
-            # Keep lifetime as shown total when no history tags yet
             status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
+        if internal is not None and ai_n > 0:
+            if abs(float(internal or 0) - float(ai_pnl)) > 1.0:
+                print(
+                    f"[ai/status] PnL mismatch internal={internal} strict_hist={ai_pnl} n={ai_n}",
+                    flush=True,
+                )
     except Exception as e:
         print(f"[ai/status] history overlay: {e}", flush=True)
         status["total_pnl_source"] = "internal"
+        status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
     return status
 
 
@@ -2080,29 +2108,8 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         for t in vwap_rev_bot._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "VWAP Mean Reversion"
-    # Fallback: match by symbol+side (works when entry_time is unknown)
-    side = trade.get("side", "")
-    if rotation and rotation._trade_log:
-        for t in rotation._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Momentum"
-    if impulse and impulse._trade_log:
-        for t in impulse._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Impulse 1D"
-    if validation and validation._trade_log:
-        for t in validation._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "MACD+Donchian Validation"
-    if ai_bot and ai_bot._trade_log:
-        for t in ai_bot._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "AI Discretionary 1H"
-    if vwap_rev_bot and vwap_rev_bot._trade_log:
-        for t in vwap_rev_bot._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "VWAP Mean Reversion"
-    # Fallback: DB bot_id stored for this trade
+    # Do NOT match by symbol+side alone — that wrongly attached Impulse SOL etc. to AI
+    # after redeploy adoption and corrupted strategy PnL.
     return _db_bot_name(trade.get("bot_id", ""))
 
 
@@ -4364,6 +4371,12 @@ async def get_pnl():
                     bot = "AI Discretionary 1H"
                 elif bot in ("smart_money", "smart_money_mirror"):
                     bot = "Умные деньги"
+
+                # SOL opens were Impulse; never count as AI without ai* clOrdId
+                inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
+                cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+                if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
+                    bot = "Impulse 1D"
 
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
