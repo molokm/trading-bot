@@ -27,7 +27,13 @@ async function request(path, options = {}) {
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    const e = new Error(err.detail || 'Request failed');
+    let detail = err.detail || err.message || resp.statusText || 'Request failed';
+    if (Array.isArray(detail)) {
+      detail = detail.map((x) => x.msg || JSON.stringify(x)).join('; ');
+    } else if (typeof detail === 'object') {
+      detail = JSON.stringify(detail);
+    }
+    const e = new Error(detail);
     e.status = resp.status;
     throw e;
   }

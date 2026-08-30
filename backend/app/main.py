@@ -259,6 +259,14 @@ async def startup():
             if tr and hasattr(tr, "hydrate_from_db"):
                 await tr.hydrate_from_db()
             print("[startup] SM tracker hydrated", flush=True)
+            _sm_auto = os.getenv("SM_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+            if _sm_auto and _bots_auto_start and tr and not getattr(tr, "_running", False):
+                try:
+                    tr.start()
+                    print("[startup] SM tracker auto-started", flush=True)
+                except Exception as e:
+                    print(f"[startup] SM auto-start: {e}", flush=True)
+
         except Exception as e:
             print(f"[startup] SM tracker hydrate: {e}", flush=True)
 
@@ -595,10 +603,11 @@ ADMIN_ONLY_PATHS = {
 
 ADMIN_ONLY_PREFIXES = (
     "/api/debug/",
-    "/api/smart-money/",
     "/api/admin/",
     "/api/vwap_rev/",
 )
+# Smart Money reads (discover/status) allowed for any authenticated non-guest;
+# mutations still use Depends(require_admin).
 
 # Guest cannot read live trading / PnL (admin or telegram-user only)
 GUEST_FORBIDDEN_PREFIXES = (
@@ -1561,30 +1570,48 @@ async def smart_money_discover(
     from app.services.smart_money_tracker import (
         SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
     )
-    tracker = sm_tracker
-    if not tracker:
-        okx = OKXCopyAPI(
-            api_key=os.getenv("OKX_API_KEY", ""),
-            secret_key=os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
-            passphrase=os.getenv("OKX_PASSPHRASE", ""),
-            demo=str(os.getenv("OKX_DEMO", "1")).lower() in ("1", "true", "yes"),
+    try:
+        tracker = sm_tracker
+        if not tracker:
+            okx = OKXCopyAPI(
+                api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+                secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+                passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+                demo=_env_demo,
+            )
+            tracker = SmartMoneyTracker(
+                config=TrackerConfig(sort_type=sort or "pnl_ratio"),
+                okx_api=okx,
+                client_manager=client_manager,
+                db=db,
+            )
+        traders = await tracker.discover_and_verify(
+            page=page,
+            limit=limit,
+            sort_type=sort or "pnl_ratio",
+            min_roi_pct=float(min_roi or 0),
+            only_verified=bool(verified_only),
+            sources=sources or "okx,hyperliquid,social",
         )
-        tracker = SmartMoneyTracker(config=TrackerConfig(sort_type=sort or "roi"), okx_api=okx)
-    traders = await tracker.discover_and_verify(
-        page=page,
-        limit=limit,
-        sort_type=sort or "roi",
-        min_roi_pct=float(min_roi or 0),
-        only_verified=bool(verified_only),
-        sources=sources or "okx,hyperliquid,social",
-    )
-    return {
-        "traders": traders,
-        "total": len(traders),
-        "sort": sort or "roi",
-        "min_roi": float(min_roi or 0),
-        "sources": sources or "okx,hyperliquid,social",
-    }
+        return {
+            "traders": traders or [],
+            "total": len(traders or []),
+            "sort": sort or "roi",
+            "min_roi": float(min_roi or 0),
+            "sources": sources or "okx,hyperliquid,social",
+        }
+    except Exception as e:
+        import traceback
+        print(f"[sm/discover] error: {e}", flush=True)
+        traceback.print_exc()
+        return {
+            "traders": [],
+            "total": 0,
+            "sort": sort or "roi",
+            "min_roi": float(min_roi or 0),
+            "sources": sources or "okx,hyperliquid,social",
+            "error": str(e),
+        }
 
 
 @app.get("/api/smart-money/trader/{unique_code}")
@@ -1725,36 +1752,51 @@ async def smart_money_mirror_stop(data: dict = None):
 
 @app.post("/api/smart-money/start", dependencies=[Depends(require_admin)])
 async def smart_money_start(data: dict = None):
-    """Start the Smart Money Tracker."""
+    """Start the Smart Money Tracker (+ restore mirror claims)."""
     global sm_tracker
     data = data or {}
-    if sm_tracker and getattr(sm_tracker, "_running", False):
-        return {"message": "Already running", **sm_tracker.get_status()}
-    cfg = TrackerConfig(
-        capital=float(data.get("capital") or 500),
-        max_leverage=int(data.get("max_leverage") or 3),
-        execute=bool(data.get("execute", False)),
-        sort_type=data.get("sort_type", "roi"),
-        min_roi_pct=float(data.get("min_roi_pct") or 5.0),
-        min_win_rate=float(data.get("min_win_rate") or 0.45),
-        max_max_drawdown=float(data.get("max_max_drawdown") or 0.30),
-        tp_ratio=float(data.get("tp_ratio") or 0.10),
-        sl_ratio=float(data.get("sl_ratio") or 0.05),
-        poll_interval_sec=float(data.get("poll_interval_sec") or 60),
-    )
-    # Create OKX copy trading API client
-    okx_api = OKXCopyAPI(
-        api_key=_env_key,
-        secret_key=_env_secret,
-        passphrase=_env_pass,
-        demo=_env_demo,
-    )
-    sm_tracker = SmartMoneyTracker(
-        config=cfg, client_manager=client_manager, db=db,
-        notifier=None, okx_api=okx_api,
-    )
-    sm_tracker.start()
-    return {"message": "Smart Money Tracker started", **sm_tracker.get_status()}
+    try:
+        if sm_tracker and getattr(sm_tracker, "_running", False):
+            st = sm_tracker.get_status()
+            return {"message": "Already running", **st}
+        cfg = TrackerConfig(
+            capital=float(data.get("capital") or 500),
+            max_leverage=int(data.get("max_leverage") or 3),
+            execute=bool(data.get("execute", False)),
+            sort_type=data.get("sort_type") or "pnl_ratio",
+            min_roi_pct=float(data.get("min_roi_pct") or 5.0),
+            min_win_rate=float(data.get("min_win_rate") or 0.45),
+            max_max_drawdown=float(data.get("max_max_drawdown") or 0.30),
+            tp_ratio=float(data.get("tp_ratio") or 0.10),
+            sl_ratio=float(data.get("sl_ratio") or 0.05),
+            poll_interval_sec=float(data.get("poll_interval_sec") or 60),
+        )
+        okx_api = OKXCopyAPI(
+            api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+            secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", ""),
+            passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+            demo=_env_demo,
+        )
+        sm_tracker = SmartMoneyTracker(
+            config=cfg, client_manager=client_manager, db=db,
+            notifier=None, okx_api=okx_api,
+        )
+        if hasattr(sm_tracker, "hydrate_from_db"):
+            await sm_tracker.hydrate_from_db()
+        sm_tracker.start()
+        # Restore mirror + claims for open SM positions (e.g. BTC)
+        try:
+            from app.services.smart_money_mirror import get_mirror
+            m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+            await m.hydrate_from_db()
+        except Exception as e:
+            print(f"[sm/start] mirror hydrate: {e}", flush=True)
+        st = sm_tracker.get_status()
+        return {"message": "Smart Money Tracker started", "ok": True, **st}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Smart Money start failed: {e}")
 
 
 @app.post("/api/smart-money/stop", dependencies=[Depends(require_admin)])
@@ -2628,6 +2670,10 @@ async def positions_bind(data: dict = None):
         AI_BOT_ID: AI_BOT_ID,
         "MACD+Donchian Validation": VAL_BOT_ID,
         VAL_BOT_ID: VAL_BOT_ID,
+        "smart_money": "smart_money",
+        "Умные деньги": "smart_money",
+        "Smart Money": "smart_money",
+        "smart_money_mirror": "smart_money",
     }
     bid = inv.get(bot) or inv.get(bot.replace(" ", "_"))
     if not inst or not bid:
