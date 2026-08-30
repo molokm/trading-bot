@@ -2216,6 +2216,10 @@ class RotationStrategy:
                 await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
             for coin, pos in self._positions.items():
                 await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
+                try:
+                    await self._persist_open_snapshot()
+                except Exception:
+                    pass
                 await self.db.save_position(
                     bot_id=self.BOT_ID, inst_id=pos.inst_id,
                     side=pos.side, size=pos.size,
@@ -2281,6 +2285,46 @@ class RotationStrategy:
             print(f"[Rotation] DB reload error: {e}", flush=True)
 
 
+
+    async def _persist_open_snapshot(self):
+        """Durable open list in settings — survives trade history wipes."""
+        if not self.db:
+            return
+        try:
+            import json
+            payload = []
+            for coin, pos in (self._positions or {}).items():
+                payload.append({
+                    "coin": coin,
+                    "inst_id": getattr(pos, "inst_id", "") or "",
+                    "side": getattr(pos, "side", "long"),
+                    "size": float(getattr(pos, "size", 0) or 0),
+                    "entry_price": float(getattr(pos, "entry_price", 0) or 0),
+                })
+            await self.db.set_setting(
+                f"open_positions:{self.BOT_ID}",
+                json.dumps(payload),
+            )
+        except Exception as e:
+            print(f"[{getattr(self, 'BOT_NAME', 'Rot')}] persist open snapshot: {e}", flush=True)
+
+    async def _load_open_snapshot_proof(self, inst_id: str, side: str) -> bool:
+        if not self.db:
+            return False
+        try:
+            import json
+            raw = await self.db.get_setting(f"open_positions:{self.BOT_ID}")
+            if not raw:
+                return False
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            side_l = (side or "long").lower()
+            for p in data or []:
+                if p.get("inst_id") == inst_id and (p.get("side") or "long").lower() == side_l:
+                    return True
+        except Exception:
+            pass
+        return False
+
     async def _should_adopt_exchange_position(self, coin: str, side: str, inst_id: str) -> bool:
         """Only restore exchange positions that THIS bot opened.
 
@@ -2316,6 +2360,13 @@ class RotationStrategy:
             if reason in ("closed", "exchange_stop", "manual_close", "sl", "tp", "trail"):
                 return False
             break
+        try:
+            if await self._load_open_snapshot_proof(inst_id, side):
+                print(f"[{self.BOT_NAME}] adopt {coin}: open_positions snapshot proof", flush=True)
+                return True
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] snapshot proof: {e}", flush=True)
+
         # No proof of ownership — do not claim foreign / orphan positions
         print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: no local ownership proof",
               flush=True)
@@ -2373,6 +2424,10 @@ class RotationStrategy:
                     signal_id=restored_signal_id,
                 )
                 self._positions[coin] = pos
+                try:
+                    await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry_px)
+                except Exception as e:
+                    print(f"[Rotation] restore claim: {e}", flush=True)
                 await self._place_exchange_stop(client, pos)
                 print(f"[Rotation] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
                       f"stop={stop_price:.2f}", flush=True)

@@ -2329,6 +2329,24 @@ async def get_positions(inst_type: str = "SWAP"):
             db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
     except Exception:
         pass
+    # Merge durable open_positions:{bot_id} snapshots (survive trade wipes)
+    try:
+        import json
+        for bid in (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, "smart_money"):
+            try:
+                raw = await db.get_setting(f"open_positions:{bid}")
+                if not raw:
+                    continue
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                for row in data or []:
+                    iid = row.get("inst_id") or ""
+                    side = (row.get("side") or "long").lower()
+                    if iid and (iid, side) not in db_pos_map:
+                        db_pos_map[(iid, side)] = bid
+            except Exception:
+                continue
+    except Exception:
+        pass
     # Tag each position with bot name; auto-reclaim if last trade was ours
     tagged = []
     for p in result.get("data", []):
