@@ -1016,6 +1016,23 @@ class SmartMoneyTracker:
         verified = [t for t in tracked if t.verified]
         copying = [t for t in tracked if t.current_positions]
 
+        open_positions = []
+        for t in copying:
+            for pos in (getattr(t, "current_positions", None) or []):
+                if isinstance(pos, dict):
+                    inst = pos.get("instId") or pos.get("inst_id") or ""
+                    side = (pos.get("posSide") or pos.get("side") or "long").lower()
+                    if side in ("sell", "s", "net"):
+                        side = "short" if float(pos.get("pos") or 0) < 0 else "long"
+                    open_positions.append({
+                        "inst_id": inst,
+                        "side": side,
+                        "size": abs(float(pos.get("pos") or pos.get("size") or 0)),
+                        "entry_price": float(pos.get("avgPx") or pos.get("entry_price") or 0),
+                        "bot": "Умные деньги",
+                        "source": "smart_money_copy",
+                        "trader": getattr(t, "unique_code", "") or "",
+                    })
         return {
             "running": self._running,
             "execute": self.config.execute,
@@ -1031,6 +1048,7 @@ class SmartMoneyTracker:
             "last_error": self._last_error,
             "config": asdict(self.config),
             "tracked": [asdict(t) for t in tracked],
+            "open_positions": open_positions,
         }
 
     # ────────── Persistence ──────────

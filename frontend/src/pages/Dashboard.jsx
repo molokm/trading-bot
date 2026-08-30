@@ -286,10 +286,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
-    addPositions(smartMoneyStatus?.open_positions, 'Smart Money')
+    addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
+
+  const isOwnedBot = (bn) => {
+    if (!bn) return false
+    const n = String(bn).toLowerCase()
+    return n.includes('momentum') || n.includes('impulse') || n.includes('validation')
+      || n.includes('macd') || n.includes('ai') || n.includes('умн') || n.includes('smart')
+      || n.includes('vwap') || n.includes('scalp')
+  }
 
   // Exchange positions with no strategy owner (manual / lost bot state)
   const orphanPositions = useMemo(() => {
@@ -305,18 +313,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addStatus(impulseStatus?.open_positions)
     addStatus(validationStatus?.open_positions)
     addStatus(aiStatus?.open_positions)
+    addStatus(smartMoneyStatus?.open_positions)
     return (positions || []).filter((p) => {
       const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
       if (!posSz) return false
-      if (p.bot) return false
       const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
       const key = `${p.instId || ''}|${posSideKey}`
       const bn = p.bot || botMap[key] || ''
-      if (bn && bn !== 'Smart Money') return false
+      if (isOwnedBot(bn)) return false
       if (managedKeys.has(key)) return false
       return true
     })
-  }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions])
+  }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions])
 
   // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {

@@ -1514,7 +1514,7 @@ def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
 async def smart_money_status():
     global sm_tracker
     if not sm_tracker:
-        return {
+        st = {
             "running": False,
             "strategy": SM_NAME,
             "version": SM_VERSION,
@@ -1523,8 +1523,28 @@ async def smart_money_status():
             "verified_count": 0,
             "copying_count": 0,
             "tracked": [],
+            "open_positions": [],
         }
-    return sm_tracker.get_status()
+    else:
+        st = sm_tracker.get_status()
+    # Merge mirror opens so dashboard never treats SM BTC as orphan
+    try:
+        from app.services.smart_money_mirror import get_mirror
+        m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+        mop = m.open_positions_list() if hasattr(m, "open_positions_list") else []
+        cur = list(st.get("open_positions") or [])
+        seen = {(p.get("inst_id"), p.get("side")) for p in cur}
+        for p in mop:
+            key = (p.get("inst_id"), p.get("side"))
+            if key not in seen:
+                cur.append(p)
+                seen.add(key)
+        st["open_positions"] = cur
+        st["mirror_running"] = bool(getattr(m, "_running", False))
+        st["mirror_targets"] = len(getattr(m, "_targets", {}) or {})
+    except Exception as e:
+        print(f"[sm/status] mirror merge: {e}", flush=True)
+    return st
 
 
 @app.get("/api/smart-money/discover")

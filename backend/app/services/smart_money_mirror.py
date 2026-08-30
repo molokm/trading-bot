@@ -124,12 +124,37 @@ class SmartMoneyMirror:
         with self._lock:
             return [self._target_public(t) for t in self._targets.values()]
 
+    def open_positions_list(self) -> list:
+        """Flat list of mirrored OKX positions for dashboard tagging."""
+        out = []
+        with self._lock:
+            for t in self._targets.values():
+                if not t.active:
+                    continue
+                for coin, m in (t.mirrored or {}).items():
+                    inst = (m or {}).get("inst_id") or f"{coin}-USDT-SWAP"
+                    side = ((m or {}).get("side") or "long").lower()
+                    if side in ("sell", "s"):
+                        side = "short"
+                    out.append({
+                        "coin": coin,
+                        "inst_id": inst,
+                        "side": side,
+                        "size": float((m or {}).get("okx_sz") or (m or {}).get("hl_szi") or 0),
+                        "entry_price": float((m or {}).get("entry") or (m or {}).get("entry_price") or 0),
+                        "bot": "Умные деньги",
+                        "source": "smart_money_mirror",
+                        "lead": t.address[:10] + "…",
+                    })
+        return out
+
     def get_status(self) -> Dict:
         with self._lock:
             return {
                 "running": self._running,
                 "targets": [self._target_public(t) for t in self._targets.values()],
                 "config": asdict(self.config),
+                "open_positions": self.open_positions_list(),
             }
 
     async def start_mirror(
@@ -618,6 +643,31 @@ class SmartMoneyMirror:
                 except Exception:
                     pass
                 log.info("mirror hydrated from DB: %d targets", len(self._targets))
+                # Re-assert DB claims for mirrored coins after deploy
+                try:
+                    from .position_claim import claim_open
+                    import asyncio
+                    async def _reclaim():
+                        if not self.db:
+                            return
+                        for t in self._targets.values():
+                            for coin, m in (t.mirrored or {}).items():
+                                inst = (m or {}).get("inst_id") or f"{coin}-USDT-SWAP"
+                                side = (m or {}).get("side") or "long"
+                                sz = float((m or {}).get("okx_sz") or 0)
+                                px = float((m or {}).get("entry") or (m or {}).get("entry_price") or 0)
+                                if sz > 0 and px > 0:
+                                    await claim_open(self.db, "smart_money", inst, side, sz, px)
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            asyncio.ensure_future(_reclaim())
+                        else:
+                            loop.run_until_complete(_reclaim())
+                    except RuntimeError:
+                        asyncio.run(_reclaim())
+                except Exception as e:
+                    log.warning("mirror reclaim on hydrate: %s", e)
                 # auto-resume polling if any active
                 if any(t.active for t in self._targets.values()) and not self._running:
                     self.start()
