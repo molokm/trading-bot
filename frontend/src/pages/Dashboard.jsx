@@ -216,14 +216,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     orderbook_scalp: 'Order Book Scalp',
     smart_money: 'Умные деньги',
     'Умные деньги': 'Умные деньги',
-    Unassigned: 'Прочее / без стратегии',
-    'Прочее / без стратегии': 'Прочее / без стратегии',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
     const merged = {}
     for (const [bid, val] of Object.entries(per)) {
       const name = botNameMap[bid] || bid
+      if (name === 'Unassigned' || name === 'Прочее / без стратегии') continue
       merged[name] = (merged[name] || 0) + Number(val || 0)
     }
     return Object.entries(merged)

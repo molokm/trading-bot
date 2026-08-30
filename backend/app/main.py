@@ -2125,10 +2125,9 @@ def _db_bot_name(bot_id: str) -> str:
         return "VWAP Mean Reversion"
     if base in ("smart_money", "smart_money_mirror", "sm_mirror"):
         return "Умные деньги"
-    # already a UI label?
     if base in (
         "Momentum", "Impulse 1D", "MACD+Donchian Validation",
-        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги", "Unassigned",
+        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
     ):
         return base
     return ""
@@ -4242,6 +4241,52 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
     return bills
 
 
+
+@app.post("/api/pnl/rebuild-strategy", dependencies=[Depends(require_admin)])
+async def pnl_rebuild_strategy(data: dict = None):
+    """Reassign SOL off AI -> Impulse and rebuild each strategy PnL from DB trades only."""
+    data = data or {}
+    symbol = str(data.get("symbol") or "SOL").upper()
+    out = {"steps": []}
+    # 1) Move SOL trades from AI to Impulse if any remain
+    try:
+        inst = f"{symbol}-USDT-SWAP"
+        st = await db.reassign_trades_instrument(AI_BOT_ID, IMP_BOT_ID, inst)
+        out["steps"].append({"reassign": st})
+        from app.services.position_claim import release_open
+        await release_open(db, AI_BOT_ID, inst, "long")
+        await release_open(db, AI_BOT_ID, inst, "short")
+    except Exception as e:
+        out["steps"].append({"reassign_err": str(e)})
+    # 2) Summaries
+    bots = {
+        "Momentum": ROT_BOT_ID,
+        "Impulse 1D": IMP_BOT_ID,
+        "MACD+Donchian Validation": VAL_BOT_ID,
+        "AI Discretionary 1H": AI_BOT_ID,
+    }
+    summaries = {}
+    for label, bid in bots.items():
+        try:
+            summaries[label] = await db.get_trades_summary(bid)
+        except Exception as e:
+            summaries[label] = {"error": str(e)}
+    out["summaries"] = summaries
+    # 3) Refresh live AI bot memory
+    global ai_bot
+    if ai_bot and hasattr(ai_bot, "correct_misattributed"):
+        try:
+            # clear one-shot flag to allow rebuild path
+            try:
+                await db.set_setting(f"ai_misattr_fixed:{AI_BOT_ID}:{symbol}", "")
+            except Exception:
+                pass
+            out["ai_correct"] = await ai_bot.correct_misattributed(symbol, IMP_BOT_ID)
+        except Exception as e:
+            out["ai_correct_err"] = str(e)
+    return out
+
+
 @app.get("/api/pnl")
 async def get_pnl():
     """PNL for Dashboard metric cards — all realized figures are computed
@@ -4269,51 +4314,38 @@ async def get_pnl():
     try:
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", [])
-        # Closed = has numeric pnl and not an open marker (open rows use pnl=None)
+        # Account total: all closed history rows (OKX-backed) — exchange truth
         closed = []
-        for t in trades:
-            reason = (t.get("reason") or "").lower()
+        for tr in trades:
+            reason = (tr.get("reason") or "").lower()
             if reason in ("open", "add"):
                 continue
-            if t.get("pnl") is None:
+            if tr.get("pnl") is None:
                 continue
             try:
-                float(t.get("pnl"))
+                float(tr.get("pnl"))
             except (TypeError, ValueError):
                 continue
-            closed.append(t)
+            closed.append(tr)
         if closed:
             source = "history"
             now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            for t in closed:
+            week_start = (now - td(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            for tr in closed:
                 try:
-                    pnl = float(t.get("pnl", 0) or 0)
+                    pnl = float(tr.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-                bot = (t.get("bot") or "").strip()
-                if not bot:
-                    try:
-                        bot = (_tag_trade_bot(t) or "").strip()
-                    except Exception:
-                        bot = ""
-                if not bot:
-                    try:
-                        bot = (_db_bot_name(t.get("bot_id") or "") or "").strip()
-                    except Exception:
-                        bot = ""
-                if not bot:
-                    bot = "Unassigned"
-                per_bot[bot] = per_bot.get(bot, 0.0) + pnl
                 total_realized += pnl
                 account_total += pnl
                 try:
-                    fee = abs(float(t.get("fee", 0) or 0))
+                    fee = abs(float(tr.get("fee", 0) or 0))
                 except (TypeError, ValueError):
                     fee = 0.0
-                if fee is not None:
-                    total_fees += fee
-                time_str = t.get("time", "") or t.get("exit_time", "")
+                total_fees += fee
+                time_str = tr.get("time", "") or tr.get("exit_time", "")
                 if time_str:
                     try:
                         t_time = dt.fromisoformat(time_str)
@@ -4332,15 +4364,46 @@ async def get_pnl():
                         realized_30d += pnl
                 else:
                     realized_30d += pnl
-            # Guarantee sum(per_bot) == total_realized (UI cards must add up)
-            pb_sum = sum(float(v or 0) for v in per_bot.values())
-            drift = round(total_realized - pb_sum, 6)
-            if abs(drift) > 0.005:
-                per_bot["Unassigned"] = per_bot.get("Unassigned", 0.0) + drift
-            print(f"[pnl] History (primary): total={total_realized:.2f} account_total={account_total:.2f} "
-                  f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed={len(closed)} per_bot={per_bot} "
-                  f"per_bot_sum={sum(per_bot.values()):.2f}", flush=True)
+
+            # Per-strategy PnL: ONLY each bot's own DB trades (honest formed PnL).
+            # Do NOT force strategy cards to sum to account total — orphans/manual
+            # and mis-tags stay outside strategy stats.
+            known = [
+                (ROT_BOT_ID, "Momentum"),
+                (MOM_BOT_ID, "Momentum"),
+                (IMP_BOT_ID, "Impulse 1D"),
+                (VAL_BOT_ID, "MACD+Donchian Validation"),
+                (AI_BOT_ID, "AI Discretionary 1H"),
+            ]
+            try:
+                from app.services.orderbook_scalp_strategy import SCALP_BOT_ID as _SCALP
+                known.append((_SCALP, "Order Book Scalp"))
+            except Exception:
+                pass
+            try:
+                known.append(("smart_money", "Умные деньги"))
+            except Exception:
+                pass
+            per_bot = {}
+            for bid, label in known:
+                try:
+                    sm = await db.get_trades_summary(bid)
+                    p = float(sm.get("total_pnl") or 0)
+                    if label in per_bot:
+                        # same label (momentum aliases) — keep max abs / sum of distinct bots
+                        if bid == MOM_BOT_ID:
+                            continue  # avoid double-count rotation+momentum if shared
+                        per_bot[label] = per_bot.get(label, 0.0) + p
+                    else:
+                        per_bot[label] = p
+                except Exception as e:
+                    print(f"[pnl] summary {bid}: {e}", flush=True)
+
+            print(
+                f"[pnl] History total={total_realized:.2f} (account) | "
+                f"strategy DB per_bot={per_bot} | closed={len(closed)}",
+                flush=True,
+            )
     except Exception as e:
         import traceback
         print(f"[pnl] History source error: {e}", flush=True)

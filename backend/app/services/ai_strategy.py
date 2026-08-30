@@ -1579,14 +1579,23 @@ class AIStrategy:
             out["error"] = f"reassign: {e}"
             return out
 
-        # lifetime / session
-        if out["moved"]:
-            self._lifetime_pnl = float(self._lifetime_pnl or 0) - out["pnl_removed"]
-            self._lifetime_trades = max(0, int(self._lifetime_trades or 0) - out["moved"])
-            self._lifetime_wins = max(0, int(self._lifetime_wins or 0) - wins)
-            # session approx
-            self._session_pnl = float(getattr(self, "_session_pnl", 0) or 0) - out["pnl_removed"]
-            self._equity = self._capital + float(self._session_pnl or 0)
+        # Rebuild lifetime strictly from remaining AI trades in DB (honest)
+        try:
+            summary = await self.db.get_trades_summary(self.BOT_ID)
+            self._lifetime_trades = int(summary.get("total") or 0)
+            self._lifetime_wins = int(summary.get("wins") or 0)
+            self._lifetime_pnl = float(summary.get("total_pnl") or 0)
+            self._session_pnl = 0.0  # session resets; lifetime is source of truth
+            self._equity = self._capital + float(self._lifetime_pnl or 0)
+        except Exception as e:
+            # fallback arithmetic if summary fails
+            if out["moved"]:
+                self._lifetime_pnl = float(self._lifetime_pnl or 0) - out["pnl_removed"]
+                self._lifetime_trades = max(0, int(self._lifetime_trades or 0) - out["moved"])
+                self._lifetime_wins = max(0, int(self._lifetime_wins or 0) - wins)
+                self._session_pnl = float(getattr(self, "_session_pnl", 0) or 0) - out["pnl_removed"]
+                self._equity = self._capital + float(self._session_pnl or 0)
+            out["summary_err"] = str(e)
 
         # drop memory position
         if coin in self._positions:
@@ -1726,11 +1735,29 @@ class AIStrategy:
         # rewrite file so next boot without DB still has numbers
         self._persist()
 
-        # One-shot: SOL was often stolen from Impulse after redeploy — move off AI PnL
+        # Ensure SOL fills are not on AI; then rebuild AI lifetime from DB trades only
         try:
             flag = await self.db.get_setting(f"ai_misattr_fixed:{self.BOT_ID}:SOL")
             if not flag:
                 await self.correct_misattributed("SOL", "impulse_strategy")
+            else:
+                # Even if already moved, refresh lifetime from DB so card matches trades
+                summary = await self.db.get_trades_summary(self.BOT_ID)
+                self._lifetime_trades = int(summary.get("total") or 0)
+                self._lifetime_wins = int(summary.get("wins") or 0)
+                self._lifetime_pnl = float(summary.get("total_pnl") or 0)
+                try:
+                    await self.db.set_setting(
+                        f"ai_lifetime:{self.BOT_ID}",
+                        json.dumps({
+                            "lifetime_pnl": self._lifetime_pnl,
+                            "lifetime_trades": self._lifetime_trades,
+                            "lifetime_wins": self._lifetime_wins,
+                            "lifetime_fees": getattr(self, "_lifetime_fees", 0),
+                        }),
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[AI] auto-correct SOL misattr: {e}", flush=True)
 
