@@ -19,6 +19,95 @@ def norm_side(side: str) -> str:
     return "long"
 
 
+async def persist_open_snapshot(db, bot_id: str, positions: list) -> None:
+    """Save open list for bot_id into settings (survives trade-table wipes)."""
+    if not db or not bot_id:
+        return
+    try:
+        import json
+        payload = []
+        for p in positions or []:
+            if isinstance(p, dict):
+                payload.append({
+                    "coin": p.get("coin") or "",
+                    "inst_id": p.get("inst_id") or p.get("instId") or "",
+                    "side": norm_side(p.get("side") or "long"),
+                    "size": float(p.get("size") or 0),
+                    "entry_price": float(p.get("entry_price") or p.get("entry") or 0),
+                })
+            else:
+                payload.append({
+                    "coin": getattr(p, "coin", "") or "",
+                    "inst_id": getattr(p, "inst_id", "") or getattr(p, "symbol", "") or "",
+                    "side": norm_side(getattr(p, "side", "long")),
+                    "size": float(getattr(p, "size", 0) or 0),
+                    "entry_price": float(getattr(p, "entry_price", 0) or 0),
+                })
+        await db.set_setting(f"open_positions:{bot_id}", json.dumps(payload))
+    except Exception as e:
+        log.warning("persist_open_snapshot %s: %s", bot_id, e)
+
+
+async def upsert_snapshot_position(db, bot_id: str, inst_id: str, side: str, size: float, entry: float) -> None:
+    """Merge one open into durable snapshot."""
+    if not db or not bot_id or not inst_id:
+        return
+    try:
+        import json
+        raw = await db.get_setting(f"open_positions:{bot_id}")
+        data = []
+        if raw:
+            data = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+        side_n = norm_side(side)
+        coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+        out = []
+        found = False
+        for p in data:
+            if (p.get("inst_id") == inst_id and norm_side(p.get("side") or "long") == side_n):
+                out.append({
+                    "coin": coin, "inst_id": inst_id, "side": side_n,
+                    "size": float(size), "entry_price": float(entry),
+                })
+                found = True
+            else:
+                out.append(p)
+        if not found:
+            out.append({
+                "coin": coin, "inst_id": inst_id, "side": side_n,
+                "size": float(size), "entry_price": float(entry),
+            })
+        await db.set_setting(f"open_positions:{bot_id}", json.dumps(out))
+    except Exception as e:
+        log.warning("upsert_snapshot_position %s: %s", bot_id, e)
+
+
+async def remove_snapshot_position(db, bot_id: str, inst_id: str = None, side: str = None) -> None:
+    if not db or not bot_id:
+        return
+    try:
+        import json
+        raw = await db.get_setting(f"open_positions:{bot_id}")
+        if not raw:
+            return
+        data = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+        if not inst_id:
+            await db.set_setting(f"open_positions:{bot_id}", "[]")
+            return
+        side_n = norm_side(side) if side else None
+        out = []
+        for p in data:
+            if p.get("inst_id") != inst_id:
+                out.append(p)
+                continue
+            if side_n and norm_side(p.get("side") or "long") != side_n:
+                out.append(p)
+                continue
+            # drop match
+        await db.set_setting(f"open_positions:{bot_id}", json.dumps(out))
+    except Exception as e:
+        log.warning("remove_snapshot_position %s: %s", bot_id, e)
+
+
 def orphan_close_enabled() -> bool:
     # Default OFF — auto-closing "orphans" wiped real strategy positions after
     # claim loss on deploy/PnL reset. Enable explicitly with ORPHAN_CLOSE=1.
@@ -49,6 +138,10 @@ async def claim_open(db, bot_id: str, inst_id: str, side: str, size: float, entr
                 size=float(size), entry_price=float(entry),
             )
             row = await db.find_position(bot_id, inst_id, side_n) if hasattr(db, "find_position") else True
+        try:
+            await upsert_snapshot_position(db, bot_id, inst_id, side_n, float(size), float(entry))
+        except Exception:
+            pass
         return bool(row)
     except Exception as e:
         log.warning("claim_open failed %s %s: %s", bot_id, inst_id, e)
@@ -57,6 +150,10 @@ async def claim_open(db, bot_id: str, inst_id: str, side: str, size: float, entr
                 bot_id=bot_id, inst_id=inst_id, side=side_n,
                 size=float(size), entry_price=float(entry),
             )
+            try:
+                await upsert_snapshot_position(db, bot_id, inst_id, side_n, float(size), float(entry))
+            except Exception:
+                pass
             return True
         except Exception as e2:
             log.error("claim_open retry failed %s: %s", inst_id, e2)
@@ -67,6 +164,10 @@ async def release_open(db, bot_id: str, inst_id: str = None, side: str = None) -
     if not db:
         return
     try:
+        try:
+            await remove_snapshot_position(db, bot_id, inst_id, side)
+        except Exception:
+            pass
         if inst_id and hasattr(db, "delete_position_inst"):
             await db.delete_position_inst(bot_id, inst_id, norm_side(side) if side else None)
         else:

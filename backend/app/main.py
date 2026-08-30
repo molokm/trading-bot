@@ -2350,40 +2350,84 @@ async def get_positions(inst_type: str = "SWAP"):
     # Tag each position with bot name; auto-reclaim if last trade was ours
     tagged = []
 
-    async def _inject_rotation_memory(inst_id: str, side: str, sz: float, entry: float):
-        """Put position back into Momentum in-memory book so UI + botMap see it."""
-        global rotation
-        if not rotation:
-            return
+    async def _inject_bot_memory(bot_label: str, inst_id: str, side: str, sz: float, entry: float):
+        """Rehydrate strategy in-memory book so UI botMap + management work after deploy."""
+        global rotation, impulse, validation, ai_bot
         coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+        entry = float(entry or 0)
+        sz = float(sz or 0)
+        if entry <= 0 or sz <= 0 or not coin:
+            return
+        stop = entry * 0.985 if side == "long" else entry * 1.015
+        now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
         try:
-            from app.services.rotation_strategy import RotPosition
-            if coin in (getattr(rotation, "_positions", None) or {}):
-                return
-            entry = float(entry or 0)
-            sz = float(sz or 0)
-            if entry <= 0 or sz <= 0:
-                return
-            stop = entry * 0.985 if side == "long" else entry * 1.015
-            pos = RotPosition(
-                symbol=inst_id, coin=coin, inst_id=inst_id,
-                side=side, size=sz, size_original=sz,
-                entry_price=entry, stop_price=stop,
-                peak_price=entry,
-                opened_at=__import__("datetime").datetime.now(
-                    __import__("datetime").timezone.utc
-                ).isoformat(),
-                atr=entry * 0.015, atr_hourly=entry * 0.015,
-                leverage=float(getattr(getattr(rotation, "config", None), "max_leverage", 3) or 3),
-            )
-            rotation._positions[coin] = pos
-            try:
-                await rotation._persist_open_snapshot()
-            except Exception:
-                pass
-            print(f"[positions] injected {coin} {side} into Momentum memory", flush=True)
+            if bot_label == "Momentum" and rotation:
+                from app.services.rotation_strategy import RotPosition
+                if coin not in (getattr(rotation, "_positions", None) or {}):
+                    rotation._positions[coin] = RotPosition(
+                        symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                        size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                        peak_price=entry, opened_at=now_iso,
+                        atr=entry * 0.015, atr_hourly=entry * 0.015,
+                        leverage=float(getattr(getattr(rotation, "config", None), "max_leverage", 3) or 3),
+                    )
+                    print(f"[positions] injected {coin} → Momentum", flush=True)
+            elif bot_label == "Impulse 1D" and impulse:
+                # Impulse stores positions similarly (coin key)
+                pos_map = getattr(impulse, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    P = getattr(impulse, "Position", None) or getattr(impulse, "ImpPosition", None)
+                    if P is None:
+                        # minimal duck object
+                        class _P:
+                            pass
+                        p = _P()
+                        p.symbol = inst_id; p.coin = coin; p.inst_id = inst_id
+                        p.side = side; p.size = sz; p.size_original = sz
+                        p.entry_price = entry; p.stop_price = stop; p.peak_price = entry
+                        p.opened_at = now_iso; p.atr = entry * 0.015
+                        pos_map[coin] = p
+                    else:
+                        try:
+                            pos_map[coin] = P(
+                                symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                                size=sz, entry_price=entry, stop_price=stop,
+                            )
+                        except TypeError:
+                            p = P.__new__(P)
+                            for k, v in dict(symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                                             size=sz, entry_price=entry, stop_price=stop).items():
+                                try:
+                                    setattr(p, k, v)
+                                except Exception:
+                                    pass
+                            pos_map[coin] = p
+                    print(f"[positions] injected {coin} → Impulse", flush=True)
+            elif bot_label.startswith("MACD") and validation:
+                pos_map = getattr(validation, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    from app.services.rotation_strategy import RotPosition
+                    pos_map[coin] = RotPosition(
+                        symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                        size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                        peak_price=entry, opened_at=now_iso,
+                        atr=entry * 0.015, atr_hourly=entry * 0.015, leverage=3.0,
+                    )
+                    print(f"[positions] injected {coin} → Validation", flush=True)
+            elif bot_label.startswith("AI") and ai_bot:
+                pos_map = getattr(ai_bot, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    # AI may use dict positions
+                    try:
+                        pos_map[coin] = {
+                            "inst_id": inst_id, "coin": coin, "side": side,
+                            "size": sz, "entry_price": entry, "stop_price": stop,
+                        }
+                    except Exception:
+                        pass
+                    print(f"[positions] injected {coin} → AI", flush=True)
         except Exception as e:
-            print(f"[positions] inject rotation: {e}", flush=True)
+            print(f"[positions] inject {bot_label}: {e}", flush=True)
 
     for p in result.get("data", []):
         inst = p.get("instId", "") or ""
@@ -2486,30 +2530,50 @@ async def get_positions(inst_type: str = "SWAP"):
             except Exception as e:
                 print(f"[positions] pending-tag {inst}: {e}", flush=True)
 
-        # Last resort for orphan that only Momentum (rotation) can own in this app:
-        # if rotation is running and coin is in its universe and nobody else claims it.
-        if not bot_name and inst and rotation and sz > 0 and entry > 0:
+        # Last resort: unique running strategy whose universe contains coin and no other claim
+        if not bot_name and inst and sz > 0 and entry > 0:
             try:
                 coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-                univ = list(getattr(getattr(rotation, "config", None), "symbols", None) or [])
-                if not univ:
-                    from app.services.rotation_strategy import COINS as _RC
-                    univ = list(_RC)
-                other = False
+                candidates = []
+                # (bot_id, label, bot_obj, universe)
                 try:
-                    other = await db.other_bot_owns_position_any(ROT_BOT_ID, inst, side_n)
+                    from app.services.rotation_strategy import COINS as _RC
                 except Exception:
+                    _RC = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
+                if rotation and getattr(rotation, "_running", False):
+                    univ = list(getattr(getattr(rotation, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((ROT_BOT_ID, "Momentum", rotation))
+                if impulse and getattr(impulse, "_running", False):
+                    univ = list(getattr(getattr(impulse, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((IMP_BOT_ID, "Impulse 1D", impulse))
+                if validation and getattr(validation, "_running", False):
+                    univ = list(getattr(getattr(validation, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((VAL_BOT_ID, "MACD+Donchian Validation", validation))
+                if ai_bot and getattr(ai_bot, "_running", False):
+                    univ = list(getattr(getattr(ai_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
+                    if coin in univ:
+                        candidates.append((AI_BOT_ID, "AI Discretionary 1H", ai_bot))
+                # Only auto-claim when exactly one candidate is running for this coin
+                if len(candidates) == 1:
+                    bid, label, _bot = candidates[0]
                     other = False
-                if coin in univ and not other:
-                    await claim_open(db, ROT_BOT_ID, inst, side_n, sz, entry)
-                    db_pos_map[(inst, side_n)] = ROT_BOT_ID
-                    bot_name = "Momentum"
-                    print(f"[positions] last-resort claim {inst} → Momentum (rotation universe)", flush=True)
+                    try:
+                        other = await db.other_bot_owns_position_any(bid, inst, side_n)
+                    except Exception:
+                        other = False
+                    if not other:
+                        await claim_open(db, bid, inst, side_n, sz, entry)
+                        db_pos_map[(inst, side_n)] = bid
+                        bot_name = label
+                        print(f"[positions] last-resort claim {inst} → {label} (unique running bot)", flush=True)
             except Exception as e:
                 print(f"[positions] last-resort {inst}: {e}", flush=True)
 
-        if bot_name == "Momentum" and inst and sz > 0:
-            await _inject_rotation_memory(inst, side_n, sz, entry)
+        if bot_name and inst and sz > 0:
+            await _inject_bot_memory(bot_name, inst, side_n, sz, entry)
 
         p["bot"] = bot_name
         p["_side_norm"] = side_n
