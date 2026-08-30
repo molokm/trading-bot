@@ -5,6 +5,7 @@ import {
   TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
+import { api } from './services/api'
 import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -17,7 +18,6 @@ const DocsPage = lazy(() => import('./pages/DocsPage'))
 const SmartMoneyPage = lazy(() => import('./pages/SmartMoneyPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
 const TrackerPage = lazy(() => import('./pages/TrackerPage'))
-import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -278,6 +278,21 @@ export default function App() {
     const role = localStorage.getItem('auth_role')
     return token ? { token, role } : null
   })
+
+  // Bootstrap session from httpOnly cookie when localStorage empty (after deploy)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const s = await api.authStatus()
+        if (cancelled || !s?.authenticated) return
+        const role = s.role === 'admin' ? 'admin' : (s.role || 'guest')
+        localStorage.setItem('auth_role', role)
+        setAuth((prev) => prev || { token: localStorage.getItem('auth_token') || 'cookie', role })
+      } catch { /* not logged in */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   return (
     <ThemeProvider>

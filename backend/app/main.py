@@ -23,6 +23,7 @@ from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import (
     login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user,
+    ensure_auth_secrets,
     get_user_id, encrypt_str, decrypt_str,
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
 )
@@ -137,8 +138,33 @@ PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 def get_token(request: Request):
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:]
+        return auth[7:].strip()
+    try:
+        c = request.cookies.get("auth_token") or ""
+        if c:
+            return c.strip()
+    except Exception:
+        pass
     return ""
+
+
+def _set_auth_cookie(response, token: str, max_age: int = 86400):
+    secure = (os.getenv("AUTH_COOKIE_SECURE") or "1").strip().lower() not in ("0", "false", "no")
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=secure,
+        samesite="lax",
+        max_age=max_age,
+        path="/",
+    )
+    return response
+
+
+def _clear_auth_cookie(response):
+    response.delete_cookie("auth_token", path="/")
+    return response
 
 
 async def write_audit(request: Request, action: str, detail: str = "", meta: str = ""):
@@ -198,6 +224,8 @@ async def startup():
     global _STARTED_AT
     _STARTED_AT = _time.time()
     try:
+        print("[startup] 0/7 auth secrets ...", flush=True)
+        ensure_auth_secrets()
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
@@ -521,6 +549,7 @@ ADMIN_ONLY_PATHS = {
     "/api/credentials/init",
     "/api/trade/order",
     "/api/positions/close",
+    "/api/positions/sweep-orphans",
     "/api/momentum/start",
     "/api/momentum/stop",
     "/api/momentum/config",
@@ -551,21 +580,65 @@ ADMIN_ONLY_PATHS = {
     "/api/subs/activate",
     "/api/subs/deactivate",
     "/api/subs/config",
+    "/api/mode",
+    "/api/audit",
+    "/api/risk/kill",
+    "/api/pnl/rebuild-strategy",
+    "/api/admin/reset-trading-stats",
+    "/api/ai/start",
+    "/api/ai/stop",
+    "/api/ai/decide",
+    "/api/ai/correct-attribution",
+    "/api/ai/logs",
+    "/api/ai/logs/download",
 }
 
-ADMIN_ONLY_PREFIXES = ("/api/debug/",)
+ADMIN_ONLY_PREFIXES = (
+    "/api/debug/",
+    "/api/smart-money/",
+    "/api/admin/",
+    "/api/vwap_rev/",
+)
+
+# Guest cannot read live trading / PnL (admin or telegram-user only)
+GUEST_FORBIDDEN_PREFIXES = (
+    "/api/pnl",
+    "/api/trades",
+    "/api/positions",
+    "/api/portfolio",
+    "/api/momentum",
+    "/api/rotation",
+    "/api/impulse",
+    "/api/validation",
+    "/api/ai/",
+    "/api/smart-money",
+    "/api/reports",
+    "/api/backtest",
+    "/api/credentials",
+    "/api/mode",
+    "/api/audit",
+    "/api/db/",
+)
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if not request.url.path.startswith("/api/") or request.url.path in PUBLIC_API_PATHS:
+    path = request.url.path
+    if not path.startswith("/api/") or path in PUBLIC_API_PATHS:
         return await call_next(request)
     role = validate(get_token(request))
     if role is None:
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-    if request.url.path in ADMIN_ONLY_PATHS or request.url.path.startswith(ADMIN_ONLY_PREFIXES):
+    if path in ADMIN_ONLY_PATHS or any(path.startswith(p) for p in ADMIN_ONLY_PREFIXES):
         if role != "admin":
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    if role == "guest":
+        for p in GUEST_FORBIDDEN_PREFIXES:
+            if path == p or path.startswith(p + "/") or path.startswith(p):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Guest cannot access trading data. Sign in as admin."},
+                )
     return await call_next(request)
 
 
@@ -579,7 +652,8 @@ async def auth_login(request: Request, data: dict):
     token = login(data.get("password", ""))
     if token:
         record_attempt(ip, True)
-        return {"token": token, "role": "admin"}
+        resp = JSONResponse({"token": token, "role": "admin", "cookie_auth": True})
+        return _set_auth_cookie(resp, token)
     record_attempt(ip, False)
     raise HTTPException(status_code=401, detail="Invalid password")
 
@@ -591,7 +665,8 @@ async def auth_guest(request: Request):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     record_guest(ip)
     token = guest()
-    return {"token": token, "role": "guest"}
+    resp = JSONResponse({"token": token, "role": "guest", "cookie_auth": True})
+    return _set_auth_cookie(resp, token)
 
 
 @app.get("/api/auth/status")
@@ -691,83 +766,12 @@ async def auth_telegram(data: dict):
 @app.post("/api/auth/logout")
 async def auth_logout(request: Request):
     token = get_token(request)
-    return logout(token)
-
-
-# ══════════════════════════════════════════════════════════════
-# MULTI-TENANT /api/me/* — per-user mini-app account
-# ══════════════════════════════════════════════════════════════
-
-async def _me_ctx(request: Request):
-    """Resolve the authenticated user context.
-
-    Returns (role, user_id, user_row_or_None). Owner (admin) has user_id=None
-    and keeps using env creds + global bots. 'user' role maps to their own
-    account. Guests are rejected.
-    """
-    token = get_token(request)
-    role = validate(token)
-    if role not in ("admin", "user"):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    user_id = get_user_id(token)
-    user_row = None
-    if user_id:
-        try:
-            user_row = await db.get_user_by_telegram(user_id)
-        except Exception:
-            user_row = None
-    return role, user_id, user_row
-
-
-async def _user_okx_client(user_id: str) -> Optional[OKXClient]:
-    """Return (and cache) the user's OKXClient from their encrypted creds."""
-    global _user_clients
-    existing = _user_clients.get(user_id)
-    if existing:
-        return existing
     try:
-        u = await db.get_user_by_telegram(user_id)
+        logout(token)
     except Exception:
-        return None
-    if not u:
-        return None
-    key = decrypt_str(u.get("okx_key_enc") or "")
-    secret = decrypt_str(u.get("okx_secret_enc") or "")
-    passphrase = decrypt_str(u.get("okx_pass_enc") or "")
-    if not (key and secret and passphrase):
-        return None
-    client = OKXClient(key, secret, passphrase, bool(u.get("okx_demo", 1)))
-    _user_clients[user_id] = client
-    strategy_mgr.set_user_client(user_id, client)
-    return client
-
-
-def _clear_user_client(user_id: str):
-    global _user_clients
-    old = _user_clients.pop(user_id, None)
-    if old:
-        try:
-            asyncio.get_event_loop().create_task(old.close())
-        except Exception:
-            pass
-
-
-def _user_notifier(user_id: str):
-    """Notifier that delivers a user's bot signals to THEIR chat (not the channel)."""
-    if not telegram.token:
-        return telegram
-    return TelegramNotifier(token=telegram.token, chat_id=str(user_id), channel_id="")
-
-
-def _has_active_plan(user_row: dict) -> bool:
-    """Pro users need a currently-active subscription to run bots."""
-    if not user_row:
-        return False
-    plan = user_row.get("plan")
-    if plan != "pro":
-        return False
-    return _is_active(user_row)
-
+        pass
+    resp = JSONResponse({"ok": True})
+    return _clear_auth_cookie(resp)
 
 @app.get("/api/me")
 async def me_profile(request: Request):
@@ -1833,6 +1837,64 @@ async def vwap_rev_stop():
         vwap_rev_bot.stop()
     return {"message": "VWAP Mean Reversion stopped", "running": False}
 
+
+
+@app.get("/api/health/positions-claims", dependencies=[Depends(require_admin)])
+async def health_positions_claims():
+    """Compare OKX open SWAP positions vs DB strategy claims."""
+    from app.services.position_claim import norm_side
+    client = client_manager.get_client()
+    exchange = []
+    if client:
+        try:
+            res = await client.get_positions("SWAP")
+            for p in (res.get("data") or []):
+                try:
+                    sz = abs(float(p.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0
+                if sz <= 0:
+                    continue
+                exchange.append({
+                    "inst_id": p.get("instId"),
+                    "side": norm_side(p.get("posSide") or "net"),
+                    "size": sz,
+                    "upl": float(p.get("upl") or 0),
+                })
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    claims = []
+    try:
+        rows = await db.get_all_positions() if hasattr(db, "get_all_positions") else []
+        for r in rows or []:
+            claims.append({
+                "bot_id": r.get("bot_id"),
+                "inst_id": r.get("inst_id"),
+                "side": r.get("side"),
+                "size": r.get("size"),
+            })
+    except Exception as e:
+        claims = [{"error": str(e)}]
+    cl_keys = set()
+    for c in claims:
+        if c.get("inst_id"):
+            cl_keys.add((c.get("inst_id"), norm_side(c.get("side") or "long")))
+            cl_keys.add((c.get("inst_id"), "net"))
+    only_exchange = [x for x in exchange if (x["inst_id"], x["side"]) not in cl_keys]
+    only_claims = [
+        c for c in claims
+        if c.get("inst_id") and (c.get("inst_id"), norm_side(c.get("side") or "long")) not in
+        {(e["inst_id"], e["side"]) for e in exchange}
+    ]
+    return {
+        "ok": len(only_exchange) == 0,
+        "exchange_count": len(exchange),
+        "claims_count": len([c for c in claims if c.get("inst_id")]),
+        "only_on_exchange": only_exchange,
+        "only_in_db_claims": only_claims,
+        "exchange": exchange,
+        "claims": claims,
+    }
 
 @app.get("/api/health")
 async def health():

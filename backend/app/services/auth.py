@@ -62,15 +62,42 @@ def record_guest(ip: str):
 
 
 # ── Encryption for secrets at rest (OKX keys, etc.) ──
+def _require_stable_secrets() -> None:
+    """Fail-fast in production when encryption key is missing."""
+    strict = (os.getenv("REQUIRE_ENCRYPTION_KEY") or "").strip().lower() in ("1", "true", "yes")
+    if not strict:
+        if os.getenv("DATABASE_URL", "").startswith(("postgres://", "postgresql://")):
+            strict = True
+        if os.getenv("DASHBOARD_PASSWORD", "").strip():
+            strict = True
+    if not strict:
+        return
+    key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
+    if not key_b64:
+        raise RuntimeError(
+            "TOKEN_ENCRYPTION_KEY is required. Generate with: "
+            "python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+        )
+    try:
+        Fernet(key_b64.encode())
+    except Exception as e:
+        raise RuntimeError(f"TOKEN_ENCRYPTION_KEY is invalid: {e}") from e
+
+
 def _get_fernet() -> Fernet:
     key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
     if key_b64:
         try:
             return Fernet(key_b64.encode())
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"TOKEN_ENCRYPTION_KEY is invalid: {e}") from e
     if not hasattr(_get_fernet, "_fallback_key"):
         _get_fernet._fallback_key = Fernet.generate_key()
+        print(
+            "[auth] WARNING: TOKEN_ENCRYPTION_KEY unset — ephemeral Fernet key "
+            "(OKX secrets will not survive restart)",
+            flush=True,
+        )
     return Fernet(_get_fernet._fallback_key)
 
 
@@ -213,3 +240,7 @@ def cleanup():
     dead = [k for k, v in _blacklist.items() if v < now]
     for k in dead:
         del _blacklist[k]
+
+
+def ensure_auth_secrets() -> None:
+    _require_stable_secrets()

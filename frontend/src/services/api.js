@@ -1,15 +1,20 @@
 const BASE = '/api';
 
 function getToken() {
+  // Legacy fallback; primary auth is httpOnly cookie (credentials: include)
   return localStorage.getItem('auth_token') || '';
 }
 
 async function request(path, options = {}) {
   const url = `${BASE}${path}`;
   const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const config = { headers, ...options };
+  const config = {
+    credentials: 'include',
+    ...options,
+    headers: { ...headers, ...(options.headers || {}) },
+  };
   const resp = await fetch(url, config);
   if (resp.status === 401) {
     localStorage.removeItem('auth_token');
@@ -43,6 +48,7 @@ export const api = {
   authStatus: () => request('/auth/status'),
 
   health: () => request('/health'),
+  positionsClaimsHealth: () => request('/health/positions-claims'),
 
   riskStatus: () => request('/risk/status'),
   riskKill: (enabled) =>
