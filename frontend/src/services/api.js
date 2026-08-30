@@ -111,6 +111,7 @@ export const api = {
     return request(url)
   },
 
+  pnlReconcile: () => request('/pnl/reconcile'),
   getPnl: () => request('/pnl'),
 
   // ── Momentum Strategy ──

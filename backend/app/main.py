@@ -5023,6 +5023,47 @@ async def get_pnl():
     except Exception:
         pass
 
+    # Funding (OKX bills type=8) — not inside trade fillPnl; surface separately
+    funding = 0.0
+    funding_source = "none"
+    funding_n = 0
+    try:
+        epoch = await get_pnl_epoch()
+        resp_f = await _okx_call(
+            lambda c: c.get_bills(inst_type="SWAP", type="8", limit=100)
+        )
+        if not resp_f.get("error"):
+            for b in resp_f.get("data") or []:
+                ts = b.get("ts") or b.get("cTime") or ""
+                # best-effort epoch filter on bill time
+                try:
+                    if epoch and ts:
+                        from datetime import datetime as _dt, timezone as _tz
+                        t_iso = _dt.fromtimestamp(int(ts) / 1000, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                        if t_iso[:19] < str(epoch)[:19]:
+                            continue
+                except Exception:
+                    pass
+                try:
+                    v = b.get("pnl")
+                    if v is None or v == "":
+                        v = b.get("balChg")
+                    funding += float(v or 0)
+                    funding_n += 1
+                except (TypeError, ValueError):
+                    continue
+            funding_source = "okx_bills_type8"
+    except Exception as e:
+        print(f"[pnl] funding: {e}", flush=True)
+
+    # OKX fillPnl is typically net of trading fees; fees field is informational
+    fees_note = (
+        "OKX fillPnl/bill.pnl is usually net of trading fees; "
+        "do not subtract 'fees' again from total. Funding is separate (type=8)."
+    )
+
+    economic = total_realized + unrealized + funding
+
     return {
         "total": round(total_realized, 2),
         "account_total": round(account_total, 2),
@@ -5031,13 +5072,142 @@ async def get_pnl():
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
         "unrealized": round(unrealized, 2),
+        "funding": round(funding, 4),
+        "funding_source": funding_source,
+        "funding_bills": funding_n,
+        "economic_approx": round(economic, 2),
         "source": source,
         "fees": round(total_fees, 2),
+        "fees_informational": True,
+        "pnl_includes_fee": True,
+        "fees_note": fees_note,
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
         "pnl_epoch": await get_pnl_epoch(),
         "skipped_untagged": skipped_untagged,
+        "timezone": "UTC",
     }
 
+
+
+
+@app.get("/api/pnl/reconcile", dependencies=[Depends(require_admin)])
+async def pnl_reconcile():
+    """Compare dashboard strict PnL vs OKX bills (trade + funding) + positions upl.
+
+    Helps detect attribution gaps (untagged), funding drift, and upl mismatch.
+    """
+    from datetime import datetime as dt, timezone as tz
+
+    dash = await get_pnl()
+    epoch = dash.get("pnl_epoch") or await get_pnl_epoch()
+
+    # OKX trade bills — all SWAP closes/opens with pnl
+    okx_trade_pnl = 0.0
+    okx_trade_n = 0
+    okx_tagged_pnl = 0.0
+    okx_untagged_pnl = 0.0
+    try:
+        # Prefer paired pipeline bills if available via get_paired_trades debug
+        # Direct bills type=2 (trade) when API supports type filter
+        for type_arg in ("2", None):
+            try:
+                if type_arg:
+                    resp = await _okx_call(
+                        lambda c, t=type_arg: c.get_bills(inst_type="SWAP", type=t, limit=100)
+                    )
+                else:
+                    resp = await _okx_call(
+                        lambda c: c.get_bills(inst_type="SWAP", limit=100)
+                    )
+                if resp.get("error"):
+                    continue
+                for b in resp.get("data") or []:
+                    sub = str(b.get("subType") or "")
+                    # close subtypes
+                    if sub and sub not in ("5", "6", "3", "4", "1", "2"):
+                        continue
+                    try:
+                        ts = b.get("ts") or ""
+                        if epoch and ts:
+                            t_iso = dt.fromtimestamp(int(ts) / 1000, tz=tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                            if t_iso[:19] < str(epoch)[:19]:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        p = float(b.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        p = 0.0
+                    if sub in ("5", "6") or p != 0:
+                        okx_trade_pnl += p
+                        okx_trade_n += 1
+                        cid = str(b.get("clOrdId") or "").lower()
+                        if cid.startswith(("rot", "imp", "ai", "val")):
+                            okx_tagged_pnl += p
+                        else:
+                            okx_untagged_pnl += p
+                break
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[reconcile] bills: {e}", flush=True)
+
+    # Positions upl
+    upl = 0.0
+    n_pos = 0
+    try:
+        pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
+        if not pos_result.get("error"):
+            for pos in pos_result.get("data") or []:
+                try:
+                    if abs(float(pos.get("pos") or 0)) <= 0:
+                        continue
+                    upl += float(pos.get("upl") or 0)
+                    n_pos += 1
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        pass
+
+    r_dash = float(dash.get("total") or 0)
+    u_dash = float(dash.get("unrealized") or 0)
+    f_dash = float(dash.get("funding") or 0)
+
+    return {
+        "ok": abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0,
+        "pnl_epoch": epoch,
+        "dashboard": {
+            "realized_tagged": r_dash,
+            "unrealized": u_dash,
+            "funding": f_dash,
+            "fees_informational": dash.get("fees"),
+            "economic_approx": dash.get("economic_approx"),
+            "skipped_untagged": dash.get("skipped_untagged"),
+            "per_bot": dash.get("per_bot"),
+            "source": dash.get("source"),
+        },
+        "okx": {
+            "trade_pnl_all": round(okx_trade_pnl, 4),
+            "trade_pnl_tagged_clord": round(okx_tagged_pnl, 4),
+            "trade_pnl_untagged": round(okx_untagged_pnl, 4),
+            "trade_bills_n": okx_trade_n,
+            "unrealized_upl": round(upl, 4),
+            "open_positions": n_pos,
+            "funding": f_dash,
+        },
+        "diffs": {
+            "realized_dash_minus_okx_tagged": round(r_dash - okx_tagged_pnl, 4),
+            "unrealized_dash_minus_okx": round(u_dash - upl, 4),
+            "okx_all_minus_dash": round(okx_trade_pnl - r_dash, 4),
+        },
+        "notes": [
+            "Dashboard realized = strategy-tagged closed trades after pnl_epoch only.",
+            "OKX trade_pnl_all may include untagged/manual fills.",
+            "fillPnl usually already net of trading fees; fees on dashboard are informational.",
+            "Funding is separate (bills type=8), included in economic_approx.",
+            "Timestamps and epoch filter use UTC.",
+        ],
+    }
 
 
 @app.get("/api/reports/summary")

@@ -197,6 +197,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const unrealizedPnl = positions.length > 0
     ? unrealizedFromPositions
     : (pnl?.unrealized || 0)
+  const fundingPnl = Number(pnl?.funding ?? 0)
+  const economicPnl = Number(pnl?.economic_approx ?? ((Number(pnl?.total) || 0) + unrealizedPnl + fundingPnl))
   const pnlTotal = pnl?.total || 0
   const pnlDay = pnl?.['1d'] || 0
   const pnlWeek = pnl?.week || 0
@@ -572,6 +574,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
                 {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
               </AnimatedValue>
+              {(fundingPnl !== 0 || Math.abs(economicPnl - pnlTotal) > 0.01) && (
+                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)] mono">
+                  <span>funding {fundingPnl >= 0 ? '+' : ''}{fmt(fundingPnl)}</span>
+                  <span className="mx-1">·</span>
+                  <span title="realized + unrealized + funding">eco {economicPnl >= 0 ? '+' : ''}{fmt(economicPnl)}</span>
+                </div>
+              )}
               {pnlByBot.length > 0 && (
                 <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (
