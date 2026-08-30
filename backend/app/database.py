@@ -1033,9 +1033,13 @@ class Database:
 
 
     async def wipe_strategy_trading_data(self, bot_ids: list) -> dict:
-        """Delete trades/signals/metrics/positions for given bot_ids."""
+        """Delete historical trades/signals/metrics only.
+
+        NEVER touch `positions` — claims must survive deploy/PnL reset so open
+        exchange positions stay bound to strategies and are not orphan-swept.
+        """
         out = {"bots": list(bot_ids), "ok": True}
-        for table in ("trades", "signals", "performance_metrics", "positions"):
+        for table in ("trades", "signals", "performance_metrics"):
             deleted = 0
             for bid in bot_ids:
                 try:

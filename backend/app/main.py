@@ -2168,7 +2168,12 @@ async def get_pnl_epoch() -> str:
 
 
 def _trade_after_epoch(tr: dict, epoch: str) -> bool:
+    """Filter closed history by epoch; always keep live open rows."""
     if not epoch:
+        return True
+    reason = (tr.get("reason") or "").lower()
+    # Open / live positions must survive epoch (PnL reset is for realized only)
+    if reason in ("open", "add") or tr.get("pnl") is None:
         return True
     ts = (
         tr.get("exit_time")
@@ -4344,7 +4349,7 @@ async def pnl_rebuild_strategy(data: dict = None):
 async def admin_reset_trading_stats(data: dict = None):
     """Wipe strategy trading history and start PnL counting from now (UTC).
 
-    Does not close exchange positions. Does not change strategy code/params.
+    Does not close exchange positions and does not delete position claims. Does not change strategy code/params.
     Sets pnl_epoch so OKX history before this moment is ignored in cards.
     """
     from datetime import datetime as dt, timezone as tz
@@ -4380,14 +4385,22 @@ async def admin_reset_trading_stats(data: dict = None):
         except Exception:
             pass
 
-    # in-memory reset for running bots
+    # in-memory reset for running bots — PnL/logs only; KEEP open positions
     global rotation, impulse, validation, ai_bot
     for bot in (rotation, impulse, validation, ai_bot):
         if not bot:
             continue
         try:
             if hasattr(bot, "_trade_log"):
-                bot._trade_log = []
+                # keep only open markers if any
+                try:
+                    bot._trade_log = [
+                        t for t in (bot._trade_log or [])
+                        if (t.get("reason") or "").lower() in ("open", "add")
+                        or t.get("pnl") is None
+                    ]
+                except Exception:
+                    bot._trade_log = []
             if hasattr(bot, "_session_pnl"):
                 bot._session_pnl = 0.0
             if hasattr(bot, "_lifetime_pnl"):
@@ -4400,6 +4413,22 @@ async def admin_reset_trading_stats(data: dict = None):
                 bot._lifetime_fees = 0.0
             if hasattr(bot, "_equity") and hasattr(bot, "_capital"):
                 bot._equity = float(getattr(bot, "_capital", 0) or 0)
+            # Re-assert DB claims for any positions still held in memory
+            try:
+                from app.services.position_claim import claim_open
+                positions = getattr(bot, "_positions", None) or {}
+                bid = getattr(bot, "BOT_ID", None)
+                if bid and positions:
+                    for pos in positions.values():
+                        await claim_open(
+                            db, bid,
+                            getattr(pos, "inst_id", None) or getattr(pos, "symbol", ""),
+                            getattr(pos, "side", "long"),
+                            float(getattr(pos, "size", 0) or 0),
+                            float(getattr(pos, "entry_price", 0) or 0),
+                        )
+            except Exception as e:
+                print(f"[reset] re-claim {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
         except Exception as e:
             print(f"[reset] mem {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
 

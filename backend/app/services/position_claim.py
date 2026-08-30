@@ -20,8 +20,10 @@ def norm_side(side: str) -> str:
 
 
 def orphan_close_enabled() -> bool:
-    v = (os.getenv("ORPHAN_CLOSE") or "1").strip().lower()
-    return v not in ("0", "false", "no", "off")
+    # Default OFF — auto-closing "orphans" wiped real strategy positions after
+    # claim loss on deploy/PnL reset. Enable explicitly with ORPHAN_CLOSE=1.
+    v = (os.getenv("ORPHAN_CLOSE") or "0").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 async def claim_open(db, bot_id: str, inst_id: str, side: str, size: float, entry: float) -> bool:
