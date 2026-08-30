@@ -6,12 +6,14 @@ and private API for copy-trading execution.
 """
 
 from __future__ import annotations
+import asyncio
 
 import asyncio
 import json
 import logging
 import os
 import time
+import asyncio
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -531,18 +533,35 @@ class SmartMoneyTracker:
                                   sort_type: str = None,
                                   min_roi_pct: float = None,
                                   only_verified: bool = False,
-                                  sources: str = None) -> List[Dict]:
-        """Discover traders from OKX + open sources, rank by ROI."""
+                                  sources: str = None,
+                                  enrich: bool = False) -> List[Dict]:
+        """Discover traders from OKX + open sources, rank by ROI.
+
+        enrich=False (default): use rank fields only — safe for Render free.
+        enrich=True: per-trader OKX stats (slow, can OOM/timeout the instance).
+        """
         src_list = [s.strip().lower() for s in (sources or "okx,hyperliquid,social").split(",") if s.strip()]
         results = []
+        try:
+            limit_n = max(1, min(30, int(limit) if str(limit).isdigit() else 20))
+        except Exception:
+            limit_n = 20
+        limit = str(limit_n)
 
         # ── OKX ──
         if "okx" in src_list and self.okx_api:
-            raw = await self.discover(page, limit, sort_type=sort_type)
+            try:
+                raw = await asyncio.wait_for(
+                    self.discover(page, limit, sort_type=sort_type),
+                    timeout=15.0,
+                )
+            except Exception as e:
+                print(f"[SmartMoney] okx discover timeout/err: {e}", flush=True)
+                raw = list(getattr(self, "_discover_cache", None) or [])[:limit_n]
         else:
             raw = []
 
-        for t_data in raw:
+        for idx, t_data in enumerate(raw[:limit_n]):
             code = t_data.get("uniqueCode", "")
             if not code:
                 continue
@@ -560,60 +579,34 @@ class SmartMoneyTracker:
             else:
                 trader.period_label = "OKX рейтинг"
 
-            # Optional enrichment (non-fatal; rate-limit friendly)
-            # lastDays: 1=7д, 2=30д, 3=90д, 4=180д
-            try:
-                stats_resp = await self.okx_api.get_trader_stats(code, last_days="2")
-                if stats_resp.get("code") == "0":
-                    stats_data = stats_resp.get("data") or []
-                    if stats_data and isinstance(stats_data[0], dict):
-                        s = stats_data[0]
-                        if s.get("winRate") not in (None, ""):
-                            wr = float(s.get("winRate") or 0)
-                            trader.win_rate = wr / 100.0 if wr > 1 else wr
-                        if s.get("maxDrawdown") not in (None, ""):
-                            dd = float(s.get("maxDrawdown") or 0)
-                            trader.max_drawdown = dd / 100.0 if dd > 1 else dd
-                        if s.get("totalTrades") not in (None, ""):
-                            trader.total_trades = int(float(s.get("totalTrades") or 0))
-                        # profitDays + lossDays ≈ activity days in window (proxy for trade activity)
-                        pd = int(float(s.get("profitDays") or 0))
-                        ld = int(float(s.get("lossDays") or 0))
-                        if trader.total_trades <= 0 and (pd or ld):
-                            trader.total_trades = pd + ld
-                            # annotate that count is trading-days in 30d window
-                            if not trader.period_label or "ведения" in trader.period_label:
-                                pass  # keep tenure for ROI; trades refer to 30d activity
-                        # Store 30d window hint for UI
-                        row_period_stats = f"WR 30д; активность {pd + ld}д"
-            except Exception:
-                pass
-
-            try:
-                weekly_resp = await self.okx_api.get_trader_weekly_pnl(code)
-                if weekly_resp.get("code") == "0":
-                    weekly_data = weekly_resp.get("data") or []
-                    if weekly_data:
-                        trader.weekly_pnl = weekly_data
-            except Exception:
-                pass
-
-            # Closed positions count (up to 50 recent) as trade-count proxy
-            if trader.total_trades <= 0:
+            # Per-trader OKX stats/history DISABLED by default — was 40–60 API
+            # calls per search and crashed Render free (503/OOM).
+            stats_data = []
+            weekly_data = []
+            if enrich and idx < 2 and self.okx_api:
                 try:
-                    hist = await self.okx_api.get_trader_position_history(code, limit="50")
-                    if hist.get("code") == "0":
-                        hdata = hist.get("data") or []
-                        if hdata:
-                            trader.total_trades = len(hdata)
-                            if len(hdata) >= 50:
-                                # indicate 50+ 
-                                trader.total_trades = 50
-                                row_trades_cap = True
+                    stats_resp = await asyncio.wait_for(
+                        self.okx_api.get_trader_stats(code, last_days="2"),
+                        timeout=5.0,
+                    )
+                    if stats_resp.get("code") == "0":
+                        stats_data = stats_resp.get("data") or []
+                        if stats_data and isinstance(stats_data[0], dict):
+                            s = stats_data[0]
+                            if s.get("winRate") not in (None, ""):
+                                wr = float(s.get("winRate") or 0)
+                                trader.win_rate = wr / 100.0 if wr > 1 else wr
+                            if s.get("maxDrawdown") not in (None, ""):
+                                dd = float(s.get("maxDrawdown") or 0)
+                                trader.max_drawdown = dd / 100.0 if dd > 1 else dd
+                            if s.get("totalTrades") not in (None, ""):
+                                trader.total_trades = int(float(s.get("totalTrades") or 0))
                 except Exception:
                     pass
-
-            self.verifier.verify(trader, stats_data, weekly_data, copy_count)
+            try:
+                self.verifier.verify(trader, stats_data, weekly_data, copy_count)
+            except Exception:
+                pass
             if not trader.copy_traders:
                 trader.copy_traders = copy_count
 
@@ -642,9 +635,18 @@ class SmartMoneyTracker:
             from .smart_money_sources import fetch_hyperliquid_cached, fetch_social
             ext = []
             if "hyperliquid" in src_list or "hl" in src_list:
-                ext.extend(await fetch_hyperliquid_cached(limit=int(limit) if str(limit).isdigit() else 25))
+                try:
+                    ext.extend(await asyncio.wait_for(
+                        fetch_hyperliquid_cached(limit=min(15, int(limit) if str(limit).isdigit() else 15)),
+                        timeout=15.0,
+                    ))
+                except Exception as e:
+                    print(f"[SmartMoney] HL timeout: {e}", flush=True)
             if "social" in src_list or "twitter" in src_list or "x" in src_list:
-                ext.extend(await fetch_social())
+                try:
+                    ext.extend(await asyncio.wait_for(fetch_social(), timeout=5.0))
+                except Exception as e:
+                    print(f"[SmartMoney] social timeout: {e}", flush=True)
             # dedupe by unique_code
             seen = {r.get("unique_code") for r in results}
             for e in ext:

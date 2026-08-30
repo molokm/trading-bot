@@ -1577,55 +1577,90 @@ async def smart_money_discover(
     sort: str = "roi",
     min_roi: float = 0,
     verified_only: bool = False,
-    sources: str = "okx,hyperliquid,social",
+    sources: str = "okx,hyperliquid",
 ):
-    """Discover traders from OKX + Hyperliquid + social, ranked by ROI."""
-    global sm_tracker
+    """Discover traders — light path (no per-trader OKX spam). Cached 90s."""
+    global sm_tracker, _SM_DISCOVER_CACHE, _SM_DISCOVER_LOCK
     from app.services.smart_money_tracker import (
         SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
     )
-    try:
-        tracker = sm_tracker
-        if not tracker:
-            okx = OKXCopyAPI(
-                api_key=_env_key or os.getenv("OKX_API_KEY", ""),
-                secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
-                passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
-                demo=_env_demo,
+    import asyncio as _aio
+
+    if "_SM_DISCOVER_CACHE" not in globals() or _SM_DISCOVER_CACHE is None:
+        _SM_DISCOVER_CACHE = {"ts": 0.0, "key": "", "data": None}
+    if _SM_DISCOVER_LOCK is None:
+        _SM_DISCOVER_LOCK = _aio.Lock()
+
+    cache_key = f"{page}|{limit}|{sort}|{min_roi}|{verified_only}|{sources}"
+    now = _time.time()
+    if (
+        _SM_DISCOVER_CACHE.get("data") is not None
+        and _SM_DISCOVER_CACHE.get("key") == cache_key
+        and now - float(_SM_DISCOVER_CACHE.get("ts") or 0) < 90
+    ):
+        return _SM_DISCOVER_CACHE["data"]
+
+    async with _SM_DISCOVER_LOCK:
+        now = _time.time()
+        if (
+            _SM_DISCOVER_CACHE.get("data") is not None
+            and _SM_DISCOVER_CACHE.get("key") == cache_key
+            and now - float(_SM_DISCOVER_CACHE.get("ts") or 0) < 90
+        ):
+            return _SM_DISCOVER_CACHE["data"]
+        try:
+            tracker = sm_tracker
+            if not tracker:
+                okx = OKXCopyAPI(
+                    api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+                    secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+                    passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+                    demo=_env_demo,
+                )
+                tracker = SmartMoneyTracker(
+                    config=TrackerConfig(sort_type=sort or "pnl_ratio"),
+                    okx_api=okx,
+                    client_manager=client_manager,
+                    db=db,
+                )
+            traders = await _aio.wait_for(
+                tracker.discover_and_verify(
+                    page=page,
+                    limit=limit,
+                    sort_type=sort or "pnl_ratio",
+                    min_roi_pct=float(min_roi or 0),
+                    only_verified=bool(verified_only),
+                    sources=sources or "okx,hyperliquid",
+                    enrich=False,
+                ),
+                timeout=35.0,
             )
-            tracker = SmartMoneyTracker(
-                config=TrackerConfig(sort_type=sort or "pnl_ratio"),
-                okx_api=okx,
-                client_manager=client_manager,
-                db=db,
-            )
-        traders = await tracker.discover_and_verify(
-            page=page,
-            limit=limit,
-            sort_type=sort or "pnl_ratio",
-            min_roi_pct=float(min_roi or 0),
-            only_verified=bool(verified_only),
-            sources=sources or "okx,hyperliquid,social",
-        )
-        return {
-            "traders": traders or [],
-            "total": len(traders or []),
-            "sort": sort or "roi",
-            "min_roi": float(min_roi or 0),
-            "sources": sources or "okx,hyperliquid,social",
-        }
-    except Exception as e:
-        import traceback
-        print(f"[sm/discover] error: {e}", flush=True)
-        traceback.print_exc()
-        return {
-            "traders": [],
-            "total": 0,
-            "sort": sort or "roi",
-            "min_roi": float(min_roi or 0),
-            "sources": sources or "okx,hyperliquid,social",
-            "error": str(e),
-        }
+            out = {
+                "traders": traders or [],
+                "total": len(traders or []),
+                "sort": sort or "roi",
+                "min_roi": float(min_roi or 0),
+                "sources": sources or "okx,hyperliquid",
+                "cached": False,
+            }
+            _SM_DISCOVER_CACHE = {
+                "ts": _time.time(),
+                "key": cache_key,
+                "data": {**out, "cached": True},
+            }
+            return out
+        except Exception as e:
+            import traceback
+            print(f"[sm/discover] error: {e}", flush=True)
+            traceback.print_exc()
+            return {
+                "traders": [],
+                "total": 0,
+                "sort": sort or "roi",
+                "min_roi": float(min_roi or 0),
+                "sources": sources or "okx,hyperliquid",
+                "error": str(e),
+            }
 
 
 @app.get("/api/smart-money/trader/{unique_code}")
@@ -2786,6 +2821,8 @@ _POS_RECLAIM_TTL = 90.0  # heavy fill/algo reclaim at most once per 90s
 _FUNDING_CACHE = 0.0
 _FUNDING_CACHE_TS = 0.0
 _FUNDING_TTL = 120.0
+_SM_DISCOVER_CACHE = {"ts": 0.0, "key": "", "data": None}
+_SM_DISCOVER_LOCK = None
 
 
 

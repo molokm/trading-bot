@@ -94,7 +94,7 @@ async def fetch_hyperliquid(limit: int = 30, min_account: float = 50_000,
                             window: str = "month") -> List[Dict]:
     """Top Hyperliquid traders by ROI for window day|week|month|allTime."""
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=12.0) as client:
             r = await client.get(HL_LEADERBOARD_URL)
             r.raise_for_status()
             data = r.json()
@@ -239,7 +239,7 @@ async def fetch_all_external(
 
 # Simple TTL cache for heavy HL payload
 _cache: Dict[str, Any] = {"ts": 0.0, "data": []}
-_CACHE_TTL = 600.0
+_CACHE_TTL = 300.0
 
 
 async def fetch_hyperliquid_cached(limit: int = 30, **kw) -> List[Dict]:
