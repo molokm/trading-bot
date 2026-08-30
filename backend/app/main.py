@@ -204,7 +204,7 @@ async def startup():
 
         # One-shot wipe of strategy PnL/trades — cards count from today
         try:
-            marker = "trading_stats_reset_v1_2026_08_30"
+            marker = "trading_stats_reset_v2_2026_08_30_strict"
             prev = await db.get_setting("trading_stats_reset_marker")
             force = (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes")
             if force or (prev or "") != marker:
@@ -4441,12 +4441,65 @@ async def admin_reset_trading_stats(data: dict = None):
 @app.get("/api/pnl")
 
 async def get_pnl():
-    """PNL for Dashboard metric cards — all realized figures are computed
-    directly from the History rows (get_paired_trades: DB + OKX bills/fills),
-    so the cards always match the History section exactly. Only the
-    "unrealized" card is taken from OKX positions (matches the exchange).
-    Falls back to OKX bills / in-memory logs when History is empty."""
+    """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
+
+    Strict tags: clOrdId prefix / DB bot_id / explicit bot label from pairing.
+    Untagged OKX noise never enters Total / 1d / week / strategy cards.
+    """
     from datetime import datetime as dt, timezone as tz, timedelta as td
+
+    STRICT_BOTS = {
+        "Momentum",
+        "Impulse 1D",
+        "MACD+Donchian Validation",
+        "AI Discretionary 1H",
+        "Order Book Scalp",
+        "VWAP Mean Reversion",
+        "Умные деньги",
+    }
+
+    def _normalize_bot(tr: dict) -> str:
+        bot = (tr.get("bot") or "").strip()
+        if not bot:
+            try:
+                bot = (_tag_trade_bot(tr) or "").strip()
+            except Exception:
+                bot = ""
+        if not bot:
+            try:
+                bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
+            except Exception:
+                bot = ""
+        # bot_id aliases
+        if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
+            bot = "Momentum"
+        elif bot in ("impulse_strategy", IMP_BOT_ID):
+            bot = "Impulse 1D"
+        elif bot in (VAL_BOT_ID, "validation_strategy"):
+            bot = "MACD+Donchian Validation"
+        elif bot in (AI_BOT_ID, "ai_strategy"):
+            bot = "AI Discretionary 1H"
+        elif bot in ("smart_money", "smart_money_mirror"):
+            bot = "Умные деньги"
+        # SOL without ai* never AI
+        inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
+        cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+        if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
+            bot = "Impulse 1D"
+        # Require strict known strategy label
+        if bot not in STRICT_BOTS:
+            return ""
+        # Prefer clOrdId / bot_id proof when present on row
+        if cid:
+            if cid.startswith("rot") and bot != "Momentum":
+                bot = "Momentum"
+            elif cid.startswith("imp") and bot != "Impulse 1D":
+                bot = "Impulse 1D"
+            elif cid.startswith("ai") and bot != "AI Discretionary 1H":
+                bot = "AI Discretionary 1H"
+            elif cid.startswith("val") and bot != "MACD+Donchian Validation":
+                bot = "MACD+Donchian Validation"
+        return bot
 
     realized_1d = 0.0
     realized_7d = 0.0
@@ -4457,18 +4510,23 @@ async def get_pnl():
     source = "none"
     per_bot = {}
     account_total = 0.0
+    skipped_untagged = 0
 
-    # ── 1. Primary: History rows — the single source for the cards ──
-    # `total`/`account_total` cover EVERY closed trade shown in the History
-    # section (Momentum, Impulse 1D, Validation, manual…), so the "Всего"
-    # card equals History's "Итого". `per_bot` is the per-bot breakdown of the
-    # same rows; open rows (pnl=None) contribute nothing.
     try:
+        epoch = await get_pnl_epoch()
+        # If reset marker exists but epoch missing, force start of today UTC
+        if not epoch:
+            try:
+                marker = await db.get_setting("trading_stats_reset_marker")
+                if marker:
+                    epoch = dt.now(tz.utc).strftime("%Y-%m-%dT00:00:00")
+                    await db.set_setting("pnl_epoch", epoch)
+            except Exception:
+                pass
+
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", []) or []
-        # Closed trades with realized pnl — single source for TOTAL and per-strategy
-        epoch = await get_pnl_epoch()
-        closed = []
+        closed_tagged = []
         for tr in trades:
             reason = (tr.get("reason") or "").lower()
             if reason in ("open", "add"):
@@ -4481,62 +4539,35 @@ async def get_pnl():
                 continue
             if not _trade_after_epoch(tr, epoch):
                 continue
-            closed.append(tr)
+            bot = _normalize_bot(tr)
+            if not bot:
+                skipped_untagged += 1
+                continue
+            tr = dict(tr)
+            tr["bot"] = bot
+            closed_tagged.append(tr)
 
-        if closed:
-            source = "history"
+        if closed_tagged or epoch:
+            # epoch set ⇒ zeros are valid (fresh start), do not fall back to raw bills
+            source = "history_strict" if closed_tagged else "epoch_empty"
             now = dt.now(tz.utc)
             week_start = (now - td(days=now.weekday())).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
-            per_bot = {}
-            for tr in closed:
+            for tr in closed_tagged:
                 try:
                     pnl = float(tr.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-
-                # Strategy link: already tagged in pairing, else resolve
-                bot = (tr.get("bot") or "").strip()
-                if not bot:
-                    try:
-                        bot = (_tag_trade_bot(tr) or "").strip()
-                    except Exception:
-                        bot = ""
-                if not bot:
-                    try:
-                        bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
-                    except Exception:
-                        bot = ""
-                # Normalize aliases → stable UI labels used by dashboard cards
-                if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
-                    bot = "Momentum"
-                elif bot in ("impulse_strategy", IMP_BOT_ID):
-                    bot = "Impulse 1D"
-                elif bot in (VAL_BOT_ID, "validation_strategy"):
-                    bot = "MACD+Donchian Validation"
-                elif bot in (AI_BOT_ID, "ai_strategy"):
-                    bot = "AI Discretionary 1H"
-                elif bot in ("smart_money", "smart_money_mirror"):
-                    bot = "Умные деньги"
-
-                # SOL opens were Impulse; never count as AI without ai* clOrdId
-                inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
-                cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
-                if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
-                    bot = "Impulse 1D"
-
+                bot = tr.get("bot") or ""
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-
                 total_realized += pnl
                 account_total += pnl
                 try:
-                    fee = abs(float(tr.get("fee", 0) or 0))
+                    total_fees += abs(float(tr.get("fee", 0) or 0))
                 except (TypeError, ValueError):
-                    fee = 0.0
-                total_fees += fee
-
+                    pass
                 time_str = tr.get("time", "") or tr.get("exit_time", "")
                 if time_str:
                     try:
@@ -4553,60 +4584,11 @@ async def get_pnl():
                         if t_time >= week_start:
                             realized_week += pnl
                     except (ValueError, OSError, TypeError):
-                        realized_30d += pnl
-                else:
-                    realized_30d += pnl
-
-            # If pairing left almost everything untagged, enrich from DB ord_id map
-            if sum(abs(v) for v in per_bot.values()) < abs(total_realized) * 0.2 and abs(total_realized) > 1:
-                try:
-                    if db._pg_mode:
-                        rows = await db._fetchall(
-                            "SELECT ord_id, bot_id FROM trades "
-                            "WHERE ord_id IS NOT NULL AND ord_id <> '' "
-                            "ORDER BY timestamp DESC LIMIT 5000"
-                        ) or []
-                    else:
-                        rows = await db._fetchall(
-                            "SELECT ord_id, bot_id FROM trades "
-                            "WHERE ord_id IS NOT NULL AND ord_id <> '' "
-                            "ORDER BY timestamp DESC LIMIT 5000"
-                        ) or []
-                    omap = {
-                        str(r.get("ord_id") or "").strip(): str(r.get("bot_id") or "").split(":")[0]
-                        for r in rows if r.get("ord_id")
-                    }
-                    per_bot = {}
-                    for tr in closed:
-                        try:
-                            pnl = float(tr.get("pnl", 0) or 0)
-                        except (TypeError, ValueError):
-                            continue
-                        bot = (tr.get("bot") or "").strip()
-                        if not bot:
-                            oid = str(tr.get("ord_id") or "").strip()
-                            bot = _db_bot_name(omap.get(oid, "")) or ""
-                        if not bot:
-                            try:
-                                bot = (_tag_trade_bot(tr) or "").strip()
-                            except Exception:
-                                bot = ""
-                        if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
-                            bot = "Momentum"
-                        elif bot in ("impulse_strategy", IMP_BOT_ID):
-                            bot = "Impulse 1D"
-                        elif bot in (VAL_BOT_ID, "validation_strategy"):
-                            bot = "MACD+Donchian Validation"
-                        elif bot in (AI_BOT_ID, "ai_strategy"):
-                            bot = "AI Discretionary 1H"
-                        if bot:
-                            per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                except Exception as e:
-                    print(f"[pnl] ord_id enrich: {e}", flush=True)
-
+                        pass
             print(
-                f"[pnl] history: total={total_realized:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
-                f"closed={len(closed)} tagged={sum(1 for tr in closed if tr.get('bot'))}",
+                f"[pnl] strict: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                f"week={realized_week:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
+                f"tagged={len(closed_tagged)} skip_untagged={skipped_untagged} epoch={epoch!r}",
                 flush=True,
             )
     except Exception as e:
@@ -4614,149 +4596,23 @@ async def get_pnl():
         print(f"[pnl] History source error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX bills (only if History is empty) ──
-    if source == "none":
-        try:
-            bills = await _fetch_all_trade_bills()
-            if bills:
-                now = dt.now(tz.utc)
-                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                source = "okx_bills"
-                for b in bills:
-                    try:
-                        b_pnl = float(b.get("pnl") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if b_pnl == 0:
-                        continue
-                    try:
-                        b_fee = abs(float(b.get("fee") or 0))
-                    except (TypeError, ValueError):
-                        b_fee = 0.0
-                    total_fees += b_fee
-                    total_realized += b_pnl
-                    account_total += b_pnl
-                    ts_str = b.get("ts", "")
-                    if ts_str:
-                        try:
-                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                            age_sec = (now - b_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += b_pnl
-                            if age_sec <= 604800:
-                                realized_7d += b_pnl
-                            if age_sec <= 2592000:
-                                realized_30d += b_pnl
-                            if b_time >= week_start:
-                                realized_week += b_pnl
-                        except (ValueError, OSError, TypeError):
-                            realized_30d += b_pnl
-                    else:
-                        realized_30d += b_pnl
-                print(f"[pnl] OKX bills fallback: total={total_realized:.2f} "
-                      f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} "
-                      f"week={realized_week:.2f} fees={total_fees:.2f}", flush=True)
-        except Exception as e:
-            import traceback
-            print(f"[pnl] OKX bills fallback error: {e}", flush=True)
-            traceback.print_exc()
+    # No raw OKX-bills fallback into Total — that reintroduced -$1006 without strategy tags.
 
-    # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
-    if source == "none":
-        try:
-            _fills_cache_ts = 0  # bypass cache
-            raw_fills = await _fetch_okx_fills(limit=300)
-            paired = await _pair_fills(raw_fills)
-            if paired:
-                source = "okx_fills"
-                now = dt.now(tz.utc)
-                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                for t in paired:
-                    if t.get("reason") != "closed":
-                        continue
-                    try:
-                        trade_pnl = float(t.get("pnl", 0) or 0)
-                    except (ValueError, TypeError):
-                        continue
-                    total_realized += trade_pnl
-                    account_total += trade_pnl
-                    try:
-                        total_fees += abs(float(t.get("fee", 0) or 0))
-                    except (ValueError, TypeError):
-                        pass
-                    time_str = t.get("time", "")
-                    if time_str:
-                        try:
-                            t_time = dt.fromisoformat(time_str)
-                            if t_time.tzinfo is None:
-                                t_time = t_time.replace(tzinfo=tz.utc)
-                            age_sec = (now - t_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += trade_pnl
-                            if age_sec <= 604800:
-                                realized_7d += trade_pnl
-                            if age_sec <= 2592000:
-                                realized_30d += trade_pnl
-                            if t_time >= week_start:
-                                realized_week += trade_pnl
-                        except (ValueError, OSError, TypeError):
-                            realized_30d += trade_pnl
-                    else:
-                        realized_30d += trade_pnl
-        except Exception as e:
-            import traceback
-            print(f"[pnl] OKX fills error: {e}", flush=True)
-            traceback.print_exc()
-
-    # ── 4. Last fallback: in-memory from running bots ──
-    if source == "none":
-        now = dt.now(tz.utc)
-        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        all_logs = []
-        if rotation and rotation._trade_log:
-            all_logs.extend(rotation._trade_log)
-
-        if all_logs:
-            source = "memory"
-            for t in all_logs:
-                pnl = t.get("pnl", 0)
-                if not pnl:
-                    continue
-                total_realized += pnl
-                account_total += pnl
-                try:
-                    t_time = dt.fromisoformat(t["time"])
-                    if t_time.tzinfo is None:
-                        t_time = t_time.replace(tzinfo=tz.utc)
-                    age = (now - t_time).total_seconds()
-                    if age <= 86400:
-                        realized_1d += pnl
-                    if age <= 604800:
-                        realized_7d += pnl
-                    if age <= 2592000:
-                        realized_30d += pnl
-                    if t_time >= week_start:
-                        realized_week += pnl
-                except Exception:
-                    realized_30d += pnl
-
-    # ── Unrealized PNL — always from OKX positions (matches exchange) ──
+    # Unrealized from open positions (exchange)
     unrealized = 0.0
     try:
         pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
         if not pos_result.get("error"):
-            for p in pos_result.get("data", []):
-                # Ignore flat rows OKX sometimes returns with residual upl
+            for pos in pos_result.get("data", []):
                 try:
-                    if abs(float(p.get("pos", 0) or 0)) <= 0:
+                    if abs(float(pos.get("pos", 0) or 0)) <= 0:
                         continue
                 except (TypeError, ValueError):
                     continue
-                unrealized += float(p.get("upl", 0) or 0)
+                unrealized += float(pos.get("upl", 0) or 0)
     except Exception:
         pass
 
-    # Feed risk_guard so place_order can enforce RISK_MAX_DAILY_LOSS_USD
     try:
         update_daily_pnl(realized_1d + unrealized)
     except Exception:
@@ -4773,6 +4629,8 @@ async def get_pnl():
         "source": source,
         "fees": round(total_fees, 2),
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
+        "pnl_epoch": await get_pnl_epoch(),
+        "skipped_untagged": skipped_untagged,
     }
 
 
