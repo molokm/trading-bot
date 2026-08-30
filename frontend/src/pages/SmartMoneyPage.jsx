@@ -418,8 +418,8 @@ export default function SmartMoneyPage({ connected, isGuest }) {
   const [minRoi, setMinRoi] = useState(10)
   const [verifiedOnly, setVerifiedOnly] = useState(false)
   const [srcOkx, setSrcOkx] = useState(true)
-  const [srcHl, setSrcHl] = useState(true)
-  const [srcSocial, setSrcSocial] = useState(true)
+  const [srcHl, setSrcHl] = useState(false)
+  const [srcSocial, setSrcSocial] = useState(false)
   const [q, setQ] = useState('')
   const [copyTrader, setCopyTrader] = useState(null)
   const [mirrorTrader, setMirrorTrader] = useState(null)
@@ -449,18 +449,17 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     setLoading(true)
     setErr('')
     try {
-      const sources = [
-        srcOkx && 'okx',
-        srcHl && 'hyperliquid',
-        srcSocial && 'social',
-      ].filter(Boolean).join(',') || 'okx'
       const r = await api.smartMoneyDiscover(p, 20, {
-        sort, min_roi: minRoi, verified_only: verifiedOnly, sources,
+        sort: sort === 'roi' ? 'pnl_ratio' : sort,
+        min_roi: minRoi,
+        verified_only: verifiedOnly,
+        sources: 'okx',
       })
-      if (r?.error) {
-        setErr(r.message || 'Ошибка загрузки')
+      if (r?.error && !(r?.traders || []).length) {
+        setErr(String(r.error || r.message || 'Ошибка загрузки'))
         setDiscoverList([])
       } else {
+        if (r?.error) setErr(String(r.error))
         setDiscoverList(r?.traders || [])
         setPage(p)
       }
@@ -470,7 +469,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     } finally {
       setLoading(false)
     }
-  }, [sort, minRoi, verifiedOnly, srcOkx, srcHl, srcSocial])
+  }, [sort, minRoi, verifiedOnly])
 
   const loadTracked = useCallback(async () => {
     try {
@@ -512,17 +511,14 @@ export default function SmartMoneyPage({ connected, isGuest }) {
 
   useEffect(() => {
     loadStatus()
-    fetchDiscover(1)
     loadTracked()
-    loadCopies()
-    loadMirrors()
-    loadSmPnl()
+    // no auto discover / HL / pnl storm on mount
     const iv = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
-      loadSmPnl(); loadMirrors()
-    }, 45000)
+      loadStatus()
+    }, 60000)
     return () => clearInterval(iv)
-  }, [loadStatus, fetchDiscover, loadTracked, loadCopies, loadMirrors, loadSmPnl])
+  }, [loadStatus, loadTracked])
 
   const filtered = useMemo(() => {
     const list = discoverList || []
