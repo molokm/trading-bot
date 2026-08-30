@@ -261,11 +261,15 @@ async def startup():
             print("[startup] SM tracker hydrated", flush=True)
             _sm_auto = os.getenv("SM_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
             if _sm_auto and _bots_auto_start and tr and not getattr(tr, "_running", False):
-                try:
-                    tr.start()
-                    print("[startup] SM tracker auto-started", flush=True)
-                except Exception as e:
-                    print(f"[startup] SM auto-start: {e}", flush=True)
+                async def _sm_delayed_start(tracker=tr):
+                    await asyncio.sleep(15)
+                    try:
+                        if not getattr(tracker, "_running", False):
+                            tracker.start()
+                            print("[startup] SM tracker auto-started (delayed)", flush=True)
+                    except Exception as e:
+                        print(f"[startup] SM auto-start: {e}", flush=True)
+                asyncio.create_task(_sm_delayed_start())
 
         except Exception as e:
             print(f"[startup] SM tracker hydrate: {e}", flush=True)
@@ -433,10 +437,20 @@ async def startup():
     # background so user requests are always served from the hot cache.
     global _warm_task
     try:
-        _warm_task = asyncio.create_task(_warm_dashboard_caches())
-        print("[startup] Dashboard cache warmer started", flush=True)
-        asyncio.create_task(_orphan_sweep_loop())
-        print("[startup] Orphan position sweeper started (every 2m)", flush=True)
+        # Delay heavy background work so /api/health answers immediately after bind
+        async def _delayed_bg():
+            await asyncio.sleep(8)
+            try:
+                await _warm_dashboard_caches()
+            except Exception as e:
+                print(f"[startup] warmer ended: {e}", flush=True)
+        _warm_task = asyncio.create_task(_delayed_bg())
+        print("[startup] Dashboard cache warmer scheduled (+8s)", flush=True)
+        async def _delayed_orphan():
+            await asyncio.sleep(120)
+            await _orphan_sweep_loop()
+        asyncio.create_task(_delayed_orphan())
+        print("[startup] Orphan sweeper scheduled (+120s)", flush=True)
     except Exception as e:
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
 
