@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -21,8 +22,41 @@ PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 TOKEN_TTL = timedelta(hours=24)
 JWT_ALG = "HS256"
 
-# In-process logout blacklist (jti -> exp unix). Best-effort only.
+# In-process logout blacklist (jti -> exp unix). Persisted to disk so a
+# logged-out token stays revoked across process restarts / Render sleep.
 _blacklist: dict[str, float] = {}
+
+BLACKLIST_PATH = os.path.join(
+    os.environ.get("DATA_DIR", "/tmp"),
+    "auth_blacklist.json",
+)
+
+def _load_blacklist() -> None:
+    global _blacklist
+    try:
+        if os.path.exists(BLACKLIST_PATH):
+            with open(BLACKLIST_PATH) as f:
+                data = json.load(f)
+            now = time.time()
+            _blacklist = {k: float(v) for k, v in data.items() if float(v) > now}
+    except Exception:
+        _blacklist = {}
+
+
+def _save_blacklist() -> None:
+    try:
+        now = time.time()
+        pruned = {k: v for k, v in _blacklist.items() if v > now}
+        _blacklist = pruned
+        tmp = BLACKLIST_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(pruned, f)
+        os.replace(tmp, BLACKLIST_PATH)
+    except Exception:
+        pass
+
+
+_load_blacklist()
 
 # ── Rate limiting (in-memory; resets on restart — acceptable) ──
 _attempts: dict[str, list[float]] = defaultdict(list)
@@ -257,11 +291,26 @@ def logout(token_enc: str):
     else:
         exp_ts = time.time() + TOKEN_TTL.total_seconds()
     _blacklist[jti] = exp_ts
-    # prune
+    _save_blacklist()
+
+
+def get_blacklist() -> dict:
+    """Return current (jti -> exp unix) blacklist snapshot (for DB persistence)."""
+    try:
+        _save_blacklist()
+    except Exception:
+        pass
+    return dict(_blacklist)
+
+
+def set_blacklist(entries: dict) -> None:
+    """Replace blacklist with entries loaded from persistent storage."""
+    global _blacklist
     now = time.time()
-    dead = [k for k, v in _blacklist.items() if v < now]
-    for k in dead:
-        del _blacklist[k]
+    try:
+        _blacklist = {str(k): float(v) for k, v in (entries or {}).items() if float(v) > now}
+    except Exception:
+        _blacklist = {}
 
 
 def cleanup():

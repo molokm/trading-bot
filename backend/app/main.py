@@ -26,6 +26,7 @@ from app.services.auth import (
     ensure_auth_secrets,
     get_user_id, encrypt_str, decrypt_str,
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
+    get_blacklist, set_blacklist,
 )
 from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
@@ -230,6 +231,15 @@ async def startup():
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
+
+        # Restore persistent logout blacklist (survives restart on Render).
+        try:
+            _bl = await db.get_setting("auth_blacklist")
+            if _bl:
+                import json as _json
+                set_blacklist(_json.loads(_bl))
+        except Exception as e:
+            print(f"[startup] auth blacklist load: {e}", flush=True)
 
         # Strategy PnL/trades reset — ONLY when explicitly requested via env.
         # Previously this auto-wiped on every deploy when the hardcoded marker
@@ -806,6 +816,12 @@ async def auth_logout(request: Request):
     token = get_token(request)
     try:
         logout(token)
+        # Persist blacklist so the revoked token stays invalid after restart.
+        try:
+            import json as _json
+            await db.set_setting("auth_blacklist", _json.dumps(get_blacklist()))
+        except Exception:
+            pass
     except Exception:
         pass
     resp = JSONResponse({"ok": True})

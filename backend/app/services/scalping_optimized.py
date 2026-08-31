@@ -595,7 +595,7 @@ def analyze(init_capital: float, final_bal: float, trades: list, equity: list):
     sharpe = daily_rets.mean() / daily_rets.std() * np.sqrt(365) if len(daily_rets) > 1 and daily_rets.std() > 0 else 0
 
     print(f"Return: {ret:+.1f}% | CAGR: {cagr*100:+.1f}% | MaxDD: {max_dd:.1f}% | Sharpe: {sharpe:.2f}")
-    print(f"Trades: {len(trades)} | WR: {wr:.1f}% | PF: {pf:.2f} | AvgW: \${avg_win:.2f} | AvgL: \${avg_loss:.2f}")
+    print(f"Trades: {len(trades)} | WR: {wr:.1f}% | PF: {pf:.2f} | AvgW: ${avg_win:.2f} | AvgL: ${avg_loss:.2f}")
     print("-" * 60)
 
 
