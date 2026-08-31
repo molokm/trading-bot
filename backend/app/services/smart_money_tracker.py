@@ -485,12 +485,13 @@ class SmartMoneyTracker:
             except Exception as e:
                 logger.error(f"Update trader {code} error: {e}")
 
-        # Snapshot periodically
+        # Snapshot periodically — do NOT touch the DB here: the tracker runs in
+        # its own thread/loop while asyncpg is bound to the main loop, and
+        # calling db.save_metric from this loop crashes the process. Only file.
         if now - self._last_snapshot_time() > self.config.snapshot_interval_sec:
-            try:
-                await self._db_snapshot()
-            except Exception as e:
-                logger.error(f"Snapshot error: {e}")
+            for t in self._traders.values():
+                if t.tracked:
+                    t.last_snapshot = now
 
     def _last_snapshot_time(self) -> float:
         return max((t.last_snapshot for t in self._traders.values()), default=0)
@@ -1099,8 +1100,14 @@ class SmartMoneyTracker:
         }
 
     def _persist(self):
+        """Write state to the local file only.
+
+        The tracker runs in its own thread/loop while asyncpg is bound to the
+        main uvicorn loop. Any DB write from this thread raises 'attached to a
+        different loop' and can crash the whole process, so we NEVER touch the
+        DB here. Callers on the main thread use persist_to_db() separately.
+        """
         data = self._state_blob()
-        # 1) Local file (always safe — no event loop involved)
         try:
             path = self._state_path()
             tmp = path + ".tmp"
@@ -1110,34 +1117,17 @@ class SmartMoneyTracker:
             os.replace(tmp, path)
         except Exception as e:
             logger.error(f"Persist state file: {e}")
-        # 2) DB copy — only via the main thread's running loop, never from the
-        #    tracker thread with asyncio.run (that can corrupt the main loop).
-        try:
-            if self.db and hasattr(self.db, "set_setting"):
-                payload = json.dumps(data, default=str)
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._db_persist(payload))
-                except RuntimeError:
-                    # No running loop in this thread → spawn a short-lived task
-                    # on the main loop if available, else skip DB persist.
-                    try:
-                        main_loop = getattr(self, "_main_loop", None)
-                        if main_loop and main_loop.is_running():
-                            main_loop.call_soon_threadsafe(
-                                lambda: asyncio.ensure_future(self._db_persist(payload))
-                            )
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.error(f"Persist state db: {e}")
 
-    async def _db_persist(self, payload: str):
+    async def persist_to_db(self):
+        """Persist current state to the DB. MUST be called from the main thread."""
+        if not self.db or not hasattr(self.db, "set_setting"):
+            return
         try:
-            if self.db:
-                await self.db.set_setting("sm_tracker_state", payload)
+            await self.db.set_setting(
+                "sm_tracker_state", json.dumps(self._state_blob(), default=str)
+            )
         except Exception as e:
-            logger.error(f"DB persist task: {e}")
+            logger.error(f"DB persist: {e}")
 
     async def hydrate_from_db(self):
         if not self.db:
