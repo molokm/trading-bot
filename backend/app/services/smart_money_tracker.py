@@ -487,7 +487,10 @@ class SmartMoneyTracker:
 
         # Snapshot periodically
         if now - self._last_snapshot_time() > self.config.snapshot_interval_sec:
-            self._db_snapshot()
+            try:
+                await self._db_snapshot()
+            except Exception as e:
+                logger.error(f"Snapshot error: {e}")
 
     def _last_snapshot_time(self) -> float:
         return max((t.last_snapshot for t in self._traders.values()), default=0)
@@ -1097,6 +1100,7 @@ class SmartMoneyTracker:
 
     def _persist(self):
         data = self._state_blob()
+        # 1) Local file (always safe — no event loop involved)
         try:
             path = self._state_path()
             tmp = path + ".tmp"
@@ -1106,20 +1110,34 @@ class SmartMoneyTracker:
             os.replace(tmp, path)
         except Exception as e:
             logger.error(f"Persist state file: {e}")
+        # 2) DB copy — only via the main thread's running loop, never from the
+        #    tracker thread with asyncio.run (that can corrupt the main loop).
         try:
             if self.db and hasattr(self.db, "set_setting"):
-                import asyncio
                 payload = json.dumps(data, default=str)
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(self.db.set_setting("sm_tracker_state", payload))
-                    else:
-                        loop.run_until_complete(self.db.set_setting("sm_tracker_state", payload))
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._db_persist(payload))
                 except RuntimeError:
-                    asyncio.run(self.db.set_setting("sm_tracker_state", payload))
+                    # No running loop in this thread → spawn a short-lived task
+                    # on the main loop if available, else skip DB persist.
+                    try:
+                        main_loop = getattr(self, "_main_loop", None)
+                        if main_loop and main_loop.is_running():
+                            main_loop.call_soon_threadsafe(
+                                lambda: asyncio.ensure_future(self._db_persist(payload))
+                            )
+                    except Exception:
+                        pass
         except Exception as e:
             logger.error(f"Persist state db: {e}")
+
+    async def _db_persist(self, payload: str):
+        try:
+            if self.db:
+                await self.db.set_setting("sm_tracker_state", payload)
+        except Exception as e:
+            logger.error(f"DB persist task: {e}")
 
     async def hydrate_from_db(self):
         if not self.db:
@@ -1138,12 +1156,12 @@ class SmartMoneyTracker:
         except Exception as e:
             logger.error(f"hydrate tracker db: {e}")
 
-    def _db_snapshot(self):
+    async def _db_snapshot(self):
         """Save performance metrics to DB."""
         if not self.db:
             return
         try:
-            self.db.save_metric(
+            await self.db.save_metric(
                 bot_id=BOT_ID,
                 equity=self.config.capital + self._lifetime_pnl,
                 total_pnl=self._lifetime_pnl,

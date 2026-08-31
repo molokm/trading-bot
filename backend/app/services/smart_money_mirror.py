@@ -638,21 +638,32 @@ class SmartMoneyMirror:
                 json.dump(data, f)
         except Exception as e:
             log.warning("persist mirror file: %s", e)
-        # 2) durable DB (survives Render redeploy)
+        # 2) durable DB (survives Render redeploy) — only via a running loop,
+        #    never asyncio.run() from a background thread (can corrupt main loop).
         try:
             if self.db and hasattr(self.db, "set_setting"):
-                import asyncio
                 payload = json.dumps(data, default=str)
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        asyncio.ensure_future(self.db.set_setting("sm_mirror_state", payload))
-                    else:
-                        loop.run_until_complete(self.db.set_setting("sm_mirror_state", payload))
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self._db_persist(payload))
                 except RuntimeError:
-                    asyncio.run(self.db.set_setting("sm_mirror_state", payload))
+                    try:
+                        main_loop = getattr(self, "_main_loop", None)
+                        if main_loop and main_loop.is_running():
+                            main_loop.call_soon_threadsafe(
+                                lambda: asyncio.ensure_future(self._db_persist(payload))
+                            )
+                    except Exception:
+                        pass
         except Exception as e:
             log.warning("persist mirror db: %s", e)
+
+    async def _db_persist(self, payload: str):
+        try:
+            if self.db:
+                await self.db.set_setting("sm_mirror_state", payload)
+        except Exception as e:
+            log.warning("mirror db persist task: %s", e)
 
     async def persist_to_db(self):
         if not self.db:
