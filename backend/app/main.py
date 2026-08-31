@@ -5683,10 +5683,23 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             except (TypeError, ValueError):
                 bf = 0.0
             prev = bill_by_ord.get(bid)
-            if prev is None or (bp != 0 and prev.get("pnl") == 0):
+            if prev is None:
                 bill_by_ord[bid] = {"pnl": bp, "fee": bf,
                                     "ts": b.get("ts", ""),
                                     "clOrdId": str(b.get("clOrdId", "") or "").strip()}
+            else:
+                # Aggregate pnl/fee across ALL bills sharing the same ordId
+                # (e.g. partial fills where one close order produces multiple
+                # bills). The old code only stored the first bill, which
+                # caused the last-mile enrich (step 4) to overwrite the
+                # correctly aggregated pnl from _pair_bills with a single
+                # bill's pnl — e.g. the ETH close at 20:44 30.08 showed
+                # pnl=13.33 instead of 680.10 (sum of 18 close bills).
+                prev["pnl"] += bp
+                prev["fee"] += bf
+                prev["ts"] = b.get("ts", prev["ts"])
+                if not prev["clOrdId"]:
+                    prev["clOrdId"] = str(b.get("clOrdId", "") or "").strip()
     except Exception as e:
         print(f"[trades/paired] bills fetch error: {e}", flush=True)
 
