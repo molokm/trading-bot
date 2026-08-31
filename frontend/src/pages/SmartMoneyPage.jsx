@@ -448,12 +448,17 @@ export default function SmartMoneyPage({ connected, isGuest }) {
   const fetchDiscover = useCallback(async (p = 1) => {
     setLoading(true)
     setErr('')
+    const srcs = []
+    if (srcOkx) srcs.push('okx')
+    if (srcHl) srcs.push('hyperliquid')
+    if (srcSocial) srcs.push('social')
+    if (!srcs.length) srcs.push('okx')
     try {
       const r = await api.smartMoneyDiscover(p, 20, {
         sort: sort === 'roi' ? 'pnl_ratio' : sort,
         min_roi: minRoi,
         verified_only: verifiedOnly,
-        sources: 'okx',
+        sources: srcs.join(','),
       })
       if (r?.error && !(r?.traders || []).length) {
         setErr(String(r.error || r.message || 'Ошибка загрузки'))
@@ -469,7 +474,7 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     } finally {
       setLoading(false)
     }
-  }, [sort, minRoi, verifiedOnly])
+  }, [sort, minRoi, verifiedOnly, srcOkx, srcHl, srcSocial])
 
   const loadTracked = useCallback(async () => {
     try {

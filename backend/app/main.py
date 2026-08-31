@@ -1701,9 +1701,21 @@ async def smart_money_discover(
     verified_only: bool = False,
     sources: str = "okx",
 ):
-    """LIGHT discover: one OKX leaderboard call only."""
+    """Discover traders from OKX + open sources (Hyperliquid, social).
+
+    OKX uses the light single-call path; Hyperliquid/social are fetched in
+    parallel and merged. Sources: comma-separated okx,hyperliquid,social.
+    """
+    import asyncio
     from app.services.smart_money_light import discover_okx_light
     from app.services.smart_money_tracker import OKXCopyAPI
+
+    src_list = [s.strip().lower() for s in (sources or "okx").split(",") if s.strip()]
+    want_okx = "okx" in src_list
+    want_hl = any(s in src_list for s in ("hyperliquid", "hl"))
+    want_social = any(s in src_list for s in ("social", "twitter", "x"))
+    if not (want_okx or want_hl or want_social):
+        want_okx = True  # default
 
     okx = OKXCopyAPI(
         api_key=_env_key or os.getenv("OKX_API_KEY", ""),
@@ -1712,21 +1724,98 @@ async def smart_money_discover(
         demo=_env_demo,
     )
     sort_type = sort if sort not in ("roi", "") else "pnl_ratio"
+
+    traders = []
+    errors = []
     try:
-        out = await discover_okx_light(
-            okx,
-            page=page,
-            limit=limit,
-            sort_type=sort_type,
-            min_roi_pct=float(min_roi or 0),
-        )
-    except Exception as e:
-        print(f"[sm/discover-light] {e}", flush=True)
-        return {"traders": [], "total": 0, "sources": "okx", "mode": "light", "error": str(e)}
+        lim = max(1, min(30, int(limit) if str(limit).isdigit() else 20))
+    except Exception:
+        lim = 20
+
+    async def _okx():
+        try:
+            out = await discover_okx_light(
+                okx, page=page, limit=str(lim),
+                sort_type=sort_type, min_roi_pct=float(min_roi or 0),
+            )
+            return out.get("traders") or []
+        except Exception as e:
+            errors.append(f"okx: {e}")
+            return []
+
+    async def _hl():
+        try:
+            from app.services.smart_money_sources import fetch_hyperliquid_cached
+            hl = await asyncio.wait_for(
+                fetch_hyperliquid_cached(limit=lim, min_account=50_000, window="month"),
+                timeout=15.0,
+            )
+            return hl or []
+        except Exception as e:
+            errors.append(f"hyperliquid: {e}")
+            return []
+
+    async def _social():
+        try:
+            from app.services.smart_money_sources import fetch_social
+            soc = await asyncio.wait_for(fetch_social(), timeout=5.0)
+            return soc or []
+        except Exception as e:
+            errors.append(f"social: {e}")
+            return []
+
+    tasks = []
+    if want_okx:
+        tasks.append(_okx())
+    if want_hl:
+        tasks.append(_hl())
+    if want_social:
+        tasks.append(_social())
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, list):
+                traders.extend(r)
+
+    # Apply filters
+    min_roi_f = float(min_roi or 0)
+    if min_roi_f > 0:
+        traders = [t for t in traders if float(t.get("roi_pct") or 0) >= min_roi_f]
     if verified_only:
-        traders = [t for t in (out.get("traders") or []) if t.get("verified")]
-        out = {**out, "traders": traders, "total": len(traders)}
-    return out
+        traders = [t for t in traders if t.get("verified")]
+
+    # Dedupe by unique_code, OKX wins on ties
+    seen = set()
+    dedup = []
+    for t in traders:
+        c = t.get("unique_code") or ""
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        dedup.append(t)
+
+    # Sort by ROI (default) unless a different sort requested
+    if str(sort).lower() in ("pnl_ratio", "roi", ""):
+        dedup.sort(key=lambda t: float(t.get("roi_pct") or 0), reverse=True)
+    elif str(sort).lower() in ("pnl", "profit"):
+        dedup.sort(key=lambda t: float(t.get("pnl_usd") or 0), reverse=True)
+    elif str(sort).lower() in ("copyratio", "followers", "overview"):
+        dedup.sort(key=lambda t: int(t.get("copy_traders") or 0), reverse=True)
+
+    for i, t in enumerate(dedup, 1):
+        t["rank"] = i
+    dedup = dedup[:lim]
+
+    return {
+        "traders": dedup,
+        "total": len(dedup),
+        "sort": sort_type,
+        "min_roi": min_roi_f,
+        "sources": ",".join(src_list) if src_list else "okx",
+        "mode": "multi",
+        "errors": errors or None,
+        "cached": bool(any(t.get("cached") for t in dedup)),
+    }
 
 
 @app.get("/api/smart-money/trader/{unique_code}")
