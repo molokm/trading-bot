@@ -22,6 +22,37 @@ try:
 except Exception:
     pass
 
+# Also capture ANY uncaught Python exception (main thread + worker threads)
+# into the same crash log — process may be restarted by Render after an
+# unhandled error in a background thread (e.g. Smart Money mirror/tracker).
+def _write_crash(text: str) -> None:
+    try:
+        with open(_CRASH_LOG, "a") as _cf:
+            _cf.write("\n=== %s ===\n%s\n" % (_time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except Exception:
+        pass
+
+
+def _excepthook(etype, value, tb):
+    import traceback as _tb
+    _write_crash("".join(_tb.format_exception(etype, value, tb)))
+
+
+def _thread_excepthook(args):
+    _write_crash("Thread %r: %s" % (args.thread and args.thread.name, "".join(
+        _tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        if (_tb := __import__("traceback")) else "?")
+    ))
+
+
+import sys
+sys.excepthook = _excepthook
+try:
+    threading.excepthook = _thread_excepthook
+except Exception:
+    pass
+import threading
+
 logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -1959,6 +1990,20 @@ async def smart_money_mirror_start(data: dict = None):
                 await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
         except Exception as e:
             return {"ok": False, "msg": f"OKX connect failed: {e}"}
+    # Memory guard: refuse to start if the process is near the 512MB free-tier
+    # limit — 4 bots + tracker + mirror can OOM-kill the instance.
+    try:
+        import resource as _r
+        _rss_kb = _r.getrusage(_r.RUSAGE_SELF).ru_maxrss
+        _rss_mb = _rss_kb / 1024 if _rss_kb > 10_000_000 else _rss_kb / 1024
+        # On Linux ru_maxrss is KB, on macOS bytes — normalize to MB
+        _rss_mb = (_rss_kb / 1048576) if _rss_kb > 10_000_000 else (_rss_kb / 1024)
+        if _rss_mb > 420:
+            print(f"[sm/mirror] REFUSE start: rss={_rss_mb:.0f}MB near limit", flush=True)
+            return {"ok": False, "msg": f"Процесс использует {_rss_mb:.0f}MB памяти — близко к лимиту. Остановите часть ботов и повторите."}
+        print(f"[sm/mirror] start: rss={_rss_mb:.0f}MB before mirror", flush=True)
+    except Exception:
+        pass
     return await m.start_mirror(
         address=address,
         alias=str(data.get("alias") or ""),
@@ -2227,13 +2272,26 @@ async def health():
         diag["sm_mirror_targets"] = len(getattr(m, "_targets", {}) or {})
     except Exception:
         pass
-    # Read crash log (faulthandler dump) if it exists
+    # Read crash log (faulthandler dump) if it exists — try multiple paths
     try:
         import os as _os
-        cl = _os.environ.get("DATA_DIR", "/tmp") + "/crash_traceback.log"
-        if _os.path.exists(cl) and _os.path.getsize(cl) > 0:
-            with open(cl) as _f:
-                diag["crash_log"] = _f.read()[-2000:]
+        _crash_paths = [
+            _os.environ.get("DATA_DIR", "/tmp") + "/crash_traceback.log",
+            "/tmp/crash_traceback.log",
+            _os.environ.get("HOME", "/tmp") + "/crash_traceback.log",
+        ]
+        for _cp in _crash_paths:
+            if _os.path.exists(_cp) and _os.path.getsize(_cp) > 0:
+                with open(_cp) as _f:
+                    diag["crash_log"] = _f.read()[-2000:]
+                break
+        # log current rss to a file too (OOM hint)
+        try:
+            import resource as _r
+            _cur = _r.getrusage(_r.RUSAGE_SELF).ru_maxrss
+            diag["rss_current"] = round(_cur / 1024, 1)  # KB->MB approx (linux) / bytes->MB (mac)
+        except Exception:
+            pass
     except Exception:
         pass
 
