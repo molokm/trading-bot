@@ -198,7 +198,7 @@ export default function SmartMoneyPage({ isGuest }) {
                       const roi = Number(t.roi_pct) || 0
                       const wr = Number(t.win_rate) || 0
                       const src = (t.source || '').toLowerCase()
-                      const isOkx = src === 'okx'
+                      const isOkx = src === 'okx' || Boolean(t.copyable)
                       return (
                         <tr key={t.unique_code || i} className="border-t border-[var(--border)] hover:bg-[var(--bg-elevated)]/50">
                           <td className="px-3 py-2 text-[var(--txt-muted)]">{i + 1}</td>
