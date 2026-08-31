@@ -450,7 +450,7 @@ class SmartMoneyMirror:
                 try:
                     from .position_claim import claim_open
                     if self.db:
-                        await claim_open(self.db, "smart_money", inst, side, float(contracts), float(px or entry or 0))
+                        await self._safe_db(claim_open, self.db, "smart_money", inst, side, float(contracts), float(px or entry or 0))
                 except Exception:
                     pass
                 # Telegram notifications disabled for Smart Money (too noisy)
@@ -548,7 +548,7 @@ class SmartMoneyMirror:
             try:
                 from .position_claim import release_open
                 if self.db:
-                    await release_open(self.db, "smart_money", inst, side)
+                    await self._safe_db(release_open, self.db, "smart_money", inst, side)
             except Exception:
                 pass
         except Exception as e:
@@ -573,6 +573,37 @@ class SmartMoneyMirror:
         t.log.append(rec)
         t.log = t.log[-80:]
         log.info("mirror %s %s %s", t.address[:10], event, kw)
+
+    async def _safe_db(self, fn, *args, **kwargs):
+        """Run an async DB call ONLY on the main thread's event loop.
+
+        The mirror runs in its own thread/loop; asyncpg connections are bound
+        to the main uvicorn loop. Calling them from the mirror's loop raises
+        'attached to a different loop' and crashes the process. If we are not
+        on the main loop (or cannot determine it), we skip the DB write
+        silently — claims are best-effort and state is persisted to file.
+        """
+        try:
+            cur = asyncio.get_running_loop()
+        except RuntimeError:
+            cur = None
+        main_loop = getattr(self, "_main_loop", None)
+        # Only run when we are definitely on the main loop.
+        if cur is not None and (main_loop is None or cur is main_loop):
+            await fn(*args, **kwargs)
+            return
+        # Foreign loop (mirror thread) — try delegating to main loop, else skip.
+        if cur is not None and main_loop and main_loop.is_running():
+            try:
+                fut = asyncio.run_coroutine_threadsafe(fn(*args, **kwargs), main_loop)
+                await asyncio.wrap_future(fut)
+                return
+            except Exception as e:
+                log.warning("safe_db delegate: %s", e)
+        # No safe path → skip (avoid asyncpg cross-loop crash).
+
+    def set_main_loop(self, loop):
+        self._main_loop = loop
 
     def _target_public(self, t: MirrorTarget) -> Dict:
         return {
