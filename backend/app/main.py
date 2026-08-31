@@ -1968,8 +1968,14 @@ async def smart_money_copy(data: dict = None):
             except Exception:
                 pass
             return {"ok": True, "msg": f"copying started with {amt} USDT"}
-        msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
-        return {"ok": False, "msg": msg}
+        # OKX returns data:[] on many errors — guard against IndexError
+        _data = resp.get("data") or []
+        _msg = resp.get("msg", "unknown")
+        if _data and isinstance(_data, list):
+            _smsg = (_data[0] or {}).get("sMsg", "")
+            if _smsg:
+                _msg = _smsg
+        return {"ok": False, "msg": f"{_msg} (code {resp.get('code')})"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -1995,8 +2001,13 @@ async def smart_money_stop_copy(data: dict = None):
             except Exception:
                 pass
             return {"ok": True, "msg": "copying stopped"}
-        msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
-        return {"ok": False, "msg": msg}
+        _data = resp.get("data") or []
+        _msg = resp.get("msg", "unknown")
+        if _data and isinstance(_data, list):
+            _smsg = (_data[0] or {}).get("sMsg", "")
+            if _smsg:
+                _msg = _smsg
+        return {"ok": False, "msg": f"{_msg} (code {resp.get('code')})"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
