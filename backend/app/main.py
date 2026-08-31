@@ -90,6 +90,7 @@ if not _cors_origins:
         "http://127.0.0.1:3000",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "https://trading-bot-mu99.onrender.com",
     ]
 app.add_middleware(
     CORSMiddleware,
@@ -854,6 +855,21 @@ async def _user_okx_client(user_id: str) -> Optional[OKXClient]:
         return None
     client = OKXClient(key, secret, passphrase, bool(u.get("okx_demo", 1)))
     _user_clients[user_id] = client
+    # Cap the cache to avoid unbounded memory growth on many users.
+    # Dict keeps insertion order → evict oldest first (FIFO).
+    MAX_USER_CLIENTS = 200
+    if len(_user_clients) > MAX_USER_CLIENTS:
+        try:
+            _oldest = next(iter(_user_clients))
+            _evict = _user_clients.pop(_oldest)
+            _closer = _evict.close()
+            if asyncio.iscoroutine(_closer):
+                try:
+                    asyncio.get_event_loop().create_task(_closer)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     strategy_mgr.set_user_client(user_id, client)
     return client
 
@@ -4786,8 +4802,8 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
     seen: set = set()
     try:
         for endpoint, fn in (
-            ("bills", lambda c, **kw: c.get_bills(inst_type="SWAP", **kw)),
-            ("archive", lambda c, **kw: c.get_bills_archive(inst_type="SWAP", **kw)),
+            ("bills", lambda c, **kw: c.get_bills(inst_type="SWAP", type="2", **kw)),
+            ("archive", lambda c, **kw: c.get_bills_archive(inst_type="SWAP", type="2", **kw)),
         ):
             after = ""
             for _ in range(10):
