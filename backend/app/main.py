@@ -1985,14 +1985,42 @@ async def health():
     except Exception as e:
         diag["pnl_epoch_err"] = str(e)
     try:
-        paired_resp = await _get_paired_trades_impl(limit=200)
+        paired_resp = await _get_paired_trades_impl(limit=500)
         diag["paired_count"] = len(paired_resp.get("trades", []))
         diag["paired_debug"] = paired_resp.get("debug", {})
+        big = [t for t in paired_resp.get("trades", [])
+               if abs(float(t.get("pnl") or 0)) > 100]
+        diag["big_trades"] = [
+            {"inst": t.get("inst_id"), "time": t.get("exit_time") or t.get("time"),
+             "pnl": t.get("pnl"), "bot": t.get("bot"), "ord": str(t.get("ord_id", ""))[:14]}
+            for t in big
+        ]
+        # Direct bills scan: does a large +PnL ETH bill exist at all on this account?
+        try:
+            bills_all = await _fetch_all_trade_bills()
+            eth_bills = []
+            for b in bills_all:
+                if (b.get("instId") or "").startswith("ETH"):
+                    try:
+                        bp = float(b.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        bp = 0.0
+                    if abs(bp) > 50:
+                        eth_bills.append({
+                            "ts": str(b.get("ts"))[:13], "pnl": round(bp, 2),
+                            "sub": b.get("subType"), "ord": str(b.get("ordId"))[:14],
+                            "px": b.get("px"), "sz": b.get("sz"),
+                        })
+            diag["eth_big_bills"] = eth_bills
+        except Exception as e:
+            diag["bills_scan_err"] = str(e)
         eth = [t for t in paired_resp.get("trades", [])
                if (t.get("inst_id") or t.get("symbol", "")).startswith("ETH")]
         diag["eth_trades"] = [
-            {"time": t.get("time"), "exit": t.get("exit_time"), "pnl": t.get("pnl"),
-             "reason": t.get("reason"), "bot": t.get("bot"), "ord": t.get("ord_id", "")[:12]}
+            {"time": t.get("exit_time") or t.get("time"), "pnl": t.get("pnl"),
+             "entry": t.get("entry") or t.get("entry_px"), "exit": t.get("exit_px"),
+             "reason": t.get("reason"), "bot": t.get("bot"),
+             "ord": str(t.get("ord_id", ""))[:14]}
             for t in eth
         ]
     except Exception as e:
