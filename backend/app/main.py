@@ -2174,6 +2174,28 @@ async def health():
     def _bot_flag(bot) -> bool:
         return bool(bot is not None and getattr(bot, "_running", False))
 
+    # Lightweight process memory + SM diagnostics (no heavy calls, no secrets).
+    diag = {}
+    try:
+        import resource
+        diag["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except Exception:
+        pass
+    try:
+        diag["sm_running"] = bool(getattr(sm_tracker, "_running", False))
+        diag["sm_tracked"] = len(getattr(sm_tracker, "_traders", {}) or {})
+        diag["sm_error"] = (getattr(sm_tracker, "_last_error", "") or "")[:200]
+        diag["sm_execute"] = bool(getattr(getattr(sm_tracker, "config", None), "execute", False))
+    except Exception:
+        pass
+    try:
+        from app.services.smart_money_mirror import get_mirror
+        m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+        diag["sm_mirror_running"] = bool(getattr(m, "_running", False))
+        diag["sm_mirror_targets"] = len(getattr(m, "_targets", {}) or {})
+    except Exception:
+        pass
+
     return {
         "status": "ok",
         "connected": connected,
@@ -2191,6 +2213,7 @@ async def health():
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
+        "sm_diag": diag,
     }
 
 
