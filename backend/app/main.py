@@ -655,6 +655,7 @@ GUEST_FORBIDDEN_PREFIXES = (
     "/api/mode",
     "/api/audit",
     "/api/db/",
+    "/api/me",
 )
 
 
