@@ -3770,7 +3770,20 @@ async def validation_status():
         return {"running": False, "strategy": "macd_donchian_validation",
                 "equity": 0, "open_positions": [], "total_trades": 0,
                 "total_pnl": 0, "config": {}}
-    return validation.get_status()
+    status = validation.get_status()
+    internal = status.get("total_pnl")
+    status["total_pnl_internal"] = internal
+    # Prefer same History/per_bot source as /api/pnl so the card matches the
+    # dashboard Total PnL breakdown (same pattern as momentum/impulse status).
+    stats = (await _bot_history_stats()).get("MACD+Donchian Validation")
+    if stats and stats.get("total_trades", 0) > 0:
+        status.update(stats)
+        status["total_pnl_source"] = "okx_history"
+        if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
+            print(f"[validation/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}", flush=True)
+    else:
+        status["total_pnl_source"] = "internal"
+    return status
 
 
 @app.post("/api/validation/start", dependencies=[Depends(require_admin)])
