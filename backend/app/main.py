@@ -1976,6 +1976,39 @@ async def health():
     def _bot_flag(bot) -> bool:
         return bool(bot is not None and getattr(bot, "_running", False))
 
+    # Lightweight PnL-pipeline diagnostics (no secrets): lets us see why a
+    # closed trade (e.g. ETH +657 on 30.08) is missing from trades/PnL.
+    diag = {}
+    try:
+        epoch = await get_pnl_epoch()
+        diag["pnl_epoch"] = epoch
+    except Exception as e:
+        diag["pnl_epoch_err"] = str(e)
+    try:
+        paired_resp = await _get_paired_trades_impl(limit=200)
+        diag["paired_count"] = len(paired_resp.get("trades", []))
+        diag["paired_debug"] = paired_resp.get("debug", {})
+        eth = [t for t in paired_resp.get("trades", [])
+               if (t.get("inst_id") or t.get("symbol", "")).startswith("ETH")]
+        diag["eth_trades"] = [
+            {"time": t.get("time"), "exit": t.get("exit_time"), "pnl": t.get("pnl"),
+             "reason": t.get("reason"), "bot": t.get("bot"), "ord": t.get("ord_id", "")[:12]}
+            for t in eth
+        ]
+    except Exception as e:
+        diag["paired_err"] = str(e)
+    try:
+        from app.services.rotation_strategy import ROT_BOT_ID
+        db_rows = await db.get_trades(bot_id=ROT_BOT_ID, limit=30)
+        diag["db_rot_trades"] = len(db_rows)
+        diag["db_eth"] = [
+            {"ts": t.get("timestamp", "")[:19], "px": t.get("px"), "pnl": t.get("pnl"),
+             "state": t.get("state"), "ord": str(t.get("ord_id", ""))[:12]}
+            for t in db_rows if (t.get("inst_id") or "").startswith("ETH")
+        ]
+    except Exception as e:
+        diag["db_err"] = str(e)
+
     return {
         "status": "ok",
         "connected": connected,
@@ -1993,6 +2026,7 @@ async def health():
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
+        "pnl_diag": diag,
     }
 
 
