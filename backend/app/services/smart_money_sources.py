@@ -92,89 +92,132 @@ def _norm_profile(
 
 async def fetch_hyperliquid(limit: int = 30, min_account: float = 50_000,
                             window: str = "month") -> List[Dict]:
-    """Top Hyperliquid traders by ROI for window day|week|month|allTime."""
+    """Top Hyperliquid traders by ROI for window day|week|month|allTime.
+
+    Streams the leaderboard JSON row-by-row instead of loading the whole
+    36MB payload into memory (which OOM-crashed the free-tier instance).
+    """
+    import json as _json
+
     try:
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            r = await client.get(HL_LEADERBOARD_URL)
-            r.raise_for_status()
-            data = r.json()
-        rows = data.get("leaderboardRows") if isinstance(data, dict) else data
-        if not isinstance(rows, list):
-            return []
-
-        scored: List[tuple] = []
-        for row in rows:
-            try:
-                av = float(row.get("accountValue") or 0)
-                if av < min_account:
-                    continue
-                perfs = {
-                    w[0]: w[1]
-                    for w in (row.get("windowPerformances") or [])
-                    if isinstance(w, (list, tuple)) and len(w) >= 2
-                }
-                block = perfs.get(window) or perfs.get("month") or perfs.get("allTime") or {}
-                roi = float(block.get("roi") or 0) * 100.0  # fraction → %
-                pnl = float(block.get("pnl") or 0)
-                addr = (row.get("ethAddress") or "").lower()
-                if not addr:
-                    continue
-                name = (row.get("displayName") or "").strip() or f"{addr[:6]}…{addr[-4:]}"
-                scored.append((roi, pnl, av, addr, name, block))
-            except Exception:
-                continue
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-        out = []
-        for roi, pnl, av, addr, name, block in scored[: max(1, int(limit))]:
-            # Soft verify: positive ROI + meaningful account
-            failures = []
-            score = 40.0
-            if roi < 5:
-                failures.append(f"ROI {roi:.1f}% низкий за окно {window}")
-            else:
-                score += min(roi / 5.0, 3) * 15
-            if av >= 100_000:
-                score += 15
-            verified = roi >= 10 and av >= 50_000 and not failures
-            vlm = float(block.get("vlm") or 0)
-            out.append(
-                _norm_profile(
-                    code=f"hl:{addr}",
-                    alias=name,
-                    source="hyperliquid",
-                    roi_pct=roi,
-                    pnl_usd=pnl,
-                    aum=av,
-                    verified=verified,
-                    verify_score=min(100.0, score),
-                    verify_failures=failures,
-                    profile_url=f"https://app.hyperliquid.xyz/explorer/address/{addr}",
-                    copyable=False,
-                    note=f"Hyperliquid · окно {window} · on-chain PnL/ROI",
-                    extra={
-                        "eth_address": addr,
-                        "window": window,
-                        "volume_usd": round(vlm, 2),
-                        "period_label": {"day": "1д", "week": "7д", "month": "30д", "allTime": "всё время"}.get(window, window),
-                        "period_days": {"day": 1, "week": 7, "month": 30, "allTime": 0}.get(window, 30),
-                        "total_trades": 0,
-                        "trades_label": "н/д",
-                        "pnl_period_note": f"PnL/ROI за { {'day': '1д', 'week': '7д', 'month': '30д', 'allTime': 'всё время'}.get(window, window) }",
-                        "metric_label_wr": "Объём",
-                        "metric_value_wr": vlm,
-                        "metric_label_dd": "Депозит",
-                        "metric_value_dd": av,
-                        "metric_label_followers": "Окно",
-                        "metric_value_followers": {"day": "1д", "week": "7д", "month": "30д", "allTime": "all"}.get(window, window),
-                    },
-                )
-            )
-        log.info("Hyperliquid: %d traders", len(out))
-        return out
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            async with client.stream("GET", HL_LEADERBOARD_URL) as r:
+                r.raise_for_status()
+                scored: List[tuple] = []
+                # Incremental JSON parse: stop as soon as we have enough top rows
+                dec = _json.JSONDecoder()
+                buf = b""
+                want = max(1, int(limit))
+                # keep up to (want*6) candidates, enough to pick top-want after sort
+                cap = max(want * 6, 60)
+                in_array = False
+                done = False
+                async for chunk in r.aiter_raw():
+                    if done:
+                        break
+                    buf += chunk
+                    # Seek past the outer object up to the leaderboardRows array
+                    if not in_array:
+                        i = buf.find(b"[")
+                        if i < 0:
+                            # keep only tail (in case '[' splits across chunks)
+                            buf = buf[-256:]
+                            continue
+                        buf = buf[i + 1:]
+                        in_array = True
+                    # Process complete '{...}' objects
+                    while True:
+                        buf = buf.lstrip()
+                        if not buf:
+                            break
+                        if buf[:1] in (b"[", b","):
+                            buf = buf[1:]
+                            continue
+                        if buf[:1] == b"]":
+                            done = True
+                            break
+                        if buf[:1] == b"{":
+                            try:
+                                obj, idx = dec.raw_decode(buf.decode("utf-8", "replace"))
+                            except (ValueError, UnicodeDecodeError):
+                                break
+                            buf = buf[idx:]
+                            try:
+                                av = float(obj.get("accountValue") or 0)
+                                if av < min_account:
+                                    continue
+                                perfs = {
+                                    w[0]: w[1]
+                                    for w in (obj.get("windowPerformances") or [])
+                                    if isinstance(w, (list, tuple)) and len(w) >= 2
+                                }
+                                block = perfs.get(window) or perfs.get("month") or perfs.get("allTime") or {}
+                                roi = float(block.get("roi") or 0) * 100.0
+                                pnl = float(block.get("pnl") or 0)
+                                addr = (obj.get("ethAddress") or "").lower()
+                                if not addr:
+                                    continue
+                                name = (obj.get("displayName") or "").strip() or f"{addr[:6]}…{addr[-4:]}"
+                                scored.append((roi, pnl, av, addr, name, block))
+                                if len(scored) >= cap:
+                                    done = True
+                                    break
+                            except Exception:
+                                continue
+                        else:
+                            buf = buf[1:]
     except Exception as e:
         log.warning("Hyperliquid fetch failed: %s", e)
         return []
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for roi, pnl, av, addr, name, block in scored[: max(1, int(limit))]:
+        # Soft verify: positive ROI + meaningful account
+        failures = []
+        score = 40.0
+        if roi < 5:
+            failures.append(f"ROI {roi:.1f}% низкий за окно {window}")
+        else:
+            score += min(roi / 5.0, 3) * 15
+        if av >= 100_000:
+            score += 15
+        verified = roi >= 10 and av >= 50_000 and not failures
+        vlm = float(block.get("vlm") or 0)
+        out.append(
+            _norm_profile(
+                code=f"hl:{addr}",
+                alias=name,
+                source="hyperliquid",
+                roi_pct=roi,
+                pnl_usd=pnl,
+                aum=av,
+                verified=verified,
+                verify_score=min(100.0, score),
+                verify_failures=failures,
+                profile_url=f"https://app.hyperliquid.xyz/explorer/address/{addr}",
+                copyable=False,
+                note=f"Hyperliquid · окно {window} · on-chain PnL/ROI",
+                extra={
+                    "eth_address": addr,
+                    "window": window,
+                    "volume_usd": round(vlm, 2),
+                    "period_label": {"day": "1д", "week": "7д", "month": "30д", "allTime": "всё время"}.get(window, window),
+                    "period_days": {"day": 1, "week": 7, "month": 30, "allTime": 0}.get(window, 30),
+                    "total_trades": 0,
+                    "trades_label": "н/д",
+                    "pnl_period_note": f"PnL/ROI за { {'day': '1д', 'week': '7д', 'month': '30д', 'allTime': 'всё время'}.get(window, window) }",
+                    "metric_label_wr": "Объём",
+                    "metric_value_wr": vlm,
+                    "metric_label_dd": "Депозит",
+                    "metric_value_dd": av,
+                    "metric_label_followers": "Окно",
+                    "metric_value_followers": {"day": "1д", "week": "7д", "month": "30д", "allTime": "all"}.get(window, window),
+                },
+            )
+        )
+    log.info("Hyperliquid: %d traders (streamed)", len(out))
+    return out
 
 
 async def fetch_social() -> List[Dict]:
