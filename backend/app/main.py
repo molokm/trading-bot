@@ -5527,7 +5527,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     nothing is stored yet."""
     # 1. Gather all raw trade records: persisted (DB) + live (in-memory).
     raw = []
-    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
+    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID]
     if db:
         try:
             for bid in bot_ids:
