@@ -1,1069 +1,167 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import {
-  TrendingUp, TrendingDown, Search, ShieldCheck, ShieldX,
-  Copy, Eye, Play, Square, RefreshCw, Users, BarChart3,
-  AlertTriangle, X, Settings, DollarSign, Target, Trophy,
-  Filter, ChevronRight, Star,
-} from 'lucide-react'
-import { api } from '../services/api'
+import { useState, useCallback } from 'react'
+import { Search, RefreshCw, TrendingUp, ExternalLink, Trophy, ShieldCheck } from 'lucide-react'
 
-function fmtPct(v, sign = true) {
+const fmtNum = (v, d = 0) => {
   const n = Number(v) || 0
-  const s = sign && n > 0 ? '+' : ''
-  return `${s}${n.toFixed(1)}%`
+  return n.toLocaleString('en', { minimumFractionDigits: d, maximumFractionDigits: d })
 }
-
-function fmtUsd(v, sign = true) {
+const fmtUsd = (v) => {
   const n = Number(v) || 0
-  const s = sign && n > 0 ? '+' : n < 0 ? '-' : ''
-  return `${s}$${Math.abs(n).toLocaleString('en', { maximumFractionDigits: 0 })}`
+  const s = n >= 0 ? '+' : ''
+  return `${s}$${fmtNum(Math.abs(n))}`
 }
 
-function isOkxTrader(t) {
-  if (!t) return false
-  const code = String(t.unique_code || '')
-  if (code.startsWith('hl:') || code.startsWith('social:')) return false
-  const src = (t.source || 'okx').toLowerCase()
-  if (src === 'hyperliquid' || src === 'social') return false
-  if (t.copyable === false && src !== 'okx') return false
-  return src === 'okx' || (!!code && !code.includes(':'))
-}
-
-function SourceBadge({ source }) {
-
-  const s = (source || 'okx').toLowerCase()
-  const map = {
-    okx: { label: 'OKX', cls: 'bg-blue-500/15 text-blue-300 border-blue-500/30' },
-    hyperliquid: { label: 'Hyperliquid', cls: 'bg-purple-500/15 text-purple-300 border-purple-500/30' },
-    social: { label: 'Соцсети', cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' },
-  }
-  const m = map[s] || { label: s, cls: 'bg-slate-500/15 text-slate-300 border-slate-500/30' }
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border ${m.cls}`}>
-      {m.label}
-    </span>
-  )
-}
-
-function VerifyBadge({ verified, score }) {
-  if (verified) {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-        <ShieldCheck size={11} /> Проверен
-      </span>
-    )
-  }
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-400/90 border border-amber-500/25">
-      <ShieldX size={11} /> {score > 0 ? `Скор ${Math.round(score)}` : 'Без проверки'}
-    </span>
-  )
-}
-
-function Stat({ label, value, color }) {
-  return (
-    <div className="min-w-0">
-      <div className={`text-sm font-semibold mono truncate ${color || 'text-[var(--txt)]'}`}>{value}</div>
-      <div className="text-[10px] text-[var(--txt-muted)]">{label}</div>
-    </div>
-  )
-}
-
-function TraderCard({ trader, rank, onView, onCopy, onMirror, onTrack, onUntrack, isTracked, isGuest }) {
-  const roi = Number(trader.roi_pct) || 0
-  const wr = Number(trader.win_rate) || 0
-  const wrPct = wr <= 1 ? wr * 100 : wr
-  const dd = Number(trader.max_drawdown) || 0
-  const ddPct = dd <= 1 ? dd * 100 : dd
-  const followers = Number(trader.copy_traders) || 0
-  const pnl = Number(trader.pnl_usd) || 0
-  const name = trader.alias || (trader.unique_code ? `${trader.unique_code.slice(0, 10)}…` : 'Трейдер')
-
-  return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 hover:border-[var(--border-hover)] transition-colors">
-      <div className="flex items-start gap-3 mb-3">
-        <div className={`w-9 h-9 rounded-lg flex items-center justify-center text-sm font-bold shrink-0 ${
-          rank <= 3 ? 'bg-amber-500/20 text-amber-300' : 'bg-[var(--bg-elevated)] text-[var(--txt-muted)]'
-        }`}>
-          {rank || '·'}
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-semibold text-[var(--txt)] truncate">{name}</span>
-            <SourceBadge source={trader.source} />
-            <VerifyBadge verified={trader.verified} score={trader.verify_score} />
-            {isTracked && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/30">
-                в списке
-              </span>
-            )}
-          </div>
-          <div className="text-[10px] text-[var(--txt-muted)] mono truncate mt-0.5">
-            {trader.unique_code}
-          </div>
-        </div>
-        <div className="text-right shrink-0">
-          <div className={`text-xl font-bold mono ${roi >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-            {fmtPct(roi)}
-          </div>
-          <div className="text-[10px] text-[var(--txt-muted)]">
-            ROI · {trader.period_label || trader.pnl_period_note || 'период н/д'}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 mb-3 py-2 border-y border-[var(--border)]">
-        <Stat
-          label={`PnL${trader.period_label ? ` (${trader.period_label})` : ''}`}
-          value={fmtUsd(pnl)}
-          color={pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}
-        />
-        <Stat
-          label="Сделок"
-          value={trader.trades_label || (trader.total_trades > 0 ? String(trader.total_trades) : 'н/д')}
-        />
-        <Stat
-          label={trader.metric_label_wr || 'Win rate'}
-          value={
-            trader.metric_value_wr != null && trader.metric_label_wr
-              ? (Number(trader.metric_value_wr) >= 1000
-                  ? `$${(Number(trader.metric_value_wr) / 1e6).toFixed(2)}M`
-                  : String(trader.metric_value_wr))
-              : (wrPct > 0 ? `${wrPct.toFixed(0)}%` : 'н/д')
-          }
-        />
-        <Stat
-          label={trader.metric_label_dd || 'Max DD'}
-          value={
-            trader.metric_value_dd != null && trader.metric_label_dd
-              ? fmtUsd(trader.metric_value_dd, false)
-              : (ddPct > 0 ? `${ddPct.toFixed(0)}%` : 'н/д')
-          }
-          color={ddPct > 25 ? 'text-[var(--loss)]' : undefined}
-        />
-        <Stat
-          label={trader.metric_label_followers || 'Подписчики'}
-          value={
-            trader.metric_value_followers != null && trader.metric_label_followers
-              ? String(trader.metric_value_followers)
-              : (followers > 0 ? followers.toLocaleString() : (trader.aum ? fmtUsd(trader.aum, false) : 'н/д'))
-          }
-        />
-      </div>
-
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => onView(trader)}
-          className="btn btn-secondary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
-        >
-          <Eye size={14} /> Подробнее
-        </button>
-        {!isGuest && (
-          <>
-            {isOkxTrader(trader) ? (
-              <button
-                type="button"
-                onClick={() => onCopy(trader)}
-                className="btn btn-primary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
-              >
-                <Copy size={14} /> Копировать
-              </button>
-            ) : (
-              <>
-                {(trader.source || '').toLowerCase() === 'hyperliquid' || String(trader.unique_code || '').startsWith('hl:') ? (
-                  <button
-                    type="button"
-                    onClick={() => onMirror && onMirror(trader)}
-                    className="btn btn-primary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
-                  >
-                    Зеркало OKX
-                  </button>
-                ) : null}
-                <a
-                  href={trader.profile_url || '#'}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="btn btn-secondary btn-sm flex-1 min-w-[100px] inline-flex items-center justify-center gap-1"
-                >
-                  Профиль
-                </a>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={() => (isTracked ? onUntrack(trader) : onTrack(trader))}
-              className="btn btn-secondary btn-sm inline-flex items-center justify-center gap-1"
-              title={isTracked ? 'Убрать из отслеживания' : 'Отслеживать'}
-            >
-              <Star size={14} className={isTracked ? 'text-amber-400 fill-amber-400' : ''} />
-            </button>
-          </>
-        )}
-      </div>
-    </div>
-  )
-}
-
-function CopyModal({ trader, onClose, onConfirm, busy }) {
-  const [amount, setAmount] = useState(100)
-  const [tp, setTp] = useState(10)
-  const [sl, setSl] = useState(5)
-  const name = trader?.alias || trader?.unique_code?.slice(0, 12) || 'трейдер'
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-3 bg-black/60" onClick={onClose}>
-      <div
-        className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-xl"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between mb-4">
-          <div>
-            <div className="text-lg font-bold text-[var(--txt)] flex items-center gap-2">
-              <Copy size={18} className="text-blue-400" /> Автокопирование
-            </div>
-            <div className="text-sm text-[var(--txt-muted)] mt-1">{name}</div>
-          </div>
-          <button type="button" onClick={onClose} className="p-1 rounded-lg hover:bg-[var(--bg-elevated)]">
-            <X size={18} className="text-[var(--txt-muted)]" />
-          </button>
-        </div>
-
-        <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3 mb-4 flex justify-between">
-          <div>
-            <div className="text-[10px] text-[var(--txt-muted)]">ROI лидера</div>
-            <div className={`text-lg font-bold mono ${(trader?.roi_pct || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              {fmtPct(trader?.roi_pct)}
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-[10px] text-[var(--txt-muted)]">Скор</div>
-            <div className="text-lg font-bold mono text-[var(--txt)]">{Math.round(trader?.verify_score || 0)}</div>
-          </div>
-        </div>
-
-        <label className="block text-xs text-[var(--txt-muted)] mb-1">Сумма на копирование (USDT)</label>
-        <input
-          type="number"
-          min={10}
-          step={10}
-          value={amount}
-          onChange={e => setAmount(Number(e.target.value))}
-          className="w-full mb-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]"
-        />
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div>
-            <label className="block text-xs text-[var(--txt-muted)] mb-1">Take-profit %</label>
-            <input type="number" min={1} max={100} value={tp} onChange={e => setTp(Number(e.target.value))}
-              className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-          </div>
-          <div>
-            <label className="block text-xs text-[var(--txt-muted)] mb-1">Stop-loss %</label>
-            <input type="number" min={1} max={100} value={sl} onChange={e => setSl(Number(e.target.value))}
-              className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-          </div>
-        </div>
-
-        <p className="text-[11px] text-[var(--txt-muted)] mb-4 leading-relaxed">
-          Сделки лидера OKX будут копироваться на ваш аккаунт OKX с выбранной суммой.
-          Нужны API-ключи с правом copy-trading. Это не гарантия прибыли.
-        </p>
-
-        <div className="flex gap-2">
-          <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Отмена</button>
-          <button
-            type="button"
-            className="btn btn-primary flex-1"
-            disabled={busy || amount < 10}
-            onClick={() => onConfirm({ amount, tp_ratio: tp / 100, sl_ratio: sl / 100 })}
-          >
-            {busy ? '…' : 'Запустить копирование'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function DetailModal({ trader, onClose, onCopy, history }) {
-  const name = trader?.alias || trader?.unique_code?.slice(0, 14) || 'Трейдер'
-  const roi = Number(trader?.roi_pct) || 0
-  const wr = Number(trader?.win_rate) || 0
-  const wrPct = wr <= 1 ? wr * 100 : wr
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-3 bg-black/60" onClick={onClose}>
-      <div
-        className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-xl"
-        onClick={e => e.stopPropagation()}
-      >
-        <div className="flex justify-between items-start mb-4">
-          <div>
-            <h3 className="text-lg font-bold text-[var(--txt)]">{name}</h3>
-            <VerifyBadge verified={trader?.verified} score={trader?.verify_score} />
-          </div>
-          <button type="button" onClick={onClose} className="p-1"><X size={18} className="text-[var(--txt-muted)]" /></button>
-        </div>
-
-        <div className="grid grid-cols-3 gap-3 mb-4">
-          <div className="rounded-xl bg-[var(--bg-elevated)] p-3 text-center">
-            <div className={`text-xl font-bold mono ${roi >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{fmtPct(roi)}</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">ROI</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] p-3 text-center">
-            <div className="text-xl font-bold mono text-[var(--txt)]">{wrPct.toFixed(0)}%</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Win rate</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] p-3 text-center">
-            <div className="text-xl font-bold mono text-[var(--txt)]">{trader?.copy_traders || 0}</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Подписчики</div>
-          </div>
-        </div>
-
-        {trader?.verify_failures?.length > 0 && (
-          <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
-            <div className="font-semibold mb-1">Замечания проверки</div>
-            <ul className="list-disc pl-4 space-y-0.5">
-              {trader.verify_failures.map((f, i) => <li key={i}>{f}</li>)}
-            </ul>
-          </div>
-        )}
-
-        <div className="mb-4">
-          <div className="text-xs font-semibold text-[var(--txt-muted)] mb-2">Последние сделки</div>
-          {!history?.length ? (
-            <div className="text-sm text-[var(--txt-muted)]">Нет данных по истории</div>
-          ) : (
-            <div className="space-y-1 max-h-48 overflow-y-auto">
-              {history.slice(0, 20).map((h, i) => (
-                <div key={i} className="flex justify-between text-xs py-1.5 border-b border-[var(--border)]">
-                  <span className="text-[var(--txt)]">{h.instId || h.inst_id || h.symbol || '—'}</span>
-                  <span className={Number(h.pnl || h.upl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-                    {fmtUsd(h.pnl ?? h.upl ?? 0)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {isOkxTrader(trader) ? (
-          <button type="button" className="btn btn-primary w-full" onClick={() => onCopy(trader)}>
-            Копировать этого трейдера (OKX)
-          </button>
-        ) : (
-          <div className="space-y-2">
-            <p className="text-xs text-[var(--txt-muted)] leading-relaxed">
-              Автокопирование на OKX доступно только для лидеров OKX Copy Trading.
-              У этого трейдера источник «{trader?.source || 'не OKX'}» — можно открыть профиль и следить вручную.
-            </p>
-            {trader?.profile_url ? (
-              <a href={trader.profile_url} target="_blank" rel="noreferrer" className="btn btn-secondary w-full inline-flex justify-center">
-                Открыть профиль
-              </a>
-            ) : null}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-
-function MirrorModal({ trader, onClose, onConfirm, busy }) {
-  const [amount, setAmount] = useState(100)
-  const [lev, setLev] = useState(3)
-  const name = trader?.alias || trader?.unique_code || 'трейдер'
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-3 bg-black/60" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-xl" onClick={e => e.stopPropagation()}>
-        <div className="flex justify-between items-start mb-3">
-          <div>
-            <div className="text-lg font-bold text-[var(--txt)]">Зеркало HL → OKX</div>
-            <div className="text-sm text-[var(--txt-muted)] mt-1">{name}</div>
-          </div>
-          <button type="button" onClick={onClose} className="p-1"><X size={18} className="text-[var(--txt-muted)]" /></button>
-        </div>
-        <p className="text-[11px] text-[var(--txt-muted)] mb-3 leading-relaxed">
-          Каждые ~20 сек читаем открытые позиции лидера на Hyperliquid и выравниваем свои позиции на OKX SWAP
-          в пределах выделенного капитала. Это не биржевой copy-trading: возможны задержка и проскальзывание.
-        </p>
-        <label className="block text-xs text-[var(--txt-muted)] mb-1">Капитал на зеркало (USDT)</label>
-        <input type="number" min={20} step={10} value={amount} onChange={e => setAmount(Number(e.target.value))}
-          className="w-full mb-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-        <label className="block text-xs text-[var(--txt-muted)] mb-1">Макс. плечо</label>
-        <input type="number" min={1} max={10} step={1} value={lev} onChange={e => setLev(Number(e.target.value))}
-          className="w-full mb-4 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-        <div className="flex gap-2">
-          <button type="button" className="btn btn-secondary flex-1" onClick={onClose}>Отмена</button>
-          <button type="button" className="btn btn-primary flex-1" disabled={busy || amount < 20}
-            onClick={() => onConfirm({ amount, leverage: lev })}>
-            {busy ? '…' : 'Запустить зеркало'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-export default function SmartMoneyPage({ connected, isGuest }) {
-  const [tab, setTab] = useState('discover')
-  const [status, setStatus] = useState(null)
-  const [discoverList, setDiscoverList] = useState([])
-  const [trackedList, setTrackedList] = useState([])
-  const [copies, setCopies] = useState([])
+export default function SmartMoneyPage({ isGuest }) {
+  const [list, setList] = useState([])
   const [loading, setLoading] = useState(false)
-  const [page, setPage] = useState(1)
-  const [sort, setSort] = useState('roi')
-  const [minRoi, setMinRoi] = useState(10)
-  const [verifiedOnly, setVerifiedOnly] = useState(false)
-  const [srcOkx, setSrcOkx] = useState(true)
-  const [srcHl, setSrcHl] = useState(false)
-  const [srcSocial, setSrcSocial] = useState(false)
-  const [q, setQ] = useState('')
-  const [copyTrader, setCopyTrader] = useState(null)
-  const [mirrorTrader, setMirrorTrader] = useState(null)
-  const [mirrors, setMirrors] = useState([])
-  const [smPnl, setSmPnl] = useState(null)
-  const [smTrades, setSmTrades] = useState([])
-  const [detailTrader, setDetailTrader] = useState(null)
-  const [history, setHistory] = useState([])
-  const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [sources, setSources] = useState('okx,hyperliquid')
+  const [minRoi, setMinRoi] = useState(0)
+  const [lastUpdate, setLastUpdate] = useState(null)
 
-  const trackedCodes = useMemo(
-    () => new Set((trackedList || []).map(t => t.unique_code)),
-    [trackedList],
-  )
-
-  const loadStatus = useCallback(async () => {
-    try {
-      const s = await api.smartMoneyStatus()
-      setStatus(s)
-    } catch {
-      setStatus(null)
-    }
-  }, [])
-
-  const fetchDiscover = useCallback(async (p = 1) => {
+  const load = useCallback(async () => {
     setLoading(true)
     setErr('')
-    const srcs = []
-    if (srcOkx) srcs.push('okx')
-    if (srcHl) srcs.push('hyperliquid')
-    if (srcSocial) srcs.push('social')
-    if (!srcs.length) srcs.push('okx')
     try {
-      const r = await api.smartMoneyDiscover(p, 20, {
-        sort: sort === 'roi' ? 'pnl_ratio' : sort,
-        min_roi: minRoi,
-        verified_only: verifiedOnly,
-        sources: srcs.join(','),
-      })
-      if (r?.error && !(r?.traders || []).length) {
-        setErr(String(r.error || r.message || 'Ошибка загрузки'))
-        setDiscoverList([])
+      const r = await fetch(`/api/smart-money/discover?limit=25&min_roi=${minRoi}&sources=${encodeURIComponent(sources)}`, { credentials: 'include' })
+      if (r.status === 401) {
+        setErr('Требуется авторизация')
+        setList([])
+        return
+      }
+      const data = await r.json()
+      if (data?.error && !(data?.traders || []).length) {
+        setErr(String(data.error || data.message || 'Ошибка загрузки'))
+        setList([])
       } else {
-        if (r?.error) setErr(String(r.error))
-        setDiscoverList(r?.traders || [])
-        setPage(p)
+        setList(data?.traders || [])
+        setLastUpdate(new Date())
+        if (data?.errors?.length) setErr(data.errors.join('; '))
       }
     } catch (e) {
-      setErr(e.message || 'Не удалось загрузить лидеров')
-      setDiscoverList([])
+      setErr(e.message || 'Не удалось загрузить')
+      setList([])
     } finally {
       setLoading(false)
     }
-  }, [sort, minRoi, verifiedOnly, srcOkx, srcHl, srcSocial])
-
-  const loadTracked = useCallback(async () => {
-    try {
-      const r = await api.smartMoneyTracked()
-      setTrackedList(r?.tracked || [])
-    } catch {
-      setTrackedList([])
-    }
-  }, [])
-
-  const loadCopies = useCallback(async () => {
-    try {
-      const r = await api.smartMoneyMyCopies()
-      setCopies(r?.copies || [])
-    } catch {
-      setCopies([])
-    }
-  }, [])
-
-  const loadMirrors = useCallback(async () => {
-    try {
-      const r = await api.smartMoneyMirrorStatus()
-      setMirrors(r?.targets || [])
-    } catch {
-      setMirrors([])
-    }
-  }, [])
-
-  const loadSmPnl = useCallback(async () => {
-    try {
-      const r = await api.smartMoneyPnl()
-      setSmPnl(r)
-      setSmTrades(r?.trades || [])
-    } catch {
-      setSmPnl(null)
-      setSmTrades([])
-    }
-  }, [])
-
-  useEffect(() => {
-    loadStatus()
-    loadTracked()
-    // no auto discover / HL / pnl storm on mount
-    const iv = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return
-      loadStatus()
-    }, 60000)
-    return () => clearInterval(iv)
-  }, [loadStatus, loadTracked])
-
-  // Load tab-specific data when user switches tabs + periodic refresh
-  useEffect(() => {
-    if (tab === 'copies') loadCopies()
-    if (tab === 'mirrors') loadMirrors()
-    if (tab === 'deals') loadSmPnl()
-    if (tab === 'tracked') loadTracked()
-    // Refresh mirror/deal data while those tabs are visible
-    const iv = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return
-      if (tab === 'mirrors') loadMirrors()
-      if (tab === 'deals') loadSmPnl()
-      if (tab === 'copies') loadCopies()
-    }, 30000)
-    return () => clearInterval(iv)
-  }, [tab, loadCopies, loadMirrors, loadSmPnl, loadTracked])
-
-  const filtered = useMemo(() => {
-    const list = discoverList || []
-    if (!q.trim()) return list
-    const s = q.trim().toLowerCase()
-    return list.filter(
-      t =>
-        (t.alias || '').toLowerCase().includes(s) ||
-        (t.unique_code || '').toLowerCase().includes(s),
-    )
-  }, [discoverList, q])
-
-  const handleTrack = async (trader) => {
-    if (isGuest) return
-    try {
-      await api.smartMoneyTrack(trader.unique_code)
-      await loadTracked()
-    } catch (e) {
-      alert(e.message)
-    }
-  }
-
-  const handleUntrack = async (trader) => {
-    if (isGuest) return
-    try {
-      await api.smartMoneyUntrack(trader.unique_code)
-      await loadTracked()
-    } catch (e) {
-      alert(e.message)
-    }
-  }
-
-  const handleView = async (trader) => {
-    setDetailTrader(trader)
-    setHistory([])
-    try {
-      const [d, h] = await Promise.all([
-        api.smartMoneyTrader(trader.unique_code).catch(() => null),
-        api.smartMoneyTraderHistory(trader.unique_code, 30).catch(() => null),
-      ])
-      if (d && !d.error) setDetailTrader({ ...trader, ...d })
-      setHistory(h?.trades || h?.data || [])
-    } catch {
-      /* ignore */
-    }
-  }
-
-  const handleMirrorConfirm = async ({ amount, leverage }) => {
-    if (!mirrorTrader || isGuest) return
-    setBusy(true)
-    try {
-      const code = mirrorTrader.unique_code || ''
-      const address = code.startsWith('hl:') ? code.slice(3) : (mirrorTrader.eth_address || code)
-      const r = await api.smartMoneyMirrorStart({
-        address,
-        alias: mirrorTrader.alias || '',
-        capital_usdt: amount,
-        max_leverage: leverage,
-        execute: true,
-      })
-      if (r?.ok === false) throw new Error(r.msg || r.message || 'Ошибка')
-      setMirrorTrader(null)
-      await loadMirrors()
-      alert(r?.msg || 'Зеркало запущено')
-    } catch (e) {
-      alert(e.message || 'Не удалось запустить зеркало')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const handleCopyConfirm = async ({ amount }) => {
-    if (!copyTrader || isGuest) return
-    if (!isOkxTrader(copyTrader)) {
-      alert('Автокопирование работает только с лидерами OKX. Выберите карточку с бейджем OKX.')
-      setCopyTrader(null)
-      return
-    }
-    setBusy(true)
-    try {
-      const r = await api.smartMoneyCopy(copyTrader.unique_code, amount)
-      if (r?.ok === false) throw new Error(r.msg || r.message || 'Ошибка')
-      setCopyTrader(null)
-      await loadCopies()
-      alert('Копирование запущено (проверьте OKX Copy Trading)')
-    } catch (e) {
-      alert(e.message || 'Не удалось запустить копирование')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const toggleTracker = async () => {
-    if (isGuest) return
-    setBusy(true)
-    try {
-      if (status?.running) await api.smartMoneyStop()
-      else await api.smartMoneyStart({})
-      await loadStatus()
-    } catch (e) {
-      alert(e.message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const tabs = [
-    { id: 'discover', label: 'Лидеры', icon: Trophy },
-    { id: 'tracked', label: 'Отслеживание', icon: Star },
-    { id: 'copies', label: 'Мои копии', icon: Copy },
-    { id: 'mirrors', label: 'Зеркала', icon: RefreshCw },
-    { id: 'deals', label: 'Сделки SM', icon: BarChart3 },
-  ]
+  }, [sources, minRoi])
 
   return (
-    <div className="h-full overflow-y-auto overscroll-contain max-w-5xl mx-auto space-y-5 px-1 pb-16">
+    <div className="h-full overflow-y-auto overscroll-contain max-w-4xl mx-auto space-y-4 px-1 pb-16">
       {/* Header */}
       <div className="rounded-2xl border border-[var(--border)] bg-gradient-to-br from-[var(--bg-card)] to-[var(--bg-elevated)] p-5">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-bold text-[var(--txt)] flex items-center gap-2">
-              <Trophy className="text-amber-400" size={22} />
-              Умные деньги
-            </h1>
-            <p className="text-sm text-[var(--txt-muted)] mt-1 max-w-xl leading-relaxed">
-              Лидеры OKX Copy Trading с проверкой ROI, win rate и просадки.
-              OKX (копирование), Hyperliquid (on-chain ROI) и открытые соц-профили. Автокопирование — только для OKX.
-            </p>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Trophy className="text-amber-400" size={20} />
+            <h1 className="text-lg font-bold text-[var(--txt)]">Умные деньги</h1>
+            <span className="text-[10px] text-[var(--txt-muted)] border border-[var(--border)] rounded-full px-2 py-0.5">read-only</span>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <div className={`px-2.5 py-1 rounded-full text-xs font-medium border ${
-              status?.running
-                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                : 'bg-[var(--bg)] text-[var(--txt-muted)] border-[var(--border)]'
-            }`}>
-              {status?.running ? 'Трекер ON' : 'Трекер OFF'}
-            </div>
-            {!isGuest && (
-              <button type="button" className="btn btn-secondary btn-sm inline-flex items-center gap-1" disabled={busy} onClick={toggleTracker}>
-                {status?.running ? <><Square size={14} /> Стоп</> : <><Play size={14} /> Старт</>}
-              </button>
-            )}
-            <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchDiscover(page)} disabled={loading}>
-              <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
+          <div className="flex items-center gap-2 flex-wrap">
+            <select
+              value={sources}
+              onChange={e => setSources(e.target.value)}
+              className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-xs text-[var(--txt)]"
+            >
+              <option value="okx">OKX</option>
+              <option value="hyperliquid">Hyperliquid</option>
+              <option value="okx,hyperliquid">OKX + Hyperliquid</option>
+              <option value="okx,hyperliquid,social">Все источники</option>
+            </select>
+            <input
+              type="number"
+              value={minRoi}
+              onChange={e => setMinRoi(Number(e.target.value))}
+              placeholder="мин ROI %"
+              className="w-20 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-xs text-[var(--txt)]"
+            />
+            <button className="btn btn-primary btn-sm" onClick={load} disabled={loading}>
+              {loading ? 'Загрузка…' : <><Search size={13} /> Найти</>}
+            </button>
+            <button className="btn btn-secondary btn-sm" onClick={load} disabled={loading}>
+              <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
             </button>
           </div>
         </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-4">
-          <div className="rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] p-3">
-            <div className="text-[10px] text-[var(--txt-muted)]">В списке лидеров</div>
-            <div className="text-lg font-bold text-[var(--txt)]">{discoverList.length}</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] p-3">
-            <div className="text-[10px] text-[var(--txt-muted)]">Проверенные</div>
-            <div className="text-lg font-bold text-emerald-400">
-              {discoverList.filter(t => t.verified).length}
-            </div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] p-3">
-            <div className="text-[10px] text-[var(--txt-muted)]">Отслеживаю</div>
-            <div className="text-lg font-bold text-blue-400">{trackedList.length}</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg)]/60 border border-[var(--border)] p-3">
-            <div className="text-[10px] text-[var(--txt-muted)]">Активные копии</div>
-            <div className="text-lg font-bold text-[var(--txt)]">{copies.length}</div>
-          </div>
-        </div>
+        <p className="text-xs text-[var(--txt-muted)] mt-2 leading-relaxed">
+          Топ-лидеры OKX Copy Trading и Hyperliquid по ROI. Просмотр только для ознакомления — без автоследования.
+          {lastUpdate && <span className="ml-1 opacity-70">Обновлено {lastUpdate.toLocaleTimeString()}</span>}
+        </p>
+        {err && <div className="text-xs text-amber-400 mt-2">{err}</div>}
       </div>
 
-
-      {/* Smart Money only PnL */}
-      <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-semibold text-[var(--txt)] flex items-center gap-2">
-            <DollarSign size={16} className="text-amber-400" />
-            PnL · Умные деньги
-          </div>
-          <span className="text-[10px] text-[var(--txt-muted)]">только copy + зеркало · не в общей статистике ботов</span>
+      {/* Table */}
+      {list.length === 0 && !loading ? (
+        <div className="text-center py-16 text-sm text-[var(--txt-muted)]">
+          Нажмите «Найти», чтобы загрузить лидеров.
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
-            <div className={`text-xl font-bold mono ${(smPnl?.realized_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              {(smPnl?.realized_pnl || 0) >= 0 ? '+' : ''}{Number(smPnl?.realized_pnl || 0).toFixed(2)}$
-            </div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Реализованный PnL</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
-            <div className="text-xl font-bold mono text-[var(--txt)]">{smPnl?.open_count ?? 0}</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Открыто</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
-            <div className="text-xl font-bold mono text-[var(--txt)]">{smPnl?.closed_count ?? 0}</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Закрыто</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
-            <div className="text-xl font-bold mono text-emerald-400">{smPnl?.win_count ?? 0}</div>
-            <div className="text-[10px] text-[var(--txt-muted)]">В плюс</div>
-          </div>
-          <div className="rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)] p-3">
-            <div className="text-xl font-bold mono text-[var(--txt)]">
-              {smPnl?.win_rate != null ? `${(Number(smPnl.win_rate) * 100).toFixed(0)}%` : '—'}
-            </div>
-            <div className="text-[10px] text-[var(--txt-muted)]">Win rate</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex gap-1 p-1 rounded-xl bg-[var(--bg-elevated)] border border-[var(--border)]">
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`flex-1 flex items-center justify-center gap-1.5 py-2 rounded-lg text-sm font-medium transition-colors ${
-              tab === t.id
-                ? 'bg-[var(--bg-card)] text-[var(--txt)] shadow-sm'
-                : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'
-            }`}
-          >
-            <t.icon size={15} />
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Discover filters */}
-      {tab === 'discover' && (
-        <>
-          <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3 flex flex-col sm:flex-row gap-3 sm:items-end">
-            <div className="flex-1">
-              <label className="text-[10px] text-[var(--txt-muted)] mb-1 flex items-center gap-1">
-                <Search size={11} /> Поиск
-              </label>
-              <input
-                value={q}
-                onChange={e => setQ(e.target.value)}
-                placeholder="Имя или код трейдера"
-                className="w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-[var(--txt-muted)] mb-1 flex items-center gap-1">
-                <Filter size={11} /> Сортировка
-              </label>
-              <select
-                value={sort}
-                onChange={e => setSort(e.target.value)}
-                className="rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]"
-              >
-                <option value="roi">По ROI</option>
-                <option value="pnl">По PnL</option>
-                <option value="copyRatio">По подписчикам</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-[10px] text-[var(--txt-muted)] mb-1">Мин. ROI %</label>
-              <input
-                type="number"
-                value={minRoi}
-                onChange={e => setMinRoi(Number(e.target.value))}
-                className="w-24 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]"
-              />
-            </div>
-            <label className="flex items-center gap-2 text-xs text-[var(--txt-muted)] pb-2 cursor-pointer">
-              <input type="checkbox" checked={verifiedOnly} onChange={e => setVerifiedOnly(e.target.checked)} />
-              Только проверенные
-            </label>
-            <div className="flex flex-wrap items-center gap-2 pb-2 text-xs text-[var(--txt-muted)]">
-              <span className="opacity-70">Источники:</span>
-              <label className="inline-flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={srcOkx} onChange={e => setSrcOkx(e.target.checked)} /> OKX
-              </label>
-              <label className="inline-flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={srcHl} onChange={e => setSrcHl(e.target.checked)} /> Hyperliquid
-              </label>
-              <label className="inline-flex items-center gap-1 cursor-pointer">
-                <input type="checkbox" checked={srcSocial} onChange={e => setSrcSocial(e.target.checked)} /> Соцсети
-              </label>
-            </div>
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={loading}
-              onClick={() => fetchDiscover(1)}
-            >
-              {loading ? 'Загрузка…' : 'Найти'}
-            </button>
-          </div>
-
-          {err && (
-            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300 flex items-center gap-2">
-              <AlertTriangle size={16} /> {err}
-            </div>
-          )}
-
-          {loading && !filtered.length ? (
-            <div className="text-center py-12 text-[var(--txt-muted)] text-sm">Загружаем лидеров с OKX…</div>
-          ) : !filtered.length ? (
-            <div className="text-center py-12 text-[var(--txt-muted)] text-sm">
-              Никого не нашли. Смягчите фильтр ROI или нажмите «Найти» ещё раз.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {filtered.map((t, i) => (
-                <TraderCard
-                  key={t.unique_code || i}
-                  trader={t}
-                  rank={t.rank || i + 1}
-                  onView={handleView}
-                  onCopy={setCopyTrader}
-                  onMirror={setMirrorTrader}
-                  onTrack={handleTrack}
-                  onUntrack={handleUntrack}
-                  isTracked={trackedCodes.has(t.unique_code)}
-                  isGuest={isGuest}
-                />
-              ))}
-            </div>
-          )}
-
-          <div className="flex items-center justify-center gap-3">
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              disabled={page <= 1 || loading}
-              onClick={() => fetchDiscover(page - 1)}
-            >
-              Назад
-            </button>
-            <span className="text-sm text-[var(--txt-muted)]">Стр. {page}</span>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              disabled={loading}
-              onClick={() => fetchDiscover(page + 1)}
-            >
-              Далее <ChevronRight size={14} />
-            </button>
-          </div>
-        </>
-      )}
-
-      {tab === 'tracked' && (
-        <div>
-          {!trackedList.length ? (
-            <div className="text-center py-12 text-[var(--txt-muted)] text-sm">
-              Список пуст. На вкладке «Лидеры» добавьте трейдеров звёздочкой.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {trackedList.map((t, i) => (
-                <TraderCard
-                  key={t.unique_code || i}
-                  trader={t}
-                  rank={i + 1}
-                  onView={handleView}
-                  onCopy={setCopyTrader}
-                  onTrack={handleTrack}
-                  onUntrack={handleUntrack}
-                  isTracked
-                  isGuest={isGuest}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {tab === 'copies' && (
-        <div>
-          {!copies.length ? (
-            <div className="text-center py-12 text-[var(--txt-muted)] text-sm">
-              Активных автокопирований нет. Выберите лидера и нажмите «Копировать».
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {copies.map((c, i) => (
-                <div
-                  key={c.unique_code || i}
-                  className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 flex items-center justify-between gap-3"
-                >
-                  <div>
-                    <div className="font-semibold text-[var(--txt)]">{c.alias || c.unique_code}</div>
-                    <div className="text-xs text-[var(--txt-muted)]">Копирование активно</div>
-                  </div>
-                  {!isGuest && (
-                    <button
-                      type="button"
-                      className="btn btn-danger btn-sm"
-                      onClick={async () => {
-                        try {
-                          await api.smartMoneyStopCopy(c.unique_code)
-                          await loadCopies()
-                        } catch (e) {
-                          alert(e.message)
-                        }
-                      }}
-                    >
-                      Остановить
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-
-      {tab === 'deals' && (
+      ) : (
         <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] overflow-hidden">
-          <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
-            <span className="text-sm font-semibold text-[var(--txt)]">Сделки копирования и зеркала</span>
-            <button type="button" className="btn btn-secondary btn-sm" onClick={loadSmPnl}>
-              <RefreshCw size={14} />
-            </button>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-[var(--bg-elevated)] text-[var(--txt-muted)]">
+                <tr>
+                  <th className="text-left px-3 py-2">#</th>
+                  <th className="text-left px-3 py-2">Трейдер</th>
+                  <th className="text-right px-3 py-2">ROI</th>
+                  <th className="text-right px-3 py-2">PnL</th>
+                  <th className="text-right px-3 py-2">Win Rate</th>
+                  <th className="text-right px-3 py-2">Подписчики</th>
+                  <th className="text-right px-3 py-2">Дни</th>
+                  <th className="text-center px-3 py-2">Источник</th>
+                  <th className="text-center px-3 py-2">Профиль</th>
+                </tr>
+              </thead>
+              <tbody>
+                {list.map((t, i) => {
+                  const roi = Number(t.roi_pct) || 0
+                  const wr = Number(t.win_rate) || 0
+                  const src = (t.source || '').toLowerCase()
+                  return (
+                    <tr key={t.unique_code || i} className="border-t border-[var(--border)] hover:bg-[var(--bg-elevated)]/50">
+                      <td className="px-3 py-2 text-[var(--txt-muted)]">{i + 1}</td>
+                      <td className="px-3 py-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-semibold text-[var(--txt)] max-w-[160px] truncate">{t.alias || t.unique_code?.slice(0, 14)}</span>
+                          {t.verified && <ShieldCheck size={12} className="text-emerald-400 shrink-0" />}
+                        </div>
+                        <div className="text-[10px] text-[var(--txt-muted)] font-mono">{t.unique_code?.slice(0, 18)}</div>
+                      </td>
+                      <td className={`px-3 py-2 text-right font-bold mono ${roi >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {roi >= 0 ? '+' : ''}{fmtNum(roi, 1)}%
+                      </td>
+                      <td className={`px-3 py-2 text-right mono ${Number(t.pnl_usd) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {fmtUsd(t.pnl_usd)}
+                      </td>
+                      <td className="px-3 py-2 text-right">{wr > 0 ? `${fmtNum(wr * 100, 0)}%` : '—'}</td>
+                      <td className="px-3 py-2 text-right">{fmtNum(t.copy_traders)}</td>
+                      <td className="px-3 py-2 text-right">{t.lead_days || t.period_days || '—'}</td>
+                      <td className="px-3 py-2 text-center">
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                          src === 'okx' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20'
+                          : src === 'hyperliquid' ? 'bg-purple-500/10 text-purple-400 border-purple-500/20'
+                          : 'bg-slate-500/10 text-slate-400 border-slate-500/20'
+                        }`}>
+                          {src === 'okx' ? 'OKX' : src === 'hyperliquid' ? 'HyperL' : 'Social'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {t.profile_url ? (
+                          <a href={t.profile_url} target="_blank" rel="noreferrer" className="text-[var(--info)] inline-flex items-center gap-0.5 hover:underline">
+                            <ExternalLink size={11} />
+                          </a>
+                        ) : '—'}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
           </div>
-          {!smTrades.length ? (
-            <div className="text-center py-10 text-sm text-[var(--txt-muted)]">Пока нет сделок Smart Money</div>
-          ) : (
-            <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-[var(--bg-elevated)] text-[var(--txt-muted)]">
-                  <tr>
-                    <th className="text-left px-3 py-2">Время</th>
-                    <th className="text-left px-3 py-2">Тип</th>
-                    <th className="text-left px-3 py-2">Событие</th>
-                    <th className="text-left px-3 py-2">Инстр.</th>
-                    <th className="text-left px-3 py-2">Сторона</th>
-                    <th className="text-right px-3 py-2">Размер</th>
-                    <th className="text-right px-3 py-2">PnL</th>
-                    <th className="text-left px-3 py-2">Лидер</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {smTrades.map((tr, i) => {
-                    const pnl = Number(tr.pnl || 0)
-                    return (
-                      <tr key={tr.id || i} className="border-t border-[var(--border)]">
-                        <td className="px-3 py-2 mono text-[var(--txt-muted)]">
-                          {(tr.time || tr.opened_at || '').replace('T', ' ').slice(0, 19)}
-                        </td>
-                        <td className="px-3 py-2">{tr.kind === 'mirror' ? 'Зеркало' : 'Copy'}</td>
-                        <td className="px-3 py-2">{tr.event}</td>
-                        <td className="px-3 py-2 font-medium text-[var(--txt)]">{tr.symbol || '—'}</td>
-                        <td className="px-3 py-2">{tr.side || '—'}</td>
-                        <td className="px-3 py-2 text-right mono">{tr.size || '—'}</td>
-                        <td className={`px-3 py-2 text-right mono font-semibold ${pnl > 0 ? 'text-[var(--profit)]' : pnl < 0 ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
-                          {tr.event === 'close' ? `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}` : '—'}
-                        </td>
-                        <td className="px-3 py-2 mono text-[var(--txt-muted)] truncate max-w-[120px]">
-                          {(tr.leader || '').slice(0, 12)}
-                        </td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
         </div>
       )}
-
-      {tab === 'mirrors' && (
-        <div>
-          {!mirrors.length ? (
-            <div className="text-center py-12 text-[var(--txt-muted)] text-sm">
-              Нет активных зеркал. В лидерах Hyperliquid нажмите «Зеркало OKX».
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {mirrors.map((m, i) => (
-                <div key={m.address || i} className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-semibold text-[var(--txt)]">{m.alias || m.address}</div>
-                      <div className="text-[10px] text-[var(--txt-muted)] mono">{m.address}</div>
-                      <div className="text-xs text-[var(--txt-muted)] mt-1">
-                        Капитал ${m.capital_usdt} · плечо x{m.max_leverage} · позиций {Object.keys(m.mirrored || {}).length}
-                      </div>
-                      {m.last_error ? <div className="text-xs text-red-400 mt-1">{m.last_error}</div> : null}
-                    </div>
-                    {!isGuest && (
-                      <button type="button" className="btn btn-danger btn-sm" onClick={async () => {
-                        try {
-                          await api.smartMoneyMirrorStop({ address: m.address, close_positions: false })
-                          await loadMirrors()
-                        } catch (e) { alert(e.message) }
-                      }}>Стоп</button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {mirrorTrader && (
-        <MirrorModal
-          trader={mirrorTrader}
-          onClose={() => setMirrorTrader(null)}
-          onConfirm={handleMirrorConfirm}
-          busy={busy}
-        />
-      )}
-      {copyTrader && (
-        <CopyModal
-          trader={copyTrader}
-          onClose={() => setCopyTrader(null)}
-          onConfirm={handleCopyConfirm}
-          busy={busy}
-        />
-      )}
-      {detailTrader && (
-        <DetailModal
-          trader={detailTrader}
-          history={history}
-          onClose={() => setDetailTrader(null)}
-          onCopy={(t) => { setDetailTrader(null); setCopyTrader(t) }}
-        />
-      )}
+      <div className="text-[10px] text-[var(--txt-muted)] leading-relaxed">
+        {isGuest ? 'Гостевой режим: отображение без операций.' : 'Только просмотр. Управление и автоследование отключены.'}
+      </div>
     </div>
   )
 }

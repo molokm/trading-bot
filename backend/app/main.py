@@ -1979,6 +1979,8 @@ async def smart_money_mirror_status():
 @app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
 async def smart_money_mirror_start(data: dict = None):
     """Start mirroring a public Hyperliquid trader onto OKX."""
+    if os.getenv("SM_EXECUTION_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return {"ok": False, "msg": "Автоследование (зеркала) временно отключено — раздел перерабатывается"}
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
@@ -2026,6 +2028,8 @@ async def smart_money_mirror_stop(data: dict = None):
 async def smart_money_start(data: dict = None):
     """Start the Smart Money Tracker (+ restore mirror claims)."""
     global sm_tracker
+    if os.getenv("SM_EXECUTION_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return {"ok": False, "msg": "Фоновый мониторинг Smart Money временно отключён — раздел перерабатывается"}
     data = data or {}
     try:
         if sm_tracker and getattr(sm_tracker, "_running", False):

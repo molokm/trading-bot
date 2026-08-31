@@ -749,11 +749,11 @@ class SmartMoneyMirror:
                             pass
                 except Exception as e:
                     log.warning("mirror reclaim on hydrate: %s", e)
-                except Exception as e:
-                    log.warning("mirror reclaim on hydrate: %s", e)
-                # auto-resume polling if any active
-                if any(t.active for t in self._targets.values()) and not self._running:
-                    self.start()
+                # NOTE: auto-resume disabled — starting the mirror thread on
+                # hydrate caused asyncpg cross-loop crashes. Mirror must be
+                # started explicitly via /api/smart-money/mirror/start.
+                # if any(t.active for t in self._targets.values()) and not self._running:
+                #     self.start()
         except Exception as e:
             log.warning("hydrate mirror db: %s", e)
 

@@ -56,3 +56,8 @@ services:
         value: "30"
       - key: TRACKER_URL
         value: "https://trading-bot-mu99.onrender.com/tracker"
+      # Smart Money execution disabled — background tracker/mirror threads
+      # were crashing the free-tier instance. Section is being rebuilt as a
+      # lightweight read-only view. Set to 0 to re-enable execution.
+      - key: SM_EXECUTION_DISABLED
+        value: "1"
