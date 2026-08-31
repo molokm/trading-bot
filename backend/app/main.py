@@ -1999,6 +1999,7 @@ async def health():
         try:
             bills_all = await _fetch_all_trade_bills()
             eth_bills = []
+            eth_ord_all = []
             for b in bills_all:
                 if (b.get("instId") or "").startswith("ETH"):
                     try:
@@ -2011,7 +2012,26 @@ async def health():
                             "sub": b.get("subType"), "ord": str(b.get("ordId"))[:14],
                             "px": b.get("px"), "sz": b.get("sz"),
                         })
+                    # All bills for the target close ord (30.08 ETH +657)
+                    if str(b.get("ordId", "")).startswith("3879571486634"):
+                        eth_ord_all.append({
+                            "ts": str(b.get("ts"))[:13], "pnl": round(bp, 2),
+                            "sub": b.get("subType"), "px": b.get("px"), "sz": b.get("sz"),
+                            "side": b.get("side"),
+                        })
             diag["eth_big_bills"] = eth_bills
+            diag["eth_close_ord_all"] = eth_ord_all
+            # Re-run _pair_bills and show what it emits for ETH closes
+            try:
+                pb = _pair_bills(bills_all)
+                diag["pair_bills_eth"] = [
+                    {"time": t.get("time"), "pnl": t.get("pnl"), "reason": t.get("reason"),
+                     "sz": t.get("size"), "entry": t.get("entry"), "exit": t.get("exit_price"),
+                     "ord": str(t.get("ord_id", ""))[:14]}
+                    for t in pb if (t.get("inst_id") or "").startswith("ETH") and t.get("reason") == "closed"
+                ]
+            except Exception as e:
+                diag["pair_bills_err"] = str(e)
         except Exception as e:
             diag["bills_scan_err"] = str(e)
         eth = [t for t in paired_resp.get("trades", [])
