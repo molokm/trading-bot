@@ -525,6 +525,22 @@ export default function SmartMoneyPage({ connected, isGuest }) {
     return () => clearInterval(iv)
   }, [loadStatus, loadTracked])
 
+  // Load tab-specific data when user switches tabs + periodic refresh
+  useEffect(() => {
+    if (tab === 'copies') loadCopies()
+    if (tab === 'mirrors') loadMirrors()
+    if (tab === 'deals') loadSmPnl()
+    if (tab === 'tracked') loadTracked()
+    // Refresh mirror/deal data while those tabs are visible
+    const iv = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      if (tab === 'mirrors') loadMirrors()
+      if (tab === 'deals') loadSmPnl()
+      if (tab === 'copies') loadCopies()
+    }, 30000)
+    return () => clearInterval(iv)
+  }, [tab, loadCopies, loadMirrors, loadSmPnl, loadTracked])
+
   const filtered = useMemo(() => {
     const list = discoverList || []
     if (!q.trim()) return list
