@@ -285,7 +285,7 @@ class OKXCopyAPI:
     async def start_copy(self, inst_type, unique_code, copy_mode="fixed_amt",
                           copy_total_amt="", copy_amt="", copy_ratio="",
                           tp_ratio="", sl_ratio="", copy_mgn_mode="cross",
-                          inst_id="") -> dict:
+                          inst_id="", sub_pos_close_type="") -> dict:
         body = {
             "instType": inst_type,
             "uniqueCode": unique_code,
@@ -304,7 +304,12 @@ class OKXCopyAPI:
             body["slRatio"] = sl_ratio
         if inst_id:
             body["instId"] = inst_id
-            body["copyInstIdType"] = "1"
+        body["copyInstIdType"] = "2" if inst_id else "1"
+        if sub_pos_close_type:
+            try:
+                body["subPosCloseType"] = int(sub_pos_close_type)
+            except (TypeError, ValueError):
+                pass
         return await self._post_auth("/api/v5/copytrading/first-copy-settings", body)
 
     async def amend_copy(self, inst_type, unique_code, **kwargs) -> dict:
