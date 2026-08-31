@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Search, RefreshCw, ExternalLink, Trophy, ShieldCheck, Copy, Square, X, RefreshCw as MirrorIcon } from 'lucide-react'
+import { Search, RefreshCw, ExternalLink, Trophy, ShieldCheck, Copy, Square, X } from 'lucide-react'
 
 const fmtNum = (v, d = 0) => {
   const n = Number(v) || 0
@@ -59,54 +59,16 @@ function CopyModal({ trader, onClose, onConfirm, busy }) {
   )
 }
 
-function MirrorModal({ trader, onClose, onConfirm, busy }) {
-  const [capital, setCapital] = useState(100)
-  const [lev, setLev] = useState(3)
-  if (!trader) return null
-  const addr = (trader.eth_address || '').slice(0, 10) || (trader.unique_code || '').replace('hl:', '').slice(0, 10)
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" onClick={onClose}>
-      <div className="w-full max-w-md rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-1">
-          <h3 className="font-bold text-[var(--txt)] flex items-center gap-2"><MirrorIcon size={16} className="text-purple-400" /> Зеркало HL → OKX</h3>
-          <button onClick={onClose} className="p-1"><X size={16} /></button>
-        </div>
-        <p className="text-sm text-[var(--txt)] mb-1 truncate">{trader.alias || addr}…</p>
-        <p className="text-[10px] text-[var(--txt-muted)] mb-3 font-mono">{trader.unique_code}</p>
-        <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-3 mb-3 text-[11px] text-amber-300/90 leading-relaxed">
-          Каждые ~20 сек читаем открытые позиции лидера на Hyperliquid и зеркалируем их на ваш OKX SWAP-аккаунт.
-          Это не биржевой Copy Trading: возможны задержки и проскальзывание.
-        </div>
-        <label className="block text-xs text-[var(--txt-muted)] mb-1">Капитал на зеркало (USDT)</label>
-        <input type="number" min={20} step={10} value={capital} onChange={e => setCapital(Number(e.target.value))}
-          className="w-full mb-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-        <label className="block text-xs text-[var(--txt-muted)] mb-1">Макс. плечо</label>
-        <input type="number" min={1} max={10} value={lev} onChange={e => setLev(Number(e.target.value))}
-          className="w-full mb-4 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm text-[var(--txt)]" />
-        <div className="flex gap-2">
-          <button className="btn btn-secondary flex-1" onClick={onClose}>Отмена</button>
-          <button className="btn btn-primary flex-1" disabled={busy || capital < 20}
-            onClick={() => onConfirm({ capital, max_leverage: lev })}>
-            {busy ? 'Запуск…' : 'Запустить зеркало'}
-          </button>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 export default function SmartMoneyPage({ isGuest }) {
   const [tab, setTab] = useState('discover')
   const [list, setList] = useState([])
   const [copies, setCopies] = useState([])
-  const [mirrors, setMirrors] = useState([])
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
   const [sources, setSources] = useState('okx,hyperliquid')
   const [minRoi, setMinRoi] = useState(0)
   const [lastUpdate, setLastUpdate] = useState(null)
   const [copyTrader, setCopyTrader] = useState(null)
-  const [mirrorTrader, setMirrorTrader] = useState(null)
   const [busy, setBusy] = useState(false)
 
   const load = useCallback(async () => {
@@ -135,19 +97,9 @@ export default function SmartMoneyPage({ isGuest }) {
     } catch { setCopies([]) }
   }, [])
 
-  const loadMirrors = useCallback(async () => {
-    try {
-      const r = await fetch('/api/smart-money/mirror/status', { credentials: 'include' })
-      if (r.status === 401) { setMirrors([]); return }
-      const data = await r.json()
-      setMirrors(data?.targets || [])
-    } catch { setMirrors([]) }
-  }, [])
-
   useEffect(() => {
     if (tab === 'copies') loadCopies()
-    if (tab === 'mirrors') loadMirrors()
-  }, [tab, loadCopies, loadMirrors])
+  }, [tab, loadCopies])
 
   const handleCopy = async ({ amount, tp_ratio, sl_ratio }) => {
     if (!copyTrader) return
@@ -164,38 +116,6 @@ export default function SmartMoneyPage({ isGuest }) {
       if (data.ok) loadCopies()
     } catch (e) { alert(e.message || 'Ошибка') }
     finally { setBusy(false) }
-  }
-
-  const handleMirror = async ({ capital, max_leverage }) => {
-    if (!mirrorTrader) return
-    setBusy(true)
-    try {
-      const code = mirrorTrader.unique_code || ''
-      const address = code.startsWith('hl:') ? code.slice(3) : (mirrorTrader.eth_address || code)
-      const r = await fetch('/api/smart-money/mirror/start', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address, alias: mirrorTrader.alias || '', capital_usdt: capital, max_leverage, execute: true }),
-      })
-      const data = await r.json()
-      alert(data.msg || (data.ok ? 'Зеркало запущено' : 'Ошибка'))
-      setMirrorTrader(null)
-      if (data.ok) loadMirrors()
-    } catch (e) { alert(e.message || 'Ошибка') }
-    finally { setBusy(false) }
-  }
-
-  const handleStopMirror = async (address) => {
-    try {
-      const r = await fetch('/api/smart-money/mirror/stop', {
-        method: 'POST', credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ address, close_positions: false }),
-      })
-      const data = await r.json()
-      alert(data.msg || 'Готово')
-      loadMirrors()
-    } catch (e) { alert(e.message || 'Ошибка') }
   }
 
   const handleStopCopy = async (code) => {
@@ -218,7 +138,6 @@ export default function SmartMoneyPage({ isGuest }) {
         {[
           { id: 'discover', label: 'Лидеры' },
           { id: 'copies', label: `Мои копии (${copies.length})` },
-          { id: 'mirrors', label: `Зеркала (${mirrors.length})` },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)}
             className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition-colors ${tab === t.id ? 'bg-[var(--bg-card)] text-[var(--txt)]' : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}>
@@ -234,7 +153,7 @@ export default function SmartMoneyPage({ isGuest }) {
               <div className="flex items-center gap-2">
                 <Trophy className="text-amber-400" size={20} />
                 <h1 className="text-lg font-bold text-[var(--txt)]">Умные деньги</h1>
-                <span className="text-[10px] text-[var(--txt-muted)] border border-[var(--border)] rounded-full px-2 py-0.5">copy + mirror</span>
+                <span className="text-[10px] text-[var(--txt-muted)] border border-[var(--border)] rounded-full px-2 py-0.5">copy</span>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 <select value={sources} onChange={e => setSources(e.target.value)}
@@ -254,10 +173,10 @@ export default function SmartMoneyPage({ isGuest }) {
                 </button>
               </div>
             </div>
-            <p className="text-xs text-[var(--txt-muted)] mt-2 leading-relaxed">
-              OKX-лидеры — «Копировать» через OKX Copy Trading. Hyperliquid — «Зеркало» (позиции HL → ваш OKX SWAP).
-              {lastUpdate && <span className="ml-1 opacity-70">Обновлено {lastUpdate.toLocaleTimeString()}</span>}
-            </p>
+<p className="text-xs text-[var(--txt-muted)] mt-2 leading-relaxed">
+                OKX-лидеры — «Копировать» через OKX Copy Trading. Hyperliquid — поиск лидеров (зеркала в разработке).
+                {lastUpdate && <span className="ml-1 opacity-70">Обновлено {lastUpdate.toLocaleTimeString()}</span>}
+              </p>
             {err && <div className="text-xs text-amber-400 mt-2">{err}</div>}
           </div>
 
@@ -285,7 +204,6 @@ export default function SmartMoneyPage({ isGuest }) {
                       const wr = Number(t.win_rate) || 0
                       const src = (t.source || '').toLowerCase()
                       const isOkx = src === 'okx' || Boolean(t.copyable)
-                      const isHl = src === 'hyperliquid' || String(t.unique_code || '').startsWith('hl:')
                       return (
                         <tr key={t.unique_code || i} className="border-t border-[var(--border)] hover:bg-[var(--bg-elevated)]/50">
                           <td className="px-3 py-2 text-[var(--txt-muted)]">{i + 1}</td>
@@ -308,17 +226,13 @@ export default function SmartMoneyPage({ isGuest }) {
                             </span>
                           </td>
                           <td className="px-3 py-2 text-center">
-                            {isOkx && (
+                            {isOkx ? (
                               <button className="btn btn-primary btn-sm" disabled={isGuest} onClick={() => setCopyTrader(t)}>
                                 <Copy size={12} /> Копировать
                               </button>
+                            ) : (
+                              <span className="text-[10px] text-[var(--txt-muted)]">—</span>
                             )}
-                            {isHl && !isOkx && (
-                              <button className="btn btn-secondary btn-sm" disabled={isGuest} onClick={() => setMirrorTrader(t)}>
-                                <MirrorIcon size={12} /> Зеркало
-                              </button>
-                            )}
-                            {!isOkx && !isHl && <span className="text-[10px] text-[var(--txt-muted)]">—</span>}
                           </td>
                         </tr>
                       )
@@ -371,41 +285,7 @@ export default function SmartMoneyPage({ isGuest }) {
         </div>
       )}
 
-      {tab === 'mirrors' && (
-        <div>
-          {mirrors.length === 0 ? (
-            <div className="text-center py-16 text-sm text-[var(--txt-muted)]">
-              Активных зеркал нет. Выберите Hyperliquid-трейдера на вкладке «Лидеры» и нажмите «Зеркало».
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {mirrors.map((m, i) => (
-                <div key={m.address || i} className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <div className="font-semibold text-[var(--txt)]">{m.alias || m.address}</div>
-                      <div className="text-[10px] text-[var(--txt-muted)] font-mono">{m.address}</div>
-                      <div className="text-xs text-[var(--txt-muted)] mt-1">
-                        Капитал ${fmtNum(m.capital_usdt)} · плечо x{m.max_leverage} · позиций {Object.keys(m.mirrored || {}).length}
-                      </div>
-                      {m.last_error ? <div className="text-xs text-red-400 mt-1">{m.last_error}</div> : null}
-                      {m.active ? <span className="text-[10px] text-emerald-400 mt-1 inline-block">● активно</span> : null}
-                    </div>
-                    {!isGuest && (
-                      <button className="btn btn-danger btn-sm" onClick={() => handleStopMirror(m.address)}>
-                        <Square size={12} /> Стоп
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
       {copyTrader && <CopyModal trader={copyTrader} onClose={() => setCopyTrader(null)} onConfirm={handleCopy} busy={busy} />}
-      {mirrorTrader && <MirrorModal trader={mirrorTrader} onClose={() => setMirrorTrader(null)} onConfirm={handleMirror} busy={busy} />}
     </div>
   )
 }

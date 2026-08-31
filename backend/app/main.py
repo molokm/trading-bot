@@ -2050,44 +2050,12 @@ async def smart_money_mirror_status():
 @app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
 async def smart_money_mirror_start(data: dict = None):
     """Start mirroring a public Hyperliquid trader onto OKX."""
-    from app.services.smart_money_mirror import get_mirror
-    data = data or {}
-    address = data.get("address") or data.get("unique_code") or ""
-    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
-    # Capture the main loop so the mirror thread can safely delegate DB calls
-    # (asyncpg is bound to this loop; _safe_db uses run_coroutine_threadsafe).
-    try:
-        m.set_main_loop(asyncio.get_running_loop())
-    except Exception:
-        pass
-    # ensure OKX client
-    if client_manager and not client_manager.get_client():
-        try:
-            if _env_key and _env_secret and _env_pass:
-                await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
-        except Exception as e:
-            return {"ok": False, "msg": f"OKX connect failed: {e}"}
-    # Memory guard: refuse to start if the process is near the 512MB free-tier
-    # limit — 4 bots + tracker + mirror can OOM-kill the instance.
-    try:
-        import resource as _r
-        _rss_kb = _r.getrusage(_r.RUSAGE_SELF).ru_maxrss
-        _rss_mb = _rss_kb / 1024 if _rss_kb > 10_000_000 else _rss_kb / 1024
-        # On Linux ru_maxrss is KB, on macOS bytes — normalize to MB
-        _rss_mb = (_rss_kb / 1048576) if _rss_kb > 10_000_000 else (_rss_kb / 1024)
-        if _rss_mb > 420:
-            print(f"[sm/mirror] REFUSE start: rss={_rss_mb:.0f}MB near limit", flush=True)
-            return {"ok": False, "msg": f"Процесс использует {_rss_mb:.0f}MB памяти — близко к лимиту. Остановите часть ботов и повторите."}
-        print(f"[sm/mirror] start: rss={_rss_mb:.0f}MB before mirror", flush=True)
-    except Exception:
-        pass
-    return await m.start_mirror(
-        address=address,
-        alias=str(data.get("alias") or ""),
-        capital_usdt=float(data.get("capital_usdt") or data.get("copy_amt") or 100),
-        max_leverage=float(data.get("max_leverage") or 3),
-        execute=bool(data.get("execute", True)),
-    )
+    # Mirroring runs a background thread with its own event loop. On the
+    # free-tier Render instance this destabilizes the process (site goes
+    # down with empty 503, no crash log). Disabled until it can be reworked
+    # to avoid per-thread async/network loops. OKX Copy Trading (one-shot
+    # REST call) remains fully supported via /api/smart-money/copy.
+    return {"ok": False, "msg": "Зеркала HL→OKX временно отключены — перерабатываются. Доступно OKX Copy Trading."}
 
 
 @app.post("/api/smart-money/mirror/stop", dependencies=[Depends(require_admin)])
