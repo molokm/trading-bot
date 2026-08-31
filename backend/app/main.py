@@ -1887,7 +1887,7 @@ async def smart_money_track(data: dict = None):
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    tracker = _ensure_sm_tracker(start=True)
+    tracker = _ensure_sm_tracker(start=False)
     res = await tracker.track_trader(code)
     try:
         await tracker.persist_to_db()
@@ -1913,9 +1913,22 @@ async def smart_money_untrack(data: dict = None):
     return res
 
 
+def _sm_okx_api() -> "OKXCopyAPI":
+    """Build a fresh OKX Copy Trading API client (no tracker thread, no
+    background work). Copy trading on OKX is a one-shot REST call, so it
+    does NOT need the Smart Money tracker thread that crashed the process."""
+    from app.services.smart_money_tracker import OKXCopyAPI
+    return OKXCopyAPI(
+        api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+        secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+        passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+        demo=_env_demo,
+    )
+
+
 @app.post("/api/smart-money/copy", dependencies=[Depends(require_admin)])
 async def smart_money_copy(data: dict = None):
-    """Start copying a trader on OKX (auto-inits tracker + enables execute)."""
+    """Start copying a trader on OKX (direct Copy Trading API — no tracker thread)."""
     data = data or {}
     code = data.get("unique_code", "")
     if not code:
@@ -1930,28 +1943,75 @@ async def smart_money_copy(data: dict = None):
                 "в списке включите источник OKX и нажмите «Копировать» на карточке с бейджем OKX."
             ),
         }
-    tracker = _ensure_sm_tracker(execute=True, start=True)
-    return await tracker.start_copying(code, copy_amt=data.get("copy_amt"))
+    okx = _sm_okx_api()
+    if not (okx.api_key or "").strip():
+        return {"ok": False, "msg": "OKX API keys not configured"}
+    amt = str(data.get("copy_amt") or 500)
+    try:
+        resp = await okx.start_copy(
+            inst_type="SWAP",
+            unique_code=code_s,
+            copy_mode="fixed_amt",
+            copy_total_amt=amt,
+            tp_ratio=str(data.get("tp_ratio") or 0.10),
+            sl_ratio=str(data.get("sl_ratio") or 0.05),
+            copy_mgn_mode="cross",
+        )
+        if resp.get("code") == "0":
+            try:
+                from .smart_money_ledger import get_sm_ledger
+                get_sm_ledger().record_open(
+                    kind="copy", symbol="PORTFOLIO", side="copy",
+                    size=float(amt or 0), price=0, leader=code_s,
+                    source="okx", note=f"OKX copy start {amt} USDT",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "msg": f"copying started with {amt} USDT"}
+        msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
+        return {"ok": False, "msg": msg}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
 
 
 @app.post("/api/smart-money/stop-copy", dependencies=[Depends(require_admin)])
 async def smart_money_stop_copy(data: dict = None):
-    """Stop copying a trader."""
-    global sm_tracker
+    """Stop copying a trader on OKX."""
     data = data or {}
     code = data.get("unique_code", "")
     if not code:
         return {"ok": False, "msg": "unique_code required"}
-    tracker = _ensure_sm_tracker()
-    return await tracker.stop_copying(code)
+    okx = _sm_okx_api()
+    try:
+        resp = await okx.stop_copy(inst_type="SWAP", unique_code=str(code).strip())
+        if resp.get("code") == "0":
+            try:
+                from .smart_money_ledger import get_sm_ledger
+                get_sm_ledger().record_close(
+                    kind="copy", symbol="PORTFOLIO", side="copy",
+                    size=0, price=0, pnl=0, leader=str(code).strip(),
+                    source="okx", note="OKX copy stopped",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "msg": "copying stopped"}
+        msg = resp.get("data", [{}])[0].get("sMsg", resp.get("msg", "unknown"))
+        return {"ok": False, "msg": msg}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
 
 
 @app.get("/api/smart-money/my-copies")
 async def smart_money_my_copies():
     """Get list of traders we're currently copying."""
-    tracker = _ensure_sm_tracker()
-    copies = await tracker.get_my_copies()
-    return {"copies": copies}
+    okx = _sm_okx_api()
+    try:
+        resp = await okx.get_my_lead_traders()
+        if resp.get("code") == "0":
+            return {"copies": resp.get("data", [])}
+        return {"copies": [], "error": resp.get("msg", "")}
+    except Exception as e:
+        return {"copies": [], "error": str(e)}
 
 
 
