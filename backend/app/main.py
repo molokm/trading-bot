@@ -5212,18 +5212,34 @@ async def get_pnl():
             funding_source = "cache"
         else:
             epoch = await get_pnl_epoch()
-            resp_f = await _okx_call(
-                lambda c: c.get_bills(inst_type="SWAP", type="8", limit=50)
-            )
-            if not resp_f.get("error"):
-                for b in resp_f.get("data") or []:
+            # Paginate backwards by billId so we don't miss funding events when
+            # the account trades many instruments (10+ coins × 3/day ⇒ 50-bill
+            # single page covers < 2 days). Cap pages to bound OKX load.
+            after = ""
+            for _page in range(6):
+                resp_f = await _okx_call(
+                    lambda c, a=after: c.get_bills(
+                        inst_type="SWAP", type="8", limit=100,
+                        **({"after": a} if a else {})
+                    )
+                )
+                if resp_f.get("error"):
+                    if _page == 0:
+                        print(f"[pnl] funding fetch: {resp_f.get('message', '')}", flush=True)
+                    break
+                page_data = resp_f.get("data") or []
+                if not page_data:
+                    break
+                stop = False
+                for b in page_data:
                     ts = b.get("ts") or b.get("cTime") or ""
                     try:
                         if epoch and ts:
                             from datetime import datetime as _dt, timezone as _tz
                             t_iso = _dt.fromtimestamp(int(ts) / 1000, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
                             if t_iso[:19] < str(epoch)[:19]:
-                                continue
+                                stop = True
+                                break
                     except Exception:
                         pass
                     try:
@@ -5234,9 +5250,14 @@ async def get_pnl():
                         funding_n += 1
                     except (TypeError, ValueError):
                         continue
-                funding_source = "okx_bills_type8"
-                _FUNDING_CACHE = funding
-                _FUNDING_CACHE_TS = now_f
+                if stop or len(page_data) < 100:
+                    break
+                after = page_data[-1].get("billId", "")
+                if not after:
+                    break
+            funding_source = "okx_bills_type8"
+            _FUNDING_CACHE = funding
+            _FUNDING_CACHE_TS = now_f
     except Exception as e:
         print(f"[pnl] funding: {e}", flush=True)
 
