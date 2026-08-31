@@ -579,17 +579,17 @@ class SmartMoneyMirror:
 
         The mirror runs in its own thread/loop; asyncpg connections are bound
         to the main uvicorn loop. Calling them from the mirror's loop raises
-        'attached to a different loop' and crashes the process. If we are not
-        on the main loop (or cannot determine it), we skip the DB write
-        silently — claims are best-effort and state is persisted to file.
+        'attached to a different loop' and crashes the process. We never run
+        DB calls here unless we KNOW we are on the main loop or can safely
+        delegate there via run_coroutine_threadsafe.
         """
         try:
             cur = asyncio.get_running_loop()
         except RuntimeError:
             cur = None
         main_loop = getattr(self, "_main_loop", None)
-        # Only run when we are definitely on the main loop.
-        if cur is not None and (main_loop is None or cur is main_loop):
+        # We can only run DB when we are ON the main loop.
+        if cur is not None and main_loop is not None and cur is main_loop:
             await fn(*args, **kwargs)
             return
         # Foreign loop (mirror thread) — try delegating to main loop, else skip.

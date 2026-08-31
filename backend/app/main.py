@@ -2050,12 +2050,16 @@ async def smart_money_mirror_status():
 @app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
 async def smart_money_mirror_start(data: dict = None):
     """Start mirroring a public Hyperliquid trader onto OKX."""
-    if os.getenv("SM_EXECUTION_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
-        return {"ok": False, "msg": "Автоследование (зеркала) временно отключено — раздел перерабатывается"}
     from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
     m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+    # Capture the main loop so the mirror thread can safely delegate DB calls
+    # (asyncpg is bound to this loop; _safe_db uses run_coroutine_threadsafe).
+    try:
+        m.set_main_loop(asyncio.get_running_loop())
+    except Exception:
+        pass
     # ensure OKX client
     if client_manager and not client_manager.get_client():
         try:
