@@ -809,6 +809,82 @@ async def auth_logout(request: Request):
     resp = JSONResponse({"ok": True})
     return _clear_auth_cookie(resp)
 
+
+# ── Multi-tenant /api/me/* helpers ─────────────────────────────────────────
+# (restored from 96ad252 — were accidentally removed in e0c251e, leaving the
+#  /api/me/* routes calling undefined functions → NameError)
+
+async def _me_ctx(request: Request):
+    """Resolve the authenticated user context.
+
+    Returns (role, user_id, user_row_or_None). Owner (admin) has user_id=None
+    and keeps using env creds + global bots. 'user' role maps to their own
+    account. Guests are rejected.
+    """
+    token = get_token(request)
+    role = validate(token)
+    if role not in ("admin", "user"):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    user_id = get_user_id(token)
+    user_row = None
+    if user_id:
+        try:
+            user_row = await db.get_user_by_telegram(user_id)
+        except Exception:
+            user_row = None
+    return role, user_id, user_row
+
+
+async def _user_okx_client(user_id: str) -> Optional[OKXClient]:
+    """Return (and cache) the user's OKXClient from their encrypted creds."""
+    global _user_clients
+    existing = _user_clients.get(user_id)
+    if existing:
+        return existing
+    try:
+        u = await db.get_user_by_telegram(user_id)
+    except Exception:
+        return None
+    if not u:
+        return None
+    key = decrypt_str(u.get("okx_key_enc") or "")
+    secret = decrypt_str(u.get("okx_secret_enc") or "")
+    passphrase = decrypt_str(u.get("okx_pass_enc") or "")
+    if not (key and secret and passphrase):
+        return None
+    client = OKXClient(key, secret, passphrase, bool(u.get("okx_demo", 1)))
+    _user_clients[user_id] = client
+    strategy_mgr.set_user_client(user_id, client)
+    return client
+
+
+def _clear_user_client(user_id: str):
+    global _user_clients
+    old = _user_clients.pop(user_id, None)
+    if old:
+        try:
+            asyncio.get_event_loop().create_task(old.close())
+        except Exception:
+            pass
+
+
+def _user_notifier(user_id: str):
+    """Notifier that delivers a user's bot signals to THEIR chat (not the channel)."""
+    if not telegram.token:
+        return telegram
+    return TelegramNotifier(token=telegram.token, chat_id=str(user_id), channel_id="")
+
+
+def _has_active_plan(user_row: dict) -> bool:
+    """Pro users need a currently-active subscription to run bots."""
+    if not user_row:
+        return False
+    plan = user_row.get("plan")
+    if plan not in ("signals", "pro"):
+        return False
+    return _is_active(user_row)
+
+
 @app.get("/api/me")
 async def me_profile(request: Request):
     """Current user profile: plan, subscription status, creds state."""
@@ -1976,87 +2052,6 @@ async def health():
     def _bot_flag(bot) -> bool:
         return bool(bot is not None and getattr(bot, "_running", False))
 
-    # Lightweight PnL-pipeline diagnostics (no secrets): lets us see why a
-    # closed trade (e.g. ETH +657 on 30.08) is missing from trades/PnL.
-    diag = {}
-    try:
-        epoch = await get_pnl_epoch()
-        diag["pnl_epoch"] = epoch
-    except Exception as e:
-        diag["pnl_epoch_err"] = str(e)
-    try:
-        paired_resp = await _get_paired_trades_impl(limit=500)
-        diag["paired_count"] = len(paired_resp.get("trades", []))
-        diag["paired_debug"] = paired_resp.get("debug", {})
-        big = [t for t in paired_resp.get("trades", [])
-               if abs(float(t.get("pnl") or 0)) > 100]
-        diag["big_trades"] = [
-            {"inst": t.get("inst_id"), "time": t.get("exit_time") or t.get("time"),
-             "pnl": t.get("pnl"), "bot": t.get("bot"), "ord": str(t.get("ord_id", ""))[:14]}
-            for t in big
-        ]
-        # Direct bills scan: does a large +PnL ETH bill exist at all on this account?
-        try:
-            bills_all = await _fetch_all_trade_bills()
-            eth_bills = []
-            eth_ord_all = []
-            for b in bills_all:
-                if (b.get("instId") or "").startswith("ETH"):
-                    try:
-                        bp = float(b.get("pnl") or 0)
-                    except (TypeError, ValueError):
-                        bp = 0.0
-                    if abs(bp) > 50:
-                        eth_bills.append({
-                            "ts": str(b.get("ts"))[:13], "pnl": round(bp, 2),
-                            "sub": b.get("subType"), "ord": str(b.get("ordId"))[:14],
-                            "px": b.get("px"), "sz": b.get("sz"),
-                        })
-                    # All bills for the target close ord (30.08 ETH +657)
-                    if str(b.get("ordId", "")).startswith("3879571486634"):
-                        eth_ord_all.append({
-                            "ts": str(b.get("ts"))[:13], "pnl": round(bp, 2),
-                            "sub": b.get("subType"), "px": b.get("px"), "sz": b.get("sz"),
-                            "side": b.get("side"),
-                        })
-            diag["eth_big_bills"] = eth_bills
-            diag["eth_close_ord_all"] = eth_ord_all
-            # Re-run _pair_bills and show what it emits for ETH closes
-            try:
-                pb = _pair_bills(bills_all)
-                diag["pair_bills_eth"] = [
-                    {"time": t.get("time"), "pnl": t.get("pnl"), "reason": t.get("reason"),
-                     "sz": t.get("size"), "entry": t.get("entry"), "exit": t.get("exit_price"),
-                     "ord": str(t.get("ord_id", ""))[:14]}
-                    for t in pb if (t.get("inst_id") or "").startswith("ETH") and t.get("reason") == "closed"
-                ]
-            except Exception as e:
-                diag["pair_bills_err"] = str(e)
-        except Exception as e:
-            diag["bills_scan_err"] = str(e)
-        eth = [t for t in paired_resp.get("trades", [])
-               if (t.get("inst_id") or t.get("symbol", "")).startswith("ETH")]
-        diag["eth_trades"] = [
-            {"time": t.get("exit_time") or t.get("time"), "pnl": t.get("pnl"),
-             "entry": t.get("entry") or t.get("entry_px"), "exit": t.get("exit_px"),
-             "reason": t.get("reason"), "bot": t.get("bot"),
-             "ord": str(t.get("ord_id", ""))[:14]}
-            for t in eth
-        ]
-    except Exception as e:
-        diag["paired_err"] = str(e)
-    try:
-        from app.services.rotation_strategy import ROT_BOT_ID
-        db_rows = await db.get_trades(bot_id=ROT_BOT_ID, limit=30)
-        diag["db_rot_trades"] = len(db_rows)
-        diag["db_eth"] = [
-            {"ts": t.get("timestamp", "")[:19], "px": t.get("px"), "pnl": t.get("pnl"),
-             "state": t.get("state"), "ord": str(t.get("ord_id", ""))[:12]}
-            for t in db_rows if (t.get("inst_id") or "").startswith("ETH")
-        ]
-    except Exception as e:
-        diag["db_err"] = str(e)
-
     return {
         "status": "ok",
         "connected": connected,
@@ -2074,7 +2069,6 @@ async def health():
         },
         "auth": "jwt",
         "risk": risk_get_status().to_dict(),
-        "pnl_diag": diag,
     }
 
 
@@ -5636,8 +5630,10 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             print(f"[trades/paired] DB read error: {e}", flush=True)
 
     # Live in-memory logs (they may include entries not yet flushed to DB).
-    live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation)]
-    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation"}
+    live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation),
+                 ("ai", ai_bot)]
+    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D",
+                  VAL_BOT_ID: "MACD+Donchian Validation", AI_BOT_ID: "AI Discretionary 1H"}
     for key, bot in live_bots:
         if bot and bot._trade_log:
             for t in bot._trade_log:
