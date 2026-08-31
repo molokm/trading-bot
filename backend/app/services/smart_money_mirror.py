@@ -723,13 +723,20 @@ class SmartMoneyMirror:
                                 if sz > 0 and px > 0:
                                     await claim_open(self.db, "smart_money", inst, side, sz, px)
                     try:
-                        loop = asyncio.get_event_loop()
-                        if loop.is_running():
-                            asyncio.ensure_future(_reclaim())
-                        else:
-                            loop.run_until_complete(_reclaim())
+                        loop = asyncio.get_running_loop()
+                        asyncio.ensure_future(_reclaim())
                     except RuntimeError:
-                        asyncio.run(_reclaim())
+                        # No running loop in this thread — skip reclaim
+                        try:
+                            main_loop = getattr(self, "_main_loop", None)
+                            if main_loop and main_loop.is_running():
+                                main_loop.call_soon_threadsafe(
+                                    lambda: asyncio.ensure_future(_reclaim())
+                                )
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.warning("mirror reclaim on hydrate: %s", e)
                 except Exception as e:
                     log.warning("mirror reclaim on hydrate: %s", e)
                 # auto-resume polling if any active
