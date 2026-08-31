@@ -4,10 +4,23 @@ import logging
 import os
 import time as _time
 import uuid
+import faulthandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
+
+# Dump native thread tracebacks on fatal signals (segfault/abort) to a file
+# that survives the crash, so we can see what actually killed the process.
+_CRASH_LOG = os.path.join(os.environ.get("DATA_DIR", "/tmp"), "crash_traceback.log")
+try:
+    with open(_CRASH_LOG, "w") as _cf:
+        _cf.write("")
+    faulthandler.enable(file=open(_CRASH_LOG, "a"))
+    faulthandler.register(11, file=open(_CRASH_LOG, "a"))   # SIGSEGV
+    faulthandler.register(6, file=open(_CRASH_LOG, "a"))    # SIGABRT
+except Exception:
+    pass
 
 logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -2212,6 +2225,15 @@ async def health():
         m = get_mirror(client_manager=client_manager, notifier=None, db=db)
         diag["sm_mirror_running"] = bool(getattr(m, "_running", False))
         diag["sm_mirror_targets"] = len(getattr(m, "_targets", {}) or {})
+    except Exception:
+        pass
+    # Read crash log (faulthandler dump) if it exists
+    try:
+        import os as _os
+        cl = _os.environ.get("DATA_DIR", "/tmp") + "/crash_traceback.log"
+        if _os.path.exists(cl) and _os.path.getsize(cl) > 0:
+            with open(cl) as _f:
+                diag["crash_log"] = _f.read()[-2000:]
     except Exception:
         pass
 
