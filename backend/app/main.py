@@ -230,17 +230,30 @@ async def startup():
         await db.init()
         await telegram.load_from_db(db)
 
-        # One-shot wipe of strategy PnL/trades — cards count from today
-        try:
-            marker = "trading_stats_reset_v2_2026_08_30_strict"
-            prev = await db.get_setting("trading_stats_reset_marker")
-            force = (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes")
-            if force or (prev or "") != marker:
-                print(f"[startup] trading stats reset (marker={marker}) ...", flush=True)
-                await admin_reset_trading_stats({})
-                await db.set_setting("trading_stats_reset_marker", marker)
-        except Exception as e:
-            print(f"[startup] reset trading stats: {e}", flush=True)
+        # Strategy PnL/trades reset — ONLY when explicitly requested via env.
+        # Previously this auto-wiped on every deploy when the hardcoded marker
+        # changed: it DELETED closed trades from the DB and set pnl_epoch to the
+        # deploy day (UTC). That silently dropped real closed trades (e.g. the
+        # 30.08 ETH close +657) from both the trades list and PnL.
+        force = (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes")
+        if force:
+            print("[startup] RESET_TRADING_STATS=1 → wiping strategy stats ...", flush=True)
+            await admin_reset_trading_stats({})
+            await db.set_setting("trading_stats_reset_marker", "manual")
+        else:
+            # No explicit reset. If a previous automated deploy left a stale
+            # pnl_epoch (marker != "manual"), clear it so OKX-confirmed closed
+            # trades before that moment count again. Never touch "manual".
+            try:
+                prev_marker = await db.get_setting("trading_stats_reset_marker")
+                if prev_marker and str(prev_marker) != "manual":
+                    stale_epoch = await db.get_setting("pnl_epoch")
+                    await db.set_setting("pnl_epoch", "")
+                    await db.set_setting("trading_stats_reset_marker", "")
+                    print(f"[startup] cleared stale auto-reset (marker={prev_marker!r} "
+                          f"epoch={stale_epoch!r}) — history restored", flush=True)
+            except Exception as e:
+                print(f"[startup] clear stale reset: {e}", flush=True)
 
         print("[startup] 2/7 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
@@ -4821,6 +4834,8 @@ async def admin_reset_trading_stats(data: dict = None):
 
     wipe = await db.wipe_strategy_trading_data(bot_ids)
     await db.set_setting("pnl_epoch", epoch)
+    # Mark as an explicit (manual) reset so startup never clears this epoch.
+    await db.set_setting("trading_stats_reset_marker", "manual")
     # clear lifetime blobs
     for key in (
         f"ai_lifetime:{AI_BOT_ID}",
