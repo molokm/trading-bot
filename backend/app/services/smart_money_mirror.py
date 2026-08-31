@@ -630,42 +630,23 @@ class SmartMoneyMirror:
             self._targets[t.address] = t
 
     def _persist(self):
+        """Write mirror state to the local file only.
+
+        The mirror runs in its own thread/loop while asyncpg is bound to the
+        main uvicorn loop. Writing DB from this thread raises 'attached to a
+        different loop' and can crash the process, so we NEVER touch the DB
+        here. Main-thread callers use persist_to_db() separately.
+        """
         data = self._snapshot()
-        # 1) local file (best-effort)
         try:
             os.makedirs(DATA_DIR, exist_ok=True)
             with open(self._state_path(), "w") as f:
                 json.dump(data, f)
         except Exception as e:
             log.warning("persist mirror file: %s", e)
-        # 2) durable DB (survives Render redeploy) — only via a running loop,
-        #    never asyncio.run() from a background thread (can corrupt main loop).
-        try:
-            if self.db and hasattr(self.db, "set_setting"):
-                payload = json.dumps(data, default=str)
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._db_persist(payload))
-                except RuntimeError:
-                    try:
-                        main_loop = getattr(self, "_main_loop", None)
-                        if main_loop and main_loop.is_running():
-                            main_loop.call_soon_threadsafe(
-                                lambda: asyncio.ensure_future(self._db_persist(payload))
-                            )
-                    except Exception:
-                        pass
-        except Exception as e:
-            log.warning("persist mirror db: %s", e)
-
-    async def _db_persist(self, payload: str):
-        try:
-            if self.db:
-                await self.db.set_setting("sm_mirror_state", payload)
-        except Exception as e:
-            log.warning("mirror db persist task: %s", e)
 
     async def persist_to_db(self):
+        """Persist mirror state to DB. MUST be called from the main thread."""
         if not self.db:
             return
         try:

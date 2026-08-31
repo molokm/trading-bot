@@ -1844,7 +1844,12 @@ async def smart_money_track(data: dict = None):
     if not code:
         return {"ok": False, "msg": "unique_code required"}
     tracker = _ensure_sm_tracker(start=True)
-    return await tracker.track_trader(code)
+    res = await tracker.track_trader(code)
+    try:
+        await tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/track] db persist: {e}", flush=True)
+    return res
 
 
 @app.post("/api/smart-money/untrack", dependencies=[Depends(require_admin)])
@@ -1856,7 +1861,12 @@ async def smart_money_untrack(data: dict = None):
     if not code:
         return {"ok": False, "msg": "unique_code required"}
     tracker = _ensure_sm_tracker()
-    return tracker.untrack_trader(code)
+    res = tracker.untrack_trader(code)
+    try:
+        await tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/untrack] db persist: {e}", flush=True)
+    return res
 
 
 @app.post("/api/smart-money/copy", dependencies=[Depends(require_admin)])
@@ -1988,6 +1998,10 @@ async def smart_money_start(data: dict = None):
         if hasattr(sm_tracker, "hydrate_from_db"):
             await sm_tracker.hydrate_from_db()
         sm_tracker.start()
+        try:
+            await sm_tracker.persist_to_db()
+        except Exception as e:
+            print(f"[sm/start] db persist: {e}", flush=True)
         # Restore mirror + claims for open SM positions (e.g. BTC)
         try:
             from app.services.smart_money_mirror import get_mirror
@@ -2026,7 +2040,12 @@ async def smart_money_update_config(data: dict = None):
         "min_lead_days", "poll_interval_sec", "execute",
     }
     filtered = {k: v for k, v in data.items() if k in allowed and v is not None}
-    return sm_tracker.update_config(**filtered)
+    res = sm_tracker.update_config(**filtered)
+    try:
+        await sm_tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/config] db persist: {e}", flush=True)
+    return res
 
 
 @app.get("/api/smart-money/trader/{unique_code}/history")
