@@ -379,6 +379,7 @@ class SmartMoneyMirror:
             t.mirrored[coin] = {
                 "side": side, "okx_sz": cur["sz"], "inst_id": inst,
                 "hl_szi": d.get("szi"), "updated": time.time(),
+                "entry": float(cur.get("avg_px") or 0),
             }
             return
 
@@ -392,6 +393,7 @@ class SmartMoneyMirror:
             t.mirrored[coin] = {
                 "side": side, "okx_sz": contracts, "inst_id": inst,
                 "hl_szi": d.get("szi"), "updated": time.time(), "paper": True,
+                "entry": float(px or 0),
             }
             return
 
@@ -433,6 +435,7 @@ class SmartMoneyMirror:
                 t.mirrored[coin] = {
                     "side": side, "okx_sz": contracts, "inst_id": inst,
                     "hl_szi": d.get("szi"), "updated": time.time(),
+                    "entry": float(px or 0),
                 }
                 try:
                     from .smart_money_ledger import get_sm_ledger
@@ -481,12 +484,62 @@ class SmartMoneyMirror:
                         pos_side=side,
                         reduce_only=True,
                     )
-            self._log(t, "close", coin=coin, reason=reason, resp=str(resp)[:200] if resp else "")
+
+            # Extract close ordId for fill-based PnL lookup
+            close_ord_id = ""
+            exit_px = 0.0
+            close_pnl = 0.0
+            if resp:
+                try:
+                    d0 = (resp.get("data") or [{}])[0]
+                    close_ord_id = str(d0.get("ordId") or "").strip()
+                except Exception:
+                    pass
+
+            # Real PnL from OKX fills (most accurate)
+            if close_ord_id and client:
+                try:
+                    from .pnl_utils import pnl_from_okx_fills
+                    fl = await client.get_fills(inst_id=inst, ordId=close_ord_id, limit=100)
+                    frows = fl.get("data") or []
+                    if frows:
+                        net, avg, _fees, _fsz = pnl_from_okx_fills(frows, 0.0)
+                        if avg is not None and avg > 0:
+                            exit_px = avg
+                        if net is not None:
+                            close_pnl = net
+                except Exception:
+                    pass
+
+            # Fallback: mark price from ticker
+            if exit_px <= 0 and client:
+                try:
+                    tick = await client.get_ticker(inst)
+                    exit_px = float((tick.get("data") or [{}])[0].get("last") or 0)
+                except Exception:
+                    exit_px = 0
+
+            # Fallback compute: if no fill PnL, derive from entry × ct_val
+            if close_pnl == 0 and exit_px > 0:
+                entry = float(m.get("entry") or 0)
+                sz = float(m.get("okx_sz") or 0)
+                ct = CT_VAL.get(coin, 0.01)
+                if entry > 0 and sz > 0 and ct > 0:
+                    if side == "long":
+                        close_pnl = (exit_px - entry) * sz * ct
+                    else:
+                        close_pnl = (entry - exit_px) * sz * ct
+
+            self._log(t, "close", coin=coin, reason=reason,
+                      exit_px=round(exit_px, 4), pnl=round(close_pnl, 4),
+                      ord=close_ord_id[:12] if close_ord_id else "")
             try:
                 from .smart_money_ledger import get_sm_ledger
                 get_sm_ledger().record_close(
                     kind="mirror", symbol=coin, side=side,
-                    size=float(m.get("okx_sz") or 0), price=0, pnl=0,
+                    size=float(m.get("okx_sz") or 0),
+                    price=round(exit_px, 6),
+                    pnl=round(close_pnl, 4),
                     leader=t.address, source="hyperliquid",
                     note=f"mirror close ({reason})",
                 )
