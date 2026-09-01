@@ -2453,6 +2453,7 @@ async def health():
                 })
             _today.sort(key=lambda x: x["time"], reverse=True)
             diag["pnl_today_trades"] = _today[:15]
+            diag["inst_entry_bot"] = _pt.get("debug", {}).get("inst_entry_bot", {})
             if _eth_debug:
                 diag["pnl_eth_debug"] = _eth_debug
         except Exception as e:
@@ -6534,7 +6535,8 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     return {"trades": dedup[:limit],
             "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
                       "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids),
-                      "pair_err": pair_bills_err}}
+                      "pair_err": pair_bills_err,
+                      "inst_entry_bot": dict(inst_entry_bot)}}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
