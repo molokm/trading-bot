@@ -57,7 +57,7 @@ logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Request, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -2394,8 +2394,8 @@ async def health_positions_claims():
     }
 
 @app.get("/api/health")
-async def health():
-    """Liveness + connection + bot run flags (for keep-alive monitors and UI)."""
+async def health(request: Request):
+    """Liveness + connection + bot flags. Heavy PnL only with ?diag=1."""
     client = client_manager.get_client()
     connected = client is not None
     uptime = None
@@ -2405,7 +2405,6 @@ async def health():
     def _bot_flag(bot) -> bool:
         return bool(bot is not None and getattr(bot, "_running", False))
 
-    # Lightweight process memory + SM diagnostics (no heavy calls, no secrets).
     diag = {}
     try:
         import resource
@@ -2415,117 +2414,30 @@ async def health():
     try:
         diag["sm_running"] = bool(getattr(sm_tracker, "_running", False))
         diag["sm_tracked"] = len(getattr(sm_tracker, "_traders", {}) or {})
-        diag["sm_error"] = (getattr(sm_tracker, "_last_error", "") or "")[:200]
-        diag["sm_execute"] = bool(getattr(getattr(sm_tracker, "config", None), "execute", False))
+        diag["sm_error"] = (getattr(sm_tracker, "_last_error", "") or "")[:120]
     except Exception:
         pass
+
+    _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+
+    # Optional heavy diagnostics (manual only — never for UptimeRobot)
+    want_diag = False
     try:
-        from app.services.smart_money_mirror import get_mirror
-        m = get_mirror(client_manager=client_manager, notifier=None, db=db)
-        diag["sm_mirror_running"] = bool(getattr(m, "_running", False))
-        diag["sm_mirror_targets"] = len(getattr(m, "_targets", {}) or {})
+        if request is not None:
+            want_diag = str(request.query_params.get("diag") or "") in ("1", "true", "yes")
     except Exception:
-        pass
-    # Read crash log (faulthandler dump) if it exists — try multiple paths
-    try:
-        import os as _os
-        _crash_paths = [
-            _os.environ.get("DATA_DIR", "/tmp") + "/crash_traceback.log",
-            "/tmp/crash_traceback.log",
-            _os.environ.get("HOME", "/tmp") + "/crash_traceback.log",
-        ]
-        for _cp in _crash_paths:
-            if _os.path.exists(_cp) and _os.path.getsize(_cp) > 0:
-                with open(_cp) as _f:
-                    diag["crash_log"] = _f.read()[-2000:]
-                break
-        # log current rss to a file too (OOM hint)
+        want_diag = False
+    if want_diag:
         try:
-            import resource as _r
-            _cur = _r.getrusage(_r.RUSAGE_SELF).ru_maxrss
-            diag["rss_current"] = round(_cur / 1024, 1)  # KB->MB approx (linux) / bytes->MB (mac)
-        except Exception:
-            pass
-    except Exception:
-        pass
-    # Telegram config status
-    diag["telegram"] = {
-        "configured": telegram.configured,
-        "status": telegram.status,
-        "chat_id": (telegram.chat_id[:2] + "…" + telegram.chat_id[-3:]) if telegram.chat_id else "",
-        "token": (telegram.token[:6] + "…" + telegram.token[-4:]) if telegram.token else "",
-    }
-    # AI env config
-    diag["ai_env"] = {
-        "AI_EXECUTE": os.getenv("AI_EXECUTE", "(unset)"),
-        "AI_AUTO_START": os.getenv("AI_AUTO_START", "(unset)"),
-        "AI_EXEC_CFG": None if ai_bot is None or ai_bot.config.execute is None else ai_bot.config.execute,
-        "MOM_AUTO_START": os.getenv("MOM_AUTO_START", "(unset, default off)"),
-        "IMP_AUTO_START": os.getenv("IMP_AUTO_START", "(unset, default off)"),
-        "VAL_AUTO_START": os.getenv("VAL_AUTO_START", "(unset, default off)"),
-    }
-    # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
-    # cards may look wrong (e.g. -288 today).
-    try:
-        diag["pnl_epoch"] = await get_pnl_epoch()
-        _pr = await get_pnl()
-        diag["pnl_total"] = _pr.get("total")
-        diag["pnl_1d"] = _pr.get("1d")
-        diag["pnl_week"] = _pr.get("week")
-        diag["pnl_per_bot"] = _pr.get("per_bot")
-        diag["pnl_source"] = _pr.get("source")
-        diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
-        # Last trades with PnL to explain the daily number
-        try:
-            _pt = await get_paired_trades(limit=500)
-            from datetime import datetime as _dt, timezone as _tz
-            _now = _dt.now(_tz.utc)
-            _today = []
-            _eth_debug = []
-            for _t in _pt.get("trades", []):
-                _ts = _t.get("exit_time") or _t.get("time") or ""
-                if not _ts:
-                    continue
-                try:
-                    _parsed = _dt.fromisoformat(_ts)
-                    if _parsed.tzinfo is None:
-                        _parsed = _parsed.replace(tzinfo=_tz.utc)
-                    _today_flag = (_now - _parsed).total_seconds() <= 86400
-                except Exception:
-                    _today_flag = False
-                _pnl = _t.get("pnl")
-                if _pnl is None:
-                    continue
-                _inst = _t.get("inst_id") or _t.get("symbol", "")
-                if "ETH" in _inst:
-                    _eth_debug.append({
-                        "time": _ts[:19],
-                        "ord_id": str(_t.get("ord_id", ""))[:24],
-                        "entry_ord_id": str(_t.get("entry_ord_id", ""))[:24],
-                        "bot": _t.get("bot", ""),
-                        "pnl": round(float(_pnl), 2),
-                        "reason": _t.get("reason", ""),
-                    })
-                if not _today_flag:
-                    continue
-                _today.append({
-                    "time": _ts[:19],
-                    "inst": _inst,
-                    "pnl": round(float(_pnl), 2),
-                    "bot": _t.get("bot") or "",
-                    "side": _t.get("side", ""),
-                    "reason": _t.get("reason", ""),
-                })
-            _today.sort(key=lambda x: x["time"], reverse=True)
-            diag["pnl_today_trades"] = _today[:15]
-            _ieb = _pt.get("debug", {}).get("inst_entry_bot", {}) or {}
-            diag["inst_entry_bot"] = _json_safe_dict(_ieb)
-            if _eth_debug:
-                diag["pnl_eth_debug"] = _eth_debug
+            diag["pnl_epoch"] = await get_pnl_epoch()
+            _pr = await get_pnl()
+            diag["pnl_total"] = _pr.get("total")
+            diag["pnl_1d"] = _pr.get("1d")
+            diag["pnl_week"] = _pr.get("week")
+            diag["pnl_per_bot"] = _pr.get("per_bot")
+            diag["pnl_source"] = _pr.get("source")
         except Exception as e:
-            diag["pnl_today_trades"] = None
-    except Exception as e:
-        diag["pnl_err"] = str(e)
+            diag["pnl_err"] = str(e)[:200]
 
     return {
         "status": "ok",
