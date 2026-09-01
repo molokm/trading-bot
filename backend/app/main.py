@@ -1452,11 +1452,15 @@ async def ai_status():
             # Reject weak tags; require explicit AI label after strict tagging
             if bot != "AI Discretionary 1H":
                 continue
-            # Extra guard: SOL without ai clOrd / bot_id never counts as AI
+            # Strict guard: a trade only counts as AI if it carries the bot's
+            # "ai" clOrdId prefix or a DB bot_id of ai_strategy. Other bots /
+            # manual closes can end up tagged AI by instrument fallbacks, so
+            # without the clOrdId the number is bogus (AI ran signal-only,
+            # so zero real trades means PnL must be zero).
             inst = (tr.get("inst_id") or tr.get("symbol") or "").upper()
             cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
             bid = str(tr.get("bot_id") or "")
-            if "SOL" in inst and not (cid.startswith("ai") or "ai_strategy" in bid):
+            if not (cid.startswith("ai") or "ai_strategy" in bid):
                 continue
             ai_pnl += pnl
             ai_n += 1
