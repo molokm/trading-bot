@@ -6353,12 +6353,14 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         if not inst or inst in _targeted_done or inst in inst_entry_bot:
             continue
         _targeted_done.add(inst)
+        print(f"[trades/paired] targeted entry fill lookup: inst={inst} entry_oid={entry_oid}", flush=True)
         try:
             async def _resolve_entry_fills(_inst=inst, _oid=entry_oid):
                 fl = await _okx_call(
                     lambda c, i=_inst, o=_oid: c.get_fills(inst_id=i, ordId=o, limit=10))
                 return fl.get("data", []) if isinstance(fl, dict) else []
             _fl_data = await _resolve_entry_fills()
+            print(f"[trades/paired] targeted resolve {inst} entry={entry_oid}: {len(_fl_data)} fills", flush=True)
             for _f in _fl_data:
                 _cid = str(_f.get("clOrdId", "") or "").strip().lower()
                 if _cid:
@@ -6369,6 +6371,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                             break
                     break
             # Re-attribute all rows for this instrument using updated fill_clord
+            print(f"[trades/paired] targeted resolve: fill_clord[{entry_oid}]={fill_clord.get(entry_oid, 'MISSING')} inst_entry_bot={inst_entry_bot.get(inst, 'MISSING')}", flush=True)
             for _t2 in dedup:
                 if _t2.get("bot"):
                     continue
@@ -6380,6 +6383,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 _new_bot = _okx_bot(_oid2, entry_ord_id=_eoid2)
                 if _new_bot:
                     _t2["bot"] = _new_bot
+                    print(f"[trades/paired] re-attributed {inst} close {_oid2[:12]}... -> {_new_bot}", flush=True)
         except Exception as e:
             print(f"[trades/paired] targeted entry fill resolve error: {e}", flush=True)
 
