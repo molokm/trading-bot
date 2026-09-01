@@ -251,7 +251,7 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     """Ask LLM (or mock) for a decision given market snapshot."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
-        # Auto: prefer BAI (api.b.ai deepseek) when key present, else Groq, else mock
+        # Auto: BAI (api.b.ai deepseek) primary when key present, else Groq, else mock
         if os.getenv("BAI_API_KEY", "").strip():
             provider = "bai"
         else:

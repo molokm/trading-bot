@@ -239,14 +239,15 @@ class AIStrategy:
                 pass
 
     def _provider(self) -> str:
+        # BAI (api.b.ai deepseek) is primary when its key is set — this is the
+        # model the operator runs in OpenCode, so it wins over AI_LLM_PROVIDER.
+        if os.getenv("BAI_API_KEY", "").strip():
+            return "bai"
         if self.config.provider:
             return str(self.config.provider).strip().lower()
         env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
         if env:
             return env
-        # Auto: prefer BAI (api.b.ai deepseek) when key present, else Groq, else mock
-        if os.getenv("BAI_API_KEY", "").strip():
-            return "bai"
         return "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
 
     def _execute_enabled(self) -> bool:
