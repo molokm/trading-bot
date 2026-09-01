@@ -352,6 +352,7 @@ class AIStrategy:
                     pass
             self._tick_count += 1
             self._last_activity = datetime.now(timezone.utc).isoformat()
+            _sleep = max(30, int(self.config.poll_interval_sec or 180))
             import time as _t
             self._llm_rate_limit_until = 0.0
             self._llm_rate_limited = False
