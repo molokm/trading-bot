@@ -5610,6 +5610,25 @@ async def get_pnl():
             if not _trade_after_epoch(tr, epoch):
                 continue
             bot = _normalize_bot(tr)
+            # Hard corrections (same as paired forced rules)
+            try:
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _et = str(tr.get("exit_time") or tr.get("time") or "")
+                _pnl = float(tr.get("pnl") or 0)
+                if (
+                    _inst == "ETH-USDT-SWAP"
+                    and "2026-09-01T17:33" in _et
+                    and abs(_pnl - 167.08) < 45
+                ):
+                    bot = "AI Discretionary 1H"
+                if (
+                    _inst == "ETH-USDT-SWAP"
+                    and "2026-09-01T17:33" in _et
+                    and abs(_pnl - 134.17) < 45
+                ):
+                    bot = "AI Discretionary 1H"
+            except Exception:
+                pass
             if not bot:
                 skipped_untagged += 1
                 continue
@@ -6111,7 +6130,7 @@ async def get_all_trades(limit: int = 100):
 
 _paired_cache: dict = {}
 _paired_lock = asyncio.Lock()
-_PAIRED_TTL = 30  # seconds — dashboard polls /api/pnl + /api/trades/paired every 10s
+_PAIRED_TTL = 10  # seconds — dashboard polls /api/pnl + /api/trades/paired every 10s
 
 
 @app.get("/api/trades/paired")
@@ -6649,18 +6668,18 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         forced = []
         # Known fix: ETH short closed 2026-09-01 ~17:33 UTC (+134 USDT) was
         # labeled Momentum but opened by AI Discretionary.
+        # ETH close 2026-09-01 17:33 UTC (20:33 MSK) +167.08 — Telegram said Momentum,
+        # but position was opened by AI. Match by time+pnl (close of short is side=buy).
         forced.append({
             "inst_id": "ETH-USDT-SWAP",
-            "pos_side": "short",
-            "pnl_near": 134.17,
-            "exit_date": "2026-09-01",
+            "exit_time_prefix": "2026-09-01T17:33",
+            "pnl_near": 167.08,
             "to_bot": "AI Discretionary 1H",
         })
         forced.append({
             "inst_id": "ETH-USDT-SWAP",
-            "pos_side": "short",
-            "pnl_near": 167.08,
-            "exit_date": "2026-09-01",
+            "exit_time_prefix": "2026-09-01T17:33",
+            "pnl_near": 134.17,
             "to_bot": "AI Discretionary 1H",
         })
         try:
@@ -6679,33 +6698,39 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             pside = str(rule.get("pos_side") or rule.get("side") or "").strip().lower()
             pnl_near = rule.get("pnl_near")
             exit_date = str(rule.get("exit_date") or rule.get("date") or "")
+            exit_pfx = str(rule.get("exit_time_prefix") or "")
             for t in dedup:
                 if (t.get("reason") or "").lower() not in ("closed", "close", "partial"):
                     continue
                 ti = str(t.get("inst_id") or t.get("symbol") or "").strip()
+                if ti != inst and not ti.startswith(inst.split("-")[0]):
+                    continue
                 if ti != inst:
                     continue
-                if pside and str(t.get("pos_side") or "").lower() not in (pside, ""):
-                    # also match via side
+                et = str(t.get("exit_time") or t.get("time") or t.get("timestamp") or "")
+                if exit_pfx and exit_pfx not in et:
+                    continue
+                if exit_date and not exit_pfx and exit_date not in et:
+                    continue
+                if pside:
+                    tps = str(t.get("pos_side") or "").lower()
                     ts = str(t.get("side") or "").lower()
-                    if pside == "short" and ts not in ("sell", "short", ""):
-                        continue
-                    if pside == "long" and ts not in ("buy", "long", ""):
-                        continue
-                if exit_date:
-                    et = str(t.get("exit_time") or t.get("time") or t.get("timestamp") or "")
-                    if exit_date not in et:
-                        continue
+                    # close of short is typically side=buy; open short side=sell
+                    if tps and tps not in (pside, ""):
+                        if not (pside == "short" and ts in ("buy", "sell", "short")):
+                            if not (pside == "long" and ts in ("buy", "sell", "long")):
+                                continue
                 if pnl_near is not None:
                     try:
-                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 40.0:
+                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 45.0:
                             continue
                     except (TypeError, ValueError):
                         continue
                 prev = t.get("bot")
                 t["bot"] = to_bot
+                t["bot_id"] = "ai_strategy" if "AI" in to_bot else t.get("bot_id")
                 if prev != to_bot:
-                    print(f"[trades/paired] forced bot {prev!r}→{to_bot!r} {inst} pnl={t.get('pnl')}", flush=True)
+                    print(f"[trades/paired] forced bot {prev!r}→{to_bot!r} {inst} pnl={t.get('pnl')} time={et[:19]}", flush=True)
     except Exception as e:
         print(f"[trades/paired] forced override error: {e}", flush=True)
 

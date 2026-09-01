@@ -160,6 +160,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       setAiStatus(aiSt)
       setSmartMoneyStatus(smartMoneySt)
       setVwapRevStatus(vwapRevSt)
+      // Seed PnL early from AI status so cards are not stuck at 0 while /api/pnl loads
+      if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
+        const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
+        setPnl(prev => {
+          if (prev && Number(prev.total) !== 0) return prev
+          return {
+            total: aiP,
+            '1d': Number(prev?.['1d'] ?? 0),
+            week: Number(prev?.week ?? 0),
+            '7d': Number(prev?.['7d'] ?? 0),
+            '30d': aiP,
+            unrealized: Number(prev?.unrealized ?? 0),
+            per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
+            per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
+            source: 'ai_status_seed',
+          }
+        })
+      }
 
       if (priceTickers?.tickers) {
         const byCoin = {}
@@ -181,7 +199,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       ])
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
-      if (pnlData) setPnl(pnlData)
+      if (pnlData && !pnlData.detail && pnlData.total != null) {
+        setPnl(pnlData)
+      } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
+        const sd = health.sm_diag
+        setPnl({
+          total: Number(sd.pnl_total ?? 0),
+          '1d': Number(sd.pnl_1d ?? 0),
+          week: Number(sd.pnl_week ?? 0),
+          '7d': Number(sd.pnl_week ?? 0),
+          '30d': Number(sd.pnl_total ?? 0),
+          unrealized: Number(sd.pnl_unrealized ?? 0),
+          per_bot: sd.pnl_per_bot || {},
+          per_bot_all: sd.pnl_per_bot || {},
+          source: sd.pnl_source || 'health_fallback',
+        })
+      }
     } catch {}
   }
 
