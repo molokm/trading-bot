@@ -1937,11 +1937,9 @@ class AIStrategy:
 
     def _status_pulse(self, decision: dict) -> str:
 
-        """Краткий статус по-русски: бот жив, что смотрит, почему нет входа."""
+        """Краткий динамический статус — меняется при изменении рынка."""
         q = self._build_quant()
         board = self._watch_board()
-        min_c = self._effective_min_confidence()
-        min_a = self._effective_min_align()
         reg = (q.get("global_regime") or "неизвестно").lower()
         reg_ru = {
             "bull": "бычий", "bear": "медвежий", "chop": "боковик",
@@ -1953,8 +1951,6 @@ class AIStrategy:
             "normal": "обычный",
             "aggressive": "агрессивный",
         }.get(str(preset).lower(), str(preset))
-        provider = self._provider()
-        poll = int(self.config.poll_interval_sec or 360)
         act = (decision.get("action") or "hold").lower()
         conf = decision.get("confidence")
         try:
@@ -1970,8 +1966,11 @@ class AIStrategy:
                 best = (sc, b)
 
         lines = []
+        # Рынок + режим (меняется при смене regime/preset)
+        lines.append(f"Рынок: {reg_ru}, режим: {preset_ru}.")
+
         if act == "hold":
-            lines.append("Сейчас сделку не открываю.")
+            line = "Позиций нет."
             if best:
                 b = best[1]
                 side = b.get("best_side") or "—"
@@ -1979,16 +1978,12 @@ class AIStrategy:
                 sc = best[0]
                 coin = b.get("coin")
                 if b.get("block_open"):
-                    lines.append(
-                        f"Ближе всех {coin} ({side_ru}, сигнал {sc:.2f}) — "
-                        f"заблокирован."
-                    )
+                    line += f" Лучший: {coin} {side_ru} ({sc:.2f}) — заблокирован."
                 else:
-                    lines.append(
-                        f"Лучший кандидат: {coin} ({side_ru}, сигнал {sc:.2f})."
-                    )
+                    line += f" Жду подтверждения: {coin} {side_ru} ({sc:.2f})."
             else:
-                lines.append("Чётких кандидатов нет.")
+                line += " Явных кандидатов нет."
+            lines.append(line)
         elif act == "open":
             sym = decision.get("symbol") or "?"
             side = decision.get("side") or ""
