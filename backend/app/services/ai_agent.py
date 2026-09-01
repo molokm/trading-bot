@@ -60,7 +60,7 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 
-SYSTEM_PROMPT = """You are a conservative OKX USDT-SWAP discretionary desk.
+SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk (balanced-aggressive). Prefer trading candidates_allowed when align is solid; avoid candidates_blocked.
 Reply with ONE JSON object only (no markdown):
 {"action":"open|close|hold|reduce","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
 "size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
@@ -135,7 +135,7 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
 
     # Policy clamps
     if action == "open":
-        if not symbol or not side or conf < 0.55 or size_pct < 0.02:
+        if not symbol or not side or conf < 0.52 or size_pct < 0.02:
             action = "hold"
             reason = (reason + " | policy: open rejected").strip(" |")
     if action in ("close", "reduce") and symbol and symbol not in open_symbols:
@@ -260,16 +260,19 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         "max_leverage": snapshot.get("max_leverage"),
         "max_positions": snapshot.get("max_positions"),
         "open_positions": snapshot.get("open_positions"),
-        "quant": snapshot.get("quant"),  # precomputed regime + align scores
+        "quant": snapshot.get("quant"),
+        "candidates_allowed": snapshot.get("candidates_allowed") or [],
+        "candidates_blocked": snapshot.get("candidates_blocked") or [],
         "indicators": snapshot.get("indicators"),
         "server_time": snapshot.get("server_time"),
         "policy": {
-            "prefer": "hold",
+            "prefer": "trade_allowed_candidates",
             "min_confidence_open": (snapshot.get("adaptive") or {}).get(
-                "min_confidence", 0.75),
-            "min_rr": 1.8,
-            "max_size_pct": (snapshot.get("adaptive") or {}).get("size_cap", 0.10),
+                "min_confidence", 0.62),
+            "min_rr": 1.6,
+            "max_size_pct": (snapshot.get("adaptive") or {}).get("size_cap", 0.15),
             "adapt_preset": (snapshot.get("adaptive") or {}).get("preset"),
+            "hint": snapshot.get("policy_hint") or "",
         },
         "reflection": snapshot.get("reflection") or "",
         "adaptive": snapshot.get("adaptive"),

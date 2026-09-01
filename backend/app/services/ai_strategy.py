@@ -71,12 +71,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.2"
+STRATEGY_VERSION = "v1.3-agg"
 STRATEGY_DESC = (
-    "AI Discretionary — интеллектуальный бот: нейросеть "
-    "анализирует рынок и сама решает, когда открывать и "
-    "закрывать сделки. Подстраивается под рыночные условия "
-    "и учится на своих результатах."
+    "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
+    "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
+    "индикаторный выход и self-adapt."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
@@ -88,50 +87,53 @@ class AIConfig:
     symbols: list = None
     capital: float = 10000.0
     max_leverage: float = 3.0
-    max_positions: int = 1
-    risk_per_trade: float = 0.01  # survival          # 2% equity at stop
-    allocation_pct: float = 0.25          # max margin / equity per pos
+    max_positions: int = 2                 # v1.3: allow 2 concurrent
+    risk_per_trade: float = 0.02           # ~2% equity at stop
+    allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
-    poll_interval_sec: int = 360          # 6m — save free-tier TPD
-    min_confidence: float = 0.70
-    min_adx: float = 18.0
-    min_roc_abs: float = 0.4           # % move on roc
-    min_stop_pct: float = 0.02
+    poll_interval_sec: int = 120           # 2m — more reactive (uses more LLM tokens)
+    min_confidence: float = 0.62
+    min_adx: float = 15.0                  # was 18 — still filtered, but less dead
+    # Soft ADX: if align is strong, allow down to adx_soft_floor
+    adx_soft_floor: float = 12.0
+    adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
+    min_roc_abs: float = 0.25
+    min_stop_pct: float = 0.018
     max_stop_pct: float = 0.05
-    min_take_pct: float = 0.04
-    max_hold_hours: float = 18.0
+    min_take_pct: float = 0.035
+    max_hold_hours: float = 24.0
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
-    min_hold_minutes: float = 45.0       # avoid instant flip-out after open
-    exit_min_profit_pct: float = 0.15    # prefer exit when ≥ this % in favor
-    exit_on_ema_cross: bool = True       # fast/slow cross against position
-    exit_on_price_vs_ema: bool = True    # close vs slow EMA against side
-    exit_on_roc_flip: bool = True        # ROC sign flips against position
-    exit_weak_adx: float = 14.0          # if ADX collapses and was in profit → exit
-    trail_activate_pct: float = 0.8      # after +0.8% move stop to breakeven+
-    trail_lock_pct: float = 0.25         # keep at least this % from peak (approx)
+    min_hold_minutes: float = 25.0
+    exit_min_profit_pct: float = 0.12
+    exit_on_ema_cross: bool = True
+    exit_on_price_vs_ema: bool = True
+    exit_on_roc_flip: bool = True
+    exit_weak_adx: float = 12.0
+    trail_activate_pct: float = 0.6
+    trail_lock_pct: float = 0.20
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.50  # hard gate vs LLM open
-    block_chop_opens: bool = False  # allow opens in chop when align/adx pass
-    # v1.1 self-adapt (bounded)
+    quant_min_align: float = 0.45
+    block_chop_opens: bool = False
+    # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
-    adapt_window: int = 12              # last N closed trades
-    adapt_min_trades: int = 4           # need this many before adapting
-    conf_floor: float = 0.70
-    conf_ceil: float = 0.82
-    align_floor: float = 0.50
-    align_ceil: float = 0.75
-    size_cap_floor: float = 0.05
-    size_cap_ceil: float = 0.12
-    provider: str = None                  # None → env AI_LLM_PROVIDER
-    execute: bool = None                  # None → env AI_EXECUTE
+    adapt_window: int = 12
+    adapt_min_trades: int = 4
+    conf_floor: float = 0.58
+    conf_ceil: float = 0.78
+    align_floor: float = 0.42
+    align_ceil: float = 0.70
+    size_cap_floor: float = 0.08
+    size_cap_ceil: float = 0.18
+    provider: str = None
+    execute: bool = None
 
     def __post_init__(self):
         if self.symbols is None:
@@ -593,6 +595,27 @@ class AIStrategy:
         self._latest_indicators = out
         return out
 
+
+    def _adx_blocks_open(self, adx: float, align_best: float) -> bool:
+        """True if ADX is too weak for an open.
+
+        Aggressive rule: min_adx applies normally; if align is strong
+        (>= adx_align_bypass), allow down to adx_soft_floor.
+        """
+        try:
+            adx = float(adx or 0)
+            align_best = float(align_best or 0)
+        except (TypeError, ValueError):
+            return True
+        min_adx = float(getattr(self.config, "min_adx", 15) or 15)
+        soft = float(getattr(self.config, "adx_soft_floor", 12) or 12)
+        bypass = float(getattr(self.config, "adx_align_bypass", 0.72) or 0.72)
+        if adx >= min_adx:
+            return False
+        if align_best >= bypass and adx >= soft:
+            return False
+        return True
+
     def _build_quant(self) -> dict:
         """Aggregate quant layer for LLM + hard gates."""
         inds = self._latest_indicators or {}
@@ -614,11 +637,9 @@ class AIStrategy:
                 "adx": ind.get("adx"),
                 "rsi": ind.get("rsi"),
                 "block_open": (
-                    # chop alone no longer blocks — require a bit higher align
-                    # in chop than in a clear trend, plus ADX above floor.
-                    (reg == "chop" and best < float(getattr(self.config, "quant_min_align", 0.5) or 0.5))
-                    or (reg != "chop" and best < 0.45)
-                    or float(ind.get("adx") or 0) < float(self.config.min_adx or 18)
+                    (reg == "chop" and best < float(getattr(self.config, "quant_min_align", 0.45) or 0.45))
+                    or (reg != "chop" and best < 0.42)
+                    or self._adx_blocks_open(float(ind.get("adx") or 0), best)
                 ),
             }
         # global regime = majority of BTC/ETH if present
@@ -846,13 +867,31 @@ class AIStrategy:
                 "entry_price": p.entry_price, "stop_price": p.stop_price,
                 "take_price": p.take_price, "leverage": p.leverage,
             })
+        quant = self._build_quant()
+        candidates = []
+        blocked = []
+        for coin, c in (quant.get("coins") or {}).items():
+            row = {
+                "coin": coin,
+                "side": c.get("best_side"),
+                "align": c.get("align_score"),
+                "adx": c.get("adx"),
+                "regime": c.get("regime"),
+            }
+            if c.get("block_open"):
+                blocked.append(row)
+            else:
+                candidates.append(row)
+        candidates.sort(key=lambda x: float(x.get("align") or 0), reverse=True)
         return {
             "equity": round(self._equity, 2),
             "capital": self._capital,
             "max_leverage": self.config.max_leverage,
             "max_positions": self.config.max_positions,
             "open_positions": open_list,
-            "quant": self._build_quant(),
+            "quant": quant,
+            "candidates_allowed": candidates,
+            "candidates_blocked": blocked,
             "indicators": self._latest_indicators,
             "adaptive": self._adapt,
             "reflection": self._reflection,
@@ -860,6 +899,10 @@ class AIStrategy:
             "provider": self._provider(),
             "llm": llm_status(),
             "execute": self._execute_enabled(),
+            "policy_hint": (
+                "Prefer opens only from candidates_allowed. "
+                "Ignore candidates_blocked unless managing existing positions."
+            ),
         }
 
     def _fmt_sz(self, coin: str, sz: float) -> str:
@@ -1528,9 +1571,13 @@ class AIStrategy:
             ema_f = float(ind.get("ema_fast") or 0)
             ema_s = float(ind.get("ema_slow") or 0)
             close = float(ind.get("close") or 0)
-            if adx < float(self.config.min_adx or 0):
+            side_probe = (decision.get("side") or "").lower()
+            al = float(ind.get("align_long") or 0)
+            ash = float(ind.get("align_short") or 0)
+            align_side = ash if side_probe == "short" else al
+            if self._adx_blocks_open(adx, align_side):
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
-                                  reason=f"low_adx:{adx:.1f}")
+                                  reason=f"low_adx:{adx:.1f}/align:{align_side:.2f}")
                 return
             if abs(roc) < float(self.config.min_roc_abs or 0):
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
@@ -1958,29 +2005,39 @@ class AIStrategy:
         except (TypeError, ValueError):
             conf_f = None
 
-        # Лучший кандидат среди всех монет
-        best = None
+        # Лучший доступный (unblocked) — иначе лучший blocked для диагностики
+        best_free = None
+        best_any = None
         for b in board:
             sc = float(b.get("align_score") or 0)
-            if best is None or sc > best[0]:
-                best = (sc, b)
+            if best_any is None or sc > best_any[0]:
+                best_any = (sc, b)
+            if not b.get("block_open"):
+                if best_free is None or sc > best_free[0]:
+                    best_free = (sc, b)
 
         lines = []
-        # Рынок + режим (меняется при смене regime/preset)
         lines.append(f"Рынок: {reg_ru}, режим: {preset_ru}.")
 
         if act == "hold":
             line = "Позиций нет."
-            if best:
-                b = best[1]
+            if best_free:
+                b = best_free[1]
                 side = b.get("best_side") or "—"
                 side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                sc = best[0]
+                sc = best_free[0]
                 coin = b.get("coin")
-                if b.get("block_open"):
-                    line += f" Лучший: {coin} {side_ru} ({sc:.2f}) — заблокирован."
-                else:
-                    line += f" Жду подтверждения: {coin} {side_ru} ({sc:.2f})."
+                line += f" Доступно: {coin} {side_ru} ({sc:.2f}) — жду подтверждения LLM/quant."
+                if best_any and best_any[1].get("block_open") and best_any[1].get("coin") != coin:
+                    bb = best_any[1]
+                    s2 = bb.get("best_side") or "—"
+                    s2ru = "лонг" if s2 == "long" else ("шорт" if s2 == "short" else s2)
+                    line += f" Сильнее по align, но блок: {bb.get('coin')} {s2ru} ({best_any[0]:.2f})."
+            elif best_any:
+                b = best_any[1]
+                side = b.get("best_side") or "—"
+                side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
+                line += f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) — заблокирован (ADX/align)."
             else:
                 line += " Явных кандидатов нет."
             lines.append(line)
