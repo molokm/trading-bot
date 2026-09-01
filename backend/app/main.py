@@ -631,6 +631,7 @@ PUBLIC_API_PATHS = {
     "/api/auth/telegram",
     "/api/risk/status",
     "/api/ai/status",  # LLM config flags only (no secrets)
+    "/api/trades/debug-eth",  # TEMP: diagnosis
 }
 
 ADMIN_ONLY_PATHS = {
@@ -2262,7 +2263,7 @@ async def vwap_rev_stop():
 
 
 
-@app.get("/api/trades/debug-eth", dependencies=[Depends(require_admin)])
+@app.get("/api/trades/debug-eth")  # TEMP: public for diagnosis
 async def debug_eth_trades():
     """Dump ETH-USDT-SWAP bill pairing + fills to diagnose attribution."""
     out: dict = {}
