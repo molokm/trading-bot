@@ -2341,7 +2341,8 @@ async def health():
             pass
     except Exception:
         pass
-    # PnL diagnostics: epoch + per_bot, so we can see why cards may look wrong
+    # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
+    # cards may look wrong (e.g. -288 today).
     try:
         diag["pnl_epoch"] = await get_pnl_epoch()
         _pr = await get_pnl()
@@ -2351,6 +2352,39 @@ async def health():
         diag["pnl_per_bot"] = _pr.get("per_bot")
         diag["pnl_source"] = _pr.get("source")
         diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
+        # Last 10 trades with PnL to explain the daily number
+        try:
+            _pt = await get_paired_trades(limit=500)
+            from datetime import datetime as _dt, timezone as _tz
+            _now = _dt.now(_tz.utc)
+            _today = []
+            for _t in _pt.get("trades", []):
+                _ts = _t.get("exit_time") or _t.get("time") or ""
+                if not _ts:
+                    continue
+                try:
+                    _parsed = _dt.fromisoformat(_ts)
+                    if _parsed.tzinfo is None:
+                        _parsed = _parsed.replace(tzinfo=_tz.utc)
+                    if (_now - _parsed).total_seconds() > 86400:
+                        continue
+                except Exception:
+                    continue
+                _pnl = _t.get("pnl")
+                if _pnl is None:
+                    continue
+                _today.append({
+                    "time": _ts[:19],
+                    "inst": _t.get("inst_id") or _t.get("symbol", ""),
+                    "pnl": round(float(_pnl), 2),
+                    "bot": _t.get("bot") or "",
+                    "side": _t.get("side", ""),
+                    "reason": _t.get("reason", ""),
+                })
+            _today.sort(key=lambda x: x["time"], reverse=True)
+            diag["pnl_today_trades"] = _today[:15]
+        except Exception as e:
+            diag["pnl_today_trades"] = None
     except Exception as e:
         diag["pnl_err"] = str(e)
 
