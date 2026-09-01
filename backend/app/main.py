@@ -5076,6 +5076,9 @@ def _pair_bills(bills: list) -> list:
                     cur["size"] += sz
                     cur["cost"] += sz * px
                     cur["fee"] += fee
+                    cur["ord_id"] = ord_id  # always update to the most recent open
+                    cur["time"] = ts
+                    cur["side"] = side
                     continue
 
                 if sub in ("5", "6"):
