@@ -467,7 +467,7 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             body = {
                 "model": mid,
                 "temperature": 0.2,
-                "max_tokens": 280,
+                "max_tokens": 900,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -480,7 +480,17 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                 data = r.json()
                 if mid != model:
                     log.warning("LLM model fallback: %s -> %s", model, mid)
-                return data["choices"][0]["message"]["content"]
+                msg = (data.get("choices") or [{}])[0].get("message") or {}
+                # Reasoning models (deepseek-v4-flash on b.ai) return the
+                # answer in reasoning_content and an EMPTY content. Use it as
+                # fallback so the JSON decision is still parseable.
+                text = (msg.get("content") or "").strip()
+                if not text:
+                    text = (msg.get("reasoning_content") or "").strip()
+                if not text:
+                    # defensive: re-read raw message dump
+                    text = str(msg)
+                return text
             last_err = f"LLM HTTP {r.status_code}: {r.text[:300]}"
             txt = (r.text or "").lower()
             if r.status_code == 429:
