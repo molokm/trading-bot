@@ -2381,18 +2381,6 @@ async def health():
         "AI_AUTO_START": os.getenv("AI_AUTO_START", "(unset)"),
         "AI_EXEC_CFG": None if ai_bot is None or ai_bot.config.execute is None else ai_bot.config.execute,
     }
-    # AI tick diagnostics: last error + timing
-    try:
-        if ai_bot:
-            diag["ai_tick"] = {
-                "last_error": getattr(ai_bot, "_last_tick_error", None),
-                "last_activity": getattr(ai_bot, "_last_activity", None),
-                "decision_count": len(getattr(ai_bot, "_decision_log", []) or []),
-                "running": getattr(ai_bot, "_running", False),
-                "last_decision_time": (getattr(ai_bot, "_last_decision", {}) or {}).get("time"),
-            }
-    except Exception as e:
-        diag["ai_tick_err"] = str(e)
     # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
     # cards may look wrong (e.g. -288 today).
     try:
