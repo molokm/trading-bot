@@ -2390,21 +2390,6 @@ async def health():
                 })
             _today.sort(key=lambda x: x["time"], reverse=True)
             diag["pnl_today_trades"] = _today[:15]
-            # DIAG: all AI-tagged trades
-            _ai_diag = []
-            for _t in _pt.get("trades", []):
-                if (str(_t.get("bot") or "") == "AI Discretionary 1H"):
-                    _ts = _t.get("exit_time") or _t.get("time") or ""
-                    _ai_diag.append({
-                        "time": _ts,
-                        "inst": _t.get("inst_id") or _t.get("symbol", ""),
-                        "pnl": _t.get("pnl"),
-                        "ord_id": _t.get("ord_id"),
-                        "entry_ord_id": _t.get("entry_ord_id"),
-                        "clOrdId": _t.get("clOrdId"),
-                        "reason": _t.get("reason"),
-                    })
-            diag["pnl_ai_diag"] = _ai_diag[-30:]
         except Exception as e:
             diag["pnl_today_trades"] = None
     except Exception as e:
