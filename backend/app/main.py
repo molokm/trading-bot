@@ -1553,6 +1553,29 @@ async def ai_stop():
     return {"message": "AI stopped", "running": False}
 
 
+@app.post("/api/ai/execute", dependencies=[Depends(require_admin)])
+async def ai_execute(data: dict = None):
+    """Toggle AI auto-trading (execute=on/off) at runtime. Optionally resets
+    stale lifetime PnL (reset=1) — AI ran in signal mode so old data is bogus."""
+    global ai_bot
+    d = data or {}
+    if not ai_bot:
+        return {"ok": False, "message": "AI bot not running"}
+    enabled = bool(d.get("execute"))
+    if d.get("reset"):
+        ai_bot.reset_lifetime_pnl()
+    ai_bot.set_execute(enabled)
+    st = ai_bot.get_status()
+    return {
+        "ok": True,
+        "execute": st.get("execute"),
+        "total_pnl": st.get("total_pnl"),
+        "lifetime_pnl": st.get("lifetime_pnl"),
+        "message": f"AI auto-trade {'ON' if enabled else 'OFF'}"
+                   + (" (lifetime PnL reset to 0)" if d.get("reset") else ""),
+    }
+
+
 
 
 @app.get("/api/ai/logs", dependencies=[Depends(require_admin)])

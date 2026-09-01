@@ -254,6 +254,22 @@ class AIStrategy:
         # No explicit AI_EXECUTE: allow orders only on OKX demo
         return self._is_demo()
 
+    def set_execute(self, enabled: bool) -> None:
+        """Runtime toggle for auto-trading. Persists the flag in config so it
+        survives until the bot is recreated (deploy restart)."""
+        self.config.execute = bool(enabled)
+        print(f"[AI] execute -> {bool(enabled)} (auto-trade {'ON' if enabled else 'OFF'})", flush=True)
+
+    def reset_lifetime_pnl(self) -> None:
+        """Reset lifetime PnL to zero (stale data from previous sessions)."""
+        self._lifetime_pnl = 0.0
+        self._lifetime_trades = 0
+        self._lifetime_wins = 0
+        self._lifetime_fees = 0.0
+        self._session_pnl = 0.0
+        self._equity = self._capital
+        print("[AI] lifetime_pnl reset to 0 (stale data cleared)", flush=True)
+
     def _is_demo(self) -> bool:
         if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
             return True
