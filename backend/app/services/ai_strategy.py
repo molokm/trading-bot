@@ -93,9 +93,9 @@ class AIConfig:
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 360          # 6m — save free-tier TPD
-    min_confidence: float = 0.75
-    min_adx: float = 22.0
-    min_roc_abs: float = 0.5           # % move on roc
+    min_confidence: float = 0.70
+    min_adx: float = 18.0
+    min_roc_abs: float = 0.4           # % move on roc
     min_stop_pct: float = 0.02
     max_stop_pct: float = 0.05
     min_take_pct: float = 0.04
@@ -117,8 +117,8 @@ class AIConfig:
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.55  # hard gate vs LLM open
-    block_chop_opens: bool = True
+    quant_min_align: float = 0.50  # hard gate vs LLM open
+    block_chop_opens: bool = False  # allow opens in chop when align/adx pass
     # v1.1 self-adapt (bounded)
     adapt_enabled: bool = True
     adapt_window: int = 12              # last N closed trades
@@ -613,9 +613,11 @@ class AIStrategy:
                 "adx": ind.get("adx"),
                 "rsi": ind.get("rsi"),
                 "block_open": (
-                    reg == "chop"
-                    or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
-                    or float(ind.get("adx") or 0) < float(self.config.min_adx or 22)
+                    # chop alone no longer blocks — require a bit higher align
+                    # in chop than in a clear trend, plus ADX above floor.
+                    (reg == "chop" and best < float(getattr(self.config, "quant_min_align", 0.5) or 0.5))
+                    or (reg != "chop" and best < 0.45)
+                    or float(ind.get("adx") or 0) < float(self.config.min_adx or 18)
                 ),
             }
         # global regime = majority of BTC/ETH if present
@@ -628,7 +630,9 @@ class AIStrategy:
             g = max(set(regimes), key=regimes.count)
         return {
             "global_regime": g,
-            "block_open": g == "chop" and getattr(self.config, "block_chop_opens", True),
+            # Global chop no longer hard-blocks every open — per-coin
+            # block_open (align/adx gates) decides instead.
+            "block_open": False,
             "coins": by_coin,
             "min_align": float(self._effective_min_align()),
             "min_adx": float(self.config.min_adx or 22),

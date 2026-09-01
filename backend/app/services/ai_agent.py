@@ -70,7 +70,7 @@ Hard rules:
 1) DEFAULT action is hold. Open only with clear edge.
 2) Never open if open_positions is non-empty (close/reduce first).
 3) Prefer setups where quant.align_score >= 0.6 and regime is bull (long) or bear (short).
-4) In regime=chop → almost always hold (no new risk).
+4) In regime=chop → hold unless one side has strong quant alignment (>=0.55) and a clear catalyst in reason.
 5) Require RR take_pct/stop_pct >= 1.8 and confidence >= 0.75 to open.
 6) Use precomputed indicators (EMA21/50/200, RSI, MACD, ADX, ATR, BB, vol_ratio, tf_4h).
 7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
