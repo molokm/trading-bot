@@ -328,26 +328,39 @@ function MiniAppPageInner
       for (const p of (validation?.open_positions || [])) pushOpen(p)
       for (const p of (aiBot?.open_positions || [])) pushOpen(p)
 
+      const toRow = (tr, isOpen = false) => {
+        const inst = tr.inst_id || tr.symbol || ''
+        return {
+          ...tr,
+          coin: tr.coin || String(inst || '').replace('-USDT-SWAP', ''),
+          symbol: tr.symbol || inst,
+          isOpen,
+          entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
+          exit: tr.exit_px ?? tr.exit_price,
+          size: tr.size ?? tr.sz ?? '',
+          time: tr.time || tr.exit_time || tr.entry_time || '',
+          pnl: tr.pnl,
+          bot: tr.bot || '',
+        }
+      }
       const out = []
+      const closedRaw = []
       for (const tr of (Array.isArray(trades) ? trades : [])) {
         if (!tr || typeof tr !== 'object') continue
         const inst = tr.inst_id || tr.symbol || ''
         const reason = String(tr.reason || '').toLowerCase()
         if (reason === 'open' || reason === 'add') continue
+        closedRaw.push(tr)
         if (inst) {
           const sideKey = String(tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
-          if (openKeys.has(`${inst}|${sideKey}`)) continue
+          // Soft suppress only if same inst+side still open AND trade has no pnl yet
+          if (openKeys.has(`${inst}|${sideKey}`) && (tr.pnl == null || tr.pnl === '')) continue
         }
-        out.push({
-          ...tr,
-          coin: tr.coin || String(inst || '').replace('-USDT-SWAP', ''),
-          symbol: tr.symbol || inst,
-          isOpen: false,
-          entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
-          exit: tr.exit_px ?? tr.exit_price,
-          size: tr.size ?? tr.sz ?? '',
-          time: tr.time || tr.exit_time || tr.entry_time || '',
-        })
+        out.push(toRow(tr, false))
+      }
+      // If filter ate everything but we have closed rows — show them
+      if (out.length === 0 && closedRaw.length > 0) {
+        return closedRaw.slice(0, 40).map(tr => toRow(tr, false))
       }
       return out
     } catch (e) {
@@ -528,12 +541,13 @@ function MiniAppPageInner
       ai: () => api.aiStatus(),
       pnl: () => api.getPnl(),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
-      trades: () => api.getPairedTrades(40),
+      trades: () => api.getPairedTrades(80),
     }
+    const timeouts = { pnl: 25000, trades: 25000, positions: 20000 }
     const names = Object.keys(callers)
     const results = await Promise.all(names.map(async (name) => {
       try {
-        const v = await withTimeout(callers[name](), 12000)
+        const v = await withTimeout(callers[name](), timeouts[name] || 15000)
         const len = (JSON.stringify(v) || '').length
         miniLog('load', name, 'OK len=' + len)
         return [name, v]
@@ -549,9 +563,35 @@ function MiniAppPageInner
     if (map.impulse) setImpulse(map.impulse)
     if (map.validation) setValidation(map.validation)
     if (map.ai) setAiBot(map.ai)
-    if (map.pnl) setPnlData(map.pnl)
-    if (map.positions) setPositions(map.positions.positions || [])
-    if (map.trades) setTrades(map.trades.trades || [])
+    // Positions: support {positions:[]} or bare array
+    if (map.positions) {
+      const pos = Array.isArray(map.positions) ? map.positions
+        : (map.positions.positions || map.positions.data || [])
+      setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
+    }
+    // Trades: multiple response shapes
+    if (map.trades) {
+      let list = []
+      if (Array.isArray(map.trades)) list = map.trades
+      else if (Array.isArray(map.trades.trades)) list = map.trades.trades
+      else if (Array.isArray(map.trades.data)) list = map.trades.data
+      setTrades(list.filter(Boolean))
+      miniLog('load', 'trades_count', list.length)
+    }
+    // PnL: API or seed from AI / per_bot
+    if (map.pnl && !map.pnl.detail) {
+      setPnlData(map.pnl)
+    } else {
+      const aiP = Number(map.ai?.lifetime_pnl ?? map.ai?.total_pnl ?? 0)
+      setPnlData({
+        total: aiP,
+        '1d': 0,
+        week: 0,
+        unrealized: 0,
+        per_bot: aiP ? { 'AI Discretionary 1H': aiP } : {},
+        source: 'mini_ai_seed',
+      })
+    }
     if (isUser) {
       try {
         const m = await withTimeout(api.me(), 10000)
@@ -654,7 +694,55 @@ function MiniAppPageInner
     )
   }
 
+
+  // Active-only PnL for mini summary cards
+  const activeNames = []
+  if (rotation?.running) activeNames.push('Momentum')
+  if (impulse?.running) activeNames.push('Impulse 1D', 'Impulse')
+  if (validation?.running) activeNames.push('MACD+Donchian Validation', 'Validation')
+  if (aiBot?.running) activeNames.push('AI Discretionary 1H')
+  const tradeIsActive = (tr) => {
+    if (!activeNames.length) return false
+    const b = String(tr?.bot || '')
+    return activeNames.some(n => b === n || b.includes(n))
+  }
+  const sumTradesSince = (msBack) => {
+    const cut = Date.now() - msBack
+    let s = 0
+    for (const tr of (trades || [])) {
+      if (!tr || tr.pnl == null || tr.pnl === '') continue
+      const reason = String(tr.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (!tradeIsActive(tr)) continue
+      const ts = tr.exit_time || tr.time || ''
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms) || ms < cut) continue
+      s += Number(tr.pnl) || 0
+    }
+    return s
+  }
+  const miniDay = (() => {
+    const v = Number(pnlData?.['1d'] ?? 0)
+    if (v !== 0) return v
+    return sumTradesSince(86400000)
+  })()
+  const miniTotal = (() => {
+    const v = Number(pnlData?.total ?? 0)
+    if (v !== 0) return v
+    const per = pnlData?.per_bot || {}
+    const fromPer = Object.values(per).reduce((s, x) => s + Number(x || 0), 0)
+    if (fromPer !== 0) return fromPer
+    const aiP = Number(aiBot?.lifetime_pnl ?? aiBot?.total_pnl ?? 0)
+    if (aiP !== 0 && aiBot?.running) return aiP
+    return sumTradesSince(365 * 86400000)
+  })()
+  const miniUpl = Number(
+    pnlData?.unrealized
+    ?? (positions || []).reduce((s, p) => s + (Number(p?.upl) || 0), 0)
+  )
+
   if (authing) {
+
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--txt-secondary)]">
         <Loader2 size={28} className="animate-spin text-[var(--info)]" />
@@ -877,20 +965,20 @@ function MiniAppPageInner
         <div className="grid grid-cols-3 gap-2">
           <Card className="py-2 text-center">
             <div className="text-2xs text-[var(--txt-muted)]">{t('mini.today')}</div>
-            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.['1d'] || 0))}`}>
-              {pnlSign(Number(pnlData?.['1d'] || 0))}
+            <div className={`text-sm font-bold mono ${pnlClass(miniDay)}`}>
+              {pnlSign(miniDay)}
             </div>
           </Card>
           <Card className="py-2 text-center">
             <div className="text-2xs text-[var(--txt-muted)]">{t('mini.total_pnl')}</div>
-            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.total || 0))}`}>
-              {pnlSign(Number(pnlData?.total || 0))}
+            <div className={`text-sm font-bold mono ${pnlClass(miniTotal)}`}>
+              {pnlSign(miniTotal)}
             </div>
           </Card>
           <Card className="py-2 text-center">
             <div className="text-2xs text-[var(--txt-muted)]">{t('mini.unrealized')}</div>
-            <div className={`text-sm font-bold mono ${pnlClass(Number(pnlData?.unrealized || positions.reduce((s, p) => s + (Number(p.upl) || 0), 0)))}`}>
-              {pnlSign(Number(pnlData?.unrealized || positions.reduce((s, p) => s + (Number(p.upl) || 0), 0)))}
+            <div className={`text-sm font-bold mono ${pnlClass(miniUpl)}`}>
+              {pnlSign(miniUpl)}
             </div>
           </Card>
         </div>
