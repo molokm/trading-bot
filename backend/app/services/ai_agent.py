@@ -5,6 +5,7 @@ Providers (env AI_LLM_PROVIDER):
   - groq   : free-tier friendly OpenAI-compatible API (GROQ_API_KEY)
   - openai : OpenAI or any compatible base URL (OPENAI_API_KEY, OPENAI_BASE_URL)
   - gemini : Google Gemini (GEMINI_API_KEY)
+  - bai    : api.b.ai (deepseek-v4-flash) — BAI_API_KEY + BAI_MODEL (default deepseek-v4-flash)
 
 Always returns a validated dict decision; invalid/unsafe → hold.
 """
@@ -250,8 +251,11 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     """Ask LLM (or mock) for a decision given market snapshot."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
-        # Auto: prefer Groq when key is present, else mock (free, no signup)
-        provider = "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
+        # Auto: prefer BAI (api.b.ai deepseek) when key present, else Groq, else mock
+        if os.getenv("BAI_API_KEY", "").strip():
+            provider = "bai"
+        else:
+            provider = "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
 
     user_payload = {
@@ -326,7 +330,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai,bai").split(",")
         if x.strip()
     ]
     chain = [primary]
@@ -352,6 +356,8 @@ def _provider_chain(primary: str) -> list[str]:
                 if "openrouter" not in out:
                     out.append("openrouter")
                 continue
+            out.append(p)
+        elif p == "bai" and os.getenv("BAI_API_KEY", "").strip():
             out.append(p)
         elif p == primary and p not in out:
             out.append(p)
@@ -408,6 +414,14 @@ async def _call_provider(provider: str, user_msg: str) -> str:
         return await _gemini(
             api_key=os.getenv("GEMINI_API_KEY", ""),
             model=os.getenv("GEMINI_MODEL") or "gemini-2.0-flash",
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+        )
+    if provider == "bai":
+        return await _openai_compatible(
+            api_key=os.getenv("BAI_API_KEY", ""),
+            base_url=os.getenv("BAI_BASE_URL", "https://api.b.ai/v1"),
+            model=os.getenv("BAI_MODEL", "deepseek-v4-flash"),
             system=SYSTEM_PROMPT,
             user=user_msg,
         )

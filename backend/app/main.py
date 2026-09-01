@@ -1534,7 +1534,10 @@ async def ai_start(data: dict = None):
         max_positions=int(data.get("max_positions") or 1),
         risk_per_trade=float(data.get("risk_per_trade") or 0.02),
         poll_interval_sec=int(data.get("poll_interval_sec") or 120),
-        provider=data.get("provider") or ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None),
+        provider=data.get("provider") or (
+            "bai" if os.getenv("BAI_API_KEY", "").strip()
+            else ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None)
+        ),
         execute=_exec,
     )
     if data.get("symbols"):

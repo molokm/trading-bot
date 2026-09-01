@@ -244,6 +244,9 @@ class AIStrategy:
         env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
         if env:
             return env
+        # Auto: prefer BAI (api.b.ai deepseek) when key present, else Groq, else mock
+        if os.getenv("BAI_API_KEY", "").strip():
+            return "bai"
         return "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
 
     def _execute_enabled(self) -> bool:
