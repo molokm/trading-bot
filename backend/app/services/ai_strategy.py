@@ -1488,7 +1488,7 @@ class AIStrategy:
                     ai_owner = ""
                 if ai_owner == "ai":
                     print(f"[AI] restore {coin}: entry fill clOrdId='ai' — ours (DB claim missing)", flush=True)
-                    self._restore_adopt_position(client, inst_id, coin, side, sz, entry)
+                    await self._restore_adopt_position(client, inst_id, coin, side, sz, entry)
                     continue
                 if ai_owner and ai_owner != "ai":
                     print(f"[AI] skip restore {coin}: entry fill owned by '{ai_owner}'", flush=True)
