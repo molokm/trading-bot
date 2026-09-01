@@ -6154,6 +6154,24 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     fill_clord = {str(f.get("ordId", "")).strip(): str(f.get("clOrdId", "") or "").strip()
                   for f in raw_fills}
 
+    # inst_id -> bot from ENTRY fills (clOrdId prefix). Used as final fallback
+    # for close orders whose own clOrdId is missing (manual/external/exchange_stop).
+    # The ENTRY fill always has the bot's clOrdId (e.g. "rot...").
+    inst_entry_bot: dict = {}
+    _clord_to_bot = {"rot": "Momentum", "imp": "Impulse 1D", "ai": "AI Discretionary 1H",
+                     "val": "MACD+Donchian Validation",
+                     "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+                     "vwap": "VWAP Mean Reversion"}
+    for _f in raw_fills:
+        _cid = str(_f.get("clOrdId", "") or "").strip().lower()
+        _fi = _f.get("instId") or _f.get("inst_id") or ""
+        if not _fi or not _cid:
+            continue
+        for _prefix, _bname in _clord_to_bot.items():
+            if _cid.startswith(_prefix) and _fi not in inst_entry_bot:
+                inst_entry_bot[_fi] = _bname
+                break
+
     def _okx_bot(ord_id: str) -> str:
         """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id."""
         cid = (fill_clord.get(ord_id, "")
@@ -6213,7 +6231,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 "reason": t.get("reason", ""),
                 "pos_side": t.get("pos_side", "long"),
                 "signal_id": t.get("signal_id", 0) or ord_id,
-                "bot": _okx_bot(ord_id),
+                "bot": _okx_bot(ord_id) or inst_entry_bot.get(inst, ""),
                 "fee": t.get("fee", "0"),
             })
     except Exception as e:
