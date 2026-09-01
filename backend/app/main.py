@@ -1523,6 +1523,72 @@ async def ai_status():
 
 
 
+
+@app.post("/api/admin/reassign-trade", dependencies=[Depends(require_admin)])
+async def admin_reassign_trade(data: dict = None):
+    """Reassign a closed trade between strategy bots (DB + override list)."""
+    data = data or {}
+    from_bot = str(data.get("from_bot") or "rotation_strategy").strip()
+    to_bot = str(data.get("to_bot") or "ai_strategy").strip()
+    # accept human labels
+    label_to_id = {
+        "Momentum": "rotation_strategy",
+        "Impulse 1D": "impulse_strategy",
+        "AI Discretionary 1H": "ai_strategy",
+        "MACD+Donchian Validation": "validation_strategy",
+    }
+    id_to_label = {v: k for k, v in label_to_id.items()}
+    from_bot = label_to_id.get(from_bot, from_bot)
+    to_bot = label_to_id.get(to_bot, to_bot)
+    symbol = str(data.get("symbol") or data.get("coin") or "ETH").upper().replace("-USDT-SWAP", "")
+    inst = f"{symbol}-USDT-SWAP"
+    side = str(data.get("side") or data.get("pos_side") or "short").lower()
+    pnl_near = data.get("pnl_near", data.get("pnl"))
+    try:
+        pnl_near = float(pnl_near) if pnl_near is not None else 134.17
+    except (TypeError, ValueError):
+        pnl_near = 134.17
+    time_contains = str(data.get("time") or data.get("exit_date") or "2026-09-01")
+    stats = await db.reassign_closed_trade(
+        from_bot, to_bot, inst,
+        side=side, pnl_near=pnl_near, time_contains=time_contains,
+    )
+    # persist override for paired pipeline
+    import json as _json
+    rule = {
+        "inst_id": inst,
+        "pos_side": "short" if side in ("short", "sell") else "long",
+        "pnl_near": pnl_near,
+        "exit_date": time_contains[:10],
+        "to_bot": id_to_label.get(to_bot, "AI Discretionary 1H"),
+    }
+    try:
+        raw = await db.get_setting("pnl_bot_overrides")
+        arr = _json.loads(raw) if raw else []
+        if not isinstance(arr, list):
+            arr = []
+        arr = [r for r in arr if not (
+            r.get("inst_id") == rule["inst_id"]
+            and abs(float(r.get("pnl_near") or 0) - pnl_near) < 1
+        )]
+        arr.append(rule)
+        await db.set_setting("pnl_bot_overrides", _json.dumps(arr))
+    except Exception as e:
+        stats["override_err"] = str(e)
+    # clear caches
+    global _bot_stats_cache, _paired_cache
+    _bot_stats_cache = {"ts": 0.0, "data": {}}
+    _paired_cache = {}
+    # adjust in-memory AI / rotation if present
+    try:
+        if ai_bot and abs(float(stats.get("pnl") or 0)) > 0:
+            ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) + float(stats["pnl"])
+            ai_bot._lifetime_trades = int(getattr(ai_bot, "_lifetime_trades", 0) or 0) + int(stats.get("moved") or 0)
+    except Exception:
+        pass
+    return {"ok": True, "from_bot": from_bot, "to_bot": to_bot, "rule": rule, **stats}
+
+
 @app.post("/api/ai/correct-attribution", dependencies=[Depends(require_admin)])
 async def ai_correct_attribution(data: dict = None):
     """Move mis-attributed trades (default SOL) off AI PnL onto Impulse."""
@@ -5442,7 +5508,29 @@ async def admin_reset_trading_stats(data: dict = None):
 
 @app.get("/api/pnl")
 
+def _active_bot_labels() -> set:
+    """Human labels of bots currently running (for dashboard PnL cards)."""
+    labels = set()
+    try:
+        if rotation and getattr(rotation, "_running", False):
+            labels.add("Momentum")
+        if impulse and getattr(impulse, "_running", False):
+            labels.add("Impulse 1D")
+        if validation and getattr(validation, "_running", False):
+            labels.add("MACD+Donchian Validation")
+        if ai_bot and getattr(ai_bot, "_running", False):
+            labels.add("AI Discretionary 1H")
+        if vwap_rev_bot and getattr(vwap_rev_bot, "_running", False):
+            labels.add("VWAP Mean Reversion")
+        if sm_tracker and getattr(sm_tracker, "_running", False):
+            labels.add("Умные деньги")
+    except Exception:
+        pass
+    return labels
+
+
 async def get_pnl():
+
     """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
 
     Strict tags: clOrdId prefix / DB bot_id / explicit bot label from pairing.
@@ -5689,6 +5777,13 @@ async def get_pnl():
 
     economic = total_realized + unrealized + funding
 
+    # Active-bots-only view for main dashboard cards
+    per_bot_all = {k: float(v) for k, v in per_bot.items()}
+    active = _active_bot_labels()
+    if active:
+        per_bot = {k: v for k, v in per_bot.items() if k in active}
+        total_realized = sum(per_bot.values())
+        # Note: 1d/7d/week still include all strict trades; total/per_bot match cards
     return {
         "total": round(total_realized, 2),
         "account_total": round(account_total, 2),
@@ -5707,6 +5802,8 @@ async def get_pnl():
         "pnl_includes_fee": True,
         "fees_note": fees_note,
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
+        "per_bot_all": {k: round(v, 2) for k, v in per_bot_all.items()},
+        "active_bots": sorted(active) if active else [],
         "pnl_epoch": await get_pnl_epoch(),
         "skipped_untagged": skipped_untagged,
         "timezone": "UTC",
@@ -6565,6 +6662,65 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 t["bot"] = opener
     except Exception as e:
         print(f"[trades/paired] entry-owner override error: {e}", flush=True)
+
+    # Admin / manual corrections (durable settings + built-in known fixes)
+    try:
+        import json as _json
+        forced = []
+        # Known fix: ETH short closed 2026-09-01 ~17:33 UTC (+134 USDT) was
+        # labeled Momentum but opened by AI Discretionary.
+        forced.append({
+            "inst_id": "ETH-USDT-SWAP",
+            "pos_side": "short",
+            "pnl_near": 134.17,
+            "exit_date": "2026-09-01",
+            "to_bot": "AI Discretionary 1H",
+        })
+        try:
+            raw = await db.get_setting("pnl_bot_overrides")
+            if raw:
+                extra = _json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(extra, list):
+                    forced.extend(extra)
+        except Exception:
+            pass
+        for rule in forced:
+            inst = str(rule.get("inst_id") or rule.get("inst") or "").strip()
+            to_bot = str(rule.get("to_bot") or "").strip()
+            if not inst or not to_bot:
+                continue
+            pside = str(rule.get("pos_side") or rule.get("side") or "").strip().lower()
+            pnl_near = rule.get("pnl_near")
+            exit_date = str(rule.get("exit_date") or rule.get("date") or "")
+            for t in dedup:
+                if (t.get("reason") or "").lower() not in ("closed", "close", "partial"):
+                    continue
+                ti = str(t.get("inst_id") or t.get("symbol") or "").strip()
+                if ti != inst:
+                    continue
+                if pside and str(t.get("pos_side") or "").lower() not in (pside, ""):
+                    # also match via side
+                    ts = str(t.get("side") or "").lower()
+                    if pside == "short" and ts not in ("sell", "short", ""):
+                        continue
+                    if pside == "long" and ts not in ("buy", "long", ""):
+                        continue
+                if exit_date:
+                    et = str(t.get("exit_time") or t.get("time") or t.get("timestamp") or "")
+                    if exit_date not in et:
+                        continue
+                if pnl_near is not None:
+                    try:
+                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 8.0:
+                            continue
+                    except (TypeError, ValueError):
+                        continue
+                prev = t.get("bot")
+                t["bot"] = to_bot
+                if prev != to_bot:
+                    print(f"[trades/paired] forced bot {prev!r}→{to_bot!r} {inst} pnl={t.get('pnl')}", flush=True)
+    except Exception as e:
+        print(f"[trades/paired] forced override error: {e}", flush=True)
 
     # 4. Last-mile: enrich any surviving closed row with the exact OKX bill PnL
     #    and fee (covers closes whose fills fell outside the fill window but

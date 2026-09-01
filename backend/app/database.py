@@ -1089,7 +1089,60 @@ class Database:
                 )
         return {"moved": n, "pnl": pnl, "wins": wins}
 
+    async def reassign_closed_trade(
+        self,
+        from_bot: str,
+        to_bot: str,
+        inst_id: str,
+        *,
+        side: str = "",
+        pnl_near: Optional[float] = None,
+        time_contains: str = "",
+    ) -> dict:
+        """Move matching closed trades (best-effort filter) from_bot → to_bot."""
+        side = (side or "").lower()
+        rows = await self._fetchall(
+            ("SELECT id, pnl, side, timestamp, state FROM trades WHERE bot_id = $1 AND inst_id = $2"
+             if self._pg_mode else
+             "SELECT id, pnl, side, timestamp, state FROM trades WHERE bot_id = ? AND inst_id = ?"),
+            (from_bot, inst_id),
+        ) or []
+        moved_ids = []
+        pnl_sum = 0.0
+        for r in rows:
+            rid = r.get("id") if isinstance(r, dict) else r[0]
+            p = float((r.get("pnl") if isinstance(r, dict) else r[1]) or 0)
+            rside = str((r.get("side") if isinstance(r, dict) else r[2]) or "").lower()
+            ts = str((r.get("timestamp") if isinstance(r, dict) else r[3]) or "")
+            st = str((r.get("state") if isinstance(r, dict) else (r[4] if len(r) > 4 else "")) or "").lower()
+            if st and st not in ("filled", "closed", "partial", ""):
+                continue
+            if side and rside and side not in rside and rside not in side:
+                # allow buy/sell vs long/short mismatch — soft
+                if not ((side == "short" and rside == "buy") or (side == "long" and rside == "sell")
+                        or (side == "short" and "sell" in rside) or (side == "long" and "buy" in rside)):
+                    if side not in rside:
+                        continue
+            if time_contains and time_contains not in ts:
+                # try alternate formats
+                alt = time_contains.replace("T", " ")[:16]
+                if alt not in ts and time_contains[:10] not in ts:
+                    continue
+            if pnl_near is not None and abs(p - float(pnl_near)) > 5.0 and abs(p) > 1e-9:
+                # if multiple rows, prefer near match; skip far
+                if abs(p - float(pnl_near)) > max(20.0, abs(float(pnl_near)) * 0.15):
+                    continue
+            moved_ids.append(rid)
+            pnl_sum += p
+        for rid in moved_ids:
+            if self._pg_mode:
+                await self._execute("UPDATE trades SET bot_id = $1 WHERE id = $2", (to_bot, rid))
+            else:
+                await self._execute("UPDATE trades SET bot_id = ? WHERE id = ?", (to_bot, rid))
+        return {"moved": len(moved_ids), "pnl": pnl_sum, "ids": moved_ids}
+
     async def last_bot_for_instrument(self, inst_id: str) -> Optional[str]:
+
         """Ownership hint: positions claim, then trades, then signals."""
         for sql in (
             (
