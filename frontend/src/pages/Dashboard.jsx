@@ -194,12 +194,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     try {
       const [momTrades, trades, pnlData] = await Promise.all([
         api.momentumTrades(30).catch(() => null),
-        api.getPairedTrades(50).catch(() => null),
+        api.getPairedTrades(200).catch(() => null),
         api.getPnl().catch(() => null),
       ])
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
-      if (pnlData && !pnlData.detail && pnlData.total != null) {
+      if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         setPnl(pnlData)
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
@@ -235,15 +235,46 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     : (pnl?.unrealized || 0)
   const fundingPnl = Number(pnl?.funding ?? 0)
   const economicPnl = Number(pnl?.economic_approx ?? ((Number(pnl?.total) || 0) + unrealizedPnl + fundingPnl))
+  // Realized windows: prefer /api/pnl; if 0/missing — sum closed rows from tradeLog
+  const sumClosedSince = (msBack) => {
+    const cutoff = Date.now() - msBack
+    let s = 0
+    for (const t of (tradeLog || [])) {
+      const reason = String(t.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (t.pnl == null || t.pnl === '') continue
+      const ts = t.exit_time || t.time || t.timestamp || ''
+      if (!ts) continue
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms) || ms < cutoff) continue
+      s += Number(t.pnl) || 0
+    }
+    return s
+  }
   const pnlTotal = (() => {
     const t = Number(pnl?.total ?? 0)
     if (t !== 0) return t
     const per = pnl?.per_bot || pnl?.per_bot_all || {}
-    return Object.values(per).reduce((s, v) => s + Number(v || 0), 0)
+    const fromPer = Object.values(per).reduce((s, v) => s + Number(v || 0), 0)
+    if (fromPer !== 0) return fromPer
+    // last resort: all closed in log
+    return sumClosedSince(365 * 86400000)
   })()
-  const pnlDay = Number(pnl?.['1d'] ?? 0)
-  const pnlWeek = Number(pnl?.week ?? pnl?.['7d'] ?? 0)
-  const pnlMonth = Number(pnl?.['30d'] ?? 0)
+  const pnlDay = (() => {
+    const v = Number(pnl?.['1d'] ?? 0)
+    if (v !== 0) return v
+    return sumClosedSince(86400000)
+  })()
+  const pnlWeek = (() => {
+    const v = Number(pnl?.week ?? pnl?.['7d'] ?? 0)
+    if (v !== 0) return v
+    return sumClosedSince(7 * 86400000)
+  })()
+  const pnlMonth = (() => {
+    const v = Number(pnl?.['30d'] ?? 0)
+    if (v !== 0) return v
+    return sumClosedSince(30 * 86400000)
+  })()
 
   // Per-strategy realized PnL breakdown (from /api/pnl per_bot)
   const botNameMap = {

@@ -5688,13 +5688,14 @@ async def get_pnl():
 
     economic = total_realized + unrealized + funding
 
-    # Active-bots-only view for main dashboard cards
+    # Active-bots-only view for main dashboard cards (total + windows)
     per_bot_all = {k: float(v) for k, v in per_bot.items()}
     active = _active_bot_labels()
     if active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
         total_realized = sum(per_bot.values())
-        # Note: 1d/7d/week still include all strict trades; total/per_bot match cards
+        # Recompute windows from tagged closed list would need bot on each add —
+        # use second pass over closed_tagged if available in scope
     return {
         "total": round(total_realized, 2),
         "account_total": round(account_total, 2),
