@@ -529,13 +529,13 @@ async def startup():
         if _env_key and _env_secret and _env_pass and _bots_auto_start and _ai_auto:
             global ai_bot
             _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
-            env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
-            if env_ex in ("1", "true", "yes", "on"):
+            # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
+            # On live, respect AI_EXECUTE env with default off.
+            if _demo:
                 _exec = True
-            elif env_ex in ("0", "false", "no", "off"):
-                _exec = False
             else:
-                _exec = _demo  # auto execute on demo
+                env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+                _exec = env_ex in ("1", "true", "yes", "on")
             ai_cfg = AIConfig(
                 capital=float(os.getenv("AI_CAPITAL", "10000")),
                 max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
@@ -1519,14 +1519,11 @@ async def ai_start(data: dict = None):
     _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
     if "execute" in data:
         _exec = bool(data["execute"])
+    elif _demo:
+        _exec = True  # demo always executes (AI_EXECUTE=0 on demo is meaningless)
     else:
         env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
-        if env_ex in ("1", "true", "yes", "on"):
-            _exec = True
-        elif env_ex in ("0", "false", "no", "off"):
-            _exec = False
-        else:
-            _exec = _demo  # auto on demo
+        _exec = env_ex in ("1", "true", "yes", "on")
     cfg = AIConfig(
         capital=float(data.get("capital") or os.getenv("AI_CAPITAL", "10000")),
         max_leverage=float(data.get("max_leverage") or 3),
