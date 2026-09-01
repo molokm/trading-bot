@@ -6241,9 +6241,18 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         _fi = _f.get("instId") or _f.get("inst_id") or ""
         if not _fi or not _cid:
             continue
+        # Side of the entry: sell opens a short, buy opens a long. A position can
+        # be opened by different bots over time on the SAME instrument (AI opened
+        # an ETH short with ai..., later Momentum opened an ETH long with rot...),
+        # so the opener is keyed by (inst_id, side), not just inst_id.
+        _fside = str(_f.get("side") or "").lower()
+        _entry_side = "short" if _fside == "sell" else ("long" if _fside == "buy" else "")
+        if not _entry_side:
+            continue
+        _key = ( _fi, _entry_side)
         for _prefix, _bname in _clord_to_bot.items():
-            if _cid.startswith(_prefix) and _fi not in inst_entry_bot:
-                inst_entry_bot[_fi] = _bname
+            if _cid.startswith(_prefix) and _key not in inst_entry_bot:
+                inst_entry_bot[_key] = _bname
                 break
 
     def _okx_bot(ord_id: str, *, entry_ord_id: str = "") -> str:
@@ -6497,17 +6506,20 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
 
     # Correct attribution: the bot that OPENED the position owns the trade, even
     # if a different bot closed it (e.g. Momentum adopted an AI position and
-    # closed it with a rot... clOrdId). inst_entry_bot maps inst_id -> bot from
-    # the ENTRY fill's clOrdId, which is the authoritative opener signal. This
-    # overrides the close-order-based tag (e.g. Momentum) whenever the entry says
-    # the opener was a different strategy. Applied AFTER the legacy merge so
-    # DB-sourced rows are corrected too.
+    # closed it with a rot... clOrdId). inst_entry_bot maps (inst_id, side) -> bot
+    # from the ENTRY fill's clOrdId, which is the authoritative opener signal.
+    # Keyed by (inst, side) because the same instrument can have different openers
+    # for different sides (AI short vs Momentum long on the same coin).
+    # Applied AFTER the legacy merge so DB-sourced rows are corrected too.
     try:
         for t in dedup:
             inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
             if not inst:
                 continue
-            opener = inst_entry_bot.get(inst, "")
+            pside = str(t.get("pos_side") or "long").strip().lower()
+            opener = inst_entry_bot.get((inst, pside), "")
+            if not opener:
+                opener = inst_entry_bot.get(inst, "")
             if not opener:
                 continue
             cur_bot = str(t.get("bot") or "")
