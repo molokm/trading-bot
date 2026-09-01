@@ -1426,7 +1426,13 @@ async def ai_status():
             "lifetime_pnl": 0,
             "open_positions": [],
         }
-    status = ai_bot.get_status()
+    try:
+        status = ai_bot.get_status()
+    except Exception as e:
+        import traceback
+        print(f"[ai/status] get_status error: {e}", flush=True)
+        traceback.print_exc()
+        return {"error": f"get_status: {type(e).__name__}: {e}", "running": ai_bot._running}
     internal = status.get("lifetime_pnl", status.get("total_pnl"))
     status["total_pnl_internal"] = internal
     status["lifetime_pnl_internal"] = internal
