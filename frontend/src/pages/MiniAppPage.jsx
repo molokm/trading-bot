@@ -182,10 +182,10 @@ function ProPreview({ t, onBack }) {
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="flex gap-2">
-            {(demo.bots || []).filter(b => b.running).map((b, i) => (
-              <span key={b.name || i}>{demoBotCard(b, i === 0 ? 'text-[var(--info)]' : 'text-[var(--profit)]')}</span>
+            {(demo.bots || []).filter(b => b && b.running).map((b, i) => (
+              <div key={b.name || i} className="contents">{demoBotCard(b, i === 0 ? 'text-[var(--info)]' : 'text-[var(--profit)]')}</div>
             ))}
-            {!(demo.bots || []).some(b => b.running) && (
+            {!(demo.bots || []).some(b => b && b.running) && (
               <div className="col-span-2 text-2xs text-[var(--txt-muted)]">Нет активных ботов</div>
             )}
           </div>
@@ -246,7 +246,34 @@ function ProPreview({ t, onBack }) {
 }
 
 /* ═══════ Main page ═══════ */
-export default function MiniAppPage() {
+class MiniAppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+  componentDidCatch(err, info) {
+    console.error('[mini] crash', err, info)
+    try { miniLog('crash', String(err?.message || err), String(info?.componentStack || '').slice(0, 300)) } catch {}
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-center">
+          <div className="text-sm font-semibold text-[var(--loss)]">Ошибка Mini App</div>
+          <pre className="text-2xs text-[var(--txt-muted)] whitespace-pre-wrap break-words max-w-full">{String(this.state.error?.message || this.state.error)}</pre>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>Перезагрузить</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function MiniAppPageInner
+() {
   const { t } = useTranslation()
   const [authing, setAuthing] = useState(true)
   const [authError, setAuthError] = useState('')
@@ -285,41 +312,48 @@ export default function MiniAppPage() {
   // closed trades with the same phantom-close suppression — a "closed" row is
   // hidden while its instrument+side is still open on OKX/bots (no real close).
   const displayTrades = useMemo(() => {
-    const openKeys = new Set()
-    const pushOpen = (p) => {
-      const inst = p.inst_id || p.instId || p.symbol || ''
-      if (!inst) return
-      const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
-      const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
-      openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
-    }
-    for (const p of (positions || [])) pushOpen(p)
-    for (const p of (rotation?.open_positions || [])) pushOpen(p)
-    for (const p of (impulse?.open_positions || [])) pushOpen(p)
-    for (const p of (validation?.open_positions || [])) pushOpen(p)
-    for (const p of (aiBot?.open_positions || [])) pushOpen(p)
-
-    const out = []
-    for (const tr of (trades || [])) {
-      const inst = tr.inst_id || tr.symbol || ''
-      const reason = (tr.reason || '').toLowerCase()
-      if (reason === 'open' || reason === 'add') continue
-      if (inst) {
-        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
-        if (openKeys.has(`${inst}|${sideKey}`)) continue
+    try {
+      const openKeys = new Set()
+      const pushOpen = (p) => {
+        if (!p || typeof p !== 'object') return
+        const inst = p.inst_id || p.instId || p.symbol || ''
+        if (!inst) return
+        const sideRaw = String(p.side || p.posSide || p.pos_side || 'long').toLowerCase()
+        const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
+        openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
       }
-      out.push({
-        ...tr,
-        coin: tr.coin || (inst || '').replace('-USDT-SWAP', ''),
-        symbol: tr.symbol || inst,
-        isOpen: false,
-        entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
-        exit: tr.exit_px ?? tr.exit_price,
-        size: tr.size ?? tr.sz ?? '',
-        time: tr.time || tr.exit_time || tr.entry_time || '',
-      })
+      for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
+      for (const p of (rotation?.open_positions || [])) pushOpen(p)
+      for (const p of (impulse?.open_positions || [])) pushOpen(p)
+      for (const p of (validation?.open_positions || [])) pushOpen(p)
+      for (const p of (aiBot?.open_positions || [])) pushOpen(p)
+
+      const out = []
+      for (const tr of (Array.isArray(trades) ? trades : [])) {
+        if (!tr || typeof tr !== 'object') continue
+        const inst = tr.inst_id || tr.symbol || ''
+        const reason = String(tr.reason || '').toLowerCase()
+        if (reason === 'open' || reason === 'add') continue
+        if (inst) {
+          const sideKey = String(tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+          if (openKeys.has(`${inst}|${sideKey}`)) continue
+        }
+        out.push({
+          ...tr,
+          coin: tr.coin || String(inst || '').replace('-USDT-SWAP', ''),
+          symbol: tr.symbol || inst,
+          isOpen: false,
+          entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
+          exit: tr.exit_px ?? tr.exit_price,
+          size: tr.size ?? tr.sz ?? '',
+          time: tr.time || tr.exit_time || tr.entry_time || '',
+        })
+      }
+      return out
+    } catch (e) {
+      console.error('[mini] displayTrades', e)
+      return []
     }
-    return out
   }, [trades, positions, rotation, impulse, validation, aiBot])
 
   useEffect(() => {
@@ -591,6 +625,7 @@ export default function MiniAppPage() {
 
   /* ── Compact strategy card ── */
   const botCard = (name, s, iconColor, shortLabel) => {
+    if (!s) return null
     const running = !!s?.running
     const pnl = Number(
       (s?.total_pnl_source === 'okx_history' ? s?.total_pnl : null)
@@ -598,8 +633,9 @@ export default function MiniAppPage() {
       ?? s?.lifetime_pnl
       ?? 0
     )
-    const nPos = (s?.open_positions || s?.positions || []).length
-    const tradesN = s?.total_trades ?? 0
+    const nPos = Array.isArray(s?.open_positions) ? s.open_positions.length
+      : (Array.isArray(s?.positions) ? s.positions.length : 0)
+    const tradesN = Number(s?.total_trades ?? 0) || 0
     return (
       <Card className="min-w-0 py-2.5">
         <div className="flex items-center justify-between gap-1 mb-1">
@@ -884,9 +920,9 @@ export default function MiniAppPage() {
             </Card>
           ) : (
             <div className="space-y-1.5 max-h-56 overflow-y-auto overscroll-contain pr-0.5">
-              {positions.map((p, i) => {
-                const upl = Number(p.upl || 0)
-                const side = (p.posSide || 'net').toLowerCase()
+              {(Array.isArray(positions) ? positions : []).filter(Boolean).map((p, i) => {
+                const upl = Number(p?.upl || 0)
+                const side = String(p?.posSide || p?.pos_side || 'net').toLowerCase()
                 return (
                   <Card key={i} className="py-2.5">
                     <div className="flex items-center justify-between mb-1">
@@ -1033,5 +1069,14 @@ export default function MiniAppPage() {
         )}
       </div>
     </div>
+  )
+}
+
+
+export default function MiniAppPage(props) {
+  return (
+    <MiniAppErrorBoundary>
+      <MiniAppPageInner {...props} />
+    </MiniAppErrorBoundary>
   )
 }
