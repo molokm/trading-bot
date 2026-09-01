@@ -2352,6 +2352,22 @@ async def health():
         diag["pnl_per_bot"] = _pr.get("per_bot")
         diag["pnl_source"] = _pr.get("source")
         diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
+        # inst_last_bot map (manual-close attribution)
+        try:
+            _ilb = {}
+            for _r in await db._fetchall(
+                "SELECT inst_id, bot_id, timestamp FROM trades "
+                "WHERE bot_id IS NOT NULL AND bot_id != '' "
+                "ORDER BY timestamp DESC LIMIT 300"
+            ):
+                _i = _r.get("inst_id") or ""
+                if _i and _i not in _ilb:
+                    _ilb[_i] = str(_r.get("bot_id") or "")
+            diag["inst_last_bot_sample"] = {
+                k: v for k, v in list(_ilb.items())[:12]
+            }
+        except Exception as e:
+            diag["inst_last_bot_err"] = str(e)
         # Last 10 trades with PnL to explain the daily number
         try:
             _pt = await get_paired_trades(limit=500)
