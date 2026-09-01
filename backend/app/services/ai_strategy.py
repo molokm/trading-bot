@@ -248,16 +248,32 @@ class AIStrategy:
                 pass
 
     def _provider(self) -> str:
-        # BAI (api.b.ai deepseek) is primary when its key is set — this is the
-        # model the operator runs in OpenCode, so it wins over AI_LLM_PROVIDER.
+        """Pick the best available LLM provider with rotation.
+
+        Rotation order: bai → groq → openrouter → gemini → openai → bai …
+        When the current provider is rate-limited, automatically falls through
+        to the next one that has an API key and is not on cooldown.
+        """
+        from .ai_agent import (
+            is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
+        )
+        # Preferred provider: BAI first, then config, then env, then groq
         if os.getenv("BAI_API_KEY", "").strip():
-            return "bai"
-        if self.config.provider:
-            return str(self.config.provider).strip().lower()
-        env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
-        if env:
-            return env
-        return "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
+            preferred = "bai"
+        elif self.config.provider:
+            preferred = str(self.config.provider).strip().lower()
+        else:
+            env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+            preferred = env or ("groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock")
+        # If preferred is available, use it
+        if preferred != "mock" and is_provider_available(preferred):
+            return preferred
+        # Otherwise pick next available in rotation
+        nxt = next_available_provider()
+        if nxt:
+            return nxt
+        # Fallback: preferred even if on cooldown (will retry)
+        return preferred
 
     def _execute_enabled(self) -> bool:
         if self.config.execute is not None:
@@ -285,6 +301,14 @@ class AIStrategy:
         self._session_pnl = 0.0
         self._equity = self._capital
         print("[AI] lifetime_pnl reset to 0 (stale data cleared)", flush=True)
+
+    def _get_provider_status(self) -> dict:
+        """Return cooldown/availability status of all LLM providers."""
+        from .ai_agent import get_provider_status, _last_provider_used
+        return {
+            "active": _last_provider_used or self._provider(),
+            "providers": get_provider_status(),
+        }
 
     def _is_demo(self) -> bool:
         if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
@@ -2171,5 +2195,6 @@ class AIStrategy:
                 "llm_rate_limited": self._llm_rate_limited,
                 "llm_rate_limit_until": self._llm_rate_limit_until,
                 "last_provider_used": self._last_provider_used,
+                "provider_status": self._get_provider_status(),
             },
         }

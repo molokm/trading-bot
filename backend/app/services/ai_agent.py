@@ -22,6 +22,65 @@ import httpx
 
 log = logging.getLogger("ai_agent")
 
+# ── provider rotation & cooldown ──────────────────────────────
+_llm_cooldowns: dict[str, float] = {}  # provider -> expiry timestamp (time.time())
+_last_provider_used: str | None = None  # last successfully used provider
+PROVIDER_ROTATION_ORDER = ["bai", "groq", "openrouter", "gemini", "openai"]
+COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
+COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
+
+def is_provider_available(name: str) -> bool:
+    """Check if a provider is not on cooldown."""
+    import time
+    exp = _llm_cooldowns.get(name, 0)
+    return exp <= time.time()
+
+def mark_provider_cooldown(name: str, seconds: float):
+    """Put a provider on cooldown."""
+    import time
+    _llm_cooldowns[name] = time.time() + seconds
+    log.warning("LLM provider %s on cooldown for %ds", name, int(seconds))
+
+def clear_provider_cooldown(name: str):
+    """Clear cooldown for a provider."""
+    _llm_cooldowns.pop(name, None)
+
+def get_provider_status() -> dict:
+    """Return cooldown status of all known providers."""
+    import time
+    now = time.time()
+    return {
+        name: {
+            "available": is_provider_available(name),
+            "cooldown_remaining": max(0, round(_llm_cooldowns.get(name, 0) - now)),
+        }
+        for name in PROVIDER_ROTATION_ORDER
+        if os.getenv(f"{name.upper()}_API_KEY", "").strip() or name == "mock"
+    }
+
+def next_available_provider() -> str | None:
+    """Pick the next available provider in rotation order.
+    If all are on cooldown, return the one with the shortest remaining cooldown."""
+    import time
+    now = time.time()
+    best = None
+    best_wait = float("inf")
+    for name in PROVIDER_ROTATION_ORDER:
+        exp = _llm_cooldowns.get(name, 0)
+        if exp <= now:
+            # Check if the provider has an API key configured
+            if name == "mock":
+                return name
+            key_env = f"{name.upper()}_API_KEY"
+            if os.getenv(key_env, "").strip():
+                return name
+        else:
+            wait = exp - now
+            if wait < best_wait:
+                best_wait = wait
+                best = name
+    return best  # least-cooled-down (or None if no keys)
+
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce")
 ALLOWED_SIDES = ("long", "short")
 ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")
@@ -289,7 +348,20 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     if provider == "mock" or not provider:
         return mock_decide(snapshot)
 
+    # Provider rotation: start from requested, but skip cooldown providers
+    preferred = provider
     chain = _provider_chain(provider)
+    # Reorder: preferred first, then rotation order, skipping cooldown
+    available = [p for p in chain if is_provider_available(p)]
+    if not available:
+        # All on cooldown — use the one with shortest remaining wait
+        fallback = next_available_provider()
+        available = [fallback] if fallback else chain[:1]
+    # Ensure preferred is first if available
+    if preferred in available:
+        available = [preferred] + [p for p in available if p != preferred]
+    chain = available
+
     errors = []
     raw = None
     used = None
@@ -297,11 +369,15 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         try:
             raw = await _call_provider(prov, user_msg)
             used = prov
+            clear_provider_cooldown(prov)
             break
         except Exception as e:
             msg = str(e)
             log.warning("LLM provider %s failed: %s", prov, msg)
             errors.append(f"{prov}:{msg[:120]}")
+            # Rate limit → long cooldown; other errors → short cooldown
+            is_rate = "429" in msg or "rate" in msg.lower() or "limit" in msg.lower()
+            mark_provider_cooldown(prov, COOLDOWN_ON_RATE_LIMIT if is_rate else COOLDOWN_ON_ERROR)
             continue
 
     if raw is None:
@@ -318,9 +394,12 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         d["reason"] = f"parse_fail via {used}; fallback: {d.get('reason')}"
         return d
     dec = validate_decision(parsed, open_syms)
-    if used and used != provider:
-        dec["reason"] = f"via_{used}: {dec.get('reason')}"
+    if used:
+        global _last_provider_used
+        _last_provider_used = used
         dec["provider_used"] = used
+        if used != provider:
+            dec["reason"] = f"via_{used}: {dec.get('reason')}"
     return dec
 
 
