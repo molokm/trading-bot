@@ -1252,7 +1252,7 @@ class AIStrategy:
         if self.notifier:
             try:
                 _reply = int(getattr(pos, "tg_message_id", 0) or 0)
-                if not _reply:
+                if not _reply and self.notifier:
                     _reply = await self.notifier.resolve_open_message_id(
                         self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
                     )

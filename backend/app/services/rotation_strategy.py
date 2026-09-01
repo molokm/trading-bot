@@ -2296,7 +2296,32 @@ class RotationStrategy:
 
 
 
+    async def _tg_reply_id(self, pos) -> int:
+        """Best-effort Telegram message_id of the OPEN to reply to."""
+        mid = int(getattr(pos, "tg_message_id", 0) or 0)
+        if mid:
+            return mid
+        if not self.notifier:
+            return 0
+        try:
+            sid = int(getattr(pos, "signal_id", 0) or 0)
+            coin = getattr(pos, "coin", "") or ""
+            mid = await self.notifier.resolve_open_message_id(
+                self.db, signal_id=sid,
+                bot_id=getattr(self, "BOT_ID", ""), coin=coin,
+            )
+            if mid:
+                try:
+                    pos.tg_message_id = int(mid)
+                except Exception:
+                    pass
+            return int(mid or 0)
+        except Exception as e:
+            print(f"[{getattr(self, 'BOT_NAME', 'bot')}] _tg_reply_id: {e}", flush=True)
+            return 0
+
     async def _persist_open_snapshot(self):
+
         """Durable open list in settings — survives trade history wipes."""
         if not self.db:
             return
@@ -2310,6 +2335,8 @@ class RotationStrategy:
                     "side": getattr(pos, "side", "long"),
                     "size": float(getattr(pos, "size", 0) or 0),
                     "entry_price": float(getattr(pos, "entry_price", 0) or 0),
+                    "tg_message_id": int(getattr(pos, "tg_message_id", 0) or 0),
+                    "signal_id": int(getattr(pos, "signal_id", 0) or 0),
                 })
             await self.db.set_setting(
                 f"open_positions:{self.BOT_ID}",
