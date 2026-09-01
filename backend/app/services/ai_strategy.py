@@ -190,6 +190,14 @@ class AIStrategy:
         self._last_activity = None
         self._last_tick_error = None
         self._started_at = None
+        self._tick_count = 0
+        self._tick_fail_count = 0
+        self._consecutive_fails = 0
+        self._llm_error_count = 0
+        self._last_llm_error = None
+        self._llm_rate_limited = False
+        self._llm_rate_limit_until = 0.0
+        self._last_provider_used = None
         self._latest_indicators: dict = {}
         self._last_decision: dict = {}
         # v1.1 adaptive layer
@@ -310,18 +318,24 @@ class AIStrategy:
             try:
                 await self._tick()
                 self._last_tick_error = None
+                self._consecutive_fails = 0
             except Exception as e:
+                self._consecutive_fails += 1
                 print(f"[AI] tick error: {e}", flush=True)
                 try:
                     self._last_tick_error = f"{type(e).__name__}: {str(e)[:200]}"
                 except Exception:
                     pass
+            self._tick_count += 1
             self._last_activity = datetime.now(timezone.utc).isoformat()
-            _sleep = max(30, int(self.config.poll_interval_sec or 180))
+            import time as _t
+            self._llm_rate_limit_until = 0.0
+            self._llm_rate_limited = False
             try:
                 from .ai_agent import _rate_limit_until
-                import time as _t
                 if _t.time() < _rate_limit_until:
+                    self._llm_rate_limited = True
+                    self._llm_rate_limit_until = _rate_limit_until
                     _sleep = max(_sleep, min(900, int(_rate_limit_until - _t.time()) + 5))
             except Exception:
                 pass
@@ -1519,7 +1533,21 @@ class AIStrategy:
         except Exception:
             pass
         snap = self._snapshot()  # include fresh adaptive + reflection
-        decision = await call_llm(snap, provider=self._provider())
+        try:
+            decision = await call_llm(snap, provider=self._provider())
+        except Exception as e:
+            self._llm_error_count += 1
+            self._last_llm_error = f"{type(e).__name__}: {str(e)[:200]}"
+            print(f"[AI] LLM call exception: {e}", flush=True)
+            decision = mock_decide(snap)
+            decision["reason"] = f"llm_exception: {str(e)[:200]}"
+        prov_used = decision.get("provider_used") or self._provider()
+        self._last_provider_used = prov_used
+        if "llm_error" in (decision.get("reason") or ""):
+            self._llm_error_count += 1
+            self._last_llm_error = decision["reason"][:200]
+        else:
+            self._last_llm_error = None
         self._last_decision = self._enrich_decision(decision, snap)
         self._decision_log.append(self._last_decision)
         self._decision_log = self._decision_log[-200:]
@@ -2131,4 +2159,17 @@ class AIStrategy:
             "recent_trades": self._trade_log[-20:],
             "last_activity": self._last_activity,
             "started_at": self._started_at,
+            "health": {
+                "alive": self._running and self._last_activity is not None,
+                "last_activity": self._last_activity,
+                "tick_count": self._tick_count,
+                "tick_fail_count": self._tick_fail_count,
+                "consecutive_fails": self._consecutive_fails,
+                "last_tick_error": self._last_tick_error,
+                "llm_error_count": self._llm_error_count,
+                "last_llm_error": self._last_llm_error,
+                "llm_rate_limited": self._llm_rate_limited,
+                "llm_rate_limit_until": self._llm_rate_limit_until,
+                "last_provider_used": self._last_provider_used,
+            },
         }

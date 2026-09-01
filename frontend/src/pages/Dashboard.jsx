@@ -1181,6 +1181,30 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               {aiStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
               {!aiStatus?.running && aiStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
             </div>
+            {/* Health indicator */}
+            {aiStatus?.health && (() => {
+              const h = aiStatus.health
+              const poll = (aiStatus?.config?.poll_interval_sec || 120) * 3
+              const lastTs = h.last_activity ? Date.parse(h.last_activity) : 0
+              const stale = lastTs ? (Date.now() - lastTs) > poll * 1000 : false
+              const hasErrors = h.consecutive_fails > 0 || h.last_tick_error
+              const rateLimited = h.llm_rate_limited && h.llm_rate_limit_until > Date.now() / 1000
+              let dotColor = 'var(--profit)'
+              let statusText = `♥ ${h.tick_count} ticks`
+              if (rateLimited) { dotColor = 'var(--loss)'; statusText = `⏳ rate limit ${Math.max(0, Math.ceil(h.llm_rate_limit_until - Date.now() / 1000))}s` }
+              else if (h.last_tick_error) { dotColor = 'var(--loss)'; statusText = `✕ ${h.last_tick_error.slice(0, 40)}` }
+              else if (h.last_llm_error) { dotColor = 'var(--warn)'; statusText = `⚠ LLM: ${h.last_llm_error.slice(0, 40)}` }
+              else if (stale) { dotColor = 'var(--warn)'; statusText = `⏰ stale ${Math.floor((Date.now() - lastTs) / 60000)}м` }
+              else if (h.last_provider_used && h.last_provider_used !== aiStatus?.provider) { dotColor = 'var(--warn)'; statusText = `↻ fallback ${h.last_provider_used}` }
+              const ago = lastTs ? Math.floor((Date.now() - lastTs) / 60000) : null
+              return (
+                <div className="px-3 pb-1 flex items-center gap-1.5 text-2xs">
+                  <span className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse" style={{ background: dotColor }} />
+                  <span className="text-[var(--txt-muted)] truncate">{statusText}</span>
+                  {ago != null && <span className="text-[var(--txt-muted)] ml-auto whitespace-nowrap">{ago < 1 ? '<1м' : `${ago}м`} ago</span>}
+                </div>
+              )
+            })()}
             <div className="p-3 space-y-2">
               <div className="grid grid-cols-2 gap-1.5 text-2xs">
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
