@@ -2377,15 +2377,6 @@ async def health():
         "AI_EXECUTE": os.getenv("AI_EXECUTE", "(unset)"),
         "AI_AUTO_START": os.getenv("AI_AUTO_START", "(unset)"),
         "AI_EXEC_CFG": None if ai_bot is None or ai_bot.config.execute is None else ai_bot.config.execute,
-        "AI_LLM_PROVIDER": os.getenv("AI_LLM_PROVIDER", "(unset)"),
-        "AI_LLM_MODEL": os.getenv("AI_LLM_MODEL", "(unset)"),
-        "AI_LLM_FALLBACKS": os.getenv("AI_LLM_FALLBACKS", "(unset)"),
-        "GROQ_API_KEY": "set" if os.getenv("GROQ_API_KEY") else "(unset)",
-        "OPENROUTER_API_KEY": "set" if os.getenv("OPENROUTER_API_KEY") else "(unset)",
-        "OPENAI_API_KEY": "set" if os.getenv("OPENAI_API_KEY") else "(unset)",
-        "GEMINI_API_KEY": "set" if os.getenv("GEMINI_API_KEY") else "(unset)",
-        "XAI_API_KEY": "set" if os.getenv("XAI_API_KEY") else "(unset)",
-        "GROK_API_KEY": "set" if os.getenv("GROK_API_KEY") else "(unset)",
     }
     # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
     # cards may look wrong (e.g. -288 today).
