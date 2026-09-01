@@ -2262,6 +2262,53 @@ async def vwap_rev_stop():
 
 
 
+@app.get("/api/trades/debug-eth", dependencies=[Depends(require_admin)])
+async def debug_eth_trades():
+    """Dump ETH-USDT-SWAP bill pairing + fills to diagnose attribution."""
+    out: dict = {}
+    try:
+        bills = await _fetch_all_trade_bills()
+        eth_bills = [b for b in bills if (b.get("instId") or "") == "ETH-USDT-SWAP"]
+        out["eth_bill_count"] = len(eth_bills)
+        out["eth_bill_subtypes"] = {}
+        for b in eth_bills:
+            st = str(b.get("subType", ""))
+            out["eth_bill_subtypes"][st] = out["eth_bill_subtypes"].get(st, 0) + 1
+        paired = _pair_bills(bills)
+        eth_paired = [r for r in paired if (r.get("inst_id") or "") == "ETH-USDT-SWAP"]
+        out["eth_paired"] = []
+        for r in eth_paired:
+            out["eth_paired"].append({
+                "time": r.get("time"),
+                "entry_ord_id": r.get("entry_ord_id"),
+                "ord_id": r.get("ord_id"),
+                "pnl": r.get("pnl"),
+                "reason": r.get("reason"),
+                "pos_side": r.get("pos_side"),
+                "source": r.get("source"),
+            })
+    except Exception as e:
+        out["bills_error"] = str(e)
+
+    try:
+        fills = await _fetch_okx_fills(limit=1000)
+        eth_fills = [f for f in fills if (f.get("instId") or "") == "ETH-USDT-SWAP"]
+        out["eth_fill_count"] = len(eth_fills)
+        out["eth_fill_clord_sample"] = []
+        for f in eth_fills[:5]:
+            out["eth_fill_clord_sample"].append({
+                "ordId": f.get("ordId"),
+                "clOrdId": f.get("clOrdId"),
+                "ts": f.get("ts"),
+            })
+        clord_map = {f.get("ordId"): f.get("clOrdId") for f in eth_fills}
+        out["eth_fill_ord_ids"] = list(clord_map.keys())
+    except Exception as e:
+        out["fills_error"] = str(e)
+
+    return out
+
+
 @app.get("/api/health/positions-claims", dependencies=[Depends(require_admin)])
 async def health_positions_claims():
     """Compare OKX open SWAP positions vs DB strategy claims."""
