@@ -631,7 +631,6 @@ PUBLIC_API_PATHS = {
     "/api/auth/telegram",
     "/api/risk/status",
     "/api/ai/status",  # LLM config flags only (no secrets)
-    "/api/trades/debug-eth",  # TEMP: diagnosis
 }
 
 ADMIN_ONLY_PATHS = {
@@ -2263,53 +2262,6 @@ async def vwap_rev_stop():
 
 
 
-@app.get("/api/trades/debug-eth")  # TEMP: public for diagnosis
-async def debug_eth_trades():
-    """Dump ETH-USDT-SWAP bill pairing + fills to diagnose attribution."""
-    out: dict = {}
-    try:
-        bills = await _fetch_all_trade_bills()
-        eth_bills = [b for b in bills if (b.get("instId") or "") == "ETH-USDT-SWAP"]
-        out["eth_bill_count"] = len(eth_bills)
-        out["eth_bill_subtypes"] = {}
-        for b in eth_bills:
-            st = str(b.get("subType", ""))
-            out["eth_bill_subtypes"][st] = out["eth_bill_subtypes"].get(st, 0) + 1
-        paired = _pair_bills(bills)
-        eth_paired = [r for r in paired if (r.get("inst_id") or "") == "ETH-USDT-SWAP"]
-        out["eth_paired"] = []
-        for r in eth_paired:
-            out["eth_paired"].append({
-                "time": r.get("time"),
-                "entry_ord_id": r.get("entry_ord_id"),
-                "ord_id": r.get("ord_id"),
-                "pnl": r.get("pnl"),
-                "reason": r.get("reason"),
-                "pos_side": r.get("pos_side"),
-                "source": r.get("source"),
-            })
-    except Exception as e:
-        out["bills_error"] = str(e)
-
-    try:
-        fills = await _fetch_okx_fills(limit=1000)
-        eth_fills = [f for f in fills if (f.get("instId") or "") == "ETH-USDT-SWAP"]
-        out["eth_fill_count"] = len(eth_fills)
-        out["eth_fill_clord_sample"] = []
-        for f in eth_fills[:5]:
-            out["eth_fill_clord_sample"].append({
-                "ordId": f.get("ordId"),
-                "clOrdId": f.get("clOrdId"),
-                "ts": f.get("ts"),
-            })
-        clord_map = {f.get("ordId"): f.get("clOrdId") for f in eth_fills}
-        out["eth_fill_ord_ids"] = list(clord_map.keys())
-    except Exception as e:
-        out["fills_error"] = str(e)
-
-    return out
-
-
 @app.get("/api/health/positions-claims", dependencies=[Depends(require_admin)])
 async def health_positions_claims():
     """Compare OKX open SWAP positions vs DB strategy claims."""
@@ -2452,6 +2404,7 @@ async def health():
             from datetime import datetime as _dt, timezone as _tz
             _now = _dt.now(_tz.utc)
             _today = []
+            _eth_debug = []
             for _t in _pt.get("trades", []):
                 _ts = _t.get("exit_time") or _t.get("time") or ""
                 if not _ts:
@@ -2460,16 +2413,27 @@ async def health():
                     _parsed = _dt.fromisoformat(_ts)
                     if _parsed.tzinfo is None:
                         _parsed = _parsed.replace(tzinfo=_tz.utc)
-                    if (_now - _parsed).total_seconds() > 86400:
-                        continue
+                    _today_flag = (_now - _parsed).total_seconds() <= 86400
                 except Exception:
-                    continue
+                    _today_flag = False
                 _pnl = _t.get("pnl")
                 if _pnl is None:
                     continue
+                _inst = _t.get("inst_id") or _t.get("symbol", "")
+                if "ETH" in _inst:
+                    _eth_debug.append({
+                        "time": _ts[:19],
+                        "ord_id": str(_t.get("ord_id", ""))[:24],
+                        "entry_ord_id": str(_t.get("entry_ord_id", ""))[:24],
+                        "bot": _t.get("bot", ""),
+                        "pnl": round(float(_pnl), 2),
+                        "reason": _t.get("reason", ""),
+                    })
+                if not _today_flag:
+                    continue
                 _today.append({
                     "time": _ts[:19],
-                    "inst": _t.get("inst_id") or _t.get("symbol", ""),
+                    "inst": _inst,
                     "pnl": round(float(_pnl), 2),
                     "bot": _t.get("bot") or "",
                     "side": _t.get("side", ""),
@@ -2477,6 +2441,8 @@ async def health():
                 })
             _today.sort(key=lambda x: x["time"], reverse=True)
             diag["pnl_today_trades"] = _today[:15]
+            if _eth_debug:
+                diag["pnl_eth_debug"] = _eth_debug
         except Exception as e:
             diag["pnl_today_trades"] = None
     except Exception as e:
@@ -6287,14 +6253,8 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 b = _match(ecid)
                 if b:
                     return b
-            # Entry ordId exists but its clOrdId is unknown (pushed out of
-            # fills window / bills lack clOrdId). Return empty so the backfill
-            # loop (inst_entry_bot) can attribute by the instrument's most
-            # recent entry fill prefix. Do NOT fall through to close-order
-            # clOrdId — that would wrongly attribute to the closer bot.
-            return ""
-        # No entry_ord_id — attribute by the order's own clOrdId (open rows,
-        # or manual/external closes without a known entry).
+        # Fallback: the order's own clOrdId (manual/external opens lack a bot
+        # clOrdId on the entry, so attribute by who closed it).
         cid = (fill_clord.get(ord_id, "")
                or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
                or "").strip().lower()
@@ -6385,55 +6345,6 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             continue
         seen.add(key)
         dedup.append(t)
-
-    # Targeted fills lookup for close rows whose entry_ord_id exists but its
-    # clOrdId is beyond the main fills window. A single get_fills(ordId=...) call
-    # per unresolved instrument resolves the entry's clOrdId, allowing _okx_bot
-    # to correctly attribute the trade to the opener bot.
-    _targeted_done: set = set()
-    for t in dedup:
-        if t.get("bot"):
-            continue
-        entry_oid = str(t.get("entry_ord_id") or "").strip()
-        if not entry_oid or entry_oid in fill_clord:
-            continue
-        inst = str(t.get("inst_id") or "").strip()
-        if not inst or inst in _targeted_done or inst in inst_entry_bot:
-            continue
-        _targeted_done.add(inst)
-        print(f"[trades/paired] targeted entry fill lookup: inst={inst} entry_oid={entry_oid}", flush=True)
-        try:
-            async def _resolve_entry_fills(_inst=inst, _oid=entry_oid):
-                fl = await _okx_call(
-                    lambda c, i=_inst, o=_oid: c.get_fills(inst_id=i, ordId=o, limit=10))
-                return fl.get("data", []) if isinstance(fl, dict) else []
-            _fl_data = await _resolve_entry_fills()
-            print(f"[trades/paired] targeted resolve {inst} entry={entry_oid}: {len(_fl_data)} fills", flush=True)
-            for _f in _fl_data:
-                _cid = str(_f.get("clOrdId", "") or "").strip().lower()
-                if _cid:
-                    fill_clord[entry_oid] = _cid
-                    for _prefix, _bname in _clord_to_bot.items():
-                        if _cid.startswith(_prefix):
-                            inst_entry_bot[inst] = _bname
-                            break
-                    break
-            # Re-attribute all rows for this instrument using updated fill_clord
-            print(f"[trades/paired] targeted resolve: fill_clord[{entry_oid}]={fill_clord.get(entry_oid, 'MISSING')} inst_entry_bot={inst_entry_bot.get(inst, 'MISSING')}", flush=True)
-            for _t2 in dedup:
-                if _t2.get("bot"):
-                    continue
-                _inst2 = str(_t2.get("inst_id") or "").strip()
-                if _inst2 != inst:
-                    continue
-                _oid2 = str(_t2.get("ord_id") or "").strip()
-                _eoid2 = str(_t2.get("entry_ord_id") or "").strip()
-                _new_bot = _okx_bot(_oid2, entry_ord_id=_eoid2)
-                if _new_bot:
-                    _t2["bot"] = _new_bot
-                    print(f"[trades/paired] re-attributed {inst} close {_oid2[:12]}... -> {_new_bot}", flush=True)
-        except Exception as e:
-            print(f"[trades/paired] targeted entry fill resolve error: {e}", flush=True)
 
     # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId,
     # and manual/external closes whose close order has no clOrdId + empty ord_id).
