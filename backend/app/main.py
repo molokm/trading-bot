@@ -2371,6 +2371,12 @@ async def health():
         "chat_id": (telegram.chat_id[:2] + "…" + telegram.chat_id[-3:]) if telegram.chat_id else "",
         "token": (telegram.token[:6] + "…" + telegram.token[-4:]) if telegram.token else "",
     }
+    # AI env config
+    diag["ai_env"] = {
+        "AI_EXECUTE": os.getenv("AI_EXECUTE", "(unset)"),
+        "AI_AUTO_START": os.getenv("AI_AUTO_START", "(unset)"),
+        "AI_EXEC_CFG": None if ai_bot is None or ai_bot.config.execute is None else ai_bot.config.execute,
+    }
     # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
     # cards may look wrong (e.g. -288 today).
     try:
