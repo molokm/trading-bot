@@ -5995,7 +5995,22 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     # closes (manual_close/exchange_stop) whose close order has no clOrdId and
     # whose ord_id is empty in the DB — without this, OKX rows lose their bot
     # attribution and their PnL drops out of strategy cards.
+    # Sources: in-memory trade logs (fast, reliable) + DB trades (fallback).
     inst_last_bot: dict = {}
+    _bot_name_map = {
+        ROT_BOT_ID: "Momentum", MOM_BOT_ID: "Momentum",
+        IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation",
+        AI_BOT_ID: "AI Discretionary 1H",
+    }
+    # Build from in-memory trade logs (most reliable — survives DB failures)
+    for _bid_name, _bot_obj in [("rotation", rotation), ("impulse", impulse),
+                                  ("validation", validation), ("ai", ai_bot)]:
+        if _bot_obj and hasattr(_bot_obj, '_trade_log') and _bot_obj._trade_log:
+            for _t in reversed(_bot_obj._trade_log):
+                _i = _t.get("symbol") or _t.get("inst_id") or ""
+                if _i and _i not in inst_last_bot:
+                    inst_last_bot[_i] = _bid_name
+    # Fallback: DB trades (if table is populated)
     if db:
         try:
             _ib_rows = await db._fetchall(
@@ -6008,7 +6023,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 if _i and _i not in inst_last_bot:
                     inst_last_bot[_i] = str(_r.get("bot_id") or "").split(":")[0]
         except Exception as e:
-            print(f"[trades/paired] inst_last_bot: {e}", flush=True)
+            print(f"[trades/paired] inst_last_bot DB fallback: {e}", flush=True)
     if db:
         try:
             for bid in bot_ids:
@@ -6255,11 +6270,12 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             t["bot"] = _db_bot_name(ord_to_bot[oid]) or t.get("bot") or ""
             continue
         # Manual/external close fallback: no ord_id / no clOrdId — attribute by
-        # the instrument's most recent DB bot (rotation saves these closes with
+        # the instrument's most recent bot (rotation saves these closes with
         # bot_id but often an empty ord_id, so OKX can't tag them).
         inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
         if inst and inst in inst_last_bot:
-            t["bot"] = _db_bot_name(inst_last_bot[inst]) or inst_last_bot[inst] or t.get("bot") or ""
+            _raw_name = inst_last_bot[inst]
+            t["bot"] = _bot_name_map.get(_raw_name, _raw_name) or t.get("bot") or ""
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
