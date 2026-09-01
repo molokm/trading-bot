@@ -1970,11 +1970,6 @@ class AIStrategy:
                 best = (sc, b)
 
         lines = []
-        lines.append(
-            f"Бот работает: сканирую BTC, ETH, SOL, XRP каждые {poll // 60 or 1} мин "
-            f"({provider}). Рынок: {reg_ru}, режим риска: {preset_ru}."
-        )
-
         if act == "hold":
             lines.append("Сейчас сделку не открываю.")
             if best:
@@ -1985,51 +1980,28 @@ class AIStrategy:
                 coin = b.get("coin")
                 if b.get("block_open"):
                     lines.append(
-                        f"Ближе всех {coin} ({side_ru}), сила сигнала {sc:.2f}, "
-                        f"но вход заблокирован (боковик / слабый тренд / ADX)."
-                    )
-                elif sc + 1e-9 < min_a:
-                    lines.append(
-                        f"Ближе всех {coin} ({side_ru}): сила сигнала {sc:.2f} — "
-                        f"не дотянула до порога {min_a:.2f}."
-                    )
-                elif conf_f is not None and conf_f + 1e-9 < min_c:
-                    lines.append(
-                        f"По {coin} ({side_ru}) сигнал есть (сила {sc:.2f}), "
-                        f"но уверенность {conf_f:.2f} ниже порога {min_c:.2f}."
+                        f"Ближе всех {coin} ({side_ru}, сигнал {sc:.2f}) — "
+                        f"заблокирован."
                     )
                 else:
                     lines.append(
-                        f"Лучший кандидат {coin} ({side_ru}, сила {sc:.2f}), "
-                        f"пороги: сила ≥{min_a:.2f}, уверенность ≥{min_c:.2f} — жду подтверждения."
+                        f"Лучший кандидат: {coin} ({side_ru}, сигнал {sc:.2f})."
                     )
             else:
-                lines.append("Чёткого кандидата среди монет пока нет.")
+                lines.append("Чётких кандидатов нет.")
         elif act == "open":
             sym = decision.get("symbol") or "?"
             side = decision.get("side") or ""
             side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
             lines.append(
                 f"Сигнал на вход: {sym} {side_ru}"
-                + (f", уверенность {conf_f:.2f}." if conf_f is not None else ".")
+                + (f" (уверенность {conf_f:.2f})." if conf_f is not None else ".")
             )
         elif act in ("close", "reduce"):
             sym = decision.get("symbol") or "?"
             lines.append(f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}.")
         else:
             lines.append(f"Действие: {act}.")
-
-        # Краткая таблица по монетам
-        bits = []
-        for b in board:
-            al = b.get("align_long")
-            ash = b.get("align_short")
-            al_s = f"{float(al):.2f}" if al is not None else "—"
-            ash_s = f"{float(ash):.2f}" if ash is not None else "—"
-            st = "блок" if b.get("block_open") else "ок"
-            bits.append(f"{b['coin']}: лонг {al_s} / шорт {ash_s} ({st})")
-        if bits:
-            lines.append("Монеты — " + "; ".join(bits) + ".")
 
         return " ".join(lines)
 
