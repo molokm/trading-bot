@@ -2341,6 +2341,13 @@ async def health():
             pass
     except Exception:
         pass
+    # Telegram config status
+    diag["telegram"] = {
+        "configured": telegram.configured,
+        "status": telegram.status,
+        "chat_id": (telegram.chat_id[:2] + "…" + telegram.chat_id[-3:]) if telegram.chat_id else "",
+        "token": (telegram.token[:6] + "…" + telegram.token[-4:]) if telegram.token else "",
+    }
     # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
     # cards may look wrong (e.g. -288 today).
     try:
