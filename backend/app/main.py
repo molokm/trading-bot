@@ -159,6 +159,13 @@ _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
 # the trading strategies. Use on a local viewer instance to avoid duplicate
 # management of the same account that the deployed (Render) version handles.
 _bots_auto_start = os.getenv("BOTS_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+# Per-bot auto-start flags: default OFF for Momentum/Impulse/Validation,
+# default ON for AI. Override with MOM_AUTO_START / IMP_AUTO_START /
+# VAL_AUTO_START / AI_AUTO_START env vars.
+_mom_auto = os.getenv("MOM_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
 
 trade_log: list = []
 _STARTED_AT = None  # set in startup(); used by /api/health uptime
@@ -366,7 +373,7 @@ async def startup():
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _mom_auto:
             # v6.9-AI: match RotationConfig defaults (gate-aware). Do not re-inflate risk.
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
@@ -409,7 +416,7 @@ async def startup():
         else:
             print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _imp_auto:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -446,7 +453,7 @@ async def startup():
         else:
             print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _val_auto:
             val_config = make_validation_config(
                 capital=300.0,
                 top_k=2,
@@ -524,9 +531,11 @@ async def startup():
 
     try:
         print("[startup] AI Discretionary auto-start ...", flush=True)
-        # Default ON with other bots (BOTS_AUTO_START). Opt out: AI_AUTO_START=0
+        # AI runs independently: only needs OKX keys + AI_AUTO_START (default ON).
+        # Not gated by BOTS_AUTO_START so we can disable the other bots while
+        # keeping AI active for observation.
         _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
-        if _env_key and _env_secret and _env_pass and _bots_auto_start and _ai_auto:
+        if _env_key and _env_secret and _env_pass and _ai_auto:
             global ai_bot
             _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
             # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
@@ -2386,6 +2395,9 @@ async def health():
         "AI_EXECUTE": os.getenv("AI_EXECUTE", "(unset)"),
         "AI_AUTO_START": os.getenv("AI_AUTO_START", "(unset)"),
         "AI_EXEC_CFG": None if ai_bot is None or ai_bot.config.execute is None else ai_bot.config.execute,
+        "MOM_AUTO_START": os.getenv("MOM_AUTO_START", "(unset, default off)"),
+        "IMP_AUTO_START": os.getenv("IMP_AUTO_START", "(unset, default off)"),
+        "VAL_AUTO_START": os.getenv("VAL_AUTO_START", "(unset, default off)"),
     }
     # PnL diagnostics: epoch + per_bot + recent trades, so we can see why
     # cards may look wrong (e.g. -288 today).
