@@ -6212,40 +6212,42 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 break
 
     def _okx_bot(ord_id: str, *, entry_ord_id: str = "") -> str:
-        """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id."""
-        cid = (fill_clord.get(ord_id, "")
-               or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
-               or "").strip().lower()
-        if cid.startswith("rot"):
-            return "Momentum"
-        if cid.startswith("imp"):
-            return "Impulse 1D"
-        if cid.startswith("ai"):
-            return "AI Discretionary 1H"
-        if cid.startswith("val"):
-            return "MACD+Donchian Validation"
-        if cid.startswith("scl") or cid.startswith("scalp"):
-            return "Order Book Scalp"
-        if cid.startswith("vwap"):
-            return "VWAP Mean Reversion"
-        # Fallback: check the ENTRY order's clOrdId (close orders placed
-        # manually/externally lack the bot's clOrdId, but the ENTRY fill does).
+        """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id.
+
+        Ownership follows the ENTRY order: the bot that OPENED the position is
+        the rightful owner, even if the closing order carries a different bot's
+        clOrdId (e.g. Momentum adopted an AI position and later closed it with a
+        rot... clOrdId). The close-order clOrdId is only used when no entry
+        clOrdId is known (e.g. manually-opened positions closed by a bot)."""
+        def _match(prefix: str) -> str:
+            m = {
+                "rot": "Momentum", "imp": "Impulse 1D", "ai": "AI Discretionary 1H",
+                "val": "MACD+Donchian Validation",
+                "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+                "vwap": "VWAP Mean Reversion",
+            }
+            for k, v in m.items():
+                if prefix.startswith(k):
+                    return v
+            return ""
+        # ENTRY clOrdId is authoritative for ownership (the opener owns the trade).
         if entry_ord_id:
             ecid = (fill_clord.get(entry_ord_id, "")
                     or bill_by_ord.get(entry_ord_id, {}).get("clOrdId", "")
                     or "").strip().lower()
-            if ecid.startswith("rot"):
-                return "Momentum"
-            if ecid.startswith("imp"):
-                return "Impulse 1D"
-            if ecid.startswith("ai"):
-                return "AI Discretionary 1H"
-            if ecid.startswith("val"):
-                return "MACD+Donchian Validation"
-            if ecid.startswith("scl") or ecid.startswith("scalp"):
-                return "Order Book Scalp"
-            if ecid.startswith("vwap"):
-                return "VWAP Mean Reversion"
+            if ecid:
+                b = _match(ecid)
+                if b:
+                    return b
+        # Fallback: the order's own clOrdId (manual/external opens lack a bot
+        # clOrdId on the entry, so attribute by who closed it).
+        cid = (fill_clord.get(ord_id, "")
+               or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
+               or "").strip().lower()
+        if cid:
+            b = _match(cid)
+            if b:
+                return b
         # Any bot_id stored for this ord_id (AI/Validation/Scalp/etc.)
         b = _db_bot_name(ord_to_bot.get(ord_id, ""))
         return b or ""
