@@ -1685,6 +1685,32 @@ class AIStrategy:
                         self._lifetime_wins = int(data.get("lifetime_wins") or self._lifetime_wins)
                         self._lifetime_pnl = float(data.get("lifetime_pnl") or self._lifetime_pnl)
                         self._lifetime_fees = float(data.get("lifetime_fees") or self._lifetime_fees)
+                    # Stale PnL guard: AI previously ran in signal-only mode
+                    # (execute=0) and the blob picked up misattributed OKX PnL
+                    # despite zero real trades. With no closed trades recorded,
+                    # lifetime PnL is meaningless — zero it out.
+                    if self._lifetime_trades == 0 and abs(self._lifetime_pnl) > 1e-9:
+                        print(f"[AI] hydrate: clearing stale lifetime_pnl "
+                              f"({self._lifetime_pnl:.2f}, trades=0)", flush=True)
+                        self._lifetime_pnl = 0.0
+                        self._lifetime_wins = 0
+                        self._lifetime_fees = 0.0
+                        self._equity = self._capital
+                        # Persist cleared state so the stale blob doesn't
+                        # resurface after the next deploy/restart.
+                        try:
+                            blob = {
+                                "lifetime_pnl": 0.0,
+                                "lifetime_trades": 0,
+                                "lifetime_wins": 0,
+                                "lifetime_fees": 0.0,
+                                "adapt": getattr(self, "_adapt", {}),
+                                "reflection": getattr(self, "_reflection", ""),
+                            }
+                            await self.db.set_setting(
+                                f"ai_lifetime:{self.BOT_ID}", json.dumps(blob))
+                        except Exception as e:
+                            print(f"[AI] hydrate persist clear: {e}", flush=True)
                     if isinstance(data.get("adapt"), dict):
                         self._adapt.update({k: data["adapt"][k] for k in data["adapt"]
                                             if k in ("min_confidence", "quant_min_align",
