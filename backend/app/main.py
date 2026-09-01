@@ -6339,17 +6339,22 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             t["bot"] = _db_bot_name(ord_to_bot[oid]) or t.get("bot") or ""
             continue
         # Manual/external close fallback: no ord_id / no clOrdId — attribute by
-        # the instrument's most recent bot (rotation saves these closes with
-        # bot_id but often an empty ord_id, so OKX can't tag them).
+        # the instrument's most recent entry fill (inst_entry_bot uses the ENTRY
+        # order's clOrdId prefix, which is the most reliable signal for who opened
+        # the position). Fallback to inst_last_bot (in-memory trade log) only if
+        # entry fills are also unavailable.
         inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
+        # ENTRY fill clOrdId map — most reliable: the person who opened the trade
+        # is the rightful owner, even if the close came from a different bot
+        # (e.g. Momentum's orphan sweep or exchange-stop).
+        if inst and inst in inst_entry_bot:
+            t["bot"] = inst_entry_bot[inst] or t.get("bot") or ""
+            continue
+        # In-memory trade log fallback: last bot that touched this instrument.
         if inst and inst in inst_last_bot:
             _raw_name = inst_last_bot[inst]
             t["bot"] = _bot_name_map.get(_raw_name, _raw_name) or t.get("bot") or ""
             continue
-        # Last resort: ENTRY fills clOrdId map. Only used when in-memory logs
-        # are empty (after restart) AND ord_to_bot/inst_last_bot didn't help.
-        if inst and inst in inst_entry_bot:
-            t["bot"] = inst_entry_bot[inst] or t.get("bot") or ""
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
