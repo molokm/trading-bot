@@ -5975,6 +5975,24 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     # 1. Gather all raw trade records: persisted (DB) + live (in-memory).
     raw = []
     bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID]
+    # Map inst_id -> most recent bot that traded it. Used to tag manual/external
+    # closes (manual_close/exchange_stop) whose close order has no clOrdId and
+    # whose ord_id is empty in the DB — without this, OKX rows lose their bot
+    # attribution and their PnL drops out of strategy cards.
+    inst_last_bot: dict = {}
+    if db:
+        try:
+            _ib_rows = await db._fetchall(
+                "SELECT inst_id, bot_id, timestamp FROM trades "
+                "WHERE bot_id IS NOT NULL AND bot_id != '' "
+                "ORDER BY timestamp DESC LIMIT 2000"
+            )
+            for _r in _ib_rows:
+                _i = _r.get("inst_id") or ""
+                if _i and _i not in inst_last_bot:
+                    inst_last_bot[_i] = str(_r.get("bot_id") or "").split(":")[0]
+        except Exception as e:
+            print(f"[trades/paired] inst_last_bot: {e}", flush=True)
     if db:
         try:
             for bid in bot_ids:
@@ -6203,7 +6221,8 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         seen.add(key)
         dedup.append(t)
 
-    # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId)
+    # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId,
+    # and manual/external closes whose close order has no clOrdId + empty ord_id).
     for t in dedup:
         if t.get("bot"):
             continue
@@ -6218,6 +6237,13 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         oid = str(t.get("ord_id") or "").strip()
         if oid and oid in ord_to_bot:
             t["bot"] = _db_bot_name(ord_to_bot[oid]) or t.get("bot") or ""
+            continue
+        # Manual/external close fallback: no ord_id / no clOrdId — attribute by
+        # the instrument's most recent DB bot (rotation saves these closes with
+        # bot_id but often an empty ord_id, so OKX can't tag them).
+        inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
+        if inst and inst in inst_last_bot:
+            t["bot"] = _db_bot_name(inst_last_bot[inst]) or inst_last_bot[inst] or t.get("bot") or ""
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
