@@ -1500,7 +1500,7 @@ async def ai_status():
         print(f"[ai/status] history overlay: {e}", flush=True)
         status["total_pnl_source"] = "internal"
         status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
-    return status
+    return await _apply_history_kpi(status, "AI Discretionary 1H")
 
 
 
@@ -3512,27 +3512,17 @@ async def get_trade_log():
 
 @app.get("/api/momentum/status")
 async def momentum_status():
-    # Redirect to rotation strategy
     if not rotation:
-        return {
-            "running": False, "config": {"max_positions": 2, "risk_per_trade": 0, "tp1_pct": 0},
+        status = {
+            "running": False, "managed": False,
+            "config": {"max_positions": 2, "risk_per_trade": 0, "tp1_pct": 0},
             "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0,
             "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC,
         }
-    status = rotation.get_status()
-    internal = status.get("total_pnl")
-    status["total_pnl_internal"] = internal
-    # Prefer same History/per_bot source as /api/pnl so card matches dashboard totals
-    stats = (await _bot_history_stats()).get("Momentum")
-    if stats and stats.get("total_trades", 0) > 0:
-        status.update(stats)
-        status["total_pnl_source"] = "okx_history"
-        if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
-            print(f"[momentum/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}", flush=True)
     else:
-        # Fallback: sum in-memory close log (same as internal equity path)
-        status["total_pnl_source"] = "internal"
-    return status
+        status = rotation.get_status()
+        status["total_pnl_internal"] = status.get("total_pnl")
+    return await _apply_history_kpi(status, "Momentum")
 
 
 @app.post("/api/momentum/start", dependencies=[Depends(require_admin)])
@@ -4026,21 +4016,17 @@ async def rotation_update_config(data: dict = None):
 @app.get("/api/impulse/status")
 async def impulse_status():
     if not impulse:
-        return {"running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
-                "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
-                "config": None, "description": IMPULSE_DESC}
-    status = impulse.get_status()
-    internal = status.get("total_pnl")
-    status["total_pnl_internal"] = internal
-    stats = (await _bot_history_stats()).get("Impulse 1D")
-    if stats and stats.get("total_trades", 0) > 0:
-        status.update(stats)
-        status["total_pnl_source"] = "okx_history"
-        if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
-            print(f"[impulse/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}", flush=True)
+        status = {
+            "running": False, "managed": False,
+            "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
+            "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
+            "total_trades": 0, "total_pnl": 0, "win_rate": 0,
+            "config": None, "description": IMPULSE_DESC,
+        }
     else:
-        status["total_pnl_source"] = "internal"
-    return status
+        status = impulse.get_status()
+        status["total_pnl_internal"] = status.get("total_pnl")
+    return await _apply_history_kpi(status, "Impulse 1D")
 
 
 @app.post("/api/impulse/start", dependencies=[Depends(require_admin)])
@@ -5919,31 +5905,62 @@ _bot_stats_cache = {"ts": 0, "data": {}}  # {"Momentum": {...}, "Impulse 1D": {.
 _BOT_STATS_TTL = 15  # seconds
 
 
-async def _bot_history_stats() -> dict:
-    """Per-bot cumulative stats from the SAME pipeline as /api/pnl (get_paired_trades).
+async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
+    """Overlay durable KPI onto strategy status (running or stopped)."""
+    status = dict(status or {})
+    try:
+        all_stats = await _bot_history_stats()
+        stats = all_stats.get(bot_label) or {}
+        status["total_pnl"] = stats.get("total_pnl", status.get("total_pnl", 0))
+        status["total_trades"] = stats.get("total_trades", status.get("total_trades", 0))
+        status["wins"] = stats.get("wins", status.get("wins", 0))
+        status["losses"] = stats.get("losses", status.get("losses", 0))
+        status["win_rate"] = stats.get("win_rate", status.get("win_rate", 0))
+        status["lifetime_pnl"] = status.get("total_pnl")
+        status["total_pnl_source"] = stats.get("total_pnl_source", "okx_history")
+        status["kpi_from_history"] = True
+    except Exception as e:
+        print(f"[kpi] {bot_label}: {e}", flush=True)
+        status["kpi_from_history"] = False
+    return status
 
-    Cached briefly so status cards and Total PnL breakdown never diverge.
+
+async def _bot_history_stats() -> dict:
+    """Per-bot KPI from the SAME pipeline as /api/pnl — works even if bots are stopped.
+
+    Always returns entries for known strategy cards (zeros after pnl_epoch reset).
     """
     now_s = _time.time()
     if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL:
         return _bot_stats_cache["data"]
-    stats = {}
+
+    KNOWN = (
+        "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
+    )
+    stats = {
+        name: {
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "total_pnl_source": "okx_history",
+        }
+        for name in KNOWN
+    }
     try:
-        # Reuse get_pnl so per_bot keys/sums are identical to dashboard cards
         pnl_resp = await get_pnl()
         per = pnl_resp.get("per_bot") or {}
-        # Also count trades for win_rate from paired list
         resp = await get_paired_trades(limit=5000)
-        counts = {}
         epoch = await get_pnl_epoch()
-        for tr in resp.get("trades", []):
-            bot = tr.get("bot") or ""
-            if bot not in (
-                "Momentum", "Impulse 1D", "MACD+Donchian Validation",
-                "AI Discretionary 1H", "Order Book Scalp",
-            ):
+        counts = {}
+        pnl_sum = {}
+        for tr in resp.get("trades", []) or []:
+            bot = tr.get("bot") or _db_bot_name(tr.get("bot_id") or "") or ""
+            if bot not in KNOWN:
                 continue
-            if (tr.get("reason") or "").lower() == "open":
+            if (tr.get("reason") or "").lower() in ("open", "add"):
                 continue
             if not _trade_after_epoch(tr, epoch):
                 continue
@@ -5955,27 +5972,28 @@ async def _bot_history_stats() -> dict:
             c["total_trades"] += 1
             if pnl > 0:
                 c["wins"] += 1
-            else:
+            elif pnl < 0:
                 c["losses"] += 1
-        for bot, total_pnl in per.items():
-            if bot not in ("Momentum", "Impulse 1D", "MACD+Donchian Validation"):
-                # map bot_id style keys if any
-                mapped = _db_bot_name(bot) or bot
-            else:
-                mapped = bot
-            if mapped not in (
-                "Momentum", "Impulse 1D", "MACD+Donchian Validation",
-                "AI Discretionary 1H", "Order Book Scalp",
-            ):
-                continue
-            c = counts.get(mapped) or counts.get(bot) or {"total_trades": 0, "wins": 0, "losses": 0}
-            total = c["total_trades"]
-            stats[mapped] = {
-                "total_pnl": round(float(total_pnl or 0), 2),
+            pnl_sum[bot] = pnl_sum.get(bot, 0.0) + pnl
+
+        for bot in KNOWN:
+            mapped_pnl = per.get(bot)
+            if mapped_pnl is None:
+                for k, v in per.items():
+                    if (_db_bot_name(k) or k) == bot:
+                        mapped_pnl = v
+                        break
+            if mapped_pnl is None:
+                mapped_pnl = pnl_sum.get(bot, 0.0)
+            c = counts.get(bot) or {"total_trades": 0, "wins": 0, "losses": 0}
+            total = int(c["total_trades"])
+            stats[bot] = {
+                "total_pnl": round(float(mapped_pnl or 0), 2),
                 "total_trades": total,
-                "wins": c.get("wins", 0),
-                "losses": c.get("losses", 0),
+                "wins": int(c.get("wins", 0)),
+                "losses": int(c.get("losses", 0)),
                 "win_rate": round(c["wins"] / total * 100, 1) if total else 0.0,
+                "total_pnl_source": "okx_history",
             }
     except Exception as e:
         print(f"[bot_stats] error: {e}", flush=True)
