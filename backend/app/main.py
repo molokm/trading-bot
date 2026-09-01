@@ -2341,6 +2341,18 @@ async def health():
             pass
     except Exception:
         pass
+    # PnL diagnostics: epoch + per_bot, so we can see why cards may look wrong
+    try:
+        diag["pnl_epoch"] = await get_pnl_epoch()
+        _pr = await get_pnl()
+        diag["pnl_total"] = _pr.get("total")
+        diag["pnl_1d"] = _pr.get("1d")
+        diag["pnl_week"] = _pr.get("week")
+        diag["pnl_per_bot"] = _pr.get("per_bot")
+        diag["pnl_source"] = _pr.get("source")
+        diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
+    except Exception as e:
+        diag["pnl_err"] = str(e)
 
     return {
         "status": "ok",
