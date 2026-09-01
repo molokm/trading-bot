@@ -202,10 +202,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     : (pnl?.unrealized || 0)
   const fundingPnl = Number(pnl?.funding ?? 0)
   const economicPnl = Number(pnl?.economic_approx ?? ((Number(pnl?.total) || 0) + unrealizedPnl + fundingPnl))
-  const pnlTotal = pnl?.total || 0
-  const pnlDay = pnl?.['1d'] || 0
-  const pnlWeek = pnl?.week || 0
-  const pnlMonth = pnl?.['30d'] || 0
+  const pnlTotal = (() => {
+    const t = Number(pnl?.total ?? 0)
+    if (t !== 0) return t
+    const per = pnl?.per_bot || pnl?.per_bot_all || {}
+    return Object.values(per).reduce((s, v) => s + Number(v || 0), 0)
+  })()
+  const pnlDay = Number(pnl?.['1d'] ?? 0)
+  const pnlWeek = Number(pnl?.week ?? pnl?.['7d'] ?? 0)
+  const pnlMonth = Number(pnl?.['30d'] ?? 0)
 
   // Per-strategy realized PnL breakdown (from /api/pnl per_bot)
   const botNameMap = {

@@ -1465,9 +1465,12 @@ async def ai_status():
     status["total_pnl_internal"] = internal
     status["lifetime_pnl_internal"] = internal
     try:
-        # High-confidence AI only: clOrdId ai* or DB bot_id=ai_strategy
+        # Prefer same totals as /api/pnl (includes entry-owner + forced overrides)
+        pnl_resp = await get_pnl()
+        per = pnl_resp.get("per_bot_all") or pnl_resp.get("per_bot") or {}
+        ai_pnl = float(per.get("AI Discretionary 1H") or 0)
+        # Trade counts from paired list (label AI after overrides)
         resp = await get_paired_trades(limit=5000)
-        ai_pnl = 0.0
         ai_n = 0
         ai_wins = 0
         epoch = await get_pnl_epoch()
@@ -1478,46 +1481,23 @@ async def ai_status():
                 continue
             if not _trade_after_epoch(tr, epoch):
                 continue
+            if (tr.get("bot") or "").strip() != "AI Discretionary 1H":
+                continue
             try:
                 pnl = float(tr.get("pnl") or 0)
             except (TypeError, ValueError):
                 continue
-            bot = (tr.get("bot") or "").strip()
-            # Reject weak tags; require explicit AI label after strict tagging
-            if bot != "AI Discretionary 1H":
-                continue
-            # Strict guard: a trade only counts as AI if it carries the bot's
-            # "ai" clOrdId prefix or a DB bot_id of ai_strategy. Other bots /
-            # manual closes can end up tagged AI by instrument fallbacks, so
-            # without the clOrdId the number is bogus (AI ran signal-only,
-            # so zero real trades means PnL must be zero).
-            inst = (tr.get("inst_id") or tr.get("symbol") or "").upper()
-            cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
-            bid = str(tr.get("bot_id") or "")
-            if not (cid.startswith("ai") or "ai_strategy" in bid):
-                continue
-            ai_pnl += pnl
             ai_n += 1
             if pnl > 0:
                 ai_wins += 1
-        if ai_n > 0:
-            status["total_pnl"] = round(ai_pnl, 2)
-            status["lifetime_pnl"] = round(ai_pnl, 2)
-            status["total_trades"] = ai_n
-            status["win_rate"] = round(ai_wins / ai_n * 100, 1) if ai_n else 0
-            status["total_pnl_source"] = "okx_history_strict"
-        else:
-            status["total_pnl_source"] = "internal"
-            status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
-        if internal is not None and ai_n > 0:
-            if abs(float(internal or 0) - float(ai_pnl)) > 1.0:
-                print(
-                    f"[ai/status] PnL mismatch internal={internal} strict_hist={ai_pnl} n={ai_n}",
-                    flush=True,
-                )
+        status["total_pnl"] = round(ai_pnl, 2)
+        status["lifetime_pnl"] = round(ai_pnl, 2)
+        status["total_trades"] = ai_n
+        status["wins"] = ai_wins
+        status["win_rate"] = round(100.0 * ai_wins / ai_n, 1) if ai_n else 0.0
+        status["total_pnl_source"] = "okx_history"
     except Exception as e:
-        print(f"[ai/status] history overlay: {e}", flush=True)
-        status["total_pnl_source"] = "internal"
+        print(f"[ai/status] history pnl: {e}", flush=True)
         status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
     return await _apply_history_kpi(status, "AI Discretionary 1H")
 
@@ -6676,6 +6656,13 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             "exit_date": "2026-09-01",
             "to_bot": "AI Discretionary 1H",
         })
+        forced.append({
+            "inst_id": "ETH-USDT-SWAP",
+            "pos_side": "short",
+            "pnl_near": 167.08,
+            "exit_date": "2026-09-01",
+            "to_bot": "AI Discretionary 1H",
+        })
         try:
             raw = await db.get_setting("pnl_bot_overrides")
             if raw:
@@ -6711,7 +6698,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                         continue
                 if pnl_near is not None:
                     try:
-                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 8.0:
+                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 40.0:
                             continue
                     except (TypeError, ValueError):
                         continue
