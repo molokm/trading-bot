@@ -2344,6 +2344,24 @@ class RotationStrategy:
         """
         if coin in self._positions:
             return False
+        # Authoritative check first: the OKX exchange knows who opened the
+        # position (entry fill clOrdId prefix). If a DIFFERENT bot's prefix
+        # (ai/imp/val/scl/vwap) is on the entry order, this is not ours —
+        # never adopt it, regardless of what the DB snapshot thinks.
+        try:
+            client = await self._get_client()
+            if client:
+                owner = await self._entry_fill_owner(client, inst_id)
+                if owner and owner != self.CL_ORD_PREFIX:
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: entry fill owned by '{owner}' "
+                          f"({inst_id})", flush=True)
+                    return False
+                if owner == self.CL_ORD_PREFIX:
+                    print(f"[{self.BOT_NAME}] adopt {coin} {side}: entry fill clOrdId='{owner}' is ours",
+                          flush=True)
+                    return True
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] adopt entry-fill owner check error: {e}", flush=True)
         # Another bot already tracks it in DB
         if self.db:
             try:
@@ -2381,6 +2399,30 @@ class RotationStrategy:
         print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: no local ownership proof",
               flush=True)
         return False
+
+    async def _entry_fill_owner(self, client, inst_id: str) -> str:
+        """Map the most recent entry fill's clOrdId prefix to a bot prefix.
+
+        Returns '' if the entry fill has no clOrdId (manual/unknown), the bot
+        prefix (e.g. 'ai'/'imp'/'val'/'scl'/'vwap'/'rot') otherwise.
+        """
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            sub = str(f.get("subType") or "")
+            if sub not in ("3", "4"):
+                continue  # only entry fills (open) count
+            cid = str(f.get("clOrdId") or "").strip().lower()
+            if not cid:
+                return ""  # manual/unknown — let DB/log checks decide
+            for pref in ("ai", "imp", "val", "scl", "vwap", "rot"):
+                if cid.startswith(pref):
+                    return pref
+            return ""
+        return ""
 
     async def _sync_open_positions(self):
         """After restart, detect open positions from OKX and restore _positions +

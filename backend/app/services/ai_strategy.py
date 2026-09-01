@@ -1479,6 +1479,20 @@ class AIStrategy:
                 # STRICT: only restore positions already claimed by THIS bot in DB.
                 # Never adopt orphans / Smart Money / other strategies — that falsely
                 # attaches e.g. SOL mirror/copy fills to AI after redeploy.
+                # Authoritative check first: entry fill clOrdId prefix. If the entry
+                # order carries an "ai" clOrdId, the position IS ours even if the DB
+                # claim was lost (e.g. claim write failed before this restart).
+                try:
+                    ai_owner = await self._entry_fill_owner(client, inst_id)
+                except Exception:
+                    ai_owner = ""
+                if ai_owner == "ai":
+                    print(f"[AI] restore {coin}: entry fill clOrdId='ai' — ours (DB claim missing)", flush=True)
+                    self._restore_adopt_position(client, inst_id, coin, side, sz, entry)
+                    continue
+                if ai_owner and ai_owner != "ai":
+                    print(f"[AI] skip restore {coin}: entry fill owned by '{ai_owner}'", flush=True)
+                    continue
                 try:
                     if not self.db:
                         print(f"[AI] skip restore {coin}: no db — refuse orphan adopt", flush=True)
@@ -1528,6 +1542,59 @@ class AIStrategy:
                 print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid}", flush=True)
         except Exception as e:
             print(f"[AI] restore error: {e}", flush=True)
+
+    async def _restore_adopt_position(self, client, inst_id: str, coin: str, side: str,
+                                      sz: float, entry: float):
+        """Adopt an exchange position whose ENTRY fill clOrdId is 'ai' — the
+        authoritative proof it was opened by this bot, even when the DB claim
+        was lost across a restart."""
+        stop_pct = 0.03
+        take_pct = 0.06
+        if side == "long":
+            stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+        else:
+            stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+        restored_sid = 0
+        if self.db:
+            try:
+                open_side = "buy" if side == "long" else "sell"
+                restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
+            except Exception as e:
+                print(f"[AI] restore signal_id: {e}", flush=True)
+        self._positions[coin] = AIPosition(
+            coin=coin, inst_id=inst_id, side=side, size=sz,
+            entry_price=entry, stop_price=stop, take_price=take,
+            leverage=float(self.config.max_leverage or 2),
+            opened_at=datetime.now(timezone.utc).isoformat(),
+            peak_price=entry,
+            signal_id=restored_sid,
+        )
+        await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
+        print(f"[AI] RESTORE({side}) {coin} sz={sz} @ {entry} sid={restored_sid} (ai clOrdId)", flush=True)
+
+    async def _entry_fill_owner(self, client, inst_id: str) -> str:
+        """Map the most recent entry fill's clOrdId prefix to a bot prefix.
+
+        Returns '' if the entry fill has no clOrdId (manual/unknown), the bot
+        prefix (e.g. 'ai'/'imp'/'val'/'scl'/'vwap'/'rot') otherwise.
+        """
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            sub = str(f.get("subType") or "")
+            if sub not in ("3", "4"):
+                continue  # only entry fills (open) count
+            cid = str(f.get("clOrdId") or "").strip().lower()
+            if not cid:
+                return ""  # manual/unknown — let DB/log checks decide
+            for pref in ("ai", "imp", "val", "scl", "vwap", "rot"):
+                if cid.startswith(pref):
+                    return pref
+            return ""
+        return ""
 
     async def _tick(self):
         client = await self._client()
