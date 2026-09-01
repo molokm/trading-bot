@@ -6393,6 +6393,26 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             t["bot"] = _bot_name_map.get(_raw_name, _raw_name) or t.get("bot") or ""
             continue
 
+    # Correct attribution: the bot that OPENED the position owns the trade, even
+    # if a different bot closed it (e.g. Momentum adopted an AI position and
+    # closed it with a rot... clOrdId). inst_entry_bot maps inst_id -> bot from
+    # the ENTRY fill's clOrdId, which is the authoritative opener signal. This
+    # overrides the close-order-based tag (e.g. Momentum) whenever the entry says
+    # the opener was a different strategy.
+    try:
+        for t in dedup:
+            inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
+            if not inst:
+                continue
+            opener = inst_entry_bot.get(inst, "")
+            if not opener:
+                continue
+            cur_bot = str(t.get("bot") or "")
+            if cur_bot and cur_bot != opener:
+                t["bot"] = opener
+    except Exception as e:
+        print(f"[trades/paired] entry-owner override error: {e}", flush=True)
+
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
     #    OKX close). Corrupt ledger closes (pnl=0 with an OKX close in the same
