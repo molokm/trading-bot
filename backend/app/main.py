@@ -4900,6 +4900,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                         "entry": round(avg_entry, 4),
                         "entry_price": round(avg_entry, 4),
                         "exit_price": round(fill_px, 4),
+                        "entry_ord_id": entry_ord_id,
                         "reason": "closed",
                         "pos_side": direction,
                         "inst_id": inst_id,
@@ -4934,6 +4935,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                         "entry": 0,
                         "entry_price": 0,
                         "exit_price": round(fill_px, 4),
+                        "entry_ord_id": entry_ord_id,
                         "reason": "closed",
                         "pos_side": pos_out,
                         "inst_id": inst_id,
@@ -4982,9 +4984,11 @@ def _pair_bills(bills: list) -> list:
         """Emit the aggregated close row and reduce the open position."""
         avg_entry = 0.0
         pos_side = "short" if pending["side"] == "buy" else "long"
+        entry_ord = ""
         if cur is not None and cur["size"] > 0:
             avg_entry = cur["cost"] / cur["size"]
             pos_side = cur["pos_side"]
+            entry_ord = str(cur.get("ord_id", "") or "").strip()
             close_sz = min(pending["size"], cur["size"])
             cur["size"] -= close_sz
             cur["cost"] = avg_entry * cur["size"] if cur["size"] > 0 else 0.0
@@ -4999,6 +5003,7 @@ def _pair_bills(bills: list) -> list:
             "ord_id": pending["ord_id"], "fee": round(pending["fee"], 4),
             "entry": round(avg_entry, 4), "entry_price": round(avg_entry, 4),
             "exit_price": round(pending["px"], 4),
+            "entry_ord_id": entry_ord,
             "reason": "closed", "pos_side": pos_side, "source": "okx_bills",
         })
 
@@ -6172,7 +6177,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 inst_entry_bot[_fi] = _bname
                 break
 
-    def _okx_bot(ord_id: str) -> str:
+    def _okx_bot(ord_id: str, *, entry_ord_id: str = "") -> str:
         """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id."""
         cid = (fill_clord.get(ord_id, "")
                or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
@@ -6189,6 +6194,24 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             return "Order Book Scalp"
         if cid.startswith("vwap"):
             return "VWAP Mean Reversion"
+        # Fallback: check the ENTRY order's clOrdId (close orders placed
+        # manually/externally lack the bot's clOrdId, but the ENTRY fill does).
+        if entry_ord_id:
+            ecid = (fill_clord.get(entry_ord_id, "")
+                    or bill_by_ord.get(entry_ord_id, {}).get("clOrdId", "")
+                    or "").strip().lower()
+            if ecid.startswith("rot"):
+                return "Momentum"
+            if ecid.startswith("imp"):
+                return "Impulse 1D"
+            if ecid.startswith("ai"):
+                return "AI Discretionary 1H"
+            if ecid.startswith("val"):
+                return "MACD+Donchian Validation"
+            if ecid.startswith("scl") or ecid.startswith("scalp"):
+                return "Order Book Scalp"
+            if ecid.startswith("vwap"):
+                return "VWAP Mean Reversion"
         # Any bot_id stored for this ord_id (AI/Validation/Scalp/etc.)
         b = _db_bot_name(ord_to_bot.get(ord_id, ""))
         return b or ""
@@ -6215,6 +6238,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                     pass
             entry_px = t.get("entry", 0) or t.get("entry_price", 0)
             exit_px = t.get("exit_price", 0)
+            entry_ord = str(t.get("entry_ord_id", "") or "").strip()
             okx_rows.append({
                 "time": t.get("time", ""),
                 "entry_time": t.get("entry_time", ""),
@@ -6231,7 +6255,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 "reason": t.get("reason", ""),
                 "pos_side": t.get("pos_side", "long"),
                 "signal_id": t.get("signal_id", 0) or ord_id,
-                "bot": _okx_bot(ord_id),
+                "bot": _okx_bot(ord_id, entry_ord_id=entry_ord),
                 "fee": t.get("fee", "0"),
             })
     except Exception as e:
