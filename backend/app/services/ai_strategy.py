@@ -188,6 +188,7 @@ class AIStrategy:
         self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
         self._equity = self._capital + self._session_pnl
         self._last_activity = None
+        self._last_tick_error = None
         self._started_at = None
         self._latest_indicators: dict = {}
         self._last_decision: dict = {}
@@ -308,8 +309,13 @@ class AIStrategy:
         while self._running:
             try:
                 await self._tick()
+                self._last_tick_error = None
             except Exception as e:
                 print(f"[AI] tick error: {e}", flush=True)
+                try:
+                    self._last_tick_error = f"{type(e).__name__}: {str(e)[:200]}"
+                except Exception:
+                    pass
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
             try:
