@@ -73,9 +73,10 @@ def save_ai_state(payload: dict) -> None:
 STRATEGY_NAME = "AI Discretionary 1H"
 STRATEGY_VERSION = "v1.2"
 STRATEGY_DESC = (
-    "AI Discretionary v1.2 — hybrid quant+LLM + self-adapt. "
-    "Rolling WR/streak подкручивает min_confidence и quant_min_align в коридоре; "
-    "reflection; persistent PnL/trades via DB (survives Render deploy)."
+    "AI Discretionary — интеллектуальный бот: нейросеть "
+    "анализирует рынок и сама решает, когда открывать и "
+    "закрывать сделки. Подстраивается под рыночные условия "
+    "и учится на своих результатах."
 )
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
