@@ -6239,8 +6239,14 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 b = _match(ecid)
                 if b:
                     return b
-        # Fallback: the order's own clOrdId (manual/external opens lack a bot
-        # clOrdId on the entry, so attribute by who closed it).
+            # Entry ordId exists but its clOrdId is unknown (pushed out of
+            # fills window / bills lack clOrdId). Return empty so the backfill
+            # loop (inst_entry_bot) can attribute by the instrument's most
+            # recent entry fill prefix. Do NOT fall through to close-order
+            # clOrdId — that would wrongly attribute to the closer bot.
+            return ""
+        # No entry_ord_id — attribute by the order's own clOrdId (open rows,
+        # or manual/external closes without a known entry).
         cid = (fill_clord.get(ord_id, "")
                or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
                or "").strip().lower()
@@ -6331,6 +6337,51 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             continue
         seen.add(key)
         dedup.append(t)
+
+    # Targeted fills lookup for close rows whose entry_ord_id exists but its
+    # clOrdId is beyond the main fills window. A single get_fills(ordId=...) call
+    # per unresolved instrument resolves the entry's clOrdId, allowing _okx_bot
+    # to correctly attribute the trade to the opener bot.
+    _targeted_done: set = set()
+    for t in dedup:
+        if t.get("bot"):
+            continue
+        entry_oid = str(t.get("entry_ord_id") or "").strip()
+        if not entry_oid or entry_oid in fill_clord:
+            continue
+        inst = str(t.get("inst_id") or "").strip()
+        if not inst or inst in _targeted_done or inst in inst_entry_bot:
+            continue
+        _targeted_done.add(inst)
+        try:
+            async def _resolve_entry_fills(_inst=inst, _oid=entry_oid):
+                fl = await _okx_call(
+                    lambda c, i=_inst, o=_oid: c.get_fills(inst_id=i, ordId=o, limit=10))
+                return fl.get("data", []) if isinstance(fl, dict) else []
+            _fl_data = await _resolve_entry_fills()
+            for _f in _fl_data:
+                _cid = str(_f.get("clOrdId", "") or "").strip().lower()
+                if _cid:
+                    fill_clord[entry_oid] = _cid
+                    for _prefix, _bname in _clord_to_bot.items():
+                        if _cid.startswith(_prefix):
+                            inst_entry_bot[inst] = _bname
+                            break
+                    break
+            # Re-attribute all rows for this instrument using updated fill_clord
+            for _t2 in dedup:
+                if _t2.get("bot"):
+                    continue
+                _inst2 = str(_t2.get("inst_id") or "").strip()
+                if _inst2 != inst:
+                    continue
+                _oid2 = str(_t2.get("ord_id") or "").strip()
+                _eoid2 = str(_t2.get("entry_ord_id") or "").strip()
+                _new_bot = _okx_bot(_oid2, entry_ord_id=_eoid2)
+                if _new_bot:
+                    _t2["bot"] = _new_bot
+        except Exception as e:
+            print(f"[trades/paired] targeted entry fill resolve error: {e}", flush=True)
 
     # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId,
     # and manual/external closes whose close order has no clOrdId + empty ord_id).
