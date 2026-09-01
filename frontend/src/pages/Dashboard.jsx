@@ -968,7 +968,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           </div>
 
-          {/* ─── Momentum Bot ─── */}
+          {/* ─── Momentum Bot (only when running) ─── */}
+          {!!momentumStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--info)]" />
@@ -1040,8 +1041,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               )}
             </div>
           </div>
+          )}
 
-          {/* ─── Impulse 1D Bot ─── */}
+          {/* ─── Impulse 1D Bot (only when running) ─── */}
+          {!!impulseStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
@@ -1100,8 +1103,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               )}
             </div>
           </div>
+          )}
 
-          {/* ─── Validation Bot ─── */}
+          {/* ─── Validation Bot (only when running) ─── */}
+          {!!validationStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <FlaskConical size={13} className="text-[var(--warn)]" />
@@ -1168,9 +1173,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               )}
             </div>
           </div>
+          )}
 
-
-          {/* ─── AI Discretionary ─── */}
+          {/* ─── AI Discretionary (only when running) ─── */}
+          {!!aiStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--accent)]" />
@@ -1303,6 +1309,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               )}
             </div>
           </div>
+          )}
 
           {/* ─── Market Data ─── */}
           <div className="panel flex-shrink-0">

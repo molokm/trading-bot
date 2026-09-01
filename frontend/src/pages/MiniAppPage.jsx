@@ -182,8 +182,12 @@ function ProPreview({ t, onBack }) {
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="flex gap-2">
-            {demoBotCard(demo.bots[0], 'text-[var(--info)]')}
-            {demoBotCard(demo.bots[1], 'text-[var(--profit)]')}
+            {(demo.bots || []).filter(b => b.running).map((b, i) => (
+              <span key={b.name || i}>{demoBotCard(b, i === 0 ? 'text-[var(--info)]' : 'text-[var(--profit)]')}</span>
+            ))}
+            {!(demo.bots || []).some(b => b.running) && (
+              <div className="col-span-2 text-2xs text-[var(--txt-muted)]">Нет активных ботов</div>
+            )}
           </div>
         </div>
 
@@ -859,10 +863,15 @@ export default function MiniAppPage() {
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
-            {botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
-            {botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
-            {botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
-            {botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
+            {!!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
+            {!!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
+            {!!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
+            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
+            {!rotation?.running && !impulse?.running && !validation?.running && !aiBot?.running && (
+              <div className="col-span-2 text-2xs text-[var(--txt-muted)] py-2">
+                Нет активных ботов
+              </div>
+            )}
           </div>
         </div>
 
