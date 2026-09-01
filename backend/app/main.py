@@ -2352,22 +2352,7 @@ async def health():
         diag["pnl_per_bot"] = _pr.get("per_bot")
         diag["pnl_source"] = _pr.get("source")
         diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
-        # inst_last_bot map (manual-close attribution) — from in-memory logs
-        try:
-            _ilb = {}
-            for _bname, _bobj in [("rotation", rotation), ("impulse", impulse),
-                                   ("validation", validation), ("ai", ai_bot)]:
-                if _bobj and hasattr(_bobj, '_trade_log') and _bobj._trade_log:
-                    for _t in reversed(_bobj._trade_log):
-                        _i = _t.get("symbol") or _t.get("inst_id") or ""
-                        if _i and _i not in _ilb:
-                            _ilb[_i] = _bname
-            diag["inst_last_bot_sample"] = {
-                k: v for k, v in list(_ilb.items())[:12]
-            }
-        except Exception as e:
-            diag["inst_last_bot_err"] = str(e)
-        # Last 10 trades with PnL to explain the daily number
+        # Last trades with PnL to explain the daily number
         try:
             _pt = await get_paired_trades(limit=500)
             from datetime import datetime as _dt, timezone as _tz
