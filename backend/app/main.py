@@ -6222,12 +6222,18 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     # inst_id -> bot from ENTRY fills (clOrdId prefix). Used as final fallback
     # for close orders whose own clOrdId is missing (manual/external/exchange_stop).
     # The ENTRY fill always has the bot's clOrdId (e.g. "rot...").
+    # NOTE: only subType 3/4 (entry) fills count — OKX returns fills newest-first,
+    # so the most recent fill for an instrument is usually a CLOSE (e.g. rot...),
+    # which would wrongly attribute the instrument to the closing bot.
     inst_entry_bot: dict = {}
     _clord_to_bot = {"rot": "Momentum", "imp": "Impulse 1D", "ai": "AI Discretionary 1H",
                      "val": "MACD+Donchian Validation",
                      "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
                      "vwap": "VWAP Mean Reversion"}
     for _f in raw_fills:
+        _sub = str(_f.get("subType") or "")
+        if _sub not in ("3", "4"):
+            continue  # only entry fills define who opened the position
         _cid = str(_f.get("clOrdId", "") or "").strip().lower()
         _fi = _f.get("instId") or _f.get("inst_id") or ""
         if not _fi or not _cid:
