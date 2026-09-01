@@ -1247,7 +1247,17 @@ class RotationStrategy:
                     if self.notifier:
                         try:
                             _sid = await self._ensure_signal_id(pos)
-                            _reply = int(getattr(pos, "tg_message_id", 0) or 0) or self.notifier.open_message_id(_sid)
+                            _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                            if not _reply:
+                                _reply = await self.notifier.resolve_open_message_id(
+                                    self.db, _sid,
+                                    bot_id=getattr(self, "BOT_ID", ""),
+                                    coin=getattr(pos, "coin", "") or "",
+                                )
+                            if not _reply:
+                                print(f"[Rotation] TG reconcile: no open message_id to reply (signal={_sid})", flush=True)
+                            else:
+                                print(f"[Rotation] TG reconcile: reply_to={_reply} signal={_sid}", flush=True)
                             _txt = self.notifier.close_msg(
                                 coin=coin, side=pos.side,
                                 entry=round(pos.entry_price, 2),
