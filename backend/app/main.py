@@ -5555,14 +5555,20 @@ async def get_pnl():
             week_start = (now - td(days=now.weekday())).replace(
                 hour=0, minute=0, second=0, microsecond=0
             )
+            active_labels = _active_bot_labels()
             for tr in closed_tagged:
                 try:
                     pnl = float(tr.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
                 bot = tr.get("bot") or ""
+                # Always keep full breakdown for diagnostics
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+                # Dashboard totals/windows: only ACTIVE bots (if any running)
+                if active_labels and bot not in active_labels:
+                    account_total += pnl  # account still sees all tagged
+                    continue
                 total_realized += pnl
                 account_total += pnl
                 try:
@@ -5688,14 +5694,12 @@ async def get_pnl():
 
     economic = total_realized + unrealized + funding
 
-    # Active-bots-only view for main dashboard cards (total + windows)
+    # per_bot on response = active only; full map in per_bot_all
     per_bot_all = {k: float(v) for k, v in per_bot.items()}
     active = _active_bot_labels()
     if active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
-        total_realized = sum(per_bot.values())
-        # Recompute windows from tagged closed list would need bot on each add —
-        # use second pass over closed_tagged if available in scope
+        # total_realized / 1d / week already counted only active in the loop
     return {
         "total": round(total_realized, 2),
         "account_total": round(account_total, 2),

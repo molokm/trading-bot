@@ -235,7 +235,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     : (pnl?.unrealized || 0)
   const fundingPnl = Number(pnl?.funding ?? 0)
   const economicPnl = Number(pnl?.economic_approx ?? ((Number(pnl?.total) || 0) + unrealizedPnl + fundingPnl))
-  // Realized windows: prefer /api/pnl; if 0/missing — sum closed rows from tradeLog
+  // Active strategy labels (only running bots contribute to dashboard PnL)
+  const activeBotNames = (() => {
+    const names = []
+    if (momentumStatus?.running) names.push('Momentum')
+    if (impulseStatus?.running) names.push('Impulse 1D', 'Impulse')
+    if (validationStatus?.running) names.push('MACD+Donchian Validation', 'Validation')
+    if (aiStatus?.running) names.push('AI Discretionary 1H')
+    if (smartMoneyStatus?.running) names.push('Умные деньги', 'Smart Money')
+    if (vwapRevStatus?.running) names.push('VWAP Mean Reversion')
+    return names
+  })()
+  const isActiveBotTrade = (t) => {
+    if (!activeBotNames.length) return true // none running → show nothing filtered below
+    const b = String(t.bot || t.bot_name || '').trim()
+    if (!b) return false
+    return activeBotNames.some(n => b === n || b.includes(n) || n.includes(b))
+  }
+  // Realized windows: prefer /api/pnl (server already filters active); fallback tradeLog
   const sumClosedSince = (msBack) => {
     const cutoff = Date.now() - msBack
     let s = 0
@@ -243,6 +260,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const reason = String(t.reason || '').toLowerCase()
       if (reason === 'open' || reason === 'add') continue
       if (t.pnl == null || t.pnl === '') continue
+      if (!isActiveBotTrade(t)) continue
       const ts = t.exit_time || t.time || t.timestamp || ''
       if (!ts) continue
       const ms = Date.parse(ts)
@@ -252,27 +270,32 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return s
   }
   const pnlTotal = (() => {
-    const t = Number(pnl?.total ?? 0)
-    if (t !== 0) return t
-    const per = pnl?.per_bot || pnl?.per_bot_all || {}
+    // Server total is already active-only
+    if (pnl && pnl.total != null && (pnl.active_bots || []).length) return Number(pnl.total)
+    if (pnl && pnl.total != null && Number(pnl.total) !== 0) return Number(pnl.total)
+    const per = pnl?.per_bot || {}
     const fromPer = Object.values(per).reduce((s, v) => s + Number(v || 0), 0)
     if (fromPer !== 0) return fromPer
-    // last resort: all closed in log
+    if (!activeBotNames.length) return 0
     return sumClosedSince(365 * 86400000)
   })()
   const pnlDay = (() => {
-    const v = Number(pnl?.['1d'] ?? 0)
-    if (v !== 0) return v
+    if (pnl && pnl['1d'] != null && (pnl.active_bots || []).length) return Number(pnl['1d'])
+    if (pnl && Number(pnl['1d'] ?? 0) !== 0) return Number(pnl['1d'])
+    if (!activeBotNames.length) return 0
     return sumClosedSince(86400000)
   })()
   const pnlWeek = (() => {
-    const v = Number(pnl?.week ?? pnl?.['7d'] ?? 0)
-    if (v !== 0) return v
+    const apiW = pnl?.week ?? pnl?.['7d']
+    if (pnl && apiW != null && (pnl.active_bots || []).length) return Number(apiW)
+    if (pnl && Number(apiW ?? 0) !== 0) return Number(apiW)
+    if (!activeBotNames.length) return 0
     return sumClosedSince(7 * 86400000)
   })()
   const pnlMonth = (() => {
-    const v = Number(pnl?.['30d'] ?? 0)
-    if (v !== 0) return v
+    if (pnl && pnl['30d'] != null && (pnl.active_bots || []).length) return Number(pnl['30d'])
+    if (pnl && Number(pnl['30d'] ?? 0) !== 0) return Number(pnl['30d'])
+    if (!activeBotNames.length) return 0
     return sumClosedSince(30 * 86400000)
   })()
 
