@@ -2352,17 +2352,16 @@ async def health():
         diag["pnl_per_bot"] = _pr.get("per_bot")
         diag["pnl_source"] = _pr.get("source")
         diag["pnl_skipped_untagged"] = _pr.get("skipped_untagged")
-        # inst_last_bot map (manual-close attribution)
+        # inst_last_bot map (manual-close attribution) — from in-memory logs
         try:
             _ilb = {}
-            for _r in await db._fetchall(
-                "SELECT inst_id, bot_id, timestamp FROM trades "
-                "WHERE bot_id IS NOT NULL AND bot_id != '' "
-                "ORDER BY timestamp DESC LIMIT 300"
-            ):
-                _i = _r.get("inst_id") or ""
-                if _i and _i not in _ilb:
-                    _ilb[_i] = str(_r.get("bot_id") or "")
+            for _bname, _bobj in [("rotation", rotation), ("impulse", impulse),
+                                   ("validation", validation), ("ai", ai_bot)]:
+                if _bobj and hasattr(_bobj, '_trade_log') and _bobj._trade_log:
+                    for _t in reversed(_bobj._trade_log):
+                        _i = _t.get("symbol") or _t.get("inst_id") or ""
+                        if _i and _i not in _ilb:
+                            _ilb[_i] = _bname
             diag["inst_last_bot_sample"] = {
                 k: v for k, v in list(_ilb.items())[:12]
             }
@@ -6001,6 +6000,9 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         ROT_BOT_ID: "Momentum", MOM_BOT_ID: "Momentum",
         IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation",
         AI_BOT_ID: "AI Discretionary 1H",
+        "rotation": "Momentum", "momentum": "Momentum",
+        "impulse": "Impulse 1D", "validation": "MACD+Donchian Validation",
+        "ai": "AI Discretionary 1H",
     }
     # Build from in-memory trade logs (most reliable — survives DB failures)
     for _bid_name, _bot_obj in [("rotation", rotation), ("impulse", impulse),
