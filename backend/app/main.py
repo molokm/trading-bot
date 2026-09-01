@@ -6231,7 +6231,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 "reason": t.get("reason", ""),
                 "pos_side": t.get("pos_side", "long"),
                 "signal_id": t.get("signal_id", 0) or ord_id,
-                "bot": _okx_bot(ord_id) or inst_entry_bot.get(inst, ""),
+                "bot": _okx_bot(ord_id),
                 "fee": t.get("fee", "0"),
             })
     except Exception as e:
@@ -6296,6 +6296,11 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         if inst and inst in inst_last_bot:
             _raw_name = inst_last_bot[inst]
             t["bot"] = _bot_name_map.get(_raw_name, _raw_name) or t.get("bot") or ""
+            continue
+        # Last resort: ENTRY fills clOrdId map. Only used when in-memory logs
+        # are empty (after restart) AND ord_to_bot/inst_last_bot didn't help.
+        if inst and inst in inst_entry_bot:
+            t["bot"] = inst_entry_bot[inst] or t.get("bot") or ""
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
