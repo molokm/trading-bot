@@ -2268,7 +2268,7 @@ class AIStrategy:
                 if self._last_decision else self._last_decision
             ),
             "watch": (self._last_decision or {}).get("watch") or self._watch_board(),
-            "pulse": (self._last_decision or {}).get("pulse") or "",
+            "pulse": self._safe_pulse_text(),
             "symbols_scanned": list(self.config.symbols or []),
             "adaptive": self._adapt,
             "reflection": self._reflection,

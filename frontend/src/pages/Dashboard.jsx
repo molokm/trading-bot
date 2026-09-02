@@ -1516,18 +1516,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   </div>
                 </div>
               </div>
-              {aiStatus?.last_decision && (
+              {(aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision) && (
                 <div className="p-1.5 rounded-md bg-[var(--bg)] text-2xs">
-                  <div className="text-[var(--txt-muted)] mb-0.5">Статус AI{aiStatus.symbols_scanned?.length ? ` · scan ${aiStatus.symbols_scanned.join("/")}` : (aiStatus.last_decision?.symbols_scanned?.length ? ` · scan ${aiStatus.last_decision.symbols_scanned.join("/")}` : "")}</div>
-                  <div className="text-[var(--txt)]">
-                    <span className="font-bold mono">{aiStatus.last_decision.action}</span>
-                    {aiStatus.last_decision.symbol ? ` ${aiStatus.last_decision.symbol}` : ''}
-                    {aiStatus.last_decision.side ? ` ${aiStatus.last_decision.side}` : ''}
-                    {aiStatus.last_decision.confidence != null ? ` · conf ${aiStatus.last_decision.confidence}` : ''}
+                  <div className="text-[var(--txt-muted)] mb-0.5">Статус рынка</div>
+                  <div className="text-[var(--txt)] whitespace-pre-wrap break-words max-h-40 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] p-2 text-[11px] leading-relaxed">
+                    {aiStatus.pulse
+                      || aiStatus.description
+                      || aiStatus.last_decision?.pulse
+                      || aiStatus.last_decision?.reason
+                      || 'Ожидание данных рынка…'}
                   </div>
-                  {aiStatus.last_decision.reason && (
-                    <div className="text-[var(--txt-muted)] mt-0.5 whitespace-pre-wrap break-words max-h-40 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] p-2 text-[11px] leading-relaxed">{aiStatus.last_decision.pulse || aiStatus.pulse || aiStatus.last_decision.reason}</div>
-                  )}
                 </div>
               )}
               {!isGuest && (
