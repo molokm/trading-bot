@@ -566,7 +566,7 @@ function MiniAppPageInner
       impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
       validation: () => api.validationStatus(),
       ai: () => api.aiStatus(),
-      pnl: () => api.getPnl(),
+      pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(80),
     }
@@ -646,7 +646,7 @@ function MiniAppPageInner
   /* ── Auto-refresh every 30s ── */
   useEffect(() => {
     if (authing || authError) return
-    const id = setInterval(load, 30000)
+    const id = setInterval(load, 45000)
     return () => clearInterval(id)
   }, [authing, authError, load])
 

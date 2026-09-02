@@ -154,6 +154,7 @@ export const api = {
 
   pnlReconcile: () => request('/pnl/reconcile'),
   getPnl: () => request('/pnl'),
+  getPnlSummary: () => request('/pnl/summary'),
 
   // ── Momentum Strategy ──
   momentumStatus: () => request('/momentum/status'),

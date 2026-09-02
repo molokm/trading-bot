@@ -195,7 +195,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const [momTrades, trades, pnlData] = await Promise.all([
         api.momentumTrades(30).catch(() => null),
         api.getPairedTrades(200).catch(() => null),
-        api.getPnl().catch(() => null),
+        api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])

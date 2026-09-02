@@ -1629,7 +1629,7 @@ async def admin_reassign_trade(data: dict = None):
     except Exception as e:
         stats["override_err"] = str(e)
     # clear caches
-    global _bot_stats_cache, _paired_cache
+    global _bot_stats_cache, _paired_cache, _pnl_cache
     _bot_stats_cache = {"ts": 0.0, "data": {}}
     _paired_cache = {}
     # adjust in-memory AI / rotation if present
@@ -5450,7 +5450,7 @@ async def admin_reset_trading_stats(data: dict = None):
         print(f"[reset] sm ledger: {e}", flush=True)
 
     # clear caches
-    global _bot_stats_cache, _paired_cache
+    global _bot_stats_cache, _paired_cache, _pnl_cache
     try:
         _bot_stats_cache["ts"] = 0
         _bot_stats_cache["data"] = {}
@@ -5458,6 +5458,10 @@ async def admin_reset_trading_stats(data: dict = None):
         pass
     try:
         _paired_cache.clear()
+    except Exception:
+        pass
+    try:
+        _pnl_cache.clear()
     except Exception:
         pass
 
@@ -5471,7 +5475,36 @@ async def admin_reset_trading_stats(data: dict = None):
     }
 
 
-@app.get("/api/pnl")
+
+@app.get("/api/pnl/summary")
+async def pnl_summary():
+    """Lightweight PnL for dashboard metric cards (cached via get_pnl).
+
+    Avoids clients re-implementing aggregation; same TTL as full /api/pnl.
+    """
+    full = await get_pnl()
+    return {
+        "total": full.get("total", 0),
+        "1d": full.get("1d", 0),
+        "7d": full.get("7d", 0),
+        "30d": full.get("30d", 0),
+        "week": full.get("week", 0),
+        "unrealized": full.get("unrealized", 0),
+        "funding": full.get("funding", 0),
+        "funding_scope": full.get("funding_scope", "account"),
+        "economic_approx": full.get("economic_approx", 0),
+        "strategy_realized": full.get("strategy_realized", full.get("total", 0)),
+        "per_bot": full.get("per_bot", {}),
+        "active_bots": full.get("active_bots", []),
+        "source": full.get("source", ""),
+        "pnl_epoch": full.get("pnl_epoch"),
+        "pnl_tz": full.get("pnl_tz") or full.get("timezone"),
+        "timezone": full.get("timezone"),
+        "day_basis": full.get("day_basis"),
+        "cached": True,
+        "cache_ttl_sec": _PNL_TTL,
+    }
+
 
 def _active_bot_labels() -> set:
     """Human labels of bots currently running (for dashboard PnL cards)."""
@@ -5494,7 +5527,23 @@ def _active_bot_labels() -> set:
     return labels
 
 
+@app.get("/api/pnl")
 async def get_pnl():
+    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
+    global _pnl_cache
+    now_s = _time.time()
+    if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
+        return dict(_pnl_cache["data"])
+    async with _pnl_lock:
+        now_s = _time.time()
+        if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
+            return dict(_pnl_cache["data"])
+        data = await _compute_pnl()
+        _pnl_cache = {"ts": _time.time(), "data": data}
+        return dict(data)
+
+
+async def _compute_pnl():
 
     """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
 
@@ -6128,7 +6177,12 @@ async def get_all_trades(limit: int = 100):
 
 _paired_cache: dict = {}
 _paired_lock = asyncio.Lock()
-_PAIRED_TTL = 10  # seconds — dashboard polls /api/pnl + /api/trades/paired every 10s
+_PAIRED_TTL = 20
+
+_pnl_cache: dict = {}
+_pnl_lock = asyncio.Lock()
+_PNL_TTL = 15  # seconds
+  # seconds — single-flight shared by /api/pnl and /trades/paired
 
 
 @app.get("/api/trades/paired")
