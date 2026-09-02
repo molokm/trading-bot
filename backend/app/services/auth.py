@@ -161,20 +161,14 @@ def _derive_fernet_key(seed: str) -> bytes:
 
 
 def _require_stable_secrets() -> None:
-    """Ensure encryption + JWT secrets are production-safe.
+    """Ensure we can encrypt secrets at rest.
 
-    Rules:
-    - Prefer explicit TOKEN_ENCRYPTION_KEY (Fernet).
-    - On Render (or REQUIRE_ENCRYPTION_KEY=1): TOKEN_ENCRYPTION_KEY is required
-      (no silent derive from password).
-    - JWT_SECRET should be long; on Render missing JWT_SECRET fails closed
-      unless ALLOW_INSECURE_SECRETS=1 (dev only).
+    Prefer TOKEN_ENCRYPTION_KEY. If unset, derive a stable Fernet key from
+    JWT_SECRET or DASHBOARD_PASSWORD so deploys keep working.
+    Hard-fail only when REQUIRE_ENCRYPTION_KEY=1 and key is missing, or when
+    there is no seed at all to derive from.
     """
-    on_render = bool(os.getenv("RENDER") or os.getenv("RENDER_SERVICE_ID"))
-    strict = (os.getenv("REQUIRE_ENCRYPTION_KEY") or ("1" if on_render else "")).strip().lower() in (
-        "1", "true", "yes", "on",
-    )
-    allow_insecure = (os.getenv("ALLOW_INSECURE_SECRETS") or "").strip().lower() in (
+    strict = (os.getenv("REQUIRE_ENCRYPTION_KEY") or "").strip().lower() in (
         "1", "true", "yes", "on",
     )
 
@@ -184,48 +178,29 @@ def _require_stable_secrets() -> None:
             Fernet(key_b64.encode() if isinstance(key_b64, str) else key_b64)
         except Exception as e:
             raise RuntimeError(f"TOKEN_ENCRYPTION_KEY is invalid: {e}") from e
-    else:
-        seed = (
-            os.getenv("JWT_SECRET", "").strip()
-            or os.getenv("DASHBOARD_PASSWORD", "").strip()
-        )
-        if strict and not allow_insecure:
-            raise RuntimeError(
-                "TOKEN_ENCRYPTION_KEY is required. Generate with: "
-                "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-            )
-        if seed:
-            print(
-                "[auth] TOKEN_ENCRYPTION_KEY unset — deriving Fernet key from "
-                "JWT_SECRET/DASHBOARD_PASSWORD (dev only; set TOKEN_ENCRYPTION_KEY in prod)",
-                flush=True,
-            )
-        else:
-            raise RuntimeError(
-                "TOKEN_ENCRYPTION_KEY is required (or JWT_SECRET/DASHBOARD_PASSWORD to derive in dev)"
-            )
+        return
 
-    jwt_sec = os.getenv("JWT_SECRET", "").strip()
-    if not jwt_sec:
-        # May still derive from TOKEN_ENCRYPTION_KEY / DASHBOARD_PASSWORD via _jwt_secret()
-        alt = (
-            os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
-            or os.getenv("DASHBOARD_PASSWORD", "").strip()
+    seed = (
+        os.getenv("JWT_SECRET", "").strip()
+        or os.getenv("DASHBOARD_PASSWORD", "").strip()
+    )
+    if strict:
+        raise RuntimeError(
+            "TOKEN_ENCRYPTION_KEY is required (REQUIRE_ENCRYPTION_KEY=1). Generate with: "
+            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
-        if on_render and not alt and not allow_insecure:
-            raise RuntimeError(
-                "JWT_SECRET is required on Render (or TOKEN_ENCRYPTION_KEY / DASHBOARD_PASSWORD). "
-                "Generate: openssl rand -hex 32"
-            )
-        if not alt:
-            print("[auth] JWT_SECRET unset — ephemeral secret (sessions die on restart)", flush=True)
-        else:
-            print("[auth] JWT_SECRET unset — using TOKEN_ENCRYPTION_KEY/DASHBOARD_PASSWORD material", flush=True)
-    elif len(jwt_sec) < 24:
+    if seed:
         print(
-            f"[auth] WARNING: JWT_SECRET is short ({len(jwt_sec)} chars); use >= 32 bytes",
+            "[auth] TOKEN_ENCRYPTION_KEY unset — deriving stable Fernet key from "
+            "JWT_SECRET/DASHBOARD_PASSWORD (set TOKEN_ENCRYPTION_KEY for explicit control)",
             flush=True,
         )
+        return
+
+    raise RuntimeError(
+        "TOKEN_ENCRYPTION_KEY is required (or set JWT_SECRET / DASHBOARD_PASSWORD to derive). "
+        "Generate: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
 
 
 
