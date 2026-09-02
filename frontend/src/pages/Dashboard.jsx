@@ -649,7 +649,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlSource = pnl?.source || ''
   const fundingNote = Number(pnl?.funding || 0)
 
-  const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---
+  const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
   const fmtTime = (ts) => fmtTs(ts, locale)
 
