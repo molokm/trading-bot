@@ -2112,12 +2112,22 @@ class AIStrategy:
         }
         return out
 
-    def _status_pulse(self, decision: dict) -> str:
 
-        """Краткий динамический статус — меняется при изменении рынка."""
-        q = self._build_quant()
-        board = self._watch_board()
-        reg = (q.get("global_regime") or "неизвестно").lower()
+    def _status_pulse(self, decision: dict) -> str:
+        """Краткий динамический статус — меняется при изменении рынка. Не бросает."""
+        decision = decision or {"action": "hold"}
+        try:
+            q = self._build_quant() or {}
+        except Exception as e:
+            print(f"[AI] pulse quant: {e}", flush=True)
+            q = {"global_regime": "unknown", "coins": {}}
+        try:
+            board = self._watch_board() or []
+        except Exception as e:
+            print(f"[AI] pulse board: {e}", flush=True)
+            board = []
+
+        reg = str(q.get("global_regime") or "неизвестно").lower()
         reg_ru = {
             "bull": "бычий", "bear": "медвежий", "chop": "боковик",
             "unknown": "неясный", "неизвестно": "неясный",
@@ -2128,56 +2138,72 @@ class AIStrategy:
             "normal": "обычный",
             "aggressive": "агрессивный",
         }.get(str(preset).lower(), str(preset))
-        act = (decision.get("action") or "hold").lower()
+        act = str(decision.get("action") or "hold").lower()
         conf = decision.get("confidence")
         try:
             conf_f = float(conf) if conf is not None else None
         except (TypeError, ValueError):
             conf_f = None
 
-        # Лучший доступный (unblocked) — иначе лучший blocked для диагностики
         best_free = None
         best_any = None
         for b in board:
-            sc = float(b.get("align_score") or 0)
+            try:
+                sc = float(b.get("align_score") or 0)
+            except (TypeError, ValueError):
+                sc = 0.0
             if best_any is None or sc > best_any[0]:
                 best_any = (sc, b)
             if not b.get("block_open"):
                 if best_free is None or sc > best_free[0]:
                     best_free = (sc, b)
 
-        lines = []
-        lines.append(f"Рынок: {reg_ru}, режим: {preset_ru}.")
+        def _coin_side(obj):
+            if isinstance(obj, dict):
+                coin = obj.get("coin") or obj.get("symbol") or "?"
+                side = str(obj.get("side") or "").lower()
+            else:
+                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
+                side = str(getattr(obj, "side", None) or "").lower()
+            coin = str(coin).replace("-USDT-SWAP", "").replace("-USDT", "")
+            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else (side or "—"))
+            return coin, side_ru
+
+        lines = [f"Рынок: {reg_ru}, режим: {preset_ru}."]
+
+        # Positions from memory (truth for open state)
+        pos_map = getattr(self, "_positions", None) or {}
+        open_list = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
 
         if act == "hold":
-            open_list = list(getattr(self, "_positions", {}) or {}).values()
             if open_list:
                 parts = []
-                for p in open_list:
-                    coin = getattr(p, "coin", None) or "?"
-                    side = (getattr(p, "side", None) or "").lower()
-                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side or "—")
+                for pos in open_list:
+                    coin, side_ru = _coin_side(pos)
                     parts.append(f"{coin} {side_ru}")
-                line = f"Открыто: {', '.join(parts)}. Новых входов нет — удерживаю / жду условия выхода."
+                line = (
+                    f"Открыто: {', '.join(parts)}. "
+                    "Новых входов нет — удерживаю / жду условия выхода."
+                )
             else:
                 line = "Позиций нет."
                 if best_free:
                     b = best_free[1]
                     side = b.get("best_side") or "—"
                     side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    sc = best_free[0]
-                    coin = b.get("coin")
-                    line += f" Доступно: {coin} {side_ru} ({sc:.2f}) — жду подтверждения LLM/quant."
-                    if best_any and best_any[1].get("block_open") and best_any[1].get("coin") != coin:
-                        bb = best_any[1]
-                        s2 = bb.get("best_side") or "—"
-                        s2ru = "лонг" if s2 == "long" else ("шорт" if s2 == "short" else s2)
-                        line += f" Сильнее по align, но блок: {bb.get('coin')} {s2ru} ({best_any[0]:.2f})."
+                    coin = b.get("coin") or "?"
+                    line += (
+                        f" Доступно: {coin} {side_ru} ({best_free[0]:.2f}) "
+                        "— жду подтверждения LLM/quant."
+                    )
                 elif best_any:
                     b = best_any[1]
                     side = b.get("best_side") or "—"
                     side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    line += f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) — заблокирован (ADX/align)."
+                    line += (
+                        f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) "
+                        "— заблокирован (ADX/align)."
+                    )
                 else:
                     line += " Явных кандидатов нет."
             lines.append(line)
@@ -2189,28 +2215,46 @@ class AIStrategy:
                 f"Сигнал на вход: {sym} {side_ru}"
                 + (f" (уверенность {conf_f:.2f})." if conf_f is not None else ".")
             )
+            if open_list:
+                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
+                lines.append(f"Уже открыто: {', '.join(parts)}.")
         elif act in ("close", "reduce"):
             sym = decision.get("symbol") or "?"
-            lines.append(f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}.")
+            lines.append(
+                f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}."
+            )
         else:
             lines.append(f"Действие: {act}.")
+            if open_list:
+                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
+                lines.append(f"Открыто: {', '.join(parts)}.")
 
         return " ".join(lines)
 
-
     def _safe_pulse_text(self) -> str:
-        """Live Russian status for UI cards; never raises into get_status."""
+        """Always recompute live pulse for UI (do not reuse stale last_decision.pulse)."""
         try:
-            pulse = ((self._last_decision or {}).get("pulse") or "").strip()
-            if pulse:
-                return pulse[:900]
             return (self._status_pulse(self._last_decision or {"action": "hold"}) or "")[:900]
         except Exception as e:
             print(f"[AI] pulse text: {e}", flush=True)
-            n = len(getattr(self, "_positions", {}) or {})
-            if n:
-                return f"Открытых позиций: {n}. Статус рынка обновляется…"
-            return "Ожидание данных рынка…"
+            pos_map = getattr(self, "_positions", None) or {}
+            open_list = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+            if open_list:
+                parts = []
+                for pos in open_list:
+                    if isinstance(pos, dict):
+                        coin = pos.get("coin") or "?"
+                        side = str(pos.get("side") or "").lower()
+                    else:
+                        coin = getattr(pos, "coin", None) or "?"
+                        side = str(getattr(pos, "side", None) or "").lower()
+                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side or "—")
+                    parts.append(f"{coin} {side_ru}")
+                return (
+                    f"Рынок: данные обновляются. Открыто: {', '.join(parts)}. "
+                    "Удерживаю позицию."
+                )
+            return "Рынок: данные обновляются. Позиций нет."
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
