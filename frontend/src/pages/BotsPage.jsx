@@ -822,7 +822,7 @@ export default function BotsPage({ connected, isGuest }) {
             statusMode={aiRunning ? 'live' : 'stopped'}
             statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
             coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
-            description={aiStatus?.description || t('bots.ai_desc')}
+            description={aiStatus?.pulse || aiStatus?.description || t('bots.ai_desc')}
             tags={[
               t('bots.tag_tf_1h'),
               'BTC · ETH · SOL · XRP',

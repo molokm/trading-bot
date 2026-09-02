@@ -2204,7 +2204,12 @@ class AIStrategy:
             "running": self._running,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
-            "description": STRATEGY_DESC,
+            # Card text = live market pulse (not static STRATEGY_DESC)
+            "description": (
+                ((self._last_decision or {}).get("pulse") or "").strip()
+                or self._status_pulse(self._last_decision or {"action": "hold"})
+            ),
+            "strategy_blurb": STRATEGY_DESC,
             "provider": self._provider(),
             "execute": self._execute_enabled(),
             "capital": self._capital,
