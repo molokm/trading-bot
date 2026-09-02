@@ -166,7 +166,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momStatus) setMomentumStatus(momStatus)
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
-      setAiStatus(aiSt)
+      if (aiSt && !aiSt.detail) setAiStatus(aiSt)
       setSmartMoneyStatus(smartMoneySt)
       setVwapRevStatus(vwapRevSt)
       // Seed PnL early from AI status so cards are not stuck at 0 while /api/pnl loads
@@ -1446,6 +1446,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             <div className="panel-header">
               <Bot size={13} className="text-[var(--accent)]" />
               AI Discretionary 1H
+              {!aiStatus && (
+                <span className="ml-2 text-2xs text-[var(--warn)]">загрузка статуса…</span>
+              )}
               {aiStatus?.version && (
                 <span className="ml-1 text-2xs text-[var(--txt-muted)] mono">{aiStatus.version}</span>
               )}
@@ -1481,7 +1484,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-[var(--txt-muted)]">LLM</div>
                   <div className="mono font-semibold text-[var(--txt)] mt-0.5">
-                    {aiStatus?.provider || '—'}{aiStatus?.groq_key_configured || aiStatus?.llm?.groq_key_configured ? ' ✓' : ''}
+                    {aiStatus?.provider || aiStatus?.llm?.provider || '—'}
+                    {(aiStatus?.groq_key_configured || aiStatus?.llm?.groq_key_configured) ? ' ✓' : ''}
                   </div>
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
@@ -1493,7 +1497,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">
                   <div className="text-[var(--txt-muted)]">Model</div>
                   <div className="mono text-[var(--txt)] mt-0.5 truncate" title={aiStatus?.model || aiStatus?.llm?.model || ''}>
-                    {(aiStatus?.model || aiStatus?.llm?.model || '—').toString().slice(0, 18)}
+                    {(aiStatus?.model || aiStatus?.llm?.model || '—').toString().slice(0, 22)}
                   </div>
                 </div>
                 <div className="p-1.5 rounded-md bg-[var(--bg)]">

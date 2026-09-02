@@ -2197,6 +2197,21 @@ class AIStrategy:
 
         return " ".join(lines)
 
+
+    def _safe_pulse_text(self) -> str:
+        """Live Russian status for UI cards; never raises into get_status."""
+        try:
+            pulse = ((self._last_decision or {}).get("pulse") or "").strip()
+            if pulse:
+                return pulse[:900]
+            return (self._status_pulse(self._last_decision or {"action": "hold"}) or "")[:900]
+        except Exception as e:
+            print(f"[AI] pulse text: {e}", flush=True)
+            n = len(getattr(self, "_positions", {}) or {})
+            if n:
+                return f"Открытых позиций: {n}. Статус рынка обновляется…"
+            return "Ожидание данных рынка…"
+
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
         session_wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
@@ -2205,12 +2220,11 @@ class AIStrategy:
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
             # Card text = live market pulse (not static STRATEGY_DESC)
-            "description": (
-                ((self._last_decision or {}).get("pulse") or "").strip()
-                or self._status_pulse(self._last_decision or {"action": "hold"})
-            ),
+            "description": self._safe_pulse_text(),
             "strategy_blurb": STRATEGY_DESC,
             "provider": self._provider(),
+            "model": (llm_status() or {}).get("model"),
+            "llm": llm_status(),
             "execute": self._execute_enabled(),
             "capital": self._capital,
             "equity": round(self._equity, 2),
