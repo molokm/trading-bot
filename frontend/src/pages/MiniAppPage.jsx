@@ -25,6 +25,7 @@ function miniLog(tag, ...args) {
 }
 
 window.__MINI_APP__ = true
+const AI_ONLY_MODE = true
 
 /* ═══════ Number formatting ═══════ */
 function fmt(n, digits = 2) {
@@ -562,9 +563,9 @@ function MiniAppPageInner
     const callers = {
       health: () => api.health(),
       portfolio: () => isUser ? api.mePortfolio() : api.getPortfolio(),
-      rotation: () => isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus(),
-      impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
-      validation: () => api.validationStatus(),
+      rotation: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus()),
+      impulse: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus()),
+      validation: () => AI_ONLY_MODE ? null : api.validationStatus(),
       ai: () => api.aiStatus(),
       pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
@@ -1035,10 +1036,10 @@ function MiniAppPageInner
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
             {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H', true)}
-            {!!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
-            {!!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
-            {!!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
-            {!rotation?.running && !impulse?.running && !validation?.running && !aiBot?.running && (
+            {!AI_ONLY_MODE && !!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
+            {!AI_ONLY_MODE && !!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
+            {!AI_ONLY_MODE && !!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
+            {!(AI_ONLY_MODE ? aiBot?.running : (rotation?.running || impulse?.running || validation?.running || aiBot?.running)) && (
               <div className="col-span-2 text-2xs text-[var(--txt-muted)] py-2">
                 Нет активных ботов
               </div>

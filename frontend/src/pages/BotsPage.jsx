@@ -1,3 +1,4 @@
+const AI_ONLY_MODE = true
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import {
   Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
@@ -697,6 +698,8 @@ export default function BotsPage({ connected, isGuest }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        {!AI_ONLY_MODE && (
+        <>
         <BotCard
           id="momentum"
           name={t('dash.momentum_bot')}
@@ -803,6 +806,8 @@ export default function BotsPage({ connected, isGuest }) {
             loading={valLoading}
             t={t}
           />
+        )}
+        </>
         )}
 
         {!isGuest && (

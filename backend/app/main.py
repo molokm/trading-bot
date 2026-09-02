@@ -172,6 +172,13 @@ _mom_auto = os.getenv("MOM_AUTO_START", "0").strip().lower() not in ("0", "false
 _imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+# Product mode: only AI Discretionary is active (no multi-bot PnL/claim collisions)
+AI_ONLY_MODE = os.getenv("AI_ONLY_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
+if AI_ONLY_MODE:
+    _mom_auto = False
+    _imp_auto = False
+    _val_auto = False
+    print("[config] AI_ONLY_MODE=1 — Momentum/Impulse/Validation/SM/VWAP disabled", flush=True)
 
 trade_log: list = []
 _STARTED_AT = None  # set in startup(); used by /api/health uptime
@@ -566,6 +573,32 @@ async def startup():
                 print(f"[startup]   Validation FAILED to start: {e}", flush=True)
         else:
             print("[startup]   Validation skipped (no OKX env keys)", flush=True)
+
+        # AI-only: ensure legacy strategies are not running
+        if AI_ONLY_MODE:
+            for _name, _bot in (
+                ("rotation", rotation),
+                ("impulse", impulse),
+                ("validation", validation),
+                ("vwap_rev", vwap_rev_bot),
+                ("scalp", scalp_bot),
+            ):
+                try:
+                    if _bot and getattr(_bot, "_running", False):
+                        if hasattr(_bot, "stop"):
+                            res = _bot.stop()
+                            if hasattr(res, "__await__"):
+                                await res
+                        print(f"[startup] AI_ONLY stopped {_name}", flush=True)
+                except Exception as _e:
+                    print(f"[startup] AI_ONLY stop {_name}: {_e}", flush=True)
+            try:
+                if sm_tracker and getattr(sm_tracker, "_running", False):
+                    sm_tracker.stop()
+                    print("[startup] AI_ONLY stopped smart_money tracker", flush=True)
+            except Exception as _e:
+                print(f"[startup] AI_ONLY stop SM: {_e}", flush=True)
+
         print("[startup] 7/7 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -2229,6 +2262,8 @@ async def smart_money_mirror_status():
 
 @app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
 async def smart_money_mirror_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: Smart Money disabled")
     """Start mirroring a public Hyperliquid trader onto OKX."""
     # Mirroring runs a background thread with its own event loop. On the
     # free-tier Render instance this destabilizes the process (site goes
@@ -2249,6 +2284,8 @@ async def smart_money_mirror_stop(data: dict = None):
 
 @app.post("/api/smart-money/start", dependencies=[Depends(require_admin)])
 async def smart_money_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: Smart Money disabled")
     """Start the Smart Money Tracker (+ restore mirror claims)."""
     global sm_tracker
     if os.getenv("SM_EXECUTION_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
@@ -2382,6 +2419,8 @@ async def vwap_rev_status():
 
 @app.post("/api/vwap_rev/start", dependencies=[Depends(require_admin)])
 async def vwap_rev_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: vwap disabled")
     global vwap_rev_bot
     data = data or {}
     if vwap_rev_bot and getattr(vwap_rev_bot, "_running", False):
@@ -3578,6 +3617,8 @@ async def momentum_status():
 
 @app.post("/api/momentum/start", dependencies=[Depends(require_admin)])
 async def momentum_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: momentum disabled")
     """Start Rotation strategy (Dashboard calls this endpoint)."""
     global rotation
     if rotation and rotation._running:
@@ -3923,6 +3964,8 @@ async def rotation_status():
 
 @app.post("/api/rotation/start", dependencies=[Depends(require_admin)])
 async def rotation_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: rotation disabled")
     global rotation
     if rotation and rotation._running:
         return {"message": "Rotation already running"}
@@ -4082,6 +4125,8 @@ async def impulse_status():
 
 @app.post("/api/impulse/start", dependencies=[Depends(require_admin)])
 async def impulse_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: impulse disabled")
     """Start Impulse 1D strategy."""
     global impulse
     if impulse and impulse._running:
@@ -4218,6 +4263,8 @@ async def validation_status():
 
 @app.post("/api/validation/start", dependencies=[Depends(require_admin)])
 async def validation_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: validation disabled")
     """Start the validation bot (MACD+Donchian)."""
     global validation
     if validation and validation._running:
@@ -5510,6 +5557,10 @@ def _active_bot_labels() -> set:
     """Human labels of bots currently running (for dashboard PnL cards)."""
     labels = set()
     try:
+        if AI_ONLY_MODE:
+            if ai_bot and getattr(ai_bot, "_running", False):
+                labels.add("AI Discretionary 1H")
+            return labels
         if rotation and getattr(rotation, "_running", False):
             labels.add("Momentum")
         if impulse and getattr(impulse, "_running", False):
@@ -5553,6 +5604,8 @@ async def _compute_pnl():
     from datetime import datetime as dt, timezone as tz, timedelta as td
 
     STRICT_BOTS = {
+        "AI Discretionary 1H",
+    } if AI_ONLY_MODE else {
         "Momentum",
         "Impulse 1D",
         "MACD+Donchian Validation",

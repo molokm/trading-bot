@@ -13,6 +13,9 @@ const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX'
 
 // Coins the bot actively trades — shown as live price cards on the dashboard
 const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
+/** Single-strategy product mode — only AI Discretionary is shown/managed */
+const AI_ONLY_MODE = true
+
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
 function AnimatedValue({ children, className = '' }) {
@@ -149,12 +152,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         api.getPortfolio().catch(() => null),
         api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        api.momentumStatus().catch(() => null),
-        api.impulseStatus().catch(() => null),
-        api.validationStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
         api.aiStatus().catch(() => null),
-        api.smartMoneyStatus().catch(() => null),
-        api.vwapRevStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       if (pf) setPortfolio(pf)
@@ -251,6 +254,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
     const names = []
+    if (AI_ONLY_MODE) {
+      if (aiStatus?.running) names.push('AI Discretionary 1H')
+      return names
+    }
     if (momentumStatus?.running) names.push('Momentum')
     if (impulseStatus?.running) names.push('Impulse 1D', 'Impulse')
     if (validationStatus?.running) names.push('MACD+Donchian Validation', 'Validation')
@@ -1227,7 +1234,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           </div>
 
           {/* ─── Momentum Bot (only when running) ─── */}
-          {!!momentumStatus?.running && (
+          {!AI_ONLY_MODE && !!momentumStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--info)]" />
@@ -1302,7 +1309,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           )}
 
           {/* ─── Impulse 1D Bot (only when running) ─── */}
-          {!!impulseStatus?.running && (
+          {!AI_ONLY_MODE && !!impulseStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
@@ -1364,7 +1371,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           )}
 
           {/* ─── Validation Bot (only when running) ─── */}
-          {!!validationStatus?.running && (
+          {!AI_ONLY_MODE && !!validationStatus?.running && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <FlaskConical size={13} className="text-[var(--warn)]" />
@@ -1433,8 +1440,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           </div>
           )}
 
-          {/* ─── AI Discretionary (only when running) ─── */}
-          {!!aiStatus?.running && (
+          {/* ─── AI Discretionary (primary strategy) ─── */}
+          {(AI_ONLY_MODE || !!aiStatus?.running) && (
           <div className="panel flex-shrink-0">
             <div className="panel-header">
               <Bot size={13} className="text-[var(--accent)]" />

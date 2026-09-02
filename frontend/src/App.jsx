@@ -123,7 +123,8 @@ function AppLayout() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
-    { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
+    // AI-only mode: Smart Money hidden
+    // { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
     { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
