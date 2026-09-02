@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
-  Clock, Bot, FlaskConical
+  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert
 } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
@@ -67,6 +67,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [pnl, setPnl] = useState(null)
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [dataFreshAt, setDataFreshAt] = useState(null)
+  const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [reconcileLoading, setReconcileLoading] = useState(false)
+  const [reconcileResult, setReconcileResult] = useState(null)
+  const [reconcileError, setReconcileError] = useState('')
+
 
   // Filters
   const [filterPair, setFilterPair] = useState('Все')
@@ -201,7 +207,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         setPnl(pnlData)
-      } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
+      }
+      setDataFreshAt(Date.now())
+ else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
         setPnl({
           total: Number(sd.pnl_total ?? 0),
@@ -617,7 +625,32 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     finally { setClosing(null) }
   }
 
-  const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
+  const handleReconcile = async () => {
+    setReconcileOpen(true)
+    setReconcileLoading(true)
+    setReconcileError('')
+    setReconcileResult(null)
+    try {
+      const r = await api.pnlReconcile()
+      setReconcileResult(r)
+    } catch (e) {
+      setReconcileError(e.message || String(e))
+    } finally {
+      setReconcileLoading(false)
+    }
+  }
+
+  // UX badges (Phase 5)
+  const dataAgeSec = dataFreshAt ? Math.floor((Date.now() - dataFreshAt) / 1000) : null
+  const dataStale = dataAgeSec != null && dataAgeSec > 90
+  const llmErr = String(aiStatus?.last_llm_error || aiStatus?.llm_error || aiStatus?.last_decision?.error || '')
+  const llmRateLimited = /429|rate.?limit|TPD|tokens per day/i.test(llmErr)
+  const llmSoftError = Boolean(llmErr) && !llmRateLimited
+  const claimMissing = (orphanPositions || []).length > 0
+  const pnlSource = pnl?.source || ''
+  const fundingNote = Number(pnl?.funding || 0)
+
+  const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
   const fmtTime = (ts) => fmtTs(ts, locale)
 
@@ -628,6 +661,131 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--loss)]/30 bg-[var(--loss-dim)] text-2xs text-[var(--loss)]">
           <Activity size={14} />
           <span>{t('dash.offline_banner')}</span>
+        </div>
+      )}
+
+      {/* ═══ Status strip (Phase 5 UX) ═══ */}
+      <div className="flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border ${
+            !connected
+              ? 'border-[var(--loss)]/40 bg-[var(--loss-dim)] text-[var(--loss)]'
+              : dataStale
+                ? 'border-[var(--warn)]/40 bg-[var(--warn-dim)] text-[var(--warn)]'
+                : 'border-[var(--border)] bg-[var(--surface)] text-[var(--txt-muted)]'
+          }`}
+          title={dataFreshAt ? `Обновлено ${new Date(dataFreshAt).toLocaleTimeString()}` : 'Нет данных'}
+        >
+          <Clock size={11} />
+          {!connected ? 'Нет связи' : dataStale ? `Данные устарели · ${dataAgeSec}с` : dataAgeSec != null ? `Свежие · ${dataAgeSec}с` : 'Загрузка…'}
+        </span>
+
+        {llmRateLimited && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--warn)]/40 bg-[var(--warn-dim)] text-[var(--warn)]" title={llmErr.slice(0, 200)}>
+            <AlertTriangle size={11} />
+            LLM: лимит запросов
+          </span>
+        )}
+        {llmSoftError && !llmRateLimited && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--warn)]/30 bg-[var(--warn-dim)] text-[var(--txt-secondary)]" title={llmErr.slice(0, 200)}>
+            <AlertTriangle size={11} />
+            LLM: сбой
+          </span>
+        )}
+
+        {claimMissing && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--loss)]/40 bg-[var(--loss-dim)] text-[var(--loss)]" title="Позиции на бирже без claim стратегии">
+            <ShieldAlert size={11} />
+            Без стратегии: {orphanPositions.length}
+          </span>
+        )}
+
+        {pnlSource && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Источник расчёта PnL">
+            PnL: {String(pnlSource).slice(0, 24)}
+            {pnl?.pnl_tz ? ` · ${pnl.pnl_tz}` : ''}
+          </span>
+        )}
+
+        {fundingNote !== 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Funding — уровень аккаунта, не фильтр стратегий">
+            Funding (acc): {fundingNote >= 0 ? '+' : ''}{fmt(fundingNote)}
+          </span>
+        )}
+
+        {!isGuest && (
+          <button
+            type="button"
+            onClick={handleReconcile}
+            className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-2xs font-semibold border border-[var(--border)] bg-[var(--surface)] text-[var(--txt-secondary)] hover:border-[var(--info)] hover:text-[var(--info)] active:opacity-80"
+            title="Сверить strategy PnL с bills OKX"
+          >
+            <RefreshCw size={12} className={reconcileLoading ? 'animate-spin' : ''} />
+            Сверка OKX
+          </button>
+        )}
+      </div>
+
+      {/* Reconcile panel */}
+      {reconcileOpen && (
+        <div className="flex-shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-2xs space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-[var(--txt)]">Сверка PnL с OKX</span>
+            <button type="button" className="text-[var(--txt-muted)] hover:text-[var(--txt)]" onClick={() => setReconcileOpen(false)}>Закрыть</button>
+          </div>
+          {reconcileLoading && <div className="text-[var(--txt-muted)]">Запрос bills / positions…</div>}
+          {reconcileError && <div className="text-[var(--loss)]">{reconcileError}</div>}
+          {reconcileResult && !reconcileLoading && (() => {
+            const d = reconcileResult.dashboard || {}
+            const strategy = Number(d.realized_tagged ?? reconcileResult.dashboard_total ?? 0)
+            const okxTrade = Number(reconcileResult.okx_trade_pnl ?? 0)
+            const tagged = Number(reconcileResult.okx_tagged_pnl ?? 0)
+            const untagged = Number(reconcileResult.okx_untagged_pnl ?? 0)
+            const gap = Number(
+              reconcileResult.gap_tagged
+              ?? reconcileResult.gap
+              ?? (tagged - strategy)
+            )
+            const fund = Number(d.funding ?? reconcileResult.funding ?? 0)
+            const uplD = Number(d.unrealized ?? 0)
+            const uplO = Number(reconcileResult.okx_upl ?? reconcileResult.unrealized_okx ?? 0)
+            return (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Strategy realized</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(strategy)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">OKX tagged bills</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(tagged)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Untagged OKX</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(untagged)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Gap (tagged − strategy)</div>
+                <div className={`mono font-semibold ${gap >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  {fmt(gap)}
+                </div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">UPL dash / OKX</div>
+                <div className="mono text-[var(--txt)]">{fmt(uplD)} / {fmt(uplO)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Funding (account)</div>
+                <div className="mono text-[var(--txt)]">{fmt(fund)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)] col-span-2">
+                <div className="text-[var(--txt-muted)]">Статус</div>
+                <div className={`font-semibold ${reconcileResult.ok ? 'text-[var(--profit)]' : 'text-[var(--warn)]'}`}>
+                  {reconcileResult.ok ? 'Согласовано' : 'Есть расхождения — проверьте untagged / claims'}
+                </div>
+              </div>
+            </div>
+            )
+          })()}
         </div>
       )}
 
