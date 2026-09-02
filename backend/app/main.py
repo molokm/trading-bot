@@ -113,6 +113,7 @@ from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_S
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
+from app.services import trade_attribution as trade_attr
 from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, orphan_close_enabled, claim_open
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
@@ -5587,8 +5588,12 @@ async def get_pnl():
                         if t_time.tzinfo is None:
                             t_time = t_time.replace(tzinfo=tz.utc)
                         age_sec = (now - t_time).total_seconds()
-                        if age_sec <= 86400:
-                            realized_1d += pnl
+                        try:
+                            if trade_attr.is_calendar_today(time_str):
+                                realized_1d += pnl
+                        except Exception:
+                            if age_sec <= 86400:
+                                realized_1d += pnl
                         if age_sec <= 604800:
                             realized_7d += pnl
                         if age_sec <= 2592000:
@@ -5716,8 +5721,11 @@ async def get_pnl():
         "funding": round(funding, 4),
         "funding_source": funding_source,
         "funding_bills": funding_n,
+        "funding_scope": "account",  # funding is account-level, not strategy-filtered
         "economic_approx": round(economic, 2),
+        "strategy_realized": round(total_realized, 2),  # active bots only
         "source": source,
+        "pnl_tz": str(getattr(trade_attr.pnl_timezone(), "key", None) or "Europe/Moscow"),
         "fees": round(total_fees, 2),
         "fees_informational": True,
         "pnl_includes_fee": True,
@@ -5727,7 +5735,8 @@ async def get_pnl():
         "active_bots": sorted(active) if active else [],
         "pnl_epoch": await get_pnl_epoch(),
         "skipped_untagged": skipped_untagged,
-        "timezone": "UTC",
+        "timezone": str(getattr(trade_attr.pnl_timezone(), "key", None) or "Europe/Moscow"),
+        "day_basis": "calendar_pnl_tz",
     }
 
 
@@ -6584,77 +6593,16 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     except Exception as e:
         print(f"[trades/paired] entry-owner override error: {e}", flush=True)
 
-    # Admin / manual corrections (durable settings + built-in known fixes)
+    # Unified attribution: entry-owner + forced overrides (single module)
     try:
-        import json as _json
-        forced = []
-        # Known fix: ETH short closed 2026-09-01 ~17:33 UTC (+134 USDT) was
-        # labeled Momentum but opened by AI Discretionary.
-        # ETH close 2026-09-01 17:33 UTC (20:33 MSK) +167.08 — Telegram said Momentum,
-        # but position was opened by AI. Match by time+pnl (close of short is side=buy).
-        forced.append({
-            "inst_id": "ETH-USDT-SWAP",
-            "exit_time_prefix": "2026-09-01T17:33",
-            "pnl_near": 167.08,
-            "to_bot": "AI Discretionary 1H",
-        })
-        forced.append({
-            "inst_id": "ETH-USDT-SWAP",
-            "exit_time_prefix": "2026-09-01T17:33",
-            "pnl_near": 134.17,
-            "to_bot": "AI Discretionary 1H",
-        })
-        try:
-            raw = await db.get_setting("pnl_bot_overrides")
-            if raw:
-                extra = _json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(extra, list):
-                    forced.extend(extra)
-        except Exception:
-            pass
-        for rule in forced:
-            inst = str(rule.get("inst_id") or rule.get("inst") or "").strip()
-            to_bot = str(rule.get("to_bot") or "").strip()
-            if not inst or not to_bot:
-                continue
-            pside = str(rule.get("pos_side") or rule.get("side") or "").strip().lower()
-            pnl_near = rule.get("pnl_near")
-            exit_date = str(rule.get("exit_date") or rule.get("date") or "")
-            exit_pfx = str(rule.get("exit_time_prefix") or "")
-            for t in dedup:
-                if (t.get("reason") or "").lower() not in ("closed", "close", "partial"):
-                    continue
-                ti = str(t.get("inst_id") or t.get("symbol") or "").strip()
-                if ti != inst and not ti.startswith(inst.split("-")[0]):
-                    continue
-                if ti != inst:
-                    continue
-                et = str(t.get("exit_time") or t.get("time") or t.get("timestamp") or "")
-                if exit_pfx and exit_pfx not in et:
-                    continue
-                if exit_date and not exit_pfx and exit_date not in et:
-                    continue
-                if pside:
-                    tps = str(t.get("pos_side") or "").lower()
-                    ts = str(t.get("side") or "").lower()
-                    # close of short is typically side=buy; open short side=sell
-                    if tps and tps not in (pside, ""):
-                        if not (pside == "short" and ts in ("buy", "sell", "short")):
-                            if not (pside == "long" and ts in ("buy", "sell", "long")):
-                                continue
-                if pnl_near is not None:
-                    try:
-                        if abs(float(t.get("pnl") or 0) - float(pnl_near)) > 45.0:
-                            continue
-                    except (TypeError, ValueError):
-                        continue
-                prev = t.get("bot")
-                t["bot"] = to_bot
-                t["bot_id"] = "ai_strategy" if "AI" in to_bot else t.get("bot_id")
-                if prev != to_bot:
-                    print(f"[trades/paired] forced bot {prev!r}→{to_bot!r} {inst} pnl={t.get('pnl')} time={et[:19]}", flush=True)
+        _overrides = await trade_attr.load_overrides(db)
+        trade_attr.apply_attribution(
+            dedup,
+            entry_owner=inst_entry_bot if isinstance(inst_entry_bot, dict) else {},
+            overrides=_overrides,
+        )
     except Exception as e:
-        print(f"[trades/paired] forced override error: {e}", flush=True)
+        print(f"[trades/paired] attribution error: {e}", flush=True)
 
     # 4. Last-mile: enrich any surviving closed row with the exact OKX bill PnL
     #    and fee (covers closes whose fills fell outside the fill window but

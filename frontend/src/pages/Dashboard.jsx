@@ -234,7 +234,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     ? unrealizedFromPositions
     : (pnl?.unrealized || 0)
   const fundingPnl = Number(pnl?.funding ?? 0)
-  const economicPnl = Number(pnl?.economic_approx ?? ((Number(pnl?.total) || 0) + unrealizedPnl + fundingPnl))
+  // economic mixes account funding with strategy realized — show both explicitly
+  const strategyRealized = Number(pnl?.strategy_realized ?? pnl?.total ?? 0)
+  const economicPnl = Number(
+    pnl?.economic_approx
+    ?? (strategyRealized + unrealizedPnl + fundingPnl)
+  )
+  const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
     const names = []
@@ -655,7 +661,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           }
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
           mono
-          tip={t('dash.pnl_day_tip')}
+          tip={`${t('dash.pnl_day_tip')} (${pnlTz}, только активные боты)`}
           sparkData={sparkData[2]}
         />
         <MetricCard
@@ -681,7 +687,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)] mono">
                   <span>funding {fundingPnl >= 0 ? '+' : ''}{fmt(fundingPnl)}</span>
                   <span className="mx-1">·</span>
-                  <span title="realized + unrealized + funding">eco {economicPnl >= 0 ? '+' : ''}{fmt(economicPnl)}</span>
+                  <span title="strategy realized + upl + account funding">eco {economicPnl >= 0 ? '+' : ''}{fmt(economicPnl)}</span>
+                  {fundingPnl !== 0 && (
+                    <span className="text-[var(--txt-muted)]" title="Funding (account)">fund {fundingPnl >= 0 ? '+' : ''}{fmt(fundingPnl)}</span>
+                  )}
                 </div>
               )}
               {pnlByBot.length > 0 && (
