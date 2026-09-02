@@ -25,6 +25,10 @@ JWT_ALG = "HS256"
 # In-process logout blacklist (jti -> exp unix). Persisted to disk so a
 # logged-out token stays revoked across process restarts / Render sleep.
 _blacklist: dict[str, float] = {}
+# Optional durable backend (Postgres settings). Wired from main.startup.
+_db_loader = None  # async callable () -> dict
+_db_saver = None   # async callable (dict) -> None
+_db_sync_pending = False
 
 BLACKLIST_PATH = os.path.join(
     os.environ.get("DATA_DIR", "/tmp"),
@@ -44,6 +48,8 @@ def _load_blacklist() -> None:
 
 
 def _save_blacklist() -> None:
+    """Persist to local file immediately; DB flush scheduled if hook is set."""
+    global _blacklist, _db_sync_pending
     try:
         now = time.time()
         pruned = {k: v for k, v in _blacklist.items() if v > now}
@@ -54,6 +60,56 @@ def _save_blacklist() -> None:
         os.replace(tmp, BLACKLIST_PATH)
     except Exception:
         pass
+    _db_sync_pending = True
+
+
+def configure_blacklist_db(loader, saver) -> None:
+    """Register async DB load/save callables (from FastAPI startup)."""
+    global _db_loader, _db_saver
+    _db_loader = loader
+    _db_saver = saver
+
+
+async def hydrate_blacklist_from_db() -> int:
+    """Merge JWT denylist from Postgres settings into memory. Returns count."""
+    global _blacklist
+    if not _db_loader:
+        return 0
+    try:
+        data = await _db_loader()
+        if not isinstance(data, dict):
+            return 0
+        now = time.time()
+        n = 0
+        for k, v in data.items():
+            try:
+                exp = float(v)
+            except (TypeError, ValueError):
+                continue
+            if exp > now:
+                prev = _blacklist.get(k, 0)
+                if exp > prev:
+                    _blacklist[k] = exp
+                    n += 1
+        _save_blacklist()
+        return n
+    except Exception as e:
+        print(f"[auth] hydrate_blacklist_from_db: {e}", flush=True)
+        return 0
+
+
+async def flush_blacklist_to_db() -> None:
+    """Write current denylist to Postgres (best-effort)."""
+    global _db_sync_pending
+    if not _db_saver:
+        return
+    try:
+        now = time.time()
+        pruned = {k: v for k, v in _blacklist.items() if v > now}
+        await _db_saver(pruned)
+        _db_sync_pending = False
+    except Exception as e:
+        print(f"[auth] flush_blacklist_to_db: {e}", flush=True)
 
 
 _load_blacklist()

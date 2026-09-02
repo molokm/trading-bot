@@ -270,3 +270,56 @@ async def sweep_exchange_orphans(client, db, memory_keys: set = None) -> list:
     except Exception as e:
         log.error("sweep_exchange_orphans: %s", e)
     return closed
+
+
+async def restore_snapshots_to_claims(db, bot_ids: list = None) -> dict:
+    """Re-apply open_positions:{bot_id} snapshots into positions claims after deploy.
+
+    Does not touch exchange — only DB ownership so UI/reclaim bind correctly.
+    """
+    out = {"restored": 0, "bots": []}
+    if not db:
+        return out
+    try:
+        import json
+        ids = list(bot_ids or [])
+        if not ids:
+            # discover keys from settings if API exists
+            try:
+                if hasattr(db, "list_settings_prefix"):
+                    keys = await db.list_settings_prefix("open_positions:")
+                    ids = [k.split(":", 1)[-1] for k in keys if ":" in k]
+            except Exception:
+                pass
+        for bot_id in ids:
+            if not bot_id:
+                continue
+            raw = await db.get_setting(f"open_positions:{bot_id}")
+            if not raw:
+                continue
+            data = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+            n = 0
+            for p in data:
+                if not isinstance(p, dict):
+                    continue
+                inst = p.get("inst_id") or ""
+                if not inst:
+                    continue
+                side = norm_side(p.get("side") or "long")
+                size = float(p.get("size") or 0)
+                entry = float(p.get("entry_price") or p.get("entry") or 0)
+                if size <= 0:
+                    continue
+                try:
+                    await claim_open(db, bot_id, inst, side, size, entry)
+                    n += 1
+                except Exception as e:
+                    log.warning("restore claim %s %s: %s", bot_id, inst, e)
+            if n:
+                out["restored"] += n
+                out["bots"].append({"bot_id": bot_id, "n": n})
+        return out
+    except Exception as e:
+        log.warning("restore_snapshots_to_claims: %s", e)
+        out["error"] = str(e)
+        return out

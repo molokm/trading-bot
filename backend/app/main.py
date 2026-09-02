@@ -374,6 +374,57 @@ async def startup():
         except Exception as e:
             print(f"[startup] SM tracker hydrate: {e}", flush=True)
 
+        
+        # Durable JWT denylist in Postgres (survives Render disk wipe)
+        try:
+            import json as _json_bl
+            from app.services.auth import configure_blacklist_db, hydrate_blacklist_from_db, flush_blacklist_to_db
+
+            async def _bl_load():
+                raw = await db.get_setting("auth_jwt_blacklist")
+                if not raw:
+                    raw = await db.get_setting("auth_blacklist")  # legacy key
+                if not raw:
+                    return {}
+                data = _json_bl.loads(raw) if isinstance(raw, str) else raw
+                return data if isinstance(data, dict) else {}
+
+            async def _bl_save(data: dict):
+                await db.set_setting("auth_jwt_blacklist", _json_bl.dumps(data or {}))
+
+            configure_blacklist_db(_bl_load, _bl_save)
+            n_bl = await hydrate_blacklist_from_db()
+            print(f"[startup] auth blacklist hydrated from DB: {n_bl} jti", flush=True)
+        except Exception as e:
+            print(f"[startup] auth blacklist hydrate: {e}", flush=True)
+
+        # Restore position claims from durable snapshots
+        try:
+            from app.services.position_claim import restore_snapshots_to_claims
+            from app.services.rotation_strategy import ROT_BOT_ID
+            from app.services.impulse_strategy import IMP_BOT_ID
+            from app.services.ai_strategy import AI_BOT_ID
+            try:
+                from app.services.validation_strategy import VAL_BOT_ID
+            except Exception:
+                VAL_BOT_ID = "validation_strategy"
+            rest = await restore_snapshots_to_claims(
+                db, [ROT_BOT_ID, IMP_BOT_ID, AI_BOT_ID, VAL_BOT_ID, "momentum_strategy"]
+            )
+            print(f"[startup] position claims restored: {rest}", flush=True)
+        except Exception as e:
+            print(f"[startup] claim restore: {e}", flush=True)
+
+        async def _blacklist_flush_loop():
+            from app.services.auth import flush_blacklist_to_db
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await flush_blacklist_to_db()
+                except Exception:
+                    pass
+        asyncio.create_task(_blacklist_flush_loop())
+
         print("[startup] 3/7 Migration check ...", flush=True)
         # One-time cleanup: check if any old momentum data exists, wipe it all.
         # Checks trades table for old bot_id - most reliable signal.
@@ -391,7 +442,8 @@ async def startup():
             pass  # table might not exist yet on very first run
         if needs_cleanup:
             print("[startup]   Old momentum data found - one-time cleanup ...", flush=True)
-            for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
+            # NEVER delete positions — claims must survive deploy / cleanup
+            for table in ["trades", "signals", "performance_metrics"]:
                 try:
                     await db._execute(f"DELETE FROM {table}")
                 except Exception as e:
@@ -894,10 +946,10 @@ async def auth_logout(request: Request):
     token = get_token(request)
     try:
         logout(token)
-        # Persist blacklist so the revoked token stays invalid after restart.
+        # Persist denylist to Postgres (same key as startup hydrate)
         try:
-            import json as _json
-            await db.set_setting("auth_blacklist", _json.dumps(get_blacklist()))
+            from app.services.auth import flush_blacklist_to_db
+            await flush_blacklist_to_db()
         except Exception:
             pass
     except Exception:

@@ -1376,6 +1376,23 @@ class Database:
         row = await self._fetchone(sql, (key,))
         return row["value"] if row else None
 
+    async def list_settings_prefix(self, prefix: str) -> list:
+        """Return setting keys that start with prefix."""
+        try:
+            if self._pg_mode:
+                rows = await self._fetchall(
+                    "SELECT key FROM settings WHERE key LIKE $1",
+                    (prefix + "%",),
+                ) or []
+            else:
+                rows = await self._fetchall(
+                    "SELECT key FROM settings WHERE key LIKE ?",
+                    (prefix + "%",),
+                ) or []
+            return [r.get("key") if isinstance(r, dict) else r[0] for r in rows]
+        except Exception:
+            return []
+
     async def set_setting(self, key: str, value: str):
         if self._pg_mode:
             await self._execute(
