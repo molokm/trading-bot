@@ -544,50 +544,50 @@ function MiniAppPageInner
       trades: () => api.getPairedTrades(80),
     }
     const timeouts = { pnl: 25000, trades: 25000, positions: 20000 }
-    const names = Object.keys(callers)
-    const results = await Promise.all(names.map(async (name) => {
+    // Progressive loading: update state as each promise resolves, so the
+    // Telegram Mini App shows data immediately rather than waiting for all.
+    const results = await Promise.allSettled(Object.entries(callers).map(async ([name, fn]) => {
       try {
-        const v = await withTimeout(callers[name](), timeouts[name] || 15000)
+        const v = await withTimeout(fn(), timeouts[name] || 15000)
         const len = (JSON.stringify(v) || '').length
         miniLog('load', name, 'OK len=' + len)
+        // Update state immediately per promise
+        switch (name) {
+          case 'health': setConnected(v?.connected); setDemoMode(v?.demo); break
+          case 'portfolio': setPortfolio(v); break
+          case 'rotation': setRotation(v); break
+          case 'impulse': setImpulse(v); break
+          case 'validation': setValidation(v); break
+          case 'ai': setAiBot(v); break
+          case 'positions': {
+            const pos = Array.isArray(v) ? v : (v?.positions || v?.data || [])
+            setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
+            break
+          }
+          case 'trades': {
+            let list = []
+            if (Array.isArray(v)) list = v
+            else if (Array.isArray(v?.trades)) list = v.trades
+            else if (Array.isArray(v?.data)) list = v.data
+            setTrades(list.filter(Boolean))
+            break
+          }
+          case 'pnl': setPnlData(v); break
+        }
         return [name, v]
       } catch (e) {
         miniLog('load', name, 'ERROR', e.message || String(e))
         return [name, null]
       }
     }))
-    const map = Object.fromEntries(results)
-    if (map.health) { setConnected(map.health.connected); setDemoMode(map.health.demo) }
-    if (map.portfolio) setPortfolio(map.portfolio)
-    if (map.rotation) setRotation(map.rotation)
-    if (map.impulse) setImpulse(map.impulse)
-    if (map.validation) setValidation(map.validation)
-    if (map.ai) setAiBot(map.ai)
-    // Positions: support {positions:[]} or bare array
-    if (map.positions) {
-      const pos = Array.isArray(map.positions) ? map.positions
-        : (map.positions.positions || map.positions.data || [])
-      setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
-    }
-    // Trades: multiple response shapes
-    if (map.trades) {
-      let list = []
-      if (Array.isArray(map.trades)) list = map.trades
-      else if (Array.isArray(map.trades.trades)) list = map.trades.trades
-      else if (Array.isArray(map.trades.data)) list = map.trades.data
-      setTrades(list.filter(Boolean))
-      miniLog('load', 'trades_count', list.length)
-    }
-    // PnL: API or seed from AI / per_bot
-    if (map.pnl && !map.pnl.detail) {
-      setPnlData(map.pnl)
-    } else {
+    const map = Object.fromEntries(
+      results.map((r, i) => [Object.keys(callers)[i], r.status === 'fulfilled' ? r.value : null])
+    )
+    // Fallback for PnL if pnl endpoint failed
+    if (!map.pnl) {
       const aiP = Number(map.ai?.lifetime_pnl ?? map.ai?.total_pnl ?? 0)
       setPnlData({
-        total: aiP,
-        '1d': 0,
-        week: 0,
-        unrealized: 0,
+        total: aiP, '1d': 0, week: 0, unrealized: 0,
         per_bot: aiP ? { 'AI Discretionary 1H': aiP } : {},
         source: 'mini_ai_seed',
       })
@@ -663,8 +663,8 @@ function MiniAppPageInner
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
 
 
-  /* ── Compact strategy card ── */
-  const botCard = (name, s, iconColor, shortLabel) => {
+  /* ── Compact strategy card (full width, with optional status text) ── */
+  const botCard = (name, s, iconColor, shortLabel, wide = false) => {
     if (!s) return null
     const running = !!s?.running
     const pnl = Number(
@@ -676,8 +676,23 @@ function MiniAppPageInner
     const nPos = Array.isArray(s?.open_positions) ? s.open_positions.length
       : (Array.isArray(s?.positions) ? s.positions.length : 0)
     const tradesN = Number(s?.total_trades ?? 0) || 0
+    // Status text: prefer last decision pulse/reason (AI), else description
+    let statusText = ''
+    const ld = s?.last_decision || {}
+    if (ld?.pulse) statusText = String(ld.pulse)
+    else if (ld?.reason) statusText = String(ld.reason)
+    else if (s?.pulse) statusText = String(s.pulse)
+    else if (s?.description) statusText = String(s.description)
+    // Health indicator for AI (alive/stale/error)
+    const h = s?.health || {}
+    let statusTone = 'text-[var(--txt-muted)]'
+    if (h?.last_llm_error) statusTone = 'text-[var(--warn)]'
+    if (h?.consecutive_fails > 0 || h?.last_tick_error) statusTone = 'text-[var(--loss)]'
+    if (running && !h?.last_llm_error && !h?.last_tick_error && !h?.consecutive_fails) {
+      statusTone = 'text-[var(--profit)]'
+    }
     return (
-      <Card className="min-w-0 py-2.5">
+      <Card className={`min-w-0 py-2.5 ${wide ? 'col-span-2' : ''}`}>
         <div className="flex items-center justify-between gap-1 mb-1">
           <div className="flex items-center gap-1 min-w-0">
             <Bot size={12} className={`${iconColor} flex-shrink-0`} />
@@ -690,6 +705,11 @@ function MiniAppPageInner
           <span>{running ? t('mini.running') : t('mini.stopped')}</span>
           <span>{tradesN}t · {nPos}pos</span>
         </div>
+        {statusText && (
+          <div className={`mt-1.5 text-2xs leading-relaxed ${statusTone} break-words whitespace-pre-wrap max-h-16 overflow-hidden`}>
+            {statusText.slice(0, 220)}
+          </div>
+        )}
       </Card>
     )
   }
@@ -987,10 +1007,10 @@ function MiniAppPageInner
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
+            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H', true)}
             {!!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
             {!!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
             {!!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
-            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
             {!rotation?.running && !impulse?.running && !validation?.running && !aiBot?.running && (
               <div className="col-span-2 text-2xs text-[var(--txt-muted)] py-2">
                 Нет активных ботов
