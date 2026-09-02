@@ -2150,26 +2150,36 @@ class AIStrategy:
         lines.append(f"Рынок: {reg_ru}, режим: {preset_ru}.")
 
         if act == "hold":
-            line = "Позиций нет."
-            if best_free:
-                b = best_free[1]
-                side = b.get("best_side") or "—"
-                side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                sc = best_free[0]
-                coin = b.get("coin")
-                line += f" Доступно: {coin} {side_ru} ({sc:.2f}) — жду подтверждения LLM/quant."
-                if best_any and best_any[1].get("block_open") and best_any[1].get("coin") != coin:
-                    bb = best_any[1]
-                    s2 = bb.get("best_side") or "—"
-                    s2ru = "лонг" if s2 == "long" else ("шорт" if s2 == "short" else s2)
-                    line += f" Сильнее по align, но блок: {bb.get('coin')} {s2ru} ({best_any[0]:.2f})."
-            elif best_any:
-                b = best_any[1]
-                side = b.get("best_side") or "—"
-                side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                line += f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) — заблокирован (ADX/align)."
+            open_list = list(getattr(self, "_positions", {}) or {}).values()
+            if open_list:
+                parts = []
+                for p in open_list:
+                    coin = getattr(p, "coin", None) or "?"
+                    side = (getattr(p, "side", None) or "").lower()
+                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side or "—")
+                    parts.append(f"{coin} {side_ru}")
+                line = f"Открыто: {', '.join(parts)}. Новых входов нет — удерживаю / жду условия выхода."
             else:
-                line += " Явных кандидатов нет."
+                line = "Позиций нет."
+                if best_free:
+                    b = best_free[1]
+                    side = b.get("best_side") or "—"
+                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
+                    sc = best_free[0]
+                    coin = b.get("coin")
+                    line += f" Доступно: {coin} {side_ru} ({sc:.2f}) — жду подтверждения LLM/quant."
+                    if best_any and best_any[1].get("block_open") and best_any[1].get("coin") != coin:
+                        bb = best_any[1]
+                        s2 = bb.get("best_side") or "—"
+                        s2ru = "лонг" if s2 == "long" else ("шорт" if s2 == "short" else s2)
+                        line += f" Сильнее по align, но блок: {bb.get('coin')} {s2ru} ({best_any[0]:.2f})."
+                elif best_any:
+                    b = best_any[1]
+                    side = b.get("best_side") or "—"
+                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
+                    line += f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) — заблокирован (ADX/align)."
+                else:
+                    line += " Явных кандидатов нет."
             lines.append(line)
         elif act == "open":
             sym = decision.get("symbol") or "?"
