@@ -207,9 +207,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         setPnl(pnlData)
-      }
-      setDataFreshAt(Date.now())
- else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
+      } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
         setPnl({
           total: Number(sd.pnl_total ?? 0),
@@ -223,6 +221,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           source: sd.pnl_source || 'health_fallback',
         })
       }
+      setDataFreshAt(Date.now())
     } catch {}
   }
 
