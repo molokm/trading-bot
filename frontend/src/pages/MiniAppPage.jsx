@@ -362,6 +362,22 @@ function MiniAppPageInner
       if (out.length === 0 && closedRaw.length > 0) {
         return closedRaw.slice(0, 40).map(tr => toRow(tr, false))
       }
+      // Fallback: bot recent_trades (AI / rotation / impulse) if paired API empty
+      if (out.length === 0) {
+        const botTrades = []
+        for (const bot of [aiBot, rotation, impulse, validation]) {
+          for (const tr of (bot?.recent_trades || [])) {
+            if (tr && typeof tr === 'object') {
+              const reason = String(tr.reason || '').toLowerCase()
+              if (reason !== 'open' && reason !== 'add') {
+                botTrades.push({ ...tr, bot: tr.bot || bot?.strategy || '' })
+              }
+            }
+          }
+        }
+        botTrades.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+        return botTrades.slice(0, 30).map(tr => toRow(tr, false))
+      }
       return out
     } catch (e) {
       console.error('[mini] displayTrades', e)
