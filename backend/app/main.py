@@ -59,6 +59,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 from dotenv import load_dotenv
 from fastapi import Request, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -144,6 +145,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Gzip-compress all responses (JS bundles drop ~70-80% in size: the 565kB
+# charts chunk -> ~164kB over the wire). Only compresses if client sends
+# Accept-Encoding: gzip, so API clients are unaffected.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 if STATIC_DIR.exists():
