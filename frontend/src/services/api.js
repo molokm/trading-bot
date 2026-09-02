@@ -5,7 +5,8 @@ let apiBackoffUntil = 0;
 let apiBackoffMs = 0;
 
 function getToken() {
-  // Legacy fallback; primary auth is httpOnly cookie (credentials: include)
+  // Prefer httpOnly cookie (credentials: include). Bearer from localStorage is legacy.
+  // When COOKIE_ONLY_AUTH=1 server omits token body — localStorage stays empty (more XSS-safe).
   return localStorage.getItem('auth_token') || '';
 }
 

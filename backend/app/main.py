@@ -227,13 +227,20 @@ def get_token(request: Request):
 
 
 def _set_auth_cookie(response, token: str, max_age: int = 86400):
+    """HttpOnly session cookie — primary auth transport (Bearer is legacy fallback)."""
     secure = (os.getenv("AUTH_COOKIE_SECURE") or "1").strip().lower() not in ("0", "false", "no")
+    samesite = (os.getenv("AUTH_COOKIE_SAMESITE") or "lax").strip().lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    # SameSite=None requires Secure
+    if samesite == "none":
+        secure = True
     response.set_cookie(
         key="auth_token",
         value=token,
         httponly=True,
         secure=secure,
-        samesite="lax",
+        samesite=samesite,
         max_age=max_age,
         path="/",
     )
@@ -241,7 +248,8 @@ def _set_auth_cookie(response, token: str, max_age: int = 86400):
 
 
 def _clear_auth_cookie(response):
-    response.delete_cookie("auth_token", path="/")
+    secure = (os.getenv("AUTH_COOKIE_SECURE") or "1").strip().lower() not in ("0", "false", "no")
+    response.delete_cookie("auth_token", path="/", httponly=True, secure=secure, samesite="lax")
     return response
 
 
@@ -706,17 +714,17 @@ async def _okx_call(coro_factory):
 # ── Access control ──
 
 PUBLIC_API_PATHS = {
-    "/api/health",
-    "/api/tracker",
-    "/api/debug/client-error",
-    "/api/debug/client-errors",
+    "/api/health",          # uptime monitors
     "/api/auth/login",
     "/api/auth/guest",
     "/api/auth/status",
     "/api/auth/logout",
-    "/api/auth/telegram",
-    "/api/risk/status",
-    "/api/ai/status",  # LLM config flags only (no secrets)
+    "/api/auth/telegram",   # Telegram Login / mini-app init
+    # Intentionally NOT public:
+    # /api/ai/status — requires auth (was used for recon)
+    # /api/debug/client-error(s) — admin only (spam / log injection)
+    # /api/tracker — requires auth
+    # /api/risk/status — requires auth (was leaking kill-switch state)
 }
 
 ADMIN_ONLY_PATHS = {
@@ -830,7 +838,11 @@ async def auth_login(request: Request, data: dict):
     token = login(data.get("password", ""))
     if token:
         record_attempt(ip, True)
-        resp = JSONResponse({"token": token, "role": "admin", "cookie_auth": True})
+        body = {"role": "admin", "cookie_auth": True}
+        # Prefer cookie; still return token unless COOKIE_ONLY_AUTH=1 (legacy clients/mini-app)
+        if (os.getenv("COOKIE_ONLY_AUTH") or "0").strip().lower() not in ("1", "true", "yes"):
+            body["token"] = token
+        resp = JSONResponse(body)
         return _set_auth_cookie(resp, token)
     record_attempt(ip, False)
     raise HTTPException(status_code=401, detail="Invalid password")
@@ -843,7 +855,10 @@ async def auth_guest(request: Request):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     record_guest(ip)
     token = guest()
-    resp = JSONResponse({"token": token, "role": "guest", "cookie_auth": True})
+    body = {"role": "guest", "cookie_auth": True}
+    if (os.getenv("COOKIE_ONLY_AUTH") or "0").strip().lower() not in ("1", "true", "yes"):
+        body["token"] = token
+    resp = JSONResponse(body)
     return _set_auth_cookie(resp, token)
 
 
@@ -7034,8 +7049,9 @@ async def mini_log_collect(data: dict):
     return {"saved": len(logs)}
 
 
-@app.post("/api/debug/client-error")
-async def client_error_collect(data: dict):
+@app.post("/api/debug/client-error", dependencies=[Depends(require_admin)])
+async def client_error_collect(request: Request, data: dict):
+    """Admin-only client error sink (was public — spam/DoS vector)."""
     """Collect frontend JS errors (public — no auth, for WebView diagnostics)."""
     err = (data or {}).get("error") or data or {}
     msg = str(err.get("message") or err)[:2000]
@@ -7047,7 +7063,7 @@ async def client_error_collect(data: dict):
     return {"ok": True}
 
 
-@app.get("/api/debug/client-errors")
+@app.get("/api/debug/client-errors", dependencies=[Depends(require_admin)])
 async def client_errors_read():
     """Read recent captured client errors (public, for diagnostics)."""
     return {"errors": [l for l in _MINI_LOG_RING if l.startswith("CLIENT-ERR")][-20:]}
