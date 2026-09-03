@@ -5634,13 +5634,25 @@ async def _compute_pnl():
             bot = "Impulse 1D"
         elif bot in (VAL_BOT_ID, "validation_strategy"):
             bot = "MACD+Donchian Validation"
-        elif bot in (AI_BOT_ID, "ai_strategy"):
+        elif bot in (AI_BOT_ID, "ai_strategy", "ai_discretionary", "ai_discretionary_1h"):
             bot = "AI Discretionary 1H"
         elif bot in ("smart_money", "smart_money_mirror"):
             bot = "Умные деньги"
-        # SOL without ai* never AI
+
         inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
         cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+
+        # AI-only product mode: ONLY AI Discretionary may enter dashboard totals
+        if AI_ONLY_MODE:
+            # Upgrade to AI only with hard proof
+            if cid.startswith("ai") or bot in (AI_BOT_ID, "ai_strategy", "AI Discretionary 1H"):
+                # Foreign order prefixes never count as AI
+                if cid and cid.startswith(("rot", "imp", "val", "sm", "vwap", "sc", "scalp")):
+                    return ""
+                return "AI Discretionary 1H"
+            return ""
+
+        # SOL without ai* never AI (legacy multi-bot)
         if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
             bot = "Impulse 1D"
         # Require strict known strategy label
@@ -5648,14 +5660,16 @@ async def _compute_pnl():
             return ""
         # Prefer clOrdId / bot_id proof when present on row
         if cid:
-            if cid.startswith("rot") and bot != "Momentum":
+            if cid.startswith("rot"):
                 bot = "Momentum"
-            elif cid.startswith("imp") and bot != "Impulse 1D":
+            elif cid.startswith("imp"):
                 bot = "Impulse 1D"
-            elif cid.startswith("ai") and bot != "AI Discretionary 1H":
+            elif cid.startswith("ai"):
                 bot = "AI Discretionary 1H"
-            elif cid.startswith("val") and bot != "MACD+Donchian Validation":
+            elif cid.startswith("val"):
                 bot = "MACD+Donchian Validation"
+            if bot not in STRICT_BOTS:
+                return ""
         return bot
 
     realized_1d = 0.0
@@ -5740,8 +5754,13 @@ async def _compute_pnl():
                 # Always keep full breakdown for diagnostics
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+                # AI-only: totals always AI only (ignore active_labels empty edge)
+                if AI_ONLY_MODE:
+                    if bot != "AI Discretionary 1H":
+                        account_total += pnl
+                        continue
                 # Dashboard totals/windows: only ACTIVE bots (if any running)
-                if active_labels and bot not in active_labels:
+                elif active_labels and bot not in active_labels:
                     account_total += pnl  # account still sees all tagged
                     continue
                 total_realized += pnl
@@ -5876,7 +5895,12 @@ async def _compute_pnl():
     # per_bot on response = active only; full map in per_bot_all
     per_bot_all = {k: float(v) for k, v in per_bot.items()}
     active = _active_bot_labels()
-    if active:
+    if AI_ONLY_MODE:
+        active = {"AI Discretionary 1H"}
+        per_bot = {k: v for k, v in per_bot.items() if k == "AI Discretionary 1H"}
+        # Re-anchor total to AI only (defense in depth)
+        total_realized = float(per_bot.get("AI Discretionary 1H") or 0.0)
+    elif active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
         # total_realized / 1d / week already counted only active in the loop
     return {

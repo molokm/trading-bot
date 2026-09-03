@@ -290,6 +290,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return s
   }
   const pnlTotal = (() => {
+    if (AI_ONLY_MODE) {
+      const per = pnl?.per_bot || {}
+      if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
+      if (pnl?.total != null) return Number(pnl.total)
+      return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+    }
     // Server total is already active-only
     if (pnl && pnl.total != null && (pnl.active_bots || []).length) return Number(pnl.total)
     if (pnl && pnl.total != null && Number(pnl.total) !== 0) return Number(pnl.total)
