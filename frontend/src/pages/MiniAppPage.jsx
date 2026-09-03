@@ -363,8 +363,14 @@ function MiniAppPageInner
       if (out.length === 0 && closedRaw.length > 0) {
         return closedRaw.slice(0, 40).map(tr => toRow(tr, false))
       }
-      // Fallback: merge bot recent_trades (AI / rotation / impulse) with paired API
-      // so the card is never empty, even when getPairedTrades is slow or empty.
+      // Paired API has data — show ONLY those rows (same source as web app),
+      // no merge with bot recent_trades (they duplicate the same close with a
+      // slightly different price/pnl/reason, e.g. ind_exit vs OKX close).
+      if (out.length > 0) {
+        out.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+        return out.slice(0, 40)
+      }
+      // Paired API empty (slow/timeout/empty) — fallback to bot recent_trades
       const botTrades = []
       for (const bot of [aiBot, rotation, impulse, validation]) {
         for (const tr of (bot?.recent_trades || [])) {
@@ -377,19 +383,6 @@ function MiniAppPageInner
         }
       }
       botTrades.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
-      if (out.length > 0) {
-        const seen = new Set(out.map(t => `${t.time}|${t.pnl}|${t.symbol}`))
-        for (const bt of botTrades) {
-          const key = `${bt.time}|${bt.pnl}|${bt.symbol}`
-          if (!seen.has(key)) {
-            out.push(toRow(bt, false))
-            seen.add(key)
-          }
-        }
-        out.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
-        return out.slice(0, 40)
-      }
-      // Paired API empty — show bot recent_trades
       return botTrades.slice(0, 30).map(tr => toRow(tr, false))
     } catch (e) {
       console.error('[mini] displayTrades', e)
