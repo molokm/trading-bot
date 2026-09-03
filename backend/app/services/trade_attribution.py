@@ -49,20 +49,7 @@ STRICT_BOTS = set(CLORD_PREFIX_TO_BOT.values()) | {
 }
 
 # Built-in corrections (ops incidents). Prefer DB overrides for new cases.
-BUILTIN_OVERRIDES: List[dict] = [
-    {
-        "inst_id": "ETH-USDT-SWAP",
-        "exit_time_prefix": "2026-09-01T17:33",
-        "pnl_near": 167.08,
-        "to_bot": "AI Discretionary 1H",
-    },
-    {
-        "inst_id": "ETH-USDT-SWAP",
-        "exit_time_prefix": "2026-09-01T17:33",
-        "pnl_near": 134.17,
-        "to_bot": "AI Discretionary 1H",
-    },
-]
+BUILTIN_OVERRIDES: List[dict] = []
 
 
 def pnl_timezone() -> ZoneInfo:
