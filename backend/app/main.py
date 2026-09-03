@@ -5846,21 +5846,26 @@ async def _compute_pnl():
 
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", []) or []
-        # Dedup by ord_id: keep the trade with the best (highest absolute) PnL
-        # for each order. This prevents double-counting when the same trade
-        # appears in both OKX bills and in-memory/DB logs.
-        _seen_ord: dict = {}
-        _nooid_seq = 0
+        # Dedup: OKX bills (with ord_id) are authoritative. Remove in-memory/DB
+        # trades without ord_id that duplicate an OKX bill (same inst + pnl).
+        # This prevents double-counting from the multi-source pipeline.
+        _bills_by_inst_pnl: dict = set()
+        for tr in trades:
+            _oid = str(tr.get("ord_id") or "").strip()
+            if _oid:
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _pnl = round(float(tr.get("pnl") or 0), 2)
+                _bills_by_inst_pnl.add((_inst, _pnl))
+        _deduped = []
         for tr in trades:
             _oid = str(tr.get("ord_id") or "").strip()
             if not _oid:
-                _oid = f"_nooid_{_nooid_seq}"
-                _nooid_seq += 1
-            _pnl = abs(float(tr.get("pnl") or 0))
-            _existing = _seen_ord.get(_oid)
-            if _existing is None or _pnl > abs(float(_existing.get("pnl") or 0)):
-                _seen_ord[_oid] = tr
-        trades = list(_seen_ord.values())
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _pnl = round(float(tr.get("pnl") or 0), 2)
+                if (_inst, _pnl) in _bills_by_inst_pnl:
+                    continue  # skip in-memory duplicate of OKX bill
+            _deduped.append(tr)
+        trades = _deduped
         closed_tagged = []
         for tr in trades:
             reason = (tr.get("reason") or "").lower()
