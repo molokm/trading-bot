@@ -5796,6 +5796,16 @@ async def _compute_pnl():
                 f"tagged={len(closed_tagged)} skip_untagged={skipped_untagged} epoch={epoch!r}",
                 flush=True,
             )
+            for _dbg in closed_tagged:
+                _b = _dbg.get("bot", "")
+                if _b == "AI Discretionary 1H":
+                    print(
+                        f"[pnl-ai] {_dbg.get('inst_id','')} pnl={_dbg.get('pnl',0):.2f} "
+                        f"time={(_dbg.get('exit_time') or _dbg.get('time',''))[:19]} "
+                        f"src={_dbg.get('source','')} oid={_dbg.get('ord_id','')} "
+                        f"attr={_dbg.get('_attr','')}",
+                        flush=True,
+                    )
     except Exception as e:
         import traceback
         print(f"[pnl] History source error: {e}", flush=True)
