@@ -23,12 +23,14 @@ class Database:
         if DATABASE_URL and DATABASE_URL.startswith("file:"):
             self.db_path = DATABASE_URL.replace("file:", "")
         self._pg_mode = _is_pg_url(DATABASE_URL)
+        self._fallback_reason = ""
 
     async def init(self):
         if self._pg_mode:
             import asyncpg
             print("[db] Connecting to PostgreSQL ...", flush=True)
             last_err = None
+            conn = None
             for attempt in range(1, 4):
                 try:
                     conn = await asyncio.wait_for(
@@ -40,21 +42,48 @@ class Database:
                     if attempt < 3:
                         await asyncio.sleep(3 * attempt)
             else:
-                raise last_err  # type: ignore
+                # Neon/Render free tier often hits compute-time quota — do not
+                # take down the whole trading app; fall back to local SQLite.
+                err_s = str(last_err or "")
+                quota = any(
+                    x in err_s.lower()
+                    for x in (
+                        "compute time quota",
+                        "exceeded the compute",
+                        "insufficientresources",
+                        "quota",
+                        "too many connections",
+                    )
+                )
+                print(
+                    f"[db] PostgreSQL unavailable ({last_err}). "
+                    f"{'Quota/limit hit — ' if quota else ''}"
+                    f"falling back to SQLite at {self.db_path}",
+                    flush=True,
+                )
+                self._pg_mode = False
+                self._fallback_reason = err_s
+                await self._init_sqlite()
+                return
             print("[db] Connected, running migrations ...", flush=True)
             try:
                 await self._migrate_pg(conn)
             finally:
                 await conn.close()
             print("[db] PG init done", flush=True)
+            self._fallback_reason = ""
         else:
-            import aiosqlite
-            os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
-            self._conn = await aiosqlite.connect(self.db_path)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.execute("PRAGMA journal_mode=WAL")
-            await self._conn.execute("PRAGMA foreign_keys=ON")
-            await self._migrate_sqlite()
+            await self._init_sqlite()
+
+    async def _init_sqlite(self):
+        import aiosqlite
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._conn = await aiosqlite.connect(self.db_path)
+        self._conn.row_factory = aiosqlite.Row
+        await self._conn.execute("PRAGMA journal_mode=WAL")
+        await self._conn.execute("PRAGMA foreign_keys=ON")
+        await self._migrate_sqlite()
+        print(f"[db] SQLite ready at {self.db_path}", flush=True)
 
     async def close(self):
         # PG mode opens a fresh connection per operation (no persistent pool to
@@ -182,6 +211,20 @@ class Database:
             CREATE TABLE IF NOT EXISTS tg_processed_updates (
                 update_id     INTEGER PRIMARY KEY,
                 processed_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS exchange_close_trades (
+                ord_id        TEXT PRIMARY KEY,
+                inst_id       TEXT NOT NULL,
+                cl_ord_id     TEXT NOT NULL,
+                bot_label     TEXT NOT NULL DEFAULT '',
+                pnl           REAL NOT NULL DEFAULT 0,
+                fee           REAL NOT NULL DEFAULT 0,
+                sz            REAL NOT NULL DEFAULT 0,
+                avg_px        REAL NOT NULL DEFAULT 0,
+                close_ts      INTEGER NOT NULL DEFAULT 0,
+                sub_type      TEXT NOT NULL DEFAULT '5',
+                synced_at     TEXT NOT NULL
             );
         """)
         await self._conn.commit()
@@ -316,10 +359,74 @@ class Database:
                 active_until  TEXT,
                 created_at    TEXT NOT NULL,
                 updated_at    TEXT
-            );
+            )
+        """)
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS tg_processed_updates (
                 update_id     BIGINT PRIMARY KEY,
                 processed_at  TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_traders (
+                unique_code   TEXT PRIMARY KEY,
+                alias         TEXT,
+                inst_type     TEXT DEFAULT 'SWAP',
+                roi_pct       DOUBLE PRECISION DEFAULT 0,
+                pnl_usd       DOUBLE PRECISION DEFAULT 0,
+                win_rate      DOUBLE PRECISION DEFAULT 0,
+                max_drawdown  DOUBLE PRECISION DEFAULT 0,
+                aum           DOUBLE PRECISION DEFAULT 0,
+                lead_days     INTEGER DEFAULT 0,
+                copy_traders  INTEGER DEFAULT 0,
+                verified      INTEGER DEFAULT 0,
+                verify_score  DOUBLE PRECISION DEFAULT 0,
+                tracked       INTEGER DEFAULT 1,
+                tracking_since DOUBLE PRECISION,
+                last_snapshot DOUBLE PRECISION,
+                created_at    TEXT NOT NULL
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS copy_trades (
+                id            TEXT PRIMARY KEY,
+                trader_code   TEXT NOT NULL,
+                inst_id       TEXT NOT NULL,
+                side          TEXT NOT NULL,
+                size          TEXT,
+                entry_price   TEXT,
+                entry_time    DOUBLE PRECISION,
+                close_price   TEXT,
+                close_time    DOUBLE PRECISION,
+                pnl           DOUBLE PRECISION DEFAULT 0,
+                reason        TEXT,
+                created_at    TEXT NOT NULL,
+                FOREIGN KEY (trader_code) REFERENCES tracked_traders(unique_code)
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id            BIGSERIAL PRIMARY KEY,
+                ts            TEXT NOT NULL,
+                actor         TEXT,
+                action        TEXT NOT NULL,
+                detail        TEXT,
+                meta          TEXT
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS exchange_close_trades (
+                ord_id        TEXT PRIMARY KEY,
+                inst_id       TEXT NOT NULL,
+                cl_ord_id     TEXT NOT NULL,
+                bot_label     TEXT NOT NULL DEFAULT '',
+                pnl           DOUBLE PRECISION NOT NULL DEFAULT 0,
+                fee           DOUBLE PRECISION NOT NULL DEFAULT 0,
+                sz            DOUBLE PRECISION NOT NULL DEFAULT 0,
+                avg_px        DOUBLE PRECISION NOT NULL DEFAULT 0,
+                close_ts      BIGINT NOT NULL DEFAULT 0,
+                sub_type      TEXT NOT NULL DEFAULT '5',
+                synced_at     TEXT NOT NULL
             )
         """)
 
@@ -378,8 +485,126 @@ class Database:
             finally:
                 await conn.close()
         cur = await self._conn.execute(sql, params)
-        await self._conn.commit()
+        self._conn.commit()
         return cur.lastrowid
+
+    # ── Exchange close trades (raw OKX bills → DB) ──
+
+    async def upsert_exchange_close_trades(self, trades: list[dict]) -> int:
+        """Upsert pre-aggregated close trades. Each dict has:
+        ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type.
+        Returns number of rows affected."""
+        if not trades:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            conn = await self._pg_connect()
+            try:
+                for t in trades:
+                    await conn.execute("""
+                        INSERT INTO exchange_close_trades
+                            (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        ON CONFLICT (ord_id) DO UPDATE SET
+                            inst_id=EXCLUDED.inst_id, cl_ord_id=EXCLUDED.cl_ord_id,
+                            bot_label=EXCLUDED.bot_label, pnl=EXCLUDED.pnl, fee=EXCLUDED.fee,
+                            sz=EXCLUDED.sz, avg_px=EXCLUDED.avg_px, close_ts=EXCLUDED.close_ts,
+                            sub_type=EXCLUDED.sub_type, synced_at=EXCLUDED.synced_at
+                    """, (
+                        t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
+                        t["pnl"], t["fee"], t["sz"], t["avg_px"],
+                        t["close_ts"], t["sub_type"], now,
+                    ))
+                return len(trades)
+            finally:
+                await conn.close()
+        else:
+            for t in trades:
+                await self._execute(
+                    """INSERT OR REPLACE INTO exchange_close_trades
+                       (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
+                     t["pnl"], t["fee"], t["sz"], t["avg_px"],
+                     t["close_ts"], t["sub_type"], now)
+                )
+            return len(trades)
+
+    async def get_exchange_pnl(self, bot_label: str = None, epoch_ms: int = 0) -> list[dict]:
+        """Get aggregated PnL from exchange_close_trades.
+        If bot_label given, filter by it. epoch_ms filters close_ts >= epoch_ms.
+        Returns list of dicts with inst_id, bot_label, total_pnl, total_fee, trade_count."""
+        sql = """
+            SELECT inst_id, bot_label, SUM(pnl) AS total_pnl, SUM(fee) AS total_fee,
+                   COUNT(*) AS trade_count
+            FROM exchange_close_trades
+            WHERE 1=1
+        """
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        sql += " GROUP BY inst_id, bot_label ORDER BY bot_label, inst_id"
+        return await self._fetchall(sql, params)
+
+    async def get_exchange_close_trade_count(self, bot_label: str = None, epoch_ms: int = 0) -> int:
+        """Count distinct close orders (ord_id) in exchange_close_trades."""
+        sql = "SELECT COUNT(DISTINCT ord_id) AS cnt FROM exchange_close_trades WHERE 1=1"
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        row = await self._fetchone(sql, params)
+        return int(row["cnt"]) if row else 0
+
+    async def get_exchange_close_trades_detail(self, bot_label: str = None, epoch_ms: int = 0, limit: int = 500) -> list[dict]:
+        """Get individual close trades from exchange_close_trades."""
+        sql = "SELECT * FROM exchange_close_trades WHERE 1=1"
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        sql += " ORDER BY close_ts DESC"
+        if self._pg_mode:
+            sql += f" LIMIT ${len(params)+1}"
+            params += (limit,)
+        else:
+            sql += " LIMIT ?"
+            params += (limit,)
+        return await self._fetchall(sql, params)
 
     # ── Bots ──
 
@@ -888,16 +1113,238 @@ class Database:
     async def get_position(self, bot_id: str) -> Optional[dict]:
         return await self._fetchone("SELECT * FROM positions WHERE bot_id = $1" if self._pg_mode else "SELECT * FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def delete_position_inst(self, bot_id: str, inst_id: str, side: str = None):
+        if side:
+            sql = (
+                "DELETE FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+                if self._pg_mode else
+                "DELETE FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?"
+            )
+            await self._execute(sql, (bot_id, inst_id, side))
+        else:
+            sql = (
+                "DELETE FROM positions WHERE bot_id = $1 AND inst_id = $2"
+                if self._pg_mode else
+                "DELETE FROM positions WHERE bot_id = ? AND inst_id = ?"
+            )
+            await self._execute(sql, (bot_id, inst_id))
+
     async def delete_position(self, bot_id: str):
         if self._pg_mode:
             await self._execute("DELETE FROM positions WHERE bot_id = $1", (bot_id,))
         else:
             await self._execute("DELETE FROM positions WHERE bot_id = ?", (bot_id,))
 
+    async def claim_position(self, bot_id: str, inst_id: str, side: str,
+                              size: float, entry_price: float) -> None:
+        """Persist ownership so restarts can restore the position to THIS bot only."""
+        side_n = (side or "long").lower()
+        if side_n in ("sell", "s"):
+            side_n = "short"
+        elif side_n in ("buy", "b", "net"):
+            side_n = "long" if side_n != "short" else side_n
+        if side_n not in ("long", "short"):
+            side_n = "long"
+        await self.save_position(
+            bot_id=bot_id, inst_id=inst_id, side=side_n,
+            size=float(size), entry_price=float(entry_price),
+            current_price=float(entry_price),
+        )
+
+    async def find_position_any_side(self, bot_id: str, inst_id: str, side: str = None) -> Optional[dict]:
+        """Match long/short/net — OKX one-way mode reports posSide=net."""
+        tried = []
+        for s in (side, "long", "short", "net"):
+            if not s or s in tried:
+                continue
+            tried.append(s)
+            row = await self.find_position(bot_id, inst_id, s)
+            if row:
+                return row
+        return None
+
+    async def other_bot_owns_position_any(self, bot_id: str, inst_id: str, side: str = None) -> bool:
+        for s in (side, "long", "short", "net"):
+            if not s:
+                continue
+            if await self.other_bot_owns_position(bot_id, inst_id, s):
+                return True
+        # any other bot on this inst regardless of side
+        sql = (
+            "SELECT bot_id FROM positions WHERE inst_id = $1 AND bot_id <> $2 LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM positions WHERE inst_id = ? AND bot_id <> ? LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id, bot_id))
+        return bool(row)
+
+
+    async def wipe_strategy_trading_data(self, bot_ids: list) -> dict:
+        """Delete historical trades/signals/metrics only.
+
+        NEVER touch `positions` — claims must survive deploy/PnL reset so open
+        exchange positions stay bound to strategies and are not orphan-swept.
+        """
+        out = {"bots": list(bot_ids), "ok": True}
+        for table in ("trades", "signals", "performance_metrics"):
+            deleted = 0
+            for bid in bot_ids:
+                try:
+                    if self._pg_mode:
+                        await self._execute(f"DELETE FROM {table} WHERE bot_id = $1", (bid,))
+                    else:
+                        await self._execute(f"DELETE FROM {table} WHERE bot_id = ?", (bid,))
+                    deleted += 1
+                except Exception as e:
+                    out[f"err_{table}_{bid}"] = str(e)
+            out[table] = deleted
+        return out
+
+    async def reassign_trades_instrument(
+        self, from_bot: str, to_bot: str, inst_id: str
+    ) -> dict:
+        """Move trades for inst_id from one bot to another; return pnl/count deltas."""
+        if self._pg_mode:
+            rows = await self._fetchall(
+                "SELECT id, pnl FROM trades WHERE bot_id = $1 AND inst_id = $2",
+                (from_bot, inst_id),
+            ) or []
+        else:
+            rows = await self._fetchall(
+                "SELECT id, pnl FROM trades WHERE bot_id = ? AND inst_id = ?",
+                (from_bot, inst_id),
+            ) or []
+        n = 0
+        pnl = 0.0
+        wins = 0
+        for r in rows:
+            n += 1
+            p = float((r.get("pnl") if isinstance(r, dict) else r[1]) or 0)
+            pnl += p
+            if p > 0:
+                wins += 1
+        if n:
+            if self._pg_mode:
+                await self._execute(
+                    "UPDATE trades SET bot_id = $1 WHERE bot_id = $2 AND inst_id = $3",
+                    (to_bot, from_bot, inst_id),
+                )
+            else:
+                await self._execute(
+                    "UPDATE trades SET bot_id = ? WHERE bot_id = ? AND inst_id = ?",
+                    (to_bot, from_bot, inst_id),
+                )
+        return {"moved": n, "pnl": pnl, "wins": wins}
+
+    async def reassign_closed_trade(
+        self,
+        from_bot: str,
+        to_bot: str,
+        inst_id: str,
+        *,
+        side: str = "",
+        pnl_near: Optional[float] = None,
+        time_contains: str = "",
+    ) -> dict:
+        """Move matching closed trades (best-effort filter) from_bot → to_bot."""
+        side = (side or "").lower()
+        rows = await self._fetchall(
+            ("SELECT id, pnl, side, timestamp, state FROM trades WHERE bot_id = $1 AND inst_id = $2"
+             if self._pg_mode else
+             "SELECT id, pnl, side, timestamp, state FROM trades WHERE bot_id = ? AND inst_id = ?"),
+            (from_bot, inst_id),
+        ) or []
+        moved_ids = []
+        pnl_sum = 0.0
+        for r in rows:
+            rid = r.get("id") if isinstance(r, dict) else r[0]
+            p = float((r.get("pnl") if isinstance(r, dict) else r[1]) or 0)
+            rside = str((r.get("side") if isinstance(r, dict) else r[2]) or "").lower()
+            ts = str((r.get("timestamp") if isinstance(r, dict) else r[3]) or "")
+            st = str((r.get("state") if isinstance(r, dict) else (r[4] if len(r) > 4 else "")) or "").lower()
+            if st and st not in ("filled", "closed", "partial", ""):
+                continue
+            if side and rside and side not in rside and rside not in side:
+                # allow buy/sell vs long/short mismatch — soft
+                if not ((side == "short" and rside == "buy") or (side == "long" and rside == "sell")
+                        or (side == "short" and "sell" in rside) or (side == "long" and "buy" in rside)):
+                    if side not in rside:
+                        continue
+            if time_contains and time_contains not in ts:
+                # try alternate formats
+                alt = time_contains.replace("T", " ")[:16]
+                if alt not in ts and time_contains[:10] not in ts:
+                    continue
+            if pnl_near is not None and abs(p - float(pnl_near)) > 5.0 and abs(p) > 1e-9:
+                # if multiple rows, prefer near match; skip far
+                if abs(p - float(pnl_near)) > max(20.0, abs(float(pnl_near)) * 0.15):
+                    continue
+            moved_ids.append(rid)
+            pnl_sum += p
+        for rid in moved_ids:
+            if self._pg_mode:
+                await self._execute("UPDATE trades SET bot_id = $1 WHERE id = $2", (to_bot, rid))
+            else:
+                await self._execute("UPDATE trades SET bot_id = ? WHERE id = ?", (to_bot, rid))
+        return {"moved": len(moved_ids), "pnl": pnl_sum, "ids": moved_ids}
+
+    async def last_bot_for_instrument(self, inst_id: str) -> Optional[str]:
+
+        """Ownership hint: positions claim, then trades, then signals."""
+        for sql in (
+            (
+                "SELECT bot_id FROM positions WHERE inst_id = $1 ORDER BY opened_at DESC LIMIT 1"
+                if self._pg_mode else
+                "SELECT bot_id FROM positions WHERE inst_id = ? ORDER BY opened_at DESC LIMIT 1"
+            ),
+            (
+                "SELECT bot_id FROM trades WHERE inst_id = $1 ORDER BY timestamp DESC LIMIT 1"
+                if self._pg_mode else
+                "SELECT bot_id FROM trades WHERE inst_id = ? ORDER BY timestamp DESC LIMIT 1"
+            ),
+            (
+                "SELECT bot_id FROM signals WHERE inst_id = $1 ORDER BY id DESC LIMIT 1"
+                if self._pg_mode else
+                "SELECT bot_id FROM signals WHERE inst_id = ? ORDER BY id DESC LIMIT 1"
+            ),
+        ):
+            try:
+                row = await self._fetchone(sql, (inst_id,))
+                if row and row.get("bot_id"):
+                    return row.get("bot_id")
+            except Exception:
+                continue
+        return None
+
+    async def find_position(self, bot_id: str, inst_id: str, side: str) -> Optional[dict]:
+        """Lookup a single open position row owned by this bot."""
+        sql = (
+            "SELECT * FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
+            if self._pg_mode else
+            "SELECT * FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?"
+        )
+        return await self._fetchone(sql, (bot_id, inst_id, side))
+
+    async def other_bot_owns_position(self, bot_id: str, inst_id: str, side: str) -> bool:
+        """True if some OTHER bot already has this instrument/side in the positions table."""
+        sql = (
+            "SELECT bot_id FROM positions WHERE inst_id = $1 AND side = $2 AND bot_id <> $3 LIMIT 1"
+            if self._pg_mode else
+            "SELECT bot_id FROM positions WHERE inst_id = ? AND side = ? AND bot_id <> ? LIMIT 1"
+        )
+        row = await self._fetchone(sql, (inst_id, side, bot_id))
+        return bool(row)
+
     async def get_all_positions(self) -> list[dict]:
+        # LEFT JOIN — positions must still tag even if bots row is missing
+        if self._pg_mode:
+            return await self._fetchall(
+                "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
+                "LEFT JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
+            )
         return await self._fetchall(
             "SELECT p.*, b.strategy_id, b.symbol FROM positions p "
-            "JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
+            "LEFT JOIN bots b ON b.id = p.bot_id ORDER BY p.opened_at DESC"
         )
 
     # ── Metrics ──
@@ -1076,6 +1523,23 @@ class Database:
         row = await self._fetchone(sql, (key,))
         return row["value"] if row else None
 
+    async def list_settings_prefix(self, prefix: str) -> list:
+        """Return setting keys that start with prefix."""
+        try:
+            if self._pg_mode:
+                rows = await self._fetchall(
+                    "SELECT key FROM settings WHERE key LIKE $1",
+                    (prefix + "%",),
+                ) or []
+            else:
+                rows = await self._fetchall(
+                    "SELECT key FROM settings WHERE key LIKE ?",
+                    (prefix + "%",),
+                ) or []
+            return [r.get("key") if isinstance(r, dict) else r[0] for r in rows]
+        except Exception:
+            return []
+
     async def set_setting(self, key: str, value: str):
         if self._pg_mode:
             await self._execute(
@@ -1088,6 +1552,34 @@ class Database:
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value)
             )
+
+
+    async def add_audit(self, action: str, actor: str = None, detail: str = None, meta: str = None):
+        """Append an audit trail row (admin actions, mode switches, risk)."""
+        from datetime import datetime, timezone
+        ts = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO audit_log (ts, actor, action, detail, meta) VALUES ($1,$2,$3,$4,$5)",
+                (ts, actor or "", action, detail or "", meta or ""),
+            )
+        else:
+            await self._execute(
+                "INSERT INTO audit_log (ts, actor, action, detail, meta) VALUES (?,?,?,?,?)",
+                (ts, actor or "", action, detail or "", meta or ""),
+            )
+
+    async def list_audit(self, limit: int = 100) -> list:
+        limit = max(1, min(int(limit), 500))
+        if self._pg_mode:
+            return await self._fetchall(
+                "SELECT id, ts, actor, action, detail, meta FROM audit_log ORDER BY id DESC LIMIT $1",
+                (limit,),
+            )
+        return await self._fetchall(
+            "SELECT id, ts, actor, action, detail, meta FROM audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
 
     async def mark_update_processed(self, update_id: int) -> bool:
         """Atomically claim a Telegram update_id for processing.

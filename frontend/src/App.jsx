@@ -2,9 +2,10 @@ import React, { useState, useEffect, createContext, useContext, lazy, Suspense }
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
   LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
+import { api } from './services/api'
 import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
@@ -14,9 +15,9 @@ const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
+const SmartMoneyPage = lazy(() => import('./pages/SmartMoneyPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
 const TrackerPage = lazy(() => import('./pages/TrackerPage'))
-import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -105,7 +106,10 @@ function AppLayout() {
       }
     }
     check()
-    const interval = setInterval(check, 15000)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      check()
+    }, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -119,6 +123,8 @@ function AppLayout() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
+    // AI-only mode: Smart Money hidden
+    // { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
     { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
@@ -174,6 +180,16 @@ function AppLayout() {
                 {latencyMs}ms
               </span>
             ) : null}
+            {health?.bots && (
+              <span className="hidden sm:flex items-center gap-1 ml-0.5" title={t('nav.bots_status_tip')}>
+                {['rotation', 'impulse', 'validation'].map(k => (
+                  <span
+                    key={k}
+                    className={`w-1.5 h-1.5 rounded-full ${health.bots[k] ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)] opacity-40'}`}
+                  />
+                ))}
+              </span>
+            )}
           </div>
 
           {/* User role */}
@@ -221,11 +237,12 @@ function AppLayout() {
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 overflow-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
+      <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
           <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
+          <Route path="/smart-money" element={<SmartMoneyPage connected={connected} isGuest={isGuest} />} />
           <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
@@ -265,6 +282,21 @@ export default function App() {
     const role = localStorage.getItem('auth_role')
     return token ? { token, role } : null
   })
+
+  // Bootstrap session from httpOnly cookie when localStorage empty (after deploy)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const s = await api.authStatus()
+        if (cancelled || !s?.authenticated) return
+        const role = s.role === 'admin' ? 'admin' : (s.role || 'guest')
+        localStorage.setItem('auth_role', role)
+        setAuth((prev) => prev || { token: localStorage.getItem('auth_token') || 'cookie', role })
+      } catch { /* not logged in */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   return (
     <ThemeProvider>

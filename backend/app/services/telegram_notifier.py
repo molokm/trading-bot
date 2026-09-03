@@ -32,6 +32,8 @@ def _esc(value) -> str:
 
 
 class TelegramNotifier:
+    _open_msg_by_signal: dict = {}
+
     def __init__(self, token: str = "", chat_id: str = "", channel_id: str = ""):
         self.token = token or os.getenv(ENV_TOKEN, "")
         self.chat_id = chat_id or os.getenv(ENV_CHAT, "")
@@ -91,6 +93,95 @@ class TelegramNotifier:
         except Exception:
             return False
 
+    def remember_open(self, signal_id, message_id, pos_key: str = "", coin: str = "") -> None:
+        try:
+            sid = int(signal_id or 0)
+            mid = int(message_id or 0)
+        except (TypeError, ValueError):
+            return
+        if not mid:
+            return
+        if sid:
+            TelegramNotifier._open_msg_by_signal[sid] = mid
+        if pos_key:
+            TelegramNotifier._open_msg_by_signal[f"pos:{pos_key}"] = mid
+        coin = (coin or "").upper().replace("-USDT-SWAP", "").strip()
+        if coin:
+            TelegramNotifier._open_msg_by_signal[f"coin:{coin}"] = mid
+        if len(TelegramNotifier._open_msg_by_signal) > 800:
+            for k in list(TelegramNotifier._open_msg_by_signal.keys())[:150]:
+                TelegramNotifier._open_msg_by_signal.pop(k, None)
+
+    def open_message_id(self, signal_id=0, pos_key: str = "", coin: str = "") -> int:
+        try:
+            sid = int(signal_id or 0)
+        except (TypeError, ValueError):
+            sid = 0
+        if sid:
+            mid = int(TelegramNotifier._open_msg_by_signal.get(sid) or 0)
+            if mid:
+                return mid
+        if pos_key:
+            mid = int(TelegramNotifier._open_msg_by_signal.get(f"pos:{pos_key}") or 0)
+            if mid:
+                return mid
+        coin = (coin or "").upper().replace("-USDT-SWAP", "").strip()
+        if coin:
+            mid = int(TelegramNotifier._open_msg_by_signal.get(f"coin:{coin}") or 0)
+            if mid:
+                return mid
+        return 0
+
+    async def remember_open_db(self, db, signal_id, message_id, bot_id: str = "", coin: str = "") -> None:
+        """Persist open Telegram message_id so close can reply after restart."""
+        coin_u = (coin or "").upper().replace("-USDT-SWAP", "").strip()
+        pos_key = f"{bot_id}:{coin_u}" if bot_id and coin_u else ""
+        self.remember_open(signal_id, message_id, pos_key=pos_key, coin=coin_u)
+        if not db:
+            return
+        try:
+            mid = int(message_id or 0)
+            if not mid:
+                return
+            if signal_id:
+                await db.set_setting(f"tg_open_msg:{int(signal_id)}", str(mid))
+            if bot_id and coin_u:
+                await db.set_setting(f"tg_open_pos:{bot_id}:{coin_u}", str(mid))
+            if coin_u:
+                # last-resort key after redeploy when signal_id is lost
+                await db.set_setting(f"tg_open_coin:{coin_u}", str(mid))
+            print(f"[TG] remembered open mid={mid} signal={signal_id} bot={bot_id} coin={coin_u}", flush=True)
+        except Exception as e:
+            print(f"[TG] remember_open_db: {e}", flush=True)
+
+    async def resolve_open_message_id(self, db, signal_id=0, bot_id: str = "", coin: str = "") -> int:
+        """Memory first, then DB settings (signal → bot:coin → coin)."""
+        coin_u = (coin or "").upper().replace("-USDT-SWAP", "").strip()
+        pos_key = f"{bot_id}:{coin_u}" if bot_id and coin_u else ""
+        mid = self.open_message_id(signal_id, pos_key=pos_key, coin=coin_u)
+        if mid:
+            return mid
+        if not db:
+            return 0
+        try:
+            keys = []
+            if signal_id:
+                keys.append(f"tg_open_msg:{int(signal_id)}")
+            if bot_id and coin_u:
+                keys.append(f"tg_open_pos:{bot_id}:{coin_u}")
+            if coin_u:
+                keys.append(f"tg_open_coin:{coin_u}")
+            for key in keys:
+                raw = await db.get_setting(key)
+                if raw and str(raw).strip().isdigit():
+                    mid = int(str(raw).strip())
+                    self.remember_open(signal_id, mid, pos_key=pos_key, coin=coin_u)
+                    print(f"[TG] resolved open mid={mid} via {key}", flush=True)
+                    return mid
+        except Exception as e:
+            print(f"[TG] resolve_open_message_id: {e}", flush=True)
+        return 0
+
     def fire(self, text: str, parse_mode: str = "HTML") -> None:
         """Fire-and-forget send — never blocks the trading loop or raises.
 
@@ -112,29 +203,91 @@ class TelegramNotifier:
         except Exception:
             pass
 
-    async def _send_to(self, chat_id: str, text: str, parse_mode: str) -> bool:
+    async def _send_to(
+        self,
+        chat_id: str,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_to_message_id=None,
+    ) -> int:
+        """Send message; return Telegram message_id (0 on failure).
+
+        When reply_to is set we require a real reply first. Only if Telegram
+        rejects the reply (message not found) we resend without reply and log.
+        """
         if not self.token:
-            return False
+            return 0
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text}
+        reply_id = None
+        if reply_to_message_id:
+            try:
+                reply_id = int(reply_to_message_id)
+            except (TypeError, ValueError):
+                reply_id = None
+
+        async def _post(payload: dict) -> tuple:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, json=payload)
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {"ok": False, "description": resp.text[:200]}
+                return data
+
+        base = {"chat_id": chat_id, "text": text}
         if parse_mode:
-            payload["parse_mode"] = parse_mode
-        # Retry transient failures (network/429/5xx) so a single Telegram hiccup
-        # does not silently drop a trade signal. Log any final failure.
+            base["parse_mode"] = parse_mode
+
+        # Pass 1: with reply (no allow_sending_without_reply — we want a real thread)
+        if reply_id:
+            payload = {**base, "reply_to_message_id": reply_id}
+            for attempt in range(2):
+                try:
+                    data = await _post(payload)
+                    if data.get("ok"):
+                        try:
+                            return int((data.get("result") or {}).get("message_id") or 0)
+                        except (TypeError, ValueError):
+                            return 0
+                    desc = str(data.get("description") or data)
+                    print(f"[TG] reply FAILED mid={reply_id}: {desc}", flush=True)
+                    # permanent reply errors → fall through to plain send
+                    low = desc.lower()
+                    if "reply" in low or "message to be replied" in low or "not found" in low:
+                        break
+                    if attempt < 1:
+                        await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"[TG] reply exception: {e}", flush=True)
+                    if attempt < 1:
+                        await asyncio.sleep(1)
+
+        # Pass 2: plain message (open messages, or close fallback)
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    resp = await client.post(url, json=payload)
-                    data = resp.json()
+                data = await _post(base)
                 if data.get("ok"):
-                    return True
+                    if reply_id:
+                        print(f"[TG] sent CLOSE without reply (open mid={reply_id} missing)", flush=True)
+                    try:
+                        return int((data.get("result") or {}).get("message_id") or 0)
+                    except (TypeError, ValueError):
+                        return 0
+                print(f"[TG] send not ok: {data.get('description')}", flush=True)
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
-            except Exception:
+            except Exception as e:
+                print(f"[TG] send exception: {e}", flush=True)
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
         print(f"[TG] send FAILED chat={chat_id} text={text[:80]!r}", flush=True)
-        return False
+        return 0
+
+    async def send_trade(self, text: str, parse_mode: str = "HTML", reply_to_message_id=None) -> int:
+        """Awaitable trade notify; returns Telegram message_id."""
+        if not self.configured:
+            return 0
+        return await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
 
     # ─── Mini App helpers ───
 

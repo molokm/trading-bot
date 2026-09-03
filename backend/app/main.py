@@ -4,17 +4,62 @@ import logging
 import os
 import time as _time
 import uuid
+import faulthandler
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
 
+# Dump native thread tracebacks on fatal signals (segfault/abort) to a file
+# that survives the crash, so we can see what actually killed the process.
+_CRASH_LOG = os.path.join(os.environ.get("DATA_DIR", "/tmp"), "crash_traceback.log")
+try:
+    with open(_CRASH_LOG, "w") as _cf:
+        _cf.write("")
+    faulthandler.enable(file=open(_CRASH_LOG, "a"))
+    faulthandler.register(11, file=open(_CRASH_LOG, "a"))   # SIGSEGV
+    faulthandler.register(6, file=open(_CRASH_LOG, "a"))    # SIGABRT
+except Exception:
+    pass
+
+# Also capture ANY uncaught Python exception (main thread + worker threads)
+# into the same crash log — process may be restarted by Render after an
+# unhandled error in a background thread (e.g. Smart Money mirror/tracker).
+def _write_crash(text: str) -> None:
+    try:
+        with open(_CRASH_LOG, "a") as _cf:
+            _cf.write("\n=== %s ===\n%s\n" % (_time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except Exception:
+        pass
+
+
+def _excepthook(etype, value, tb):
+    import traceback as _tb
+    _write_crash("".join(_tb.format_exception(etype, value, tb)))
+
+
+def _thread_excepthook(args):
+    _write_crash("Thread %r: %s" % (args.thread and args.thread.name, "".join(
+        _tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback)
+        if (_tb := __import__("traceback")) else "?")
+    ))
+
+
+import sys
+sys.excepthook = _excepthook
+try:
+    threading.excepthook = _thread_excepthook
+except Exception:
+    pass
+import threading
+
 logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Request, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 
@@ -23,17 +68,53 @@ from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import (
     login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user,
+    ensure_auth_secrets,
     get_user_id, encrypt_str, decrypt_str,
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
+    get_blacklist, set_blacklist,
 )
 from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
+from app.services.ai_strategy import AIStrategy, AIConfig, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
+from app.services.ai_agent import llm_status
+from app.services.orderbook_scalp_strategy import (
+    OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID,
+    STRATEGY_NAME as SCALP_NAME, STRATEGY_VERSION as SCALP_VERSION,
+    STRATEGY_DESC as SCALP_DESC, compute_book_metrics,
+)
+try:
+    from app.services.scalping_vwap_rev import (
+        VWAPMeanReversion, ScalpConfig as VWAPScalpConfig, VWAP_BOT_ID,
+        STRATEGY_NAME as VWAP_NAME, STRATEGY_VERSION as VWAP_VERSION,
+        STRATEGY_DESC as VWAP_DESC,
+    )
+except Exception as _vwap_imp_err:
+    print(f"[startup] VWAP module unavailable: {_vwap_imp_err}", flush=True)
+    VWAP_BOT_ID = "vwap_mean_rev"
+    VWAP_NAME = "VWAP Mean Reversion"
+    VWAP_VERSION = "off"
+    VWAP_DESC = "unavailable"
+    class VWAPScalpConfig:
+        def __init__(self, **kwargs): pass
+    class VWAPMeanReversion:
+        def __init__(self, *a, **k): self._running=False; self._positions={}; self._trade_log=[]
+        def start(self): pass
+        def stop(self): pass
+        def get_status(self): return {"running": False, "strategy": VWAP_NAME, "version": "off"}
+from app.services.smart_money_tracker import (
+    SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
+    BOT_ID as SM_BOT_ID, STRATEGY_NAME as SM_NAME, STRATEGY_VERSION as SM_VERSION,
+)
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
 from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
+from app.services import trade_attribution as trade_attr
+from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, orphan_close_enabled, claim_open
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
@@ -56,6 +137,7 @@ if not _cors_origins:
         "http://127.0.0.1:3000",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
+        "https://trading-bot-mu99.onrender.com",
     ]
 app.add_middleware(
     CORSMiddleware,
@@ -64,6 +146,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Gzip-compress all responses (JS bundles drop ~70-80% in size: the 565kB
+# charts chunk -> ~164kB over the wire). Only compresses if client sends
+# Accept-Encoding: gzip, so API clients are unaffected.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 if STATIC_DIR.exists():
@@ -75,9 +161,46 @@ _env_key = os.getenv("OKX_API_KEY", "")
 _env_secret = os.getenv("OKX_SECRET_KEY", "")
 _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
+# When "0"/"false": keep OKX read access (dashboard/trades) but do NOT auto-start
+# the trading strategies. Use on a local viewer instance to avoid duplicate
+# management of the same account that the deployed (Render) version handles.
+_bots_auto_start = os.getenv("BOTS_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+# Per-bot auto-start flags: default OFF for Momentum/Impulse/Validation,
+# default ON for AI. Override with MOM_AUTO_START / IMP_AUTO_START /
+# VAL_AUTO_START / AI_AUTO_START env vars.
+_mom_auto = os.getenv("MOM_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+_ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+# Product mode: only AI Discretionary is active (no multi-bot PnL/claim collisions)
+AI_ONLY_MODE = os.getenv("AI_ONLY_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
+if AI_ONLY_MODE:
+    _mom_auto = False
+    _imp_auto = False
+    _val_auto = False
+    print("[config] AI_ONLY_MODE=1 — Momentum/Impulse/Validation/SM/VWAP disabled", flush=True)
 
 trade_log: list = []
 _STARTED_AT = None  # set in startup(); used by /api/health uptime
+
+def _json_safe_dict(d) -> dict:
+    """Convert dict keys that are tuples/lists to strings (JSON-safe)."""
+    if not isinstance(d, dict):
+        return {}
+    out = {}
+    for k, v in d.items():
+        if isinstance(k, (list, tuple)):
+            key = "|".join(str(x) for x in k)
+        else:
+            key = str(k) if not isinstance(k, (str, int, float, bool)) and k is not None else k
+            if key is None:
+                key = "null"
+        if isinstance(v, dict):
+            v = _json_safe_dict(v)
+        out[key] = v
+    return out
+
+
 rotation: Optional[RotationStrategy] = None
 impulse: Optional[ImpulseStrategy] = None
 validation: Optional[ValidationStrategy] = None
@@ -87,6 +210,11 @@ equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
+ai_bot = None
+scalp_bot = None  # Order Book Scalp instance (retired)
+vwap_rev_bot = None  # VWAP Mean Reversion instance
+sm_tracker = None  # Smart Money Tracker instance
+sm_mirror = None  # HL→OKX position mirror
 _user_clients: dict[str, OKXClient] = {}
 PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 
@@ -95,8 +223,53 @@ PLANS_PRICE = {"signals": PRO_PRICE_STARS, "pro": PRO_PRICE_STARS}
 def get_token(request: Request):
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer "):
-        return auth[7:]
+        return auth[7:].strip()
+    try:
+        c = request.cookies.get("auth_token") or ""
+        if c:
+            return c.strip()
+    except Exception:
+        pass
     return ""
+
+
+def _set_auth_cookie(response, token: str, max_age: int = 86400):
+    """HttpOnly session cookie — primary auth transport (Bearer is legacy fallback)."""
+    secure = (os.getenv("AUTH_COOKIE_SECURE") or "1").strip().lower() not in ("0", "false", "no")
+    samesite = (os.getenv("AUTH_COOKIE_SAMESITE") or "lax").strip().lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    # SameSite=None requires Secure
+    if samesite == "none":
+        secure = True
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        max_age=max_age,
+        path="/",
+    )
+    return response
+
+
+def _clear_auth_cookie(response):
+    secure = (os.getenv("AUTH_COOKIE_SECURE") or "1").strip().lower() not in ("0", "false", "no")
+    response.delete_cookie("auth_token", path="/", httponly=True, secure=secure, samesite="lax")
+    return response
+
+
+async def write_audit(request: Request, action: str, detail: str = "", meta: str = ""):
+    """Best-effort audit log; never breaks the request path."""
+    try:
+        role = validate(get_token(request)) or "anonymous"
+        uid = get_user_id(get_token(request))
+        actor = f"{role}:{uid}" if uid else role
+        await db.add_audit(action=action, actor=actor, detail=detail, meta=meta)
+    except Exception as e:
+        print(f"[audit] write failed: {e}", flush=True)
+
 
 
 def require_admin(request: Request):
@@ -144,12 +317,129 @@ async def startup():
     global _STARTED_AT
     _STARTED_AT = _time.time()
     try:
+        print("[startup] 0/7 auth secrets ...", flush=True)
+        ensure_auth_secrets()
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
+
+        # Restore persistent logout blacklist (survives restart on Render).
+        try:
+            _bl = await db.get_setting("auth_blacklist")
+            if _bl:
+                import json as _json
+                set_blacklist(_json.loads(_bl))
+        except Exception as e:
+            print(f"[startup] auth blacklist load: {e}", flush=True)
+
+        # Strategy PnL/trades reset — ONLY when explicitly requested via env.
+        # Previously this auto-wiped on every deploy when the hardcoded marker
+        # changed: it DELETED closed trades from the DB and set pnl_epoch to the
+        # deploy day (UTC). That silently dropped real closed trades (e.g. the
+        # 30.08 ETH close +657) from both the trades list and PnL.
+        force = (os.getenv("RESET_TRADING_STATS") or "").strip().lower() in ("1", "true", "yes")
+        if force:
+            print("[startup] RESET_TRADING_STATS=1 → wiping strategy stats ...", flush=True)
+            await admin_reset_trading_stats({})
+            await db.set_setting("trading_stats_reset_marker", "manual")
+        else:
+            # No explicit reset. If a previous automated deploy left a stale
+            # pnl_epoch (marker != "manual"), clear it so OKX-confirmed closed
+            # trades before that moment count again. Never touch "manual".
+            try:
+                prev_marker = await db.get_setting("trading_stats_reset_marker")
+                if prev_marker and str(prev_marker) != "manual":
+                    stale_epoch = await db.get_setting("pnl_epoch")
+                    await db.set_setting("pnl_epoch", "")
+                    await db.set_setting("trading_stats_reset_marker", "")
+                    print(f"[startup] cleared stale auto-reset (marker={prev_marker!r} "
+                          f"epoch={stale_epoch!r}) — history restored", flush=True)
+            except Exception as e:
+                print(f"[startup] clear stale reset: {e}", flush=True)
+
         print("[startup] 2/7 OKX client init ...", flush=True)
         if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        
+        # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
+        try:
+            from app.services.smart_money_mirror import get_mirror
+            m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+            await m.hydrate_from_db()
+            print(f"[startup] SM mirror targets={len(getattr(m, '_targets', {}) or {})}", flush=True)
+        except Exception as e:
+            print(f"[startup] SM mirror hydrate: {e}", flush=True)
+        try:
+            tr = _ensure_sm_tracker(execute=False, start=False)
+            if tr and hasattr(tr, "hydrate_from_db"):
+                await tr.hydrate_from_db()
+            print("[startup] SM tracker hydrated", flush=True)
+            _sm_auto = os.getenv("SM_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
+            if _sm_auto and _bots_auto_start and tr and not getattr(tr, "_running", False):
+                async def _sm_delayed_start(tracker=tr):
+                    await asyncio.sleep(15)
+                    try:
+                        if not getattr(tracker, "_running", False):
+                            tracker.start()
+                            print("[startup] SM tracker auto-started (delayed)", flush=True)
+                    except Exception as e:
+                        print(f"[startup] SM auto-start: {e}", flush=True)
+                asyncio.create_task(_sm_delayed_start())
+
+        except Exception as e:
+            print(f"[startup] SM tracker hydrate: {e}", flush=True)
+
+        
+        # Durable JWT denylist in Postgres (survives Render disk wipe)
+        try:
+            import json as _json_bl
+            from app.services.auth import configure_blacklist_db, hydrate_blacklist_from_db, flush_blacklist_to_db
+
+            async def _bl_load():
+                raw = await db.get_setting("auth_jwt_blacklist")
+                if not raw:
+                    raw = await db.get_setting("auth_blacklist")  # legacy key
+                if not raw:
+                    return {}
+                data = _json_bl.loads(raw) if isinstance(raw, str) else raw
+                return data if isinstance(data, dict) else {}
+
+            async def _bl_save(data: dict):
+                await db.set_setting("auth_jwt_blacklist", _json_bl.dumps(data or {}))
+
+            configure_blacklist_db(_bl_load, _bl_save)
+            n_bl = await hydrate_blacklist_from_db()
+            print(f"[startup] auth blacklist hydrated from DB: {n_bl} jti", flush=True)
+        except Exception as e:
+            print(f"[startup] auth blacklist hydrate: {e}", flush=True)
+
+        # Restore position claims from durable snapshots
+        try:
+            from app.services.position_claim import restore_snapshots_to_claims
+            from app.services.rotation_strategy import ROT_BOT_ID
+            from app.services.impulse_strategy import IMP_BOT_ID
+            from app.services.ai_strategy import AI_BOT_ID
+            try:
+                from app.services.validation_strategy import VAL_BOT_ID
+            except Exception:
+                VAL_BOT_ID = "validation_strategy"
+            rest = await restore_snapshots_to_claims(
+                db, [ROT_BOT_ID, IMP_BOT_ID, AI_BOT_ID, VAL_BOT_ID, "momentum_strategy"]
+            )
+            print(f"[startup] position claims restored: {rest}", flush=True)
+        except Exception as e:
+            print(f"[startup] claim restore: {e}", flush=True)
+
+        async def _blacklist_flush_loop():
+            from app.services.auth import flush_blacklist_to_db
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    await flush_blacklist_to_db()
+                except Exception:
+                    pass
+        asyncio.create_task(_blacklist_flush_loop())
+
         print("[startup] 3/7 Migration check ...", flush=True)
         # One-time cleanup: check if any old momentum data exists, wipe it all.
         # Checks trades table for old bot_id - most reliable signal.
@@ -167,14 +457,16 @@ async def startup():
             pass  # table might not exist yet on very first run
         if needs_cleanup:
             print("[startup]   Old momentum data found - one-time cleanup ...", flush=True)
-            for table in ["trades", "signals", "positions", "performance_metrics", "bots"]:
+            # NEVER delete positions — claims must survive deploy / cleanup
+            for table in ["trades", "signals", "performance_metrics"]:
                 try:
                     await db._execute(f"DELETE FROM {table}")
                 except Exception as e:
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _mom_auto:
+            # v6.9-AI: match RotationConfig defaults (gate-aware). Do not re-inflate risk.
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -183,19 +475,24 @@ async def startup():
                 ema_fast=20,
                 ema_slow=50,
                 atr_period=14,
-                adx_min=25.0,
+                adx_min=26.0,
                 min_roc=4.5,
                 sma_long=200,
                 min_hold_days=11,
                 max_leverage=2.0,
-                risk_per_trade=0.20,
-                allocation_pct=0.5,
-                atr_stop_mult=4.5,
+                risk_per_trade=0.08,
+                allocation_pct=0.30,
+                atr_stop_mult=3.5,
                 trail_atr_mult=3.0,
-                breakeven_pct=0.05,
-                partial_tp_pct=0.08,
-                partial_tp_ratio=0.5,
+                breakeven_pct=0.025,
+                partial_tp_pct=0.06,
+                partial_tp_ratio=0.30,
+                partial_tp2_pct=0.12,
+                partial_tp2_ratio=0.30,
                 allow_short=True,
+                gate_enabled=True,
+                gate_llm_veto=True,
+                desk_telegram=False,
                 poll_interval_sec=300,
                 auto_execute=True,
             )
@@ -211,27 +508,30 @@ async def startup():
         else:
             print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _imp_auto:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
                 top_k=3,
-                entry_roc=3.0,
+                entry_roc=6.0,
                 max_adds=0,
-                risk_per_trade=0.10,
+                risk_per_trade=0.045,
                 sl_atr_mult=5.0,
                 sl_atr_mult_short=5.0,
                 trail_atr_mult=12.0,
                 trail_atr_mult_short=12.0,
                 cooldown_bars=3,
                 tp1_atr=2.0,
-                tp1_frac=0.3,
+                tp1_frac=0.25,
                 tp2_atr=10.0,
                 tp2_frac=0.3,
-                max_hold_bars=30,
+                max_hold_bars=28,
                 max_leverage=3.0,
                 poll_interval_sec=300,
                 auto_execute=True,
+                allow_short=False,
+                btc_sma200_filter=True,
+                peak_lock_after_tp1=True,
             )
             imp = ImpulseStrategy(config=imp_config, client_manager=client_manager, db=db,
                                   notifier=telegram)
@@ -245,20 +545,20 @@ async def startup():
         else:
             print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
+        if _env_key and _env_secret and _env_pass and _bots_auto_start and _val_auto:
             val_config = make_validation_config(
                 capital=300.0,
-                top_k=4,
-                donchian_n=15,
+                top_k=2,
+                donchian_n=30,
                 tp_pct=0.08,
-                tp_ratio=0.3,
-                tp2_pct=0.10,
+                tp_ratio=0.4,
+                tp2_pct=0.08,
                 be_pct=0.015,
                 chandelier_atr=4.0,
                 max_hold_days=3,
                 risk_per_trade=0.14,
-                allocation_pct=0.15,
-                max_leverage=1.0,
+                allocation_pct=0.5,
+                max_leverage=2.0,
                 poll_interval_sec=300,
                 auto_execute=True,
             )
@@ -273,6 +573,32 @@ async def startup():
                 print(f"[startup]   Validation FAILED to start: {e}", flush=True)
         else:
             print("[startup]   Validation skipped (no OKX env keys)", flush=True)
+
+        # AI-only: ensure legacy strategies are not running
+        if AI_ONLY_MODE:
+            for _name, _bot in (
+                ("rotation", rotation),
+                ("impulse", impulse),
+                ("validation", validation),
+                ("vwap_rev", vwap_rev_bot),
+                ("scalp", scalp_bot),
+            ):
+                try:
+                    if _bot and getattr(_bot, "_running", False):
+                        if hasattr(_bot, "stop"):
+                            res = _bot.stop()
+                            if hasattr(res, "__await__"):
+                                await res
+                        print(f"[startup] AI_ONLY stopped {_name}", flush=True)
+                except Exception as _e:
+                    print(f"[startup] AI_ONLY stop {_name}: {_e}", flush=True)
+            try:
+                if sm_tracker and getattr(sm_tracker, "_running", False):
+                    sm_tracker.stop()
+                    print("[startup] AI_ONLY stopped smart_money tracker", flush=True)
+            except Exception as _e:
+                print(f"[startup] AI_ONLY stop SM: {_e}", flush=True)
+
         print("[startup] 7/7 Done ...", flush=True)
     except Exception as e:
         print(f"[startup] ERROR: {e}", flush=True)
@@ -304,10 +630,74 @@ async def startup():
     # background so user requests are always served from the hot cache.
     global _warm_task
     try:
-        _warm_task = asyncio.create_task(_warm_dashboard_caches())
-        print("[startup] Dashboard cache warmer started", flush=True)
+        # Delay heavy background work so /api/health answers immediately after bind
+        async def _delayed_bg():
+            await asyncio.sleep(8)
+            try:
+                await _warm_dashboard_caches()
+            except Exception as e:
+                print(f"[startup] warmer ended: {e}", flush=True)
+        _warm_task = asyncio.create_task(_delayed_bg())
+        print("[startup] Dashboard cache warmer scheduled (+8s)", flush=True)
+
+        async def _exchange_sync_bg():
+            await asyncio.sleep(10)
+            try:
+                n = await sync_exchange_close_trades()
+                print(f"[startup] Exchange sync done: {n} trades", flush=True)
+            except Exception as e:
+                print(f"[startup] Exchange sync error: {e}", flush=True)
+        asyncio.create_task(_exchange_sync_bg())
+        print("[startup] Exchange close trades sync scheduled (+10s)", flush=True)
+
+        async def _delayed_orphan():
+            await asyncio.sleep(120)
+            await _orphan_sweep_loop()
+        asyncio.create_task(_delayed_orphan())
+        print("[startup] Orphan sweeper scheduled (+120s)", flush=True)
     except Exception as e:
         print(f"[startup] Dashboard cache warmer error: {e}", flush=True)
+
+    try:
+        print("[startup] AI Discretionary auto-start ...", flush=True)
+        # AI runs independently: only needs OKX keys + AI_AUTO_START (default ON).
+        # Not gated by BOTS_AUTO_START so we can disable the other bots while
+        # keeping AI active for observation.
+        _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+        if _env_key and _env_secret and _env_pass and _ai_auto:
+            global ai_bot
+            _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+            # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
+            # On live, respect AI_EXECUTE env with default off.
+            if _demo:
+                _exec = True
+            else:
+                env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+                _exec = env_ex in ("1", "true", "yes", "on")
+            ai_cfg = AIConfig(
+                capital=float(os.getenv("AI_CAPITAL", "10000")),
+                max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
+                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                execute=_exec,
+            )
+            ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
+                               notifier=telegram)
+            ai_bot.start()
+            global _positions_cache
+            _positions_cache = None
+            print(
+                f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
+                flush=True,
+            )
+        else:
+            print(
+                "[startup]   AI skipped (need OKX keys + BOTS_AUTO_START; set AI_AUTO_START=0 to disable)",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"[startup]   AI FAILED: {e}", flush=True)
 
 
 @app.on_event("shutdown")
@@ -334,6 +724,11 @@ async def shutdown():
         await impulse.stop()
     if validation and validation._running:
         await validation.stop()
+    if ai_bot and getattr(ai_bot, "_running", False):
+        try:
+            ai_bot.stop()
+        except Exception:
+            pass
     await db.close()
     try:
         from app.services.analysis_logger import get_logger
@@ -363,15 +758,17 @@ async def _okx_call(coro_factory):
 # ── Access control ──
 
 PUBLIC_API_PATHS = {
-    "/api/health",
-    "/api/tracker",
-    "/api/debug/client-error",
-    "/api/debug/client-errors",
+    "/api/health",          # uptime monitors
     "/api/auth/login",
     "/api/auth/guest",
     "/api/auth/status",
     "/api/auth/logout",
-    "/api/auth/telegram",
+    "/api/auth/telegram",   # Telegram Login / mini-app init
+    # Intentionally NOT public:
+    # /api/ai/status — requires auth (was used for recon)
+    # /api/debug/client-error(s) — admin only (spam / log injection)
+    # /api/tracker — requires auth
+    # /api/risk/status — requires auth (was leaking kill-switch state)
 }
 
 ADMIN_ONLY_PATHS = {
@@ -380,6 +777,7 @@ ADMIN_ONLY_PATHS = {
     "/api/credentials/init",
     "/api/trade/order",
     "/api/positions/close",
+    "/api/positions/sweep-orphans",
     "/api/momentum/start",
     "/api/momentum/stop",
     "/api/momentum/config",
@@ -410,21 +808,67 @@ ADMIN_ONLY_PATHS = {
     "/api/subs/activate",
     "/api/subs/deactivate",
     "/api/subs/config",
+    "/api/mode",
+    "/api/audit",
+    "/api/risk/kill",
+    "/api/pnl/rebuild-strategy",
+    "/api/admin/reset-trading-stats",
+    "/api/ai/start",
+    "/api/ai/stop",
+    "/api/ai/decide",
+    "/api/ai/correct-attribution",
+    "/api/ai/logs",
+    "/api/ai/logs/download",
 }
 
-ADMIN_ONLY_PREFIXES = ("/api/debug/",)
+ADMIN_ONLY_PREFIXES = (
+    "/api/debug/",
+    "/api/admin/",
+    "/api/vwap_rev/",
+)
+# Smart Money reads (discover/status) allowed for any authenticated non-guest;
+# mutations still use Depends(require_admin).
+
+# Guest cannot read live trading / PnL (admin or telegram-user only)
+GUEST_FORBIDDEN_PREFIXES = (
+    "/api/pnl",
+    "/api/trades",
+    "/api/positions",
+    "/api/portfolio",
+    "/api/momentum",
+    "/api/rotation",
+    "/api/impulse",
+    "/api/validation",
+    "/api/ai/",
+    "/api/smart-money",
+    "/api/reports",
+    "/api/backtest",
+    "/api/credentials",
+    "/api/mode",
+    "/api/audit",
+    "/api/db/",
+    "/api/me",
+)
 
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    if not request.url.path.startswith("/api/") or request.url.path in PUBLIC_API_PATHS:
+    path = request.url.path
+    if not path.startswith("/api/") or path in PUBLIC_API_PATHS:
         return await call_next(request)
     role = validate(get_token(request))
     if role is None:
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-    if request.url.path in ADMIN_ONLY_PATHS or request.url.path.startswith(ADMIN_ONLY_PREFIXES):
+    if path in ADMIN_ONLY_PATHS or any(path.startswith(p) for p in ADMIN_ONLY_PREFIXES):
         if role != "admin":
             return JSONResponse(status_code=403, content={"detail": "Forbidden"})
+    if role == "guest":
+        for p in GUEST_FORBIDDEN_PREFIXES:
+            if path == p or path.startswith(p + "/") or path.startswith(p):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Guest cannot access trading data. Sign in as admin."},
+                )
     return await call_next(request)
 
 
@@ -438,7 +882,12 @@ async def auth_login(request: Request, data: dict):
     token = login(data.get("password", ""))
     if token:
         record_attempt(ip, True)
-        return {"token": token, "role": "admin"}
+        body = {"role": "admin", "cookie_auth": True}
+        # Prefer cookie; still return token unless COOKIE_ONLY_AUTH=1 (legacy clients/mini-app)
+        if (os.getenv("COOKIE_ONLY_AUTH") or "0").strip().lower() not in ("1", "true", "yes"):
+            body["token"] = token
+        resp = JSONResponse(body)
+        return _set_auth_cookie(resp, token)
     record_attempt(ip, False)
     raise HTTPException(status_code=401, detail="Invalid password")
 
@@ -450,7 +899,11 @@ async def auth_guest(request: Request):
         raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
     record_guest(ip)
     token = guest()
-    return {"token": token, "role": "guest"}
+    body = {"role": "guest", "cookie_auth": True}
+    if (os.getenv("COOKIE_ONLY_AUTH") or "0").strip().lower() not in ("1", "true", "yes"):
+        body["token"] = token
+    resp = JSONResponse(body)
+    return _set_auth_cookie(resp, token)
 
 
 @app.get("/api/auth/status")
@@ -550,12 +1003,23 @@ async def auth_telegram(data: dict):
 @app.post("/api/auth/logout")
 async def auth_logout(request: Request):
     token = get_token(request)
-    return logout(token)
+    try:
+        logout(token)
+        # Persist denylist to Postgres (same key as startup hydrate)
+        try:
+            from app.services.auth import flush_blacklist_to_db
+            await flush_blacklist_to_db()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    resp = JSONResponse({"ok": True})
+    return _clear_auth_cookie(resp)
 
 
-# ══════════════════════════════════════════════════════════════
-# MULTI-TENANT /api/me/* — per-user mini-app account
-# ══════════════════════════════════════════════════════════════
+# ── Multi-tenant /api/me/* helpers ─────────────────────────────────────────
+# (restored from 96ad252 — were accidentally removed in e0c251e, leaving the
+#  /api/me/* routes calling undefined functions → NameError)
 
 async def _me_ctx(request: Request):
     """Resolve the authenticated user context.
@@ -597,6 +1061,21 @@ async def _user_okx_client(user_id: str) -> Optional[OKXClient]:
         return None
     client = OKXClient(key, secret, passphrase, bool(u.get("okx_demo", 1)))
     _user_clients[user_id] = client
+    # Cap the cache to avoid unbounded memory growth on many users.
+    # Dict keeps insertion order → evict oldest first (FIFO).
+    MAX_USER_CLIENTS = 200
+    if len(_user_clients) > MAX_USER_CLIENTS:
+        try:
+            _oldest = next(iter(_user_clients))
+            _evict = _user_clients.pop(_oldest)
+            _closer = _evict.close()
+            if asyncio.iscoroutine(_closer):
+                try:
+                    asyncio.get_event_loop().create_task(_closer)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     strategy_mgr.set_user_client(user_id, client)
     return client
 
@@ -623,7 +1102,7 @@ def _has_active_plan(user_row: dict) -> bool:
     if not user_row:
         return False
     plan = user_row.get("plan")
-    if plan != "pro":
+    if plan not in ("signals", "pro"):
         return False
     return _is_active(user_row)
 
@@ -795,11 +1274,14 @@ def _user_strategy_statuses(ub):
 async def me_status(request: Request):
     role, user_id, user_row = await _me_ctx(request)
     if user_id is None:
+        # Owner: same History-aligned PnL as /api/momentum/status cards
+        rot = await momentum_status() if rotation else {"running": False}
+        imp = await impulse_status() if impulse else {"running": False}
         return {
             "role": "admin",
             "plan": "owner",
-            "rotation": rotation.get_status() if rotation else {"running": False},
-            "impulse": impulse.get_status() if impulse else {"running": False},
+            "rotation": rot,
+            "impulse": imp,
         }
     ub = strategy_mgr.get_or_create(user_id)
     rot_status, imp_status = _user_strategy_statuses(ub)
@@ -1002,16 +1484,7 @@ async def me_pnl(request: Request):
 # PUBLIC EQUITY TRACKER (no auth — trust page for selling subscriptions)
 # ══════════════════════════════════════════════════════════════
 
-_BACKTEST_SUMMARY = {
-    "note": "Результаты бэктестов на реальных свечах OKX (нативные 1D, 10 монет, 2023–2026). Не гарантия будущей доходности.",
-    "periods": [
-        {"label": "Momentum Rotation v5 2023–2026", "return_pct": 365.5, "max_dd_pct": 51.8, "cagr_pct": 59.8, "sharpe": 1.23},
-        {"label": "Impulse 1D v2 2023–2026", "return_pct": 402.2, "max_dd_pct": 36.5, "cagr_pct": 63.5, "sharpe": 1.58},
-        {"label": "Портфель 50/50 2023–2026", "return_pct": 383.9, "max_dd_pct": 36.2, "cagr_pct": 61.6, "sharpe": 1.60},
-    ],
-    "win_rate_backtest_pct": 55.0,
-    "liquidations": 0,
-}
+# _BACKTEST_SUMMARY imported from app.services.strategy_cards
 
 
 @app.get("/api/tracker")
@@ -1083,11 +1556,969 @@ async def public_tracker():
     }
 
 
+
+# ── AI Discretionary 1H ──
+
+@app.get("/api/ai/status")
+async def ai_status():
+    """AI status. Prefer History-sourced PnL (same as /api/pnl Total) when available."""
+    global ai_bot
+    if not ai_bot:
+        return {
+            "running": False,
+            "strategy": "AI Discretionary 1H",
+            "total_pnl": 0,
+            "lifetime_pnl": 0,
+            "open_positions": [],
+        }
+    try:
+        status = ai_bot.get_status()
+    except Exception as e:
+        import traceback
+        print(f"[ai/status] get_status error: {e}", flush=True)
+        traceback.print_exc()
+        return {"error": f"get_status: {type(e).__name__}: {e}", "running": ai_bot._running}
+    internal = status.get("lifetime_pnl", status.get("total_pnl"))
+    status["total_pnl_internal"] = internal
+    status["lifetime_pnl_internal"] = internal
+    try:
+        # Prefer same totals as /api/pnl (includes entry-owner + forced overrides)
+        pnl_resp = await get_pnl()
+        per = pnl_resp.get("per_bot_all") or pnl_resp.get("per_bot") or {}
+        ai_pnl = float(per.get("AI Discretionary 1H") or 0)
+        # Trade counts from paired list (label AI after overrides)
+        resp = await get_paired_trades(limit=5000)
+        ai_n = 0
+        ai_wins = 0
+        epoch = await get_pnl_epoch()
+        for tr in resp.get("trades", []) or []:
+            if (tr.get("reason") or "").lower() in ("open", "add"):
+                continue
+            if tr.get("pnl") is None:
+                continue
+            if not _trade_after_epoch(tr, epoch):
+                continue
+            if (tr.get("bot") or "").strip() != "AI Discretionary 1H":
+                continue
+            try:
+                pnl = float(tr.get("pnl") or 0)
+            except (TypeError, ValueError):
+                continue
+            ai_n += 1
+            if pnl > 0:
+                ai_wins += 1
+        status["total_pnl"] = round(ai_pnl, 2)
+        status["lifetime_pnl"] = round(ai_pnl, 2)
+        status["total_trades"] = ai_n
+        status["wins"] = ai_wins
+        status["win_rate"] = round(100.0 * ai_wins / ai_n, 1) if ai_n else 0.0
+        status["total_pnl_source"] = "okx_history"
+    except Exception as e:
+        print(f"[ai/status] history pnl: {e}", flush=True)
+        status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
+    return await _apply_history_kpi(status, "AI Discretionary 1H")
+
+
+
+
+@app.post("/api/admin/reassign-trade", dependencies=[Depends(require_admin)])
+async def admin_reassign_trade(data: dict = None):
+    """Reassign a closed trade between strategy bots (DB + override list)."""
+    data = data or {}
+    from_bot = str(data.get("from_bot") or "rotation_strategy").strip()
+    to_bot = str(data.get("to_bot") or "ai_strategy").strip()
+    # accept human labels
+    label_to_id = {
+        "Momentum": "rotation_strategy",
+        "Impulse 1D": "impulse_strategy",
+        "AI Discretionary 1H": "ai_strategy",
+        "MACD+Donchian Validation": "validation_strategy",
+    }
+    id_to_label = {v: k for k, v in label_to_id.items()}
+    from_bot = label_to_id.get(from_bot, from_bot)
+    to_bot = label_to_id.get(to_bot, to_bot)
+    symbol = str(data.get("symbol") or data.get("coin") or "ETH").upper().replace("-USDT-SWAP", "")
+    inst = f"{symbol}-USDT-SWAP"
+    side = str(data.get("side") or data.get("pos_side") or "short").lower()
+    pnl_near = data.get("pnl_near", data.get("pnl"))
+    try:
+        pnl_near = float(pnl_near) if pnl_near is not None else 134.17
+    except (TypeError, ValueError):
+        pnl_near = 134.17
+    time_contains = str(data.get("time") or data.get("exit_date") or "2026-09-01")
+    stats = await db.reassign_closed_trade(
+        from_bot, to_bot, inst,
+        side=side, pnl_near=pnl_near, time_contains=time_contains,
+    )
+    # persist override for paired pipeline
+    import json as _json
+    rule = {
+        "inst_id": inst,
+        "pos_side": "short" if side in ("short", "sell") else "long",
+        "pnl_near": pnl_near,
+        "exit_date": time_contains[:10],
+        "to_bot": id_to_label.get(to_bot, "AI Discretionary 1H"),
+    }
+    try:
+        raw = await db.get_setting("pnl_bot_overrides")
+        arr = _json.loads(raw) if raw else []
+        if not isinstance(arr, list):
+            arr = []
+        arr = [r for r in arr if not (
+            r.get("inst_id") == rule["inst_id"]
+            and abs(float(r.get("pnl_near") or 0) - pnl_near) < 1
+        )]
+        arr.append(rule)
+        await db.set_setting("pnl_bot_overrides", _json.dumps(arr))
+    except Exception as e:
+        stats["override_err"] = str(e)
+    # clear caches
+    global _bot_stats_cache, _paired_cache, _pnl_cache
+    _bot_stats_cache = {"ts": 0.0, "data": {}}
+    _paired_cache = {}
+    # adjust in-memory AI / rotation if present
+    try:
+        if ai_bot and abs(float(stats.get("pnl") or 0)) > 0:
+            ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) + float(stats["pnl"])
+            ai_bot._lifetime_trades = int(getattr(ai_bot, "_lifetime_trades", 0) or 0) + int(stats.get("moved") or 0)
+    except Exception:
+        pass
+    return {"ok": True, "from_bot": from_bot, "to_bot": to_bot, "rule": rule, **stats}
+
+
+@app.post("/api/ai/correct-attribution", dependencies=[Depends(require_admin)])
+async def ai_correct_attribution(data: dict = None):
+    """Move mis-attributed trades (default SOL) off AI PnL onto Impulse."""
+    global ai_bot
+    data = data or {}
+    symbol = str(data.get("symbol") or "SOL").upper()
+    to_bot = str(data.get("to_bot") or "impulse_strategy")
+    if ai_bot and hasattr(ai_bot, "correct_misattributed"):
+        return await ai_bot.correct_misattributed(symbol, to_bot)
+    # offline fix via DB only
+    from app.services.ai_strategy import AI_BOT_ID
+    inst = f"{symbol}-USDT-SWAP"
+    stats = await db.reassign_trades_instrument(AI_BOT_ID, to_bot, inst)
+    try:
+        from app.services.position_claim import release_open
+        await release_open(db, AI_BOT_ID, inst, "long")
+        await release_open(db, AI_BOT_ID, inst, "short")
+    except Exception:
+        pass
+    return {"ok": True, "offline": True, **stats, "symbol": symbol, "to_bot": to_bot}
+
+
+@app.post("/api/ai/start", dependencies=[Depends(require_admin)])
+async def ai_start(data: dict = None):
+    # decorator must be @app.post (not bare post)
+
+    global ai_bot
+    data = data or {}
+    if ai_bot and getattr(ai_bot, "_running", False):
+        return {"message": "AI already running", **ai_bot.get_status()}
+    # Default execute=True on OKX demo so we accumulate real fills+logs for prompt tuning
+    _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+    if "execute" in data:
+        _exec = bool(data["execute"])
+    elif _demo:
+        _exec = True  # demo always executes (AI_EXECUTE=0 on demo is meaningless)
+    else:
+        env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+        _exec = env_ex in ("1", "true", "yes", "on")
+    cfg = AIConfig(
+        capital=float(data.get("capital") or os.getenv("AI_CAPITAL", "10000")),
+        max_leverage=float(data.get("max_leverage") or 3),
+        max_positions=int(data.get("max_positions") or 1),
+        risk_per_trade=float(data.get("risk_per_trade") or 0.02),
+        poll_interval_sec=int(data.get("poll_interval_sec") or 120),
+        provider=data.get("provider") or (
+            "bai" if os.getenv("BAI_API_KEY", "").strip()
+            else ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None)
+        ),
+        execute=_exec,
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
+    ai_bot.start()
+    global _positions_cache
+    _positions_cache = None
+    return {"message": "AI Discretionary started", **ai_bot.get_status()}
+
+
+@app.post("/api/ai/stop", dependencies=[Depends(require_admin)])
+async def ai_stop():
+    global ai_bot
+    if ai_bot:
+        ai_bot.stop()
+    return {"message": "AI stopped", "running": False}
+
+
+@app.post("/api/ai/execute", dependencies=[Depends(require_admin)])
+async def ai_execute(data: dict = None):
+    """Toggle AI auto-trading (execute=on/off) at runtime. Optionally resets
+    stale lifetime PnL (reset=1) — AI ran in signal mode so old data is bogus."""
+    global ai_bot
+    d = data or {}
+    if not ai_bot:
+        return {"ok": False, "message": "AI bot not running"}
+    enabled = bool(d.get("execute"))
+    if d.get("reset"):
+        ai_bot.reset_lifetime_pnl()
+    ai_bot.set_execute(enabled)
+    st = ai_bot.get_status()
+    return {
+        "ok": True,
+        "execute": st.get("execute"),
+        "total_pnl": st.get("total_pnl"),
+        "lifetime_pnl": st.get("lifetime_pnl"),
+        "message": f"AI auto-trade {'ON' if enabled else 'OFF'}"
+                   + (" (lifetime PnL reset to 0)" if d.get("reset") else ""),
+    }
+
+
+
+
+@app.get("/api/ai/logs", dependencies=[Depends(require_admin)])
+async def ai_logs(limit: int = 200, event: str = None):
+    """Export AI decision/trade logs for prompt tuning.
+
+    Sources: in-memory decision log (running bot) + analysis.jsonl tail (bot=ai).
+    """
+    global ai_bot
+    limit = max(1, min(int(limit or 200), 2000))
+    mem = []
+    if ai_bot:
+        mem = list(getattr(ai_bot, "_decision_log", []) or [])[-limit:]
+        if event:
+            mem = [d for d in mem if (d.get("event") or d.get("action")) == event
+                   or d.get("action") == event]
+
+    file_rows = []
+    try:
+        from app.services.analysis_logger import DEFAULT_PATH
+        path = Path(DEFAULT_PATH)
+        if path.exists():
+            # read last ~N*2 lines then filter
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            for line in lines[-(limit * 3):]:
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if row.get("bot") != "ai":
+                    continue
+                if event and row.get("event") != event:
+                    continue
+                file_rows.append(row)
+            file_rows = file_rows[-limit:]
+    except Exception as e:
+        print(f"[ai/logs] file read: {e}", flush=True)
+
+    return {
+        "memory": mem,
+        "file": file_rows,
+        "memory_n": len(mem),
+        "file_n": len(file_rows),
+        "execute": bool(ai_bot and ai_bot._execute_enabled()) if ai_bot else False,
+        "running": bool(ai_bot and getattr(ai_bot, "_running", False)),
+    }
+
+
+@app.get("/api/ai/logs/download", dependencies=[Depends(require_admin)])
+async def ai_logs_download(limit: int = 500):
+    """Download AI analysis lines as JSONL attachment."""
+    from app.services.analysis_logger import DEFAULT_PATH
+    path = Path(DEFAULT_PATH)
+    out_lines = []
+    if path.exists():
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()[-(int(limit) * 5):]:
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("bot") == "ai":
+                out_lines.append(json.dumps(row, ensure_ascii=False))
+    body = ('\n'.join(out_lines[-int(limit):]) + ('\n' if out_lines else ''))
+    return Response(
+        content=body,
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": "attachment; filename=ai_decisions.jsonl"},
+    )
+
+@app.post("/api/ai/decide", dependencies=[Depends(require_admin)])
+async def ai_decide_once():
+    global ai_bot
+    if not ai_bot or not getattr(ai_bot, "_running", False):
+        raise HTTPException(status_code=400, detail="AI bot not running — start first")
+    client = client_manager.get_client() if client_manager else None
+    if not client:
+        raise HTTPException(status_code=400, detail="OKX client not ready")
+    await ai_bot._fetch_indicators(client)
+    try:
+        ai_bot._refresh_adaptive()
+    except Exception:
+        pass
+    snap = ai_bot._snapshot()
+    from app.services.ai_agent import call_llm
+    decision = await call_llm(snap, provider=ai_bot._provider())
+    enriched = ai_bot._enrich_decision(decision, snap)
+    ai_bot._last_decision = enriched
+    return {
+        "snapshot": {
+            "indicators": snap.get("indicators"),
+            "open_positions": snap.get("open_positions"),
+            "equity": snap.get("equity"),
+        },
+        "decision": enriched,
+    }
+
+
 # ── Health ──
 
+
+
+# ── Smart Money Tracker ──────────────────────────────────────
+
+def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
+    """Create global Smart Money tracker on first use (browse/copy without manual Start)."""
+    global sm_tracker
+    from app.services.smart_money_tracker import (
+        SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
+    )
+    if sm_tracker is None:
+        okx = OKXCopyAPI(
+            api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+            secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+            passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+            demo=_env_demo,
+        )
+        cfg = TrackerConfig(
+            sort_type="pnl_ratio",
+            execute=bool(execute) if execute is not None else False,
+        )
+        sm_tracker = SmartMoneyTracker(
+            config=cfg,
+            client_manager=client_manager,
+            db=db,
+            notifier=None,  # no TG for Smart Money
+            okx_api=okx,
+        )
+    else:
+        if execute is True:
+            try:
+                sm_tracker.config.execute = True
+            except Exception:
+                pass
+        # refresh keys if tracker was created empty
+        try:
+            if sm_tracker.okx_api and not getattr(sm_tracker.okx_api, "api_key", None):
+                sm_tracker.okx_api.api_key = _env_key
+                sm_tracker.okx_api.secret_key = _env_secret
+                sm_tracker.okx_api.passphrase = _env_pass
+        except Exception:
+            pass
+    if start and not getattr(sm_tracker, "_running", False):
+        sm_tracker.start()
+    return sm_tracker
+
+
+@app.get("/api/smart-money/status")
+async def smart_money_status():
+    global sm_tracker
+    if not sm_tracker:
+        st = {
+            "running": False,
+            "strategy": SM_NAME,
+            "version": SM_VERSION,
+            "execute": False,
+            "tracked_count": 0,
+            "verified_count": 0,
+            "copying_count": 0,
+            "tracked": [],
+            "open_positions": [],
+        }
+    else:
+        st = sm_tracker.get_status()
+    # Merge mirror opens so dashboard never treats SM BTC as orphan
+    try:
+        from app.services.smart_money_mirror import get_mirror
+        m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+        mop = m.open_positions_list() if hasattr(m, "open_positions_list") else []
+        cur = list(st.get("open_positions") or [])
+        seen = {(p.get("inst_id"), p.get("side")) for p in cur}
+        for p in mop:
+            key = (p.get("inst_id"), p.get("side"))
+            if key not in seen:
+                cur.append(p)
+                seen.add(key)
+        st["open_positions"] = cur
+        st["mirror_running"] = bool(getattr(m, "_running", False))
+        st["mirror_targets"] = len(getattr(m, "_targets", {}) or {})
+    except Exception as e:
+        print(f"[sm/status] mirror merge: {e}", flush=True)
+    return st
+
+
+@app.get("/api/smart-money/discover")
+async def smart_money_discover(
+    page: str = "1",
+    limit: str = "20",
+    sort: str = "pnl_ratio",
+    min_roi: float = 0,
+    verified_only: bool = False,
+    sources: str = "okx",
+):
+    """Discover traders from OKX + open sources (Hyperliquid, social).
+
+    OKX uses the light single-call path; Hyperliquid/social are fetched in
+    parallel and merged. Sources: comma-separated okx,hyperliquid,social.
+    """
+    import asyncio
+    from app.services.smart_money_light import discover_okx_light
+    from app.services.smart_money_tracker import OKXCopyAPI
+
+    src_list = [s.strip().lower() for s in (sources or "okx").split(",") if s.strip()]
+    want_okx = "okx" in src_list
+    want_hl = any(s in src_list for s in ("hyperliquid", "hl"))
+    want_social = any(s in src_list for s in ("social", "twitter", "x"))
+    if not (want_okx or want_hl or want_social):
+        want_okx = True  # default
+
+    okx = OKXCopyAPI(
+        api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+        secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+        passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+        demo=_env_demo,
+    )
+    sort_type = sort if sort not in ("roi", "") else "pnl_ratio"
+
+    traders = []
+    errors = []
+    try:
+        lim = max(1, min(30, int(limit) if str(limit).isdigit() else 20))
+    except Exception:
+        lim = 20
+
+    async def _okx():
+        try:
+            out = await discover_okx_light(
+                okx, page=page, limit=str(lim),
+                sort_type=sort_type, min_roi_pct=float(min_roi or 0),
+            )
+            return out.get("traders") or []
+        except Exception as e:
+            errors.append(f"okx: {e}")
+            return []
+
+    async def _hl():
+        try:
+            from app.services.smart_money_sources import fetch_hyperliquid_cached
+            hl = await asyncio.wait_for(
+                fetch_hyperliquid_cached(limit=lim, min_account=50_000, window="month"),
+                timeout=15.0,
+            )
+            return hl or []
+        except Exception as e:
+            errors.append(f"hyperliquid: {e}")
+            return []
+
+    async def _social():
+        try:
+            from app.services.smart_money_sources import fetch_social
+            soc = await asyncio.wait_for(fetch_social(), timeout=5.0)
+            return soc or []
+        except Exception as e:
+            errors.append(f"social: {e}")
+            return []
+
+    tasks = []
+    if want_okx:
+        tasks.append(_okx())
+    if want_hl:
+        tasks.append(_hl())
+    if want_social:
+        tasks.append(_social())
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, list):
+                traders.extend(r)
+
+    # Apply filters
+    min_roi_f = float(min_roi or 0)
+    if min_roi_f > 0:
+        traders = [t for t in traders if float(t.get("roi_pct") or 0) >= min_roi_f]
+    if verified_only:
+        traders = [t for t in traders if t.get("verified")]
+
+    # Dedupe by unique_code, OKX wins on ties
+    seen = set()
+    dedup = []
+    for t in traders:
+        c = t.get("unique_code") or ""
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        dedup.append(t)
+
+    # Sort by ROI (default) unless a different sort requested
+    if str(sort).lower() in ("pnl_ratio", "roi", ""):
+        dedup.sort(key=lambda t: float(t.get("roi_pct") or 0), reverse=True)
+    elif str(sort).lower() in ("pnl", "profit"):
+        dedup.sort(key=lambda t: float(t.get("pnl_usd") or 0), reverse=True)
+    elif str(sort).lower() in ("copyratio", "followers", "overview"):
+        dedup.sort(key=lambda t: int(t.get("copy_traders") or 0), reverse=True)
+
+    for i, t in enumerate(dedup, 1):
+        t["rank"] = i
+    dedup = dedup[:lim]
+
+    return {
+        "traders": dedup,
+        "total": len(dedup),
+        "sort": sort_type,
+        "min_roi": min_roi_f,
+        "sources": ",".join(src_list) if src_list else "okx",
+        "mode": "multi",
+        "errors": errors or None,
+        "cached": bool(any(t.get("cached") for t in dedup)),
+    }
+
+
+@app.get("/api/smart-money/trader/{unique_code}")
+async def smart_money_trader_detail(unique_code: str):
+    """Get full details for a single trader."""
+    tracker = _ensure_sm_tracker()
+    detail = await tracker.get_trader_detail(unique_code)
+    return detail
+
+
+@app.get("/api/smart-money/tracked")
+async def smart_money_tracked():
+    """List all tracked traders."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"tracked": []}
+    return {"tracked": sm_tracker.get_tracked()}
+
+
+@app.post("/api/smart-money/track", dependencies=[Depends(require_admin)])
+async def smart_money_track(data: dict = None):
+    """Start tracking a trader."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    tracker = _ensure_sm_tracker(start=False)
+    res = await tracker.track_trader(code)
+    try:
+        await tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/track] db persist: {e}", flush=True)
+    return res
+
+
+@app.post("/api/smart-money/untrack", dependencies=[Depends(require_admin)])
+async def smart_money_untrack(data: dict = None):
+    """Stop tracking a trader."""
+    global sm_tracker
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    tracker = _ensure_sm_tracker()
+    res = tracker.untrack_trader(code)
+    try:
+        await tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/untrack] db persist: {e}", flush=True)
+    return res
+
+
+def _sm_okx_api() -> "OKXCopyAPI":
+    """Build a fresh OKX Copy Trading API client (no tracker thread, no
+    background work). Copy trading on OKX is a one-shot REST call, so it
+    does NOT need the Smart Money tracker thread that crashed the process."""
+    from app.services.smart_money_tracker import OKXCopyAPI
+    return OKXCopyAPI(
+        api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+        secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
+        passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+        demo=_env_demo,
+    )
+
+
+@app.post("/api/smart-money/copy", dependencies=[Depends(require_admin)])
+async def smart_money_copy(data: dict = None):
+    """Start copying a trader on OKX (direct Copy Trading API — no tracker thread)."""
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    code_s = str(code or "").strip()
+    if code_s.startswith("hl:") or code_s.startswith("social:"):
+        return {
+            "ok": False,
+            "msg": (
+                "Этот трейдер не с OKX (Hyperliquid/соцсети). "
+                "Автокопирование запускается только для лидеров OKX Copy Trading — "
+                "в списке включите источник OKX и нажмите «Копировать» на карточке с бейджем OKX."
+            ),
+        }
+    okx = _sm_okx_api()
+    if not (okx.api_key or "").strip():
+        return {"ok": False, "msg": "OKX API keys not configured"}
+    amt = str(data.get("copy_amt") or 500)
+    try:
+        resp = await okx.start_copy(
+            inst_type="SWAP",
+            unique_code=code_s,
+            copy_mode="fixed_amount",
+            copy_total_amt=amt,
+            tp_ratio=str(data.get("tp_ratio") or 0.10),
+            sl_ratio=str(data.get("sl_ratio") or 0.05),
+            copy_mgn_mode="cross",
+        )
+        if resp.get("code") == "0":
+            try:
+                from .smart_money_ledger import get_sm_ledger
+                get_sm_ledger().record_open(
+                    kind="copy", symbol="PORTFOLIO", side="copy",
+                    size=float(amt or 0), price=0, leader=code_s,
+                    source="okx", note=f"OKX copy start {amt} USDT",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "msg": f"copying started with {amt} USDT"}
+        # OKX returns data:[] on many errors — guard against IndexError
+        _data = resp.get("data") or []
+        _msg = resp.get("msg", "unknown")
+        if _data and isinstance(_data, list):
+            _smsg = (_data[0] or {}).get("sMsg", "")
+            if _smsg:
+                _msg = _smsg
+        return {"ok": False, "msg": f"{_msg} (code {resp.get('code')})"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/smart-money/stop-copy", dependencies=[Depends(require_admin)])
+async def smart_money_stop_copy(data: dict = None):
+    """Stop copying a trader on OKX."""
+    data = data or {}
+    code = data.get("unique_code", "")
+    if not code:
+        return {"ok": False, "msg": "unique_code required"}
+    okx = _sm_okx_api()
+    try:
+        resp = await okx.stop_copy(inst_type="SWAP", unique_code=str(code).strip())
+        if resp.get("code") == "0":
+            try:
+                from .smart_money_ledger import get_sm_ledger
+                get_sm_ledger().record_close(
+                    kind="copy", symbol="PORTFOLIO", side="copy",
+                    size=0, price=0, pnl=0, leader=str(code).strip(),
+                    source="okx", note="OKX copy stopped",
+                )
+            except Exception:
+                pass
+            return {"ok": True, "msg": "copying stopped"}
+        _data = resp.get("data") or []
+        _msg = resp.get("msg", "unknown")
+        if _data and isinstance(_data, list):
+            _smsg = (_data[0] or {}).get("sMsg", "")
+            if _smsg:
+                _msg = _smsg
+        return {"ok": False, "msg": f"{_msg} (code {resp.get('code')})"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@app.get("/api/smart-money/my-copies")
+async def smart_money_my_copies():
+    """Get list of traders we're currently copying."""
+    okx = _sm_okx_api()
+    try:
+        resp = await okx.get_my_lead_traders()
+        if resp.get("code") == "0":
+            return {"copies": resp.get("data", [])}
+        return {"copies": [], "error": resp.get("msg", "")}
+    except Exception as e:
+        return {"copies": [], "error": str(e)}
+
+
+
+
+@app.get("/api/smart-money/pnl")
+async def smart_money_pnl():
+    """PnL and open/closed trades only for Smart Money (copy + mirror)."""
+    from app.services.smart_money_ledger import get_sm_ledger
+    return get_sm_ledger().snapshot()
+
+
+@app.get("/api/smart-money/trades")
+async def smart_money_trades(limit: int = 100):
+    from app.services.smart_money_ledger import get_sm_ledger
+    return {"trades": get_sm_ledger().trades(limit=limit), "bot_id": "smart_money"}
+
+
+@app.get("/api/smart-money/mirror/status")
+async def smart_money_mirror_status():
+    from app.services.smart_money_mirror import get_mirror
+    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+    return m.get_status()
+
+
+@app.post("/api/smart-money/mirror/start", dependencies=[Depends(require_admin)])
+async def smart_money_mirror_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: Smart Money disabled")
+    """Start mirroring a public Hyperliquid trader onto OKX."""
+    # Mirroring runs a background thread with its own event loop. On the
+    # free-tier Render instance this destabilizes the process (site goes
+    # down with empty 503, no crash log). Disabled until it can be reworked
+    # to avoid per-thread async/network loops. OKX Copy Trading (one-shot
+    # REST call) remains fully supported via /api/smart-money/copy.
+    return {"ok": False, "msg": "Зеркала HL→OKX временно отключены — перерабатываются. Доступно OKX Copy Trading."}
+
+
+@app.post("/api/smart-money/mirror/stop", dependencies=[Depends(require_admin)])
+async def smart_money_mirror_stop(data: dict = None):
+    from app.services.smart_money_mirror import get_mirror
+    data = data or {}
+    address = data.get("address") or data.get("unique_code") or ""
+    m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+    return await m.stop_mirror(address, close_positions=bool(data.get("close_positions", False)))
+
+
+@app.post("/api/smart-money/start", dependencies=[Depends(require_admin)])
+async def smart_money_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: Smart Money disabled")
+    """Start the Smart Money Tracker (+ restore mirror claims)."""
+    global sm_tracker
+    if os.getenv("SM_EXECUTION_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return {"ok": False, "msg": "Фоновый мониторинг Smart Money временно отключён — раздел перерабатывается"}
+    data = data or {}
+    try:
+        if sm_tracker and getattr(sm_tracker, "_running", False):
+            st = sm_tracker.get_status()
+            return {"message": "Already running", **st}
+        cfg = TrackerConfig(
+            capital=float(data.get("capital") or 500),
+            max_leverage=int(data.get("max_leverage") or 3),
+            execute=bool(data.get("execute", False)),
+            sort_type=data.get("sort_type") or "pnl_ratio",
+            min_roi_pct=float(data.get("min_roi_pct") or 5.0),
+            min_win_rate=float(data.get("min_win_rate") or 0.45),
+            max_max_drawdown=float(data.get("max_max_drawdown") or 0.30),
+            tp_ratio=float(data.get("tp_ratio") or 0.10),
+            sl_ratio=float(data.get("sl_ratio") or 0.05),
+            poll_interval_sec=float(data.get("poll_interval_sec") or 60),
+        )
+        okx_api = OKXCopyAPI(
+            api_key=_env_key or os.getenv("OKX_API_KEY", ""),
+            secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", ""),
+            passphrase=_env_pass or os.getenv("OKX_PASSPHRASE", ""),
+            demo=_env_demo,
+        )
+        sm_tracker = SmartMoneyTracker(
+            config=cfg, client_manager=client_manager, db=db,
+            notifier=None, okx_api=okx_api,
+        )
+        if hasattr(sm_tracker, "hydrate_from_db"):
+            await sm_tracker.hydrate_from_db()
+        sm_tracker.start()
+        try:
+            await sm_tracker.persist_to_db()
+        except Exception as e:
+            print(f"[sm/start] db persist: {e}", flush=True)
+        # Restore mirror + claims for open SM positions (e.g. BTC)
+        try:
+            from app.services.smart_money_mirror import get_mirror
+            m = get_mirror(client_manager=client_manager, notifier=None, db=db)
+            await m.hydrate_from_db()
+        except Exception as e:
+            print(f"[sm/start] mirror hydrate: {e}", flush=True)
+        st = sm_tracker.get_status()
+        return {"message": "Smart Money Tracker started", "ok": True, **st}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Smart Money start failed: {e}")
+
+
+@app.post("/api/smart-money/stop", dependencies=[Depends(require_admin)])
+async def smart_money_stop():
+    """Stop the Smart Money Tracker."""
+    global sm_tracker
+    if sm_tracker:
+        sm_tracker.stop()
+    return {"message": "Smart Money Tracker stopped", "running": False}
+
+
+@app.post("/api/smart-money/config", dependencies=[Depends(require_admin)])
+async def smart_money_update_config(data: dict = None):
+    """Update tracker config at runtime (capital, TP/SL, leverage, etc)."""
+    global sm_tracker
+    if not sm_tracker:
+        return {"ok": False, "msg": "Tracker not initialized"}
+    data = data or {}
+    allowed = {
+        "capital", "max_leverage", "tp_ratio", "sl_ratio",
+        "max_daily_loss_pct", "max_open_copies", "copy_mode",
+        "min_roi_pct", "min_win_rate", "max_max_drawdown",
+        "min_lead_days", "poll_interval_sec", "execute",
+    }
+    filtered = {k: v for k, v in data.items() if k in allowed and v is not None}
+    res = sm_tracker.update_config(**filtered)
+    try:
+        await sm_tracker.persist_to_db()
+    except Exception as e:
+        print(f"[sm/config] db persist: {e}", flush=True)
+    return res
+
+
+@app.get("/api/smart-money/trader/{unique_code}/history")
+async def smart_money_trader_history(unique_code: str, limit: int = 50):
+    """Get closed trade history for a trader."""
+    global sm_tracker
+    if not sm_tracker or not sm_tracker.okx_api:
+        return {"trades": []}
+    try:
+        resp = await sm_tracker.okx_api.get_trader_position_history(
+            unique_code, limit=str(limit)
+        )
+        if resp.get("code") == "0":
+            trades = []
+            for h in resp.get("data", []):
+                trades.append({
+                    "instId": h.get("instId", ""),
+                    "side": h.get("side", ""),
+                    "sz": h.get("sz", ""),
+                    "avgPx": h.get("avgPx", ""),
+                    "pnl": float(h.get("pnl", 0)),
+                    "pnlRatio": float(h.get("pnlRatio", 0)),
+                    "openTime": h.get("cTime", ""),
+                    "closeTime": h.get("uTime", ""),
+                    "lever": h.get("lever", ""),
+                })
+            return {"trades": trades}
+        return {"trades": []}
+    except Exception as e:
+        return {"trades": [], "error": str(e)}
+
+
+@app.get("/api/vwap_rev/status")
+async def vwap_rev_status():
+    global vwap_rev_bot
+    if not vwap_rev_bot:
+        return {
+            "running": False,
+            "strategy": VWAP_NAME,
+            "version": VWAP_VERSION,
+            "description": VWAP_DESC,
+            "execute": False,
+            "open_positions": [],
+            "total_pnl": 0,
+            "recent_signals": [],
+        }
+    return vwap_rev_bot.get_status()
+
+
+@app.post("/api/vwap_rev/start", dependencies=[Depends(require_admin)])
+async def vwap_rev_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: vwap disabled")
+    global vwap_rev_bot
+    data = data or {}
+    if vwap_rev_bot and getattr(vwap_rev_bot, "_running", False):
+        return {"message": "VWAP Mean Reversion already running", **vwap_rev_bot.get_status()}
+    cfg = VWAPScalpConfig(
+        capital=float(data.get("capital") or 5000),
+        max_leverage=float(data.get("max_leverage") or 2),
+        risk_per_trade=float(data.get("risk_per_trade") or 0.008),
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    vwap_rev_bot = VWAPMeanReversion(
+        config=cfg, client_manager=client_manager, db=db, notifier=None,
+    )
+    vwap_rev_bot.start()
+    return {"message": "VWAP Mean Reversion started", **vwap_rev_bot.get_status()}
+
+
+@app.post("/api/vwap_rev/stop", dependencies=[Depends(require_admin)])
+async def vwap_rev_stop():
+    global vwap_rev_bot
+    if vwap_rev_bot:
+        vwap_rev_bot.stop()
+    return {"message": "VWAP Mean Reversion stopped", "running": False}
+
+
+
+@app.get("/api/health/positions-claims", dependencies=[Depends(require_admin)])
+async def health_positions_claims():
+    """Compare OKX open SWAP positions vs DB strategy claims."""
+    from app.services.position_claim import norm_side
+    client = client_manager.get_client()
+    exchange = []
+    if client:
+        try:
+            res = await client.get_positions("SWAP")
+            for p in (res.get("data") or []):
+                try:
+                    sz = abs(float(p.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0
+                if sz <= 0:
+                    continue
+                exchange.append({
+                    "inst_id": p.get("instId"),
+                    "side": norm_side(p.get("posSide") or "net"),
+                    "size": sz,
+                    "upl": float(p.get("upl") or 0),
+                })
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+    claims = []
+    try:
+        rows = await db.get_all_positions() if hasattr(db, "get_all_positions") else []
+        for r in rows or []:
+            claims.append({
+                "bot_id": r.get("bot_id"),
+                "inst_id": r.get("inst_id"),
+                "side": r.get("side"),
+                "size": r.get("size"),
+            })
+    except Exception as e:
+        claims = [{"error": str(e)}]
+    cl_keys = set()
+    for c in claims:
+        if c.get("inst_id"):
+            cl_keys.add((c.get("inst_id"), norm_side(c.get("side") or "long")))
+            cl_keys.add((c.get("inst_id"), "net"))
+    only_exchange = [x for x in exchange if (x["inst_id"], x["side"]) not in cl_keys]
+    only_claims = [
+        c for c in claims
+        if c.get("inst_id") and (c.get("inst_id"), norm_side(c.get("side") or "long")) not in
+        {(e["inst_id"], e["side"]) for e in exchange}
+    ]
+    return {
+        "ok": len(only_exchange) == 0,
+        "exchange_count": len(exchange),
+        "claims_count": len([c for c in claims if c.get("inst_id")]),
+        "only_on_exchange": only_exchange,
+        "only_in_db_claims": only_claims,
+        "exchange": exchange,
+        "claims": claims,
+    }
+
 @app.get("/api/health")
-async def health():
-    """Liveness + connection + bot run flags (for keep-alive monitors and UI)."""
+async def health(request: Request):
+    """Liveness + connection + bot flags. Heavy PnL only with ?diag=1."""
     client = client_manager.get_client()
     connected = client is not None
     uptime = None
@@ -1096,6 +2527,40 @@ async def health():
 
     def _bot_flag(bot) -> bool:
         return bool(bot is not None and getattr(bot, "_running", False))
+
+    diag = {}
+    try:
+        import resource
+        diag["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024, 1)
+    except Exception:
+        pass
+    try:
+        diag["sm_running"] = bool(getattr(sm_tracker, "_running", False))
+        diag["sm_tracked"] = len(getattr(sm_tracker, "_traders", {}) or {})
+        diag["sm_error"] = (getattr(sm_tracker, "_last_error", "") or "")[:120]
+    except Exception:
+        pass
+
+    _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+
+    # Optional heavy diagnostics (manual only — never for UptimeRobot)
+    want_diag = False
+    try:
+        if request is not None:
+            want_diag = str(request.query_params.get("diag") or "") in ("1", "true", "yes")
+    except Exception:
+        want_diag = False
+    if want_diag:
+        try:
+            diag["pnl_epoch"] = await get_pnl_epoch()
+            _pr = await get_pnl()
+            diag["pnl_total"] = _pr.get("total")
+            diag["pnl_1d"] = _pr.get("1d")
+            diag["pnl_week"] = _pr.get("week")
+            diag["pnl_per_bot"] = _pr.get("per_bot")
+            diag["pnl_source"] = _pr.get("source")
+        except Exception as e:
+            diag["pnl_err"] = str(e)[:200]
 
     return {
         "status": "ok",
@@ -1107,9 +2572,40 @@ async def health():
             "rotation": _bot_flag(rotation),
             "impulse": _bot_flag(impulse),
             "validation": _bot_flag(validation),
+            "ai": _bot_flag(ai_bot),
+            "scalp": False,
+            "vwap_rev": _bot_flag(vwap_rev_bot),
+            "smart_money": bool(getattr(sm_tracker, "_running", False)),
         },
         "auth": "jwt",
+        "risk": risk_get_status().to_dict(),
+        "sm_diag": diag,
     }
+
+
+# ── Risk guards (stage-3a) ──
+
+@app.get("/api/risk/status")
+async def risk_status():
+    """Public-ish status for UI badges (no secrets)."""
+    daily = None
+    try:
+        # best-effort daily pnl from existing endpoint helper if present
+        from app.services import risk_guard as _rg  # noqa: F401
+    except Exception:
+        pass
+    st = risk_get_status(daily_pnl=None)
+    return st.to_dict()
+
+
+@app.post("/api/risk/kill", dependencies=[Depends(require_admin)])
+async def risk_kill(request: Request, data: dict = None):
+    """Enable/disable runtime kill switch (blocks new entries, not closes)."""
+    data = data or {}
+    enabled = bool(data.get("enabled", True))
+    set_kill_switch(enabled)
+    await write_audit(request, "risk.kill_switch", detail=f"enabled={enabled}")
+    return {"ok": True, **risk_get_status().to_dict()}
 
 
 # ── Credentials ──
@@ -1137,7 +2633,7 @@ async def credentials_test(data: dict):
 
 
 @app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
-async def credentials_init(data: dict):
+async def credentials_init(request: Request, data: dict):
     global _env_key, _env_secret, _env_pass, _env_demo
     key = data.get("apiKey", "")
     secret = data.get("secretKey", "")
@@ -1155,7 +2651,50 @@ async def credentials_init(data: dict):
     result = await client_manager.init_client(key, secret, passphrase, demo)
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+    await write_audit(request, "credentials.init", detail=f"demo={bool(demo)}")
     return {"message": "Credentials configured", "demo": demo}
+
+
+@app.get("/api/mode", dependencies=[Depends(require_admin)])
+async def get_trading_mode():
+    return {"demo": _env_demo, "okx_demo": _env_demo, "live": not _env_demo}
+
+
+@app.post("/api/mode", dependencies=[Depends(require_admin)])
+async def set_trading_mode(request: Request, data: dict = None):
+    """Switch DEMO/LIVE for the owner OKX client.
+
+    Switching to LIVE requires confirm == "LIVE" to avoid accidental flips.
+    """
+    global _env_demo
+    data = data or {}
+    demo = bool(data.get("demo", True))
+    if not demo:
+        if str(data.get("confirm", "")).strip() != "LIVE":
+            raise HTTPException(
+                status_code=400,
+                detail='Switching to LIVE requires confirm: "LIVE"',
+            )
+    if not (_env_key and _env_secret and _env_pass):
+        raise HTTPException(status_code=400, detail="OKX credentials not configured")
+    prev = _env_demo
+    _env_demo = demo
+    result = await client_manager.init_client(_env_key, _env_secret, _env_pass, demo)
+    if result.get("error"):
+        _env_demo = prev
+        raise HTTPException(status_code=400, detail=result.get("message", "Reconnect failed"))
+    await write_audit(
+        request,
+        "mode.switch",
+        detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
+    )
+    return {"ok": True, "demo": _env_demo, "live": not _env_demo}
+
+
+@app.get("/api/audit", dependencies=[Depends(require_admin)])
+async def get_audit(limit: int = 100):
+    rows = await db.list_audit(limit=limit)
+    return {"items": rows}
 
 
 # ── Portfolio ──
@@ -1191,26 +2730,40 @@ async def get_portfolio():
 
 # ── Positions ──
 
-def _tag_position_bot(inst_id: str, pos_side: str) -> str:
-    """Determine which bot owns an OKX position by checking running bots' in-memory positions."""
-    # Normalize pos_side for matching
+def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = None) -> str:
+    """Determine which bot owns an OKX position.
+
+    Priority: in-memory _positions → trade logs → DB positions table → empty.
+    """
     norm_side = pos_side.lower() if pos_side else ""
-    # Check Impulse bot positions
-    if impulse and impulse._running and impulse._positions:
-        for coin, pos in impulse._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Impulse 1D"
-    # Check Validation bot positions
-    if validation and validation._running and validation._positions:
-        for coin, pos in validation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "MACD+Donchian Validation"
-    # Check Rotation bot positions
-    if rotation and rotation._running and rotation._positions:
-        for coin, pos in rotation._positions.items():
-            if pos.inst_id == inst_id and pos.side == norm_side:
-                return "Momentum"
-    # Fallback: check trade logs for recent open entry of this instrument
+
+    def _match(bot) -> bool:
+        # Do not require _running: after redeploy memory may still be refilled
+        # while status is stopped, or restore completed on first tick.
+        if not (bot and getattr(bot, "_positions", None)):
+            return False
+        for coin, pos in bot._positions.items():
+            if pos.inst_id == inst_id and (
+                pos.side == norm_side or norm_side in ("", "net")
+                or (norm_side in ("long", "short") and pos.side in ("long", "short"))
+            ):
+                # side must agree when both are directional
+                if norm_side in ("long", "short") and pos.side in ("long", "short"):
+                    if pos.side != norm_side:
+                        continue
+                return True
+        return False
+
+    if _match(rotation):
+        return "Momentum"
+    if _match(impulse):
+        return "Impulse 1D"
+    if _match(validation):
+        return "MACD+Donchian Validation"
+    if _match(ai_bot):
+        return "AI Discretionary 1H"
+
+    # Fallback: trade logs (same priority)
     if rotation and rotation._trade_log:
         for t in reversed(rotation._trade_log):
             sym = t.get("symbol", "") or t.get("inst_id", "")
@@ -1226,15 +2779,63 @@ def _tag_position_bot(inst_id: str, pos_side: str) -> str:
             sym = t.get("symbol", "") or t.get("inst_id", "")
             if sym == inst_id and t.get("reason") == "open":
                 return "MACD+Donchian Validation"
+    if ai_bot and ai_bot._trade_log:
+        for t in reversed(ai_bot._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "AI Discretionary 1H"
+    if vwap_rev_bot and vwap_rev_bot._trade_log:
+        for t in reversed(vwap_rev_bot._trade_log):
+            sym = t.get("symbol", "") or t.get("inst_id", "")
+            if sym == inst_id and t.get("reason") == "open":
+                return "VWAP Mean Reversion"
+
+    # Fallback: DB positions table (survives restarts)
+    if db_pos_map is not None:
+        # Try exact side match first
+        bot_id = db_pos_map.get((inst_id, norm_side))
+        if not bot_id and norm_side == "net":
+            # One-way mode: OKX returns "net" but DB stores "long" or "short"
+            bot_id = db_pos_map.get((inst_id, "long")) or db_pos_map.get((inst_id, "short"))
+        if not bot_id:
+            # Last resort: any position for this instrument
+            for (iid, _), bid in db_pos_map.items():
+                if iid == inst_id:
+                    bot_id = bid
+                    break
+        if bot_id:
+            name = _db_bot_name(bot_id)
+            if name:
+                return name
+
     return ""
 
 
-def _tag_trade_bot(trade: dict) -> str:
+def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
     """Tag a paired trade with bot name. Works for both open and closed trades."""
     inst_id = trade.get("inst_id", "") or trade.get("symbol", "")
     pos_side = trade.get("pos_side", "")
+    # DB bot_id is authoritative when present
+    by_id = _db_bot_name(trade.get("bot_id", "") or "")
+    if by_id:
+        return by_id
     if trade.get("reason") == "open":
-        return _tag_position_bot(inst_id, pos_side)
+        return _tag_position_bot(inst_id, pos_side, db_pos_map=db_pos_map)
+    # Prefer exact ordId match against in-memory close logs (most reliable)
+    ord_id = str(trade.get("ord_id") or trade.get("close_ord_id") or "").strip()
+    if ord_id:
+        for bot_label, log in (
+            ("Momentum", getattr(rotation, "_trade_log", None) if rotation else None),
+            ("Impulse 1D", getattr(impulse, "_trade_log", None) if impulse else None),
+            ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
+            ("AI Discretionary 1H", getattr(ai_bot, "_trade_log", None) if ai_bot else None),
+            ("VWAP Mean Reversion", getattr(vwap_rev_bot, "_trade_log", None) if vwap_rev_bot else None),
+        ):
+            if not log:
+                continue
+            for t in log:
+                if str(t.get("ord_id", "") or "").strip() == ord_id:
+                    return bot_label
     # For closed trades, check trade logs for matching entry+exit
     entry_time = trade.get("entry_time", "")
     if rotation and rotation._trade_log:
@@ -1249,21 +2850,16 @@ def _tag_trade_bot(trade: dict) -> str:
         for t in validation._trade_log:
             if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
                 return "MACD+Donchian Validation"
-    # Fallback: match by symbol+side (works when entry_time is unknown)
-    side = trade.get("side", "")
-    if rotation and rotation._trade_log:
-        for t in rotation._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Momentum"
-    if impulse and impulse._trade_log:
-        for t in impulse._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "Impulse 1D"
-    if validation and validation._trade_log:
-        for t in validation._trade_log:
-            if t.get("symbol", "") == inst_id and t.get("side", "") == side and t.get("pnl", 0) != 0:
-                return "MACD+Donchian Validation"
-    # Fallback: DB bot_id stored for this trade
+    if ai_bot and ai_bot._trade_log:
+        for t in ai_bot._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "AI Discretionary 1H"
+    if vwap_rev_bot and vwap_rev_bot._trade_log:
+        for t in vwap_rev_bot._trade_log:
+            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
+                return "VWAP Mean Reversion"
+    # Do NOT match by symbol+side alone — that wrongly attached Impulse SOL etc. to AI
+    # after redeploy adoption and corrupted strategy PnL.
     return _db_bot_name(trade.get("bot_id", ""))
 
 
@@ -1278,22 +2874,366 @@ def _db_bot_name(bot_id: str) -> str:
         return "Impulse 1D"
     if base == VAL_BOT_ID:
         return "MACD+Donchian Validation"
+    if base == AI_BOT_ID:
+        return "AI Discretionary 1H"
+    if base == SCALP_BOT_ID:
+        return "Order Book Scalp"
+    if base == VWAP_BOT_ID:
+        return "VWAP Mean Reversion"
+    if base in ("smart_money", "smart_money_mirror", "sm_mirror"):
+        return "Умные деньги"
+    if base in (
+        "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
+    ):
+        return base
     return ""
+
+
+async def get_pnl_epoch() -> str:
+    """ISO timestamp; trades before this are ignored for strategy cards & total stats."""
+    try:
+        v = await db.get_setting("pnl_epoch")
+        if v and str(v).strip():
+            return str(v).strip()
+    except Exception:
+        pass
+    return "2026-09-01T00:00:00"
+
+
+def _trade_after_epoch(tr: dict, epoch: str) -> bool:
+    """Filter closed history by epoch; always keep live open rows."""
+    if not epoch:
+        return True
+    reason = (tr.get("reason") or "").lower()
+    # Open / live positions must survive epoch (PnL reset is for realized only)
+    if reason in ("open", "add") or tr.get("pnl") is None:
+        return True
+    ts = (
+        tr.get("exit_time")
+        or tr.get("time")
+        or tr.get("entry_time")
+        or tr.get("timestamp")
+        or ""
+    )
+    if not ts:
+        return True
+    try:
+        return str(ts)[:19] >= str(epoch)[:19]
+    except Exception:
+        return True
+
+
+async def _orphan_sweep_loop():
+
+    """Periodically close exchange positions not owned by any strategy."""
+    global _positions_cache
+    import asyncio as _asyncio
+    await _asyncio.sleep(45)  # let bots restore first
+    while True:
+        try:
+            client = client_manager.get_client()
+            if client and orphan_close_enabled():
+                mem = set()
+                for bot in (rotation, impulse, validation, ai_bot, vwap_rev_bot, sm_tracker):
+                    if not bot or not getattr(bot, "_positions", None):
+                        continue
+                    for pos in bot._positions.values():
+                        mem.add((getattr(pos, "inst_id", None) or "", getattr(pos, "side", "long")))
+                closed = await sweep_exchange_orphans(client, db, mem)
+                if closed:
+                    print(f"[orphan-sweep] closed {len(closed)}: {closed}", flush=True)
+                    _positions_cache = None
+        except Exception as e:
+            print(f"[orphan-sweep] error: {e}", flush=True)
+        await _asyncio.sleep(120)  # every 2 min
+
+
+@app.post("/api/positions/sweep-orphans", dependencies=[Depends(require_admin)])
+async def sweep_orphans():
+    """Close exchange positions not claimed by any strategy (anti-orphan)."""
+    client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail="API not configured")
+    mem = set()
+    for bot in (rotation, impulse, validation, ai_bot, vwap_rev_bot, sm_tracker):
+        if not bot or not getattr(bot, "_positions", None):
+            continue
+        for pos in bot._positions.values():
+            mem.add((pos.inst_id, getattr(pos, "side", "long")))
+    closed = await sweep_exchange_orphans(client, db, mem)
+    global _positions_cache
+    _positions_cache = None
+    return {"closed": closed, "n": len(closed)}
 
 
 @app.get("/api/positions")
 async def get_positions(inst_type: str = "SWAP"):
-    global _positions_cache, _positions_cache_ts
+    global _positions_cache, _positions_cache_ts, _POS_RECLAIM_TS
     now_s = _time.time()
     if _positions_cache is not None and (now_s - _positions_cache_ts) < _POS_CACHE_TTL:
         return _positions_cache
+    # Heavy OKX fills/algo reclaim — at most once per _POS_RECLAIM_TTL
+    do_heavy_reclaim = (now_s - float(_POS_RECLAIM_TS or 0)) >= float(_POS_RECLAIM_TTL or 90)
     result = await _okx_call(lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
-    # Tag each position with bot name
+    # Build DB positions map for fallback tagging (survives restarts)
+    db_pos_map = {}
+    try:
+        db_rows = await db.get_all_positions()
+        for row in db_rows:
+            db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+    except Exception:
+        pass
+    # Merge durable open_positions:{bot_id} snapshots (survive trade wipes)
+    try:
+        import json
+        for bid in (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, "smart_money"):
+            try:
+                raw = await db.get_setting(f"open_positions:{bid}")
+                if not raw:
+                    continue
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                for row in data or []:
+                    iid = row.get("inst_id") or ""
+                    side = (row.get("side") or "long").lower()
+                    if iid and (iid, side) not in db_pos_map:
+                        db_pos_map[(iid, side)] = bid
+            except Exception:
+                continue
+    except Exception:
+        pass
+    # Tag each position with bot name; auto-reclaim if last trade was ours
     tagged = []
+
+    async def _inject_bot_memory(bot_label: str, inst_id: str, side: str, sz: float, entry: float):
+        """Rehydrate strategy in-memory book so UI botMap + management work after deploy."""
+        global rotation, impulse, validation, ai_bot
+        coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+        entry = float(entry or 0)
+        sz = float(sz or 0)
+        if entry <= 0 or sz <= 0 or not coin:
+            return
+        stop = entry * 0.985 if side == "long" else entry * 1.015
+        now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        try:
+            if bot_label == "Momentum" and rotation:
+                from app.services.rotation_strategy import RotPosition
+                if coin not in (getattr(rotation, "_positions", None) or {}):
+                    rotation._positions[coin] = RotPosition(
+                        symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                        size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                        peak_price=entry, opened_at=now_iso,
+                        atr=entry * 0.015, atr_hourly=entry * 0.015,
+                        leverage=float(getattr(getattr(rotation, "config", None), "max_leverage", 3) or 3),
+                    )
+                    print(f"[positions] injected {coin} → Momentum", flush=True)
+            elif bot_label == "Impulse 1D" and impulse:
+                # Impulse stores positions similarly (coin key)
+                pos_map = getattr(impulse, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    P = getattr(impulse, "Position", None) or getattr(impulse, "ImpPosition", None)
+                    if P is None:
+                        # minimal duck object
+                        class _P:
+                            pass
+                        p = _P()
+                        p.symbol = inst_id; p.coin = coin; p.inst_id = inst_id
+                        p.side = side; p.size = sz; p.size_original = sz
+                        p.entry_price = entry; p.stop_price = stop; p.peak_price = entry
+                        p.opened_at = now_iso; p.atr = entry * 0.015
+                        pos_map[coin] = p
+                    else:
+                        try:
+                            pos_map[coin] = P(
+                                symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                                size=sz, entry_price=entry, stop_price=stop,
+                            )
+                        except TypeError:
+                            p = P.__new__(P)
+                            for k, v in dict(symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                                             size=sz, entry_price=entry, stop_price=stop).items():
+                                try:
+                                    setattr(p, k, v)
+                                except Exception:
+                                    pass
+                            pos_map[coin] = p
+                    print(f"[positions] injected {coin} → Impulse", flush=True)
+            elif bot_label.startswith("MACD") and validation:
+                pos_map = getattr(validation, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    from app.services.rotation_strategy import RotPosition
+                    pos_map[coin] = RotPosition(
+                        symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                        size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                        peak_price=entry, opened_at=now_iso,
+                        atr=entry * 0.015, atr_hourly=entry * 0.015, leverage=3.0,
+                    )
+                    print(f"[positions] injected {coin} → Validation", flush=True)
+            elif bot_label.startswith("AI") and ai_bot:
+                pos_map = getattr(ai_bot, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    # AI may use dict positions
+                    try:
+                        pos_map[coin] = {
+                            "inst_id": inst_id, "coin": coin, "side": side,
+                            "size": sz, "entry_price": entry, "stop_price": stop,
+                        }
+                    except Exception:
+                        pass
+                    print(f"[positions] injected {coin} → AI", flush=True)
+        except Exception as e:
+            print(f"[positions] inject {bot_label}: {e}", flush=True)
+
     for p in result.get("data", []):
-        p["bot"] = _tag_position_bot(p.get("instId", ""), p.get("posSide", "net"))
+        inst = p.get("instId", "") or ""
+        pos_side = (p.get("posSide", "net") or "net").lower()
+        try:
+            pos_raw = float(p.get("pos") or 0)
+        except (TypeError, ValueError):
+            pos_raw = 0.0
+        # One-way mode: posSide=net, sign of pos indicates direction
+        if pos_side == "short" or pos_raw < 0:
+            side_n = "short"
+        else:
+            side_n = "long"
+        sz = abs(pos_raw)
+        try:
+            entry = float(p.get("avgPx") or 0)
+        except (TypeError, ValueError):
+            entry = 0.0
+
+        bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
+        if not bot_name:
+            bot_name = _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
+
+        if not bot_name and inst:
+            try:
+                last_bot = await db.last_bot_for_instrument(inst)
+                if last_bot and sz > 0 and entry > 0:
+                    await claim_open(db, last_bot, inst, side_n, sz, entry)
+                    db_pos_map[(inst, side_n)] = last_bot
+                    db_pos_map[(inst, "net")] = last_bot
+                    bot_name = _db_bot_name(last_bot) or _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
+                    if bot_name:
+                        print(f"[positions] reclaimed {inst} {side_n} → {last_bot}", flush=True)
+            except Exception as e:
+                print(f"[positions] reclaim {inst}: {e}", flush=True)
+
+        if not bot_name and inst and do_heavy_reclaim:
+            try:
+                fills = await _fetch_okx_fills(limit=100)
+                prefix_map = {
+                    "rot": (ROT_BOT_ID, "Momentum"),
+                    "imp": (IMP_BOT_ID, "Impulse 1D"),
+                    "ai": (AI_BOT_ID, "AI Discretionary 1H"),
+                    "val": (VAL_BOT_ID, "MACD+Donchian Validation"),
+                }
+                for f in fills or []:
+                    if (f.get("instId") or "") != inst:
+                        continue
+                    cid = str(f.get("clOrdId") or "").lower()
+                    for pref, (bid, label) in prefix_map.items():
+                        if cid.startswith(pref):
+                            if sz > 0 and entry > 0:
+                                await claim_open(db, bid, inst, side_n, sz, entry)
+                                db_pos_map[(inst, side_n)] = bid
+                                db_pos_map[(inst, "net")] = bid
+                                bot_name = label
+                                print(f"[positions] reclaimed via clOrdId {cid[:20]} → {label}", flush=True)
+                            break
+                    if bot_name:
+                        break
+            except Exception as e:
+                print(f"[positions] fill-tag {inst}: {e}", flush=True)
+
+        # Pending algo / stop orders often keep clOrdId longer than fills window
+        if not bot_name and inst and do_heavy_reclaim:
+            try:
+                client = client_manager.get_client()
+                if client and hasattr(client, "get_order_list"):
+                    pass
+                # OKX pending algos via generic call if available
+                if client:
+                    for meth in ("get_orders_pending", "get_order_list", "orders_pending"):
+                        fn = getattr(client, meth, None)
+                        if not callable(fn):
+                            continue
+                        try:
+                            ores = await fn(inst_type="SWAP")
+                        except TypeError:
+                            try:
+                                ores = await fn("SWAP")
+                            except Exception:
+                                continue
+                        except Exception:
+                            continue
+                        for o in (ores.get("data") or []) if isinstance(ores, dict) else []:
+                            if (o.get("instId") or "") != inst:
+                                continue
+                            cid = str(o.get("clOrdId") or "").lower()
+                            if cid.startswith("rot"):
+                                await claim_open(db, ROT_BOT_ID, inst, side_n, sz, entry)
+                                bot_name = "Momentum"
+                                print(f"[positions] reclaimed via pending order {cid[:20]} → Momentum", flush=True)
+                                break
+                            if cid.startswith("imp"):
+                                await claim_open(db, IMP_BOT_ID, inst, side_n, sz, entry)
+                                bot_name = "Impulse 1D"
+                                break
+                        if bot_name:
+                            break
+            except Exception as e:
+                print(f"[positions] pending-tag {inst}: {e}", flush=True)
+
+        # Last resort: unique running strategy whose universe contains coin and no other claim
+        if not bot_name and inst and sz > 0 and entry > 0:
+            try:
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                candidates = []
+                # (bot_id, label, bot_obj, universe)
+                try:
+                    from app.services.rotation_strategy import COINS as _RC
+                except Exception:
+                    _RC = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
+                if rotation and getattr(rotation, "_running", False):
+                    univ = list(getattr(getattr(rotation, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((ROT_BOT_ID, "Momentum", rotation))
+                if impulse and getattr(impulse, "_running", False):
+                    univ = list(getattr(getattr(impulse, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((IMP_BOT_ID, "Impulse 1D", impulse))
+                if validation and getattr(validation, "_running", False):
+                    univ = list(getattr(getattr(validation, "config", None), "symbols", None) or _RC)
+                    if coin in univ:
+                        candidates.append((VAL_BOT_ID, "MACD+Donchian Validation", validation))
+                if ai_bot and getattr(ai_bot, "_running", False):
+                    univ = list(getattr(getattr(ai_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
+                    if coin in univ:
+                        candidates.append((AI_BOT_ID, "AI Discretionary 1H", ai_bot))
+                # Only auto-claim when exactly one candidate is running for this coin
+                if len(candidates) == 1:
+                    bid, label, _bot = candidates[0]
+                    other = False
+                    try:
+                        other = await db.other_bot_owns_position_any(bid, inst, side_n)
+                    except Exception:
+                        other = False
+                    if not other:
+                        await claim_open(db, bid, inst, side_n, sz, entry)
+                        db_pos_map[(inst, side_n)] = bid
+                        bot_name = label
+                        print(f"[positions] last-resort claim {inst} → {label} (unique running bot)", flush=True)
+            except Exception as e:
+                print(f"[positions] last-resort {inst}: {e}", flush=True)
+
+        if bot_name and inst and sz > 0:
+            await _inject_bot_memory(bot_name, inst, side_n, sz, entry)
+
+        p["bot"] = bot_name
+        p["_side_norm"] = side_n
         tagged.append(p)
     out = {"positions": tagged}
     _positions_cache = out
@@ -1301,7 +3241,84 @@ async def get_positions(inst_type: str = "SWAP"):
     return out
 
 
+@app.post("/api/positions/bind", dependencies=[Depends(require_admin)])
+async def positions_bind(data: dict = None):
+    """Force-bind an OKX position to a strategy (claim + Momentum memory if needed)."""
+    data = data or {}
+    inst = (data.get("instId") or data.get("inst_id") or "").strip()
+    side = (data.get("side") or data.get("posSide") or "long").lower()
+    if side in ("sell", "s"):
+        side = "short"
+    elif side not in ("long", "short"):
+        side = "long"
+    bot = (data.get("bot") or data.get("bot_id") or "Momentum").strip()
+    inv = {
+        "Momentum": ROT_BOT_ID,
+        "rotation_strategy": ROT_BOT_ID,
+        ROT_BOT_ID: ROT_BOT_ID,
+        "Impulse 1D": IMP_BOT_ID,
+        "impulse_strategy": IMP_BOT_ID,
+        IMP_BOT_ID: IMP_BOT_ID,
+        "AI Discretionary 1H": AI_BOT_ID,
+        AI_BOT_ID: AI_BOT_ID,
+        "MACD+Donchian Validation": VAL_BOT_ID,
+        VAL_BOT_ID: VAL_BOT_ID,
+        "smart_money": "smart_money",
+        "Умные деньги": "smart_money",
+        "Smart Money": "smart_money",
+        "smart_money_mirror": "smart_money",
+    }
+    bid = inv.get(bot) or inv.get(bot.replace(" ", "_"))
+    if not inst or not bid:
+        raise HTTPException(status_code=400, detail="instId and bot required")
+    # size/entry from exchange
+    sz, entry = 0.0, 0.0
+    client = client_manager.get_client()
+    if client:
+        res = await client.get_positions("SWAP")
+        for p in res.get("data") or []:
+            if p.get("instId") == inst:
+                try:
+                    sz = abs(float(p.get("pos") or 0))
+                    entry = float(p.get("avgPx") or 0)
+                except (TypeError, ValueError):
+                    pass
+                break
+    if sz <= 0 or entry <= 0:
+        sz = float(data.get("size") or 0)
+        entry = float(data.get("entry") or 0)
+    if sz <= 0 or entry <= 0:
+        raise HTTPException(status_code=400, detail="Cannot resolve size/entry from OKX")
+    await claim_open(db, bid, inst, side, sz, entry)
+    if bid == ROT_BOT_ID:
+        # inject memory via internal helper path: call get_positions logic lightly
+        try:
+            from app.services.rotation_strategy import RotPosition
+            global rotation
+            if rotation:
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                stop = entry * 0.985 if side == "long" else entry * 1.015
+                rotation._positions[coin] = RotPosition(
+                    symbol=inst, coin=coin, inst_id=inst, side=side,
+                    size=sz, size_original=sz, entry_price=entry, stop_price=stop,
+                    peak_price=entry,
+                    opened_at=__import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+                    atr=entry * 0.015, atr_hourly=entry * 0.015,
+                    leverage=3.0,
+                )
+                try:
+                    await rotation._persist_open_snapshot()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[bind] inject: {e}", flush=True)
+    global _positions_cache
+    _positions_cache = None
+    return {"ok": True, "inst_id": inst, "side": side, "bot_id": bid, "size": sz, "entry": entry}
+
+
 @app.post("/api/positions/close", dependencies=[Depends(require_admin)])
+
 async def close_position(data: dict):
     client = client_manager.get_client()
     if not client:
@@ -1342,7 +3359,15 @@ _positions_cache: dict = None
 _positions_cache_ts: float = 0
 _portfolio_cache: dict = None
 _portfolio_cache_ts: float = 0
-_POS_CACHE_TTL = 5  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+_POS_CACHE_TTL = 3  # seconds — avoid 2+ OKX calls per dashboard poll for positions/balance
+_POS_RECLAIM_TS = 0.0
+_POS_RECLAIM_TTL = 90.0  # heavy fill/algo reclaim at most once per 90s
+_FUNDING_CACHE = 0.0
+_FUNDING_CACHE_TS = 0.0
+_FUNDING_TTL = 120.0
+_SM_DISCOVER_CACHE = {"ts": 0.0, "key": "", "data": None}
+_SM_DISCOVER_LOCK = None
+
 
 
 @app.get("/api/market/ticker")
@@ -1543,6 +3568,14 @@ async def backtest_last():
 
 @app.post("/api/trade/order", dependencies=[Depends(require_admin)])
 async def place_order(data: dict):
+    """Manual orders disabled by default — only strategy signal path may open risk."""
+    allow = os.getenv("ALLOW_MANUAL_ORDERS", "0").strip().lower() in ("1", "true", "yes", "on")
+    if not allow:
+        raise HTTPException(
+            status_code=403,
+            detail="Manual orders disabled. Opens only via strategy signals "
+                   "(set ALLOW_MANUAL_ORDERS=1 to override).",
+        )
     client = client_manager.get_client()
     if not client:
         raise HTTPException(status_code=400, detail="API not configured")
@@ -1580,22 +3613,23 @@ async def get_trade_log():
 
 @app.get("/api/momentum/status")
 async def momentum_status():
-    # Redirect to rotation strategy
     if not rotation:
-        return {
-            "running": False, "config": {"max_positions": 2, "risk_per_trade": 0, "tp1_pct": 0},
+        status = {
+            "running": False, "managed": False,
+            "config": {"max_positions": 2, "risk_per_trade": 0, "tp1_pct": 0},
             "equity": 0, "open_positions": [], "total_signals": 0, "total_trades": 0,
             "recent_signals": [], "recent_trades": [], "description": STRATEGY_DESC,
         }
-    status = rotation.get_status()
-    stats = (await _bot_history_stats()).get("Momentum")
-    if stats:
-        status.update(stats)
-    return status
+    else:
+        status = rotation.get_status()
+        status["total_pnl_internal"] = status.get("total_pnl")
+    return await _apply_history_kpi(status, "Momentum")
 
 
 @app.post("/api/momentum/start", dependencies=[Depends(require_admin)])
 async def momentum_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: momentum disabled")
     """Start Rotation strategy (Dashboard calls this endpoint)."""
     global rotation
     if rotation and rotation._running:
@@ -1738,6 +3772,14 @@ async def momentum_trades(limit: int = 20):
                 algo_map = {}
 
             trades = []
+            # Build DB positions map for fallback tagging
+            db_pos_map = {}
+            try:
+                db_rows = await db.get_all_positions()
+                for row in db_rows:
+                    db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+            except Exception:
+                pass
             for t in reversed(paired):
                 if len(trades) >= limit:
                     break
@@ -1765,7 +3807,7 @@ async def momentum_trades(limit: int = 20):
                     "ord_id": t.get("ord_id", ""),
                     "source": "okx",
                 }
-                trade["bot"] = _tag_trade_bot(trade)
+                trade["bot"] = _tag_trade_bot(trade, db_pos_map=db_pos_map)
                 if is_open and inst_id in algo_map:
                     for ao in algo_map[inst_id]:
                         sl = ao.get("slTriggerPxPx") or ao.get("slTriggerPx")
@@ -1933,6 +3975,8 @@ async def rotation_status():
 
 @app.post("/api/rotation/start", dependencies=[Depends(require_admin)])
 async def rotation_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: rotation disabled")
     global rotation
     if rotation and rotation._running:
         return {"message": "Rotation already running"}
@@ -2077,18 +4121,23 @@ async def rotation_update_config(data: dict = None):
 @app.get("/api/impulse/status")
 async def impulse_status():
     if not impulse:
-        return {"running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
-                "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
-                "config": None, "description": IMPULSE_DESC}
-    status = impulse.get_status()
-    stats = (await _bot_history_stats()).get("Impulse 1D")
-    if stats:
-        status.update(stats)
-    return status
+        status = {
+            "running": False, "managed": False,
+            "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION,
+            "equity": 0, "capital": 0, "open_positions": [], "closed_trades": 0,
+            "total_trades": 0, "total_pnl": 0, "win_rate": 0,
+            "config": None, "description": IMPULSE_DESC,
+        }
+    else:
+        status = impulse.get_status()
+        status["total_pnl_internal"] = status.get("total_pnl")
+    return await _apply_history_kpi(status, "Impulse 1D")
 
 
 @app.post("/api/impulse/start", dependencies=[Depends(require_admin)])
 async def impulse_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: impulse disabled")
     """Start Impulse 1D strategy."""
     global impulse
     if impulse and impulse._running:
@@ -2207,11 +4256,26 @@ async def validation_status():
         return {"running": False, "strategy": "macd_donchian_validation",
                 "equity": 0, "open_positions": [], "total_trades": 0,
                 "total_pnl": 0, "config": {}}
-    return validation.get_status()
+    status = validation.get_status()
+    internal = status.get("total_pnl")
+    status["total_pnl_internal"] = internal
+    # Prefer same History/per_bot source as /api/pnl so the card matches the
+    # dashboard Total PnL breakdown (same pattern as momentum/impulse status).
+    stats = (await _bot_history_stats()).get("MACD+Donchian Validation")
+    if stats and stats.get("total_trades", 0) > 0:
+        status.update(stats)
+        status["total_pnl_source"] = "okx_history"
+        if internal is not None and abs(float(internal or 0) - float(stats.get("total_pnl") or 0)) > 1.0:
+            print(f"[validation/status] PnL mismatch internal={internal} history={stats.get('total_pnl')}", flush=True)
+    else:
+        status["total_pnl_source"] = "internal"
+    return status
 
 
 @app.post("/api/validation/start", dependencies=[Depends(require_admin)])
 async def validation_start(data: dict = None):
+    if AI_ONLY_MODE:
+        raise HTTPException(status_code=403, detail="AI-only mode: validation disabled")
     """Start the validation bot (MACD+Donchian)."""
     global validation
     if validation and validation._running:
@@ -2415,22 +4479,22 @@ async def telegram_simulate(data: dict = None):
     open_px = 67250.00
     msg_open = notifier.open_msg(
         coin="BTC", side="long", price=open_px, stop=round(open_px * 0.97, 2),
-        size=0.03, leverage=3.0, bot_name="Momentum Rotation v5",
+        size=0.03, leverage=3.0, bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_partial = notifier.partial_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.05, 2),
         pnl=76.50, closed_sz=0.015, remaining_sz=0.015,
-        bot_name="Momentum Rotation v5", signal_id=123,
+        bot_name="Momentum Rotation v6.2", signal_id=123,
     )
     msg_close = notifier.close_msg(
         coin="BTC", side="long", entry=open_px, exit_px=round(open_px * 1.09, 2),
-        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v5",
+        pnl=201.75, reason="trail_stop", bot_name="Momentum Rotation v6.2",
         signal_id=123,
     )
     msg_add = notifier.add_msg(
         coin="ETH", side="long", price=3450.00, size=0.4, total=1.2,
-        bot_name="Impulse 1D v2", signal_id=124,
+        bot_name="Impulse 1D v4", signal_id=124,
     )
 
     results = {}
@@ -2989,6 +5053,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                         "entry": round(avg_entry, 4),
                         "entry_price": round(avg_entry, 4),
                         "exit_price": round(fill_px, 4),
+                        "entry_ord_id": entry_ord_id,
                         "reason": "closed",
                         "pos_side": direction,
                         "inst_id": inst_id,
@@ -3023,6 +5088,7 @@ async def _pair_fills(fills: list[dict]) -> list[dict]:
                         "entry": 0,
                         "entry_price": 0,
                         "exit_price": round(fill_px, 4),
+                        "entry_ord_id": entry_ord_id,
                         "reason": "closed",
                         "pos_side": pos_out,
                         "inst_id": inst_id,
@@ -3071,9 +5137,11 @@ def _pair_bills(bills: list) -> list:
         """Emit the aggregated close row and reduce the open position."""
         avg_entry = 0.0
         pos_side = "short" if pending["side"] == "buy" else "long"
+        entry_ord = ""
         if cur is not None and cur["size"] > 0:
             avg_entry = cur["cost"] / cur["size"]
             pos_side = cur["pos_side"]
+            entry_ord = str(cur.get("ord_id", "") or "").strip()
             close_sz = min(pending["size"], cur["size"])
             cur["size"] -= close_sz
             cur["cost"] = avg_entry * cur["size"] if cur["size"] > 0 else 0.0
@@ -3088,6 +5156,7 @@ def _pair_bills(bills: list) -> list:
             "ord_id": pending["ord_id"], "fee": round(pending["fee"], 4),
             "entry": round(avg_entry, 4), "entry_price": round(avg_entry, 4),
             "exit_price": round(pending["px"], 4),
+            "entry_ord_id": entry_ord,
             "reason": "closed", "pos_side": pos_side, "source": "okx_bills",
         })
 
@@ -3135,6 +5204,9 @@ def _pair_bills(bills: list) -> list:
                     cur["size"] += sz
                     cur["cost"] += sz * px
                     cur["fee"] += fee
+                    cur["ord_id"] = ord_id  # always update to the most recent open
+                    cur["time"] = ts
+                    cur["side"] = side
                     continue
 
                 if sub in ("5", "6"):
@@ -3240,8 +5312,8 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
     seen: set = set()
     try:
         for endpoint, fn in (
-            ("bills", lambda c, **kw: c.get_bills(inst_type="SWAP", **kw)),
-            ("archive", lambda c, **kw: c.get_bills_archive(inst_type="SWAP", **kw)),
+            ("bills", lambda c, **kw: c.get_bills(inst_type="SWAP", type="2", **kw)),
+            ("archive", lambda c, **kw: c.get_bills_archive(inst_type="SWAP", type="2", **kw)),
         ):
             after = ""
             for _ in range(10):
@@ -3288,14 +5360,467 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
     return bills
 
 
+# ── Exchange close trades sync: OKX bills → DB ──
+
+_CLORD_BOT_MAP = {
+    "ai": "AI Discretionary 1H",
+    "rot": "Momentum", "momentum": "Momentum",
+    "imp": "Impulse 1D",
+    "val": "MACD+Donchian Validation",
+    "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+    "vwap": "VWAP Mean Reversion",
+    "sm": "Умные деньги",
+}
+
+_exchange_sync_ts: float = 0
+_EXCHANGE_SYNC_TTL = 300  # 5 minutes between full syncs
+
+
+async def sync_exchange_close_trades() -> int:
+    """Fetch all OKX close bills (type=2, subType 5/6), group by ordId, tag by
+    clOrdId prefix, and upsert into exchange_close_trades table.
+    Returns number of trades synced."""
+    global _exchange_sync_ts
+    now = _time.time()
+    if _exchange_sync_ts and (now - _exchange_sync_ts) < _EXCHANGE_SYNC_TTL:
+        return 0  # recently synced
+
+    bills = await _fetch_all_trade_bills(limit_per_page=100)
+
+    # Group CLOSE bills by ordId
+    close_by_ord: dict = {}
+    for b in bills:
+        sub = str(b.get("subType", "") or "")
+        if sub not in ("5", "6"):
+            continue
+        oid = str(b.get("ordId", "")).strip()
+        if not oid:
+            continue
+        try:
+            bp = float(b.get("pnl") or 0)
+        except (TypeError, ValueError):
+            bp = 0.0
+        try:
+            bf = abs(float(b.get("fee") or 0))
+        except (TypeError, ValueError):
+            bf = 0.0
+        try:
+            bs = float(b.get("sz") or 0)
+        except (TypeError, ValueError):
+            bs = 0.0
+        try:
+            bpx = float(b.get("px") or b.get("fillIdxPx") or 0)
+        except (TypeError, ValueError):
+            bpx = 0.0
+        ts = b.get("ts") or ""
+        clord = str(b.get("clOrdId", "") or "").strip()
+        inst = b.get("instId", "")
+
+        if oid not in close_by_ord:
+            close_by_ord[oid] = {
+                "inst_id": inst, "cl_ord_id": clord, "ts": ts,
+                "pnl": 0.0, "fee": 0.0, "sz": 0.0, "px_sum": 0.0, "px_n": 0,
+                "sub_type": sub,
+            }
+        close_by_ord[oid]["pnl"] += bp
+        close_by_ord[oid]["fee"] += bf
+        close_by_ord[oid]["sz"] += bs
+        if bpx > 0:
+            close_by_ord[oid]["px_sum"] += bpx * bs if bs > 0 else bpx
+            close_by_ord[oid]["px_n"] += bs if bs > 0 else 1
+        if ts and ts > close_by_ord[oid]["ts"]:
+            close_by_ord[oid]["ts"] = ts
+        if clord and not close_by_ord[oid]["cl_ord_id"]:
+            close_by_ord[oid]["cl_ord_id"] = clord
+
+    # Tag and build DB rows
+    rows = []
+    for oid, info in close_by_ord.items():
+        clord = info["cl_ord_id"].lower()
+        bot_label = ""
+        for pfx, label in _CLORD_BOT_MAP.items():
+            if clord.startswith(pfx):
+                bot_label = label
+                break
+        avg_px = (info["px_sum"] / info["px_n"]) if info["px_n"] > 0 else 0.0
+        close_ts = 0
+        if info["ts"]:
+            try:
+                close_ts = int(info["ts"])
+            except (TypeError, ValueError):
+                pass
+        rows.append({
+            "ord_id": oid,
+            "inst_id": info["inst_id"],
+            "cl_ord_id": info["cl_ord_id"],
+            "bot_label": bot_label,
+            "pnl": round(info["pnl"], 6),
+            "fee": round(info["fee"], 6),
+            "sz": round(info["sz"], 6),
+            "avg_px": round(avg_px, 6),
+            "close_ts": close_ts,
+            "sub_type": info["sub_type"],
+        })
+
+    if rows:
+        try:
+            n = await db.upsert_exchange_close_trades(rows)
+            _exchange_sync_ts = _time.time()
+            print(f"[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders", flush=True)
+            return n
+        except Exception as e:
+            print(f"[exchange-sync] DB upsert error: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+    return 0
+
+
+@app.post("/api/pnl/rebuild-exchange", dependencies=[Depends(require_admin)])
+async def pnl_rebuild_exchange():
+    """Force re-sync of exchange close trades from OKX bills → DB, then return stats."""
+    global _exchange_sync_ts
+    _exchange_sync_ts = 0  # force re-sync
+    n = await sync_exchange_close_trades()
+    epoch = await get_pnl_epoch()
+    epoch_ms = 0
+    if epoch:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            epoch_ms = int(_dt.fromisoformat(epoch).replace(tzinfo=_tz.utc).timestamp() * 1000)
+        except Exception:
+            pass
+    trades = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=500)
+    total_pnl = sum(t.get("pnl", 0) for t in trades)
+    ai_pnl = sum(t.get("pnl", 0) for t in trades if t.get("bot_label") == "AI Discretionary 1H")
+    return {
+        "synced": n,
+        "total_trades": len(trades),
+        "total_pnl": round(total_pnl, 2),
+        "ai_pnl": round(ai_pnl, 2),
+        "epoch": epoch,
+        "trades": [
+            {"oid": t["ord_id"][-8:], "inst": t["inst_id"], "bot": t["bot_label"],
+             "pnl": round(t["pnl"], 2), "fee": round(t["fee"], 2),
+             "ts": t["close_ts"]}
+            for t in trades[:50]
+        ],
+    }
+
+
+@app.post("/api/pnl/rebuild-strategy", dependencies=[Depends(require_admin)])
+async def pnl_rebuild_strategy(data: dict = None):
+    """Reassign SOL off AI -> Impulse and rebuild each strategy PnL from DB trades only."""
+    data = data or {}
+    symbol = str(data.get("symbol") or "SOL").upper()
+    out = {"steps": []}
+    # 1) Move SOL trades from AI to Impulse if any remain
+    try:
+        inst = f"{symbol}-USDT-SWAP"
+        st = await db.reassign_trades_instrument(AI_BOT_ID, IMP_BOT_ID, inst)
+        out["steps"].append({"reassign": st})
+        from app.services.position_claim import release_open
+        await release_open(db, AI_BOT_ID, inst, "long")
+        await release_open(db, AI_BOT_ID, inst, "short")
+    except Exception as e:
+        out["steps"].append({"reassign_err": str(e)})
+    # 2) Summaries
+    bots = {
+        "Momentum": ROT_BOT_ID,
+        "Impulse 1D": IMP_BOT_ID,
+        "MACD+Donchian Validation": VAL_BOT_ID,
+        "AI Discretionary 1H": AI_BOT_ID,
+    }
+    summaries = {}
+    for label, bid in bots.items():
+        try:
+            summaries[label] = await db.get_trades_summary(bid)
+        except Exception as e:
+            summaries[label] = {"error": str(e)}
+    out["summaries"] = summaries
+    # 3) Refresh live AI bot memory
+    global ai_bot
+    if ai_bot and hasattr(ai_bot, "correct_misattributed"):
+        try:
+            # clear one-shot flag to allow rebuild path
+            try:
+                await db.set_setting(f"ai_misattr_fixed:{AI_BOT_ID}:{symbol}", "")
+            except Exception:
+                pass
+            out["ai_correct"] = await ai_bot.correct_misattributed(symbol, IMP_BOT_ID)
+        except Exception as e:
+            out["ai_correct_err"] = str(e)
+    return out
+
+
+@app.post("/api/admin/reset-trading-stats", dependencies=[Depends(require_admin)])
+async def admin_reset_trading_stats(data: dict = None):
+    """Wipe strategy trading history and start PnL counting from now (UTC).
+
+    Does not close exchange positions and does not delete position claims. Does not change strategy code/params.
+    Sets pnl_epoch so OKX history before this moment is ignored in cards.
+    """
+    from datetime import datetime as dt, timezone as tz
+    data = data or {}
+    # start of today UTC unless explicit epoch provided
+    if data.get("epoch"):
+        epoch = str(data["epoch"])
+    else:
+        epoch = dt.now(tz.utc).strftime("%Y-%m-%dT00:00:00")
+
+    bot_ids = [
+        ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID,
+        "smart_money",
+    ]
+    try:
+        from app.services.orderbook_scalp_strategy import SCALP_BOT_ID
+        bot_ids.append(SCALP_BOT_ID)
+    except Exception:
+        pass
+    # unique preserve order
+    seen = set()
+    bot_ids = [b for b in bot_ids if b and not (b in seen or seen.add(b))]
+
+    wipe = await db.wipe_strategy_trading_data(bot_ids)
+    await db.set_setting("pnl_epoch", epoch)
+    # Mark as an explicit (manual) reset so startup never clears this epoch.
+    await db.set_setting("trading_stats_reset_marker", "manual")
+    # clear lifetime blobs
+    for key in (
+        f"ai_lifetime:{AI_BOT_ID}",
+        f"ai_misattr_fixed:{AI_BOT_ID}:SOL",
+    ):
+        try:
+            await db.set_setting(key, "")
+        except Exception:
+            pass
+
+    # in-memory reset for running bots — PnL/logs only; KEEP open positions
+    global rotation, impulse, validation, ai_bot
+    for bot in (rotation, impulse, validation, ai_bot):
+        if not bot:
+            continue
+        try:
+            if hasattr(bot, "_trade_log"):
+                # keep only open markers if any
+                try:
+                    bot._trade_log = [
+                        t for t in (bot._trade_log or [])
+                        if (t.get("reason") or "").lower() in ("open", "add")
+                        or t.get("pnl") is None
+                    ]
+                except Exception:
+                    bot._trade_log = []
+            if hasattr(bot, "_session_pnl"):
+                bot._session_pnl = 0.0
+            if hasattr(bot, "_lifetime_pnl"):
+                bot._lifetime_pnl = 0.0
+            if hasattr(bot, "_lifetime_trades"):
+                bot._lifetime_trades = 0
+            if hasattr(bot, "_lifetime_wins"):
+                bot._lifetime_wins = 0
+            if hasattr(bot, "_lifetime_fees"):
+                bot._lifetime_fees = 0.0
+            if hasattr(bot, "_equity") and hasattr(bot, "_capital"):
+                bot._equity = float(getattr(bot, "_capital", 0) or 0)
+            # Re-assert DB claims for any positions still held in memory
+            try:
+                from app.services.position_claim import claim_open
+                positions = getattr(bot, "_positions", None) or {}
+                bid = getattr(bot, "BOT_ID", None)
+                if bid and positions:
+                    for pos in positions.values():
+                        await claim_open(
+                            db, bid,
+                            getattr(pos, "inst_id", None) or getattr(pos, "symbol", ""),
+                            getattr(pos, "side", "long"),
+                            float(getattr(pos, "size", 0) or 0),
+                            float(getattr(pos, "entry_price", 0) or 0),
+                        )
+            except Exception as e:
+                print(f"[reset] re-claim {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
+        except Exception as e:
+            print(f"[reset] mem {getattr(bot,'BOT_ID',bot)}: {e}", flush=True)
+
+    # Smart Money ledger (realized PnL counter) only — NEVER wipe mirror/tracker state
+    try:
+        import os
+        from app.services.smart_money_ledger import LEDGER_PATH, get_sm_ledger
+        if os.path.exists(LEDGER_PATH):
+            os.remove(LEDGER_PATH)
+        import app.services.smart_money_ledger as sml
+        sml._ledger = None
+        get_sm_ledger()
+    except Exception as e:
+        print(f"[reset] sm ledger: {e}", flush=True)
+
+    # clear caches
+    global _bot_stats_cache, _paired_cache, _pnl_cache
+    try:
+        _bot_stats_cache["ts"] = 0
+        _bot_stats_cache["data"] = {}
+    except Exception:
+        pass
+    try:
+        _paired_cache.clear()
+    except Exception:
+        pass
+    try:
+        _pnl_cache.clear()
+    except Exception:
+        pass
+
+    print(f"[reset] trading stats wiped epoch={epoch} bots={bot_ids}", flush=True)
+    return {
+        "ok": True,
+        "epoch": epoch,
+        "bots": bot_ids,
+        "wipe": wipe,
+        "message": "PnL and trade cards reset. Counting from epoch. Open exchange positions unchanged.",
+    }
+
+
+
+@app.get("/api/pnl/summary")
+async def pnl_summary():
+    """Lightweight PnL for dashboard metric cards (cached via get_pnl).
+
+    Avoids clients re-implementing aggregation; same TTL as full /api/pnl.
+    """
+    full = await get_pnl()
+    return {
+        "total": full.get("total", 0),
+        "1d": full.get("1d", 0),
+        "7d": full.get("7d", 0),
+        "30d": full.get("30d", 0),
+        "week": full.get("week", 0),
+        "unrealized": full.get("unrealized", 0),
+        "funding": full.get("funding", 0),
+        "funding_scope": full.get("funding_scope", "account"),
+        "economic_approx": full.get("economic_approx", 0),
+        "strategy_realized": full.get("strategy_realized", full.get("total", 0)),
+        "per_bot": full.get("per_bot", {}),
+        "active_bots": full.get("active_bots", []),
+        "source": full.get("source", ""),
+        "pnl_epoch": full.get("pnl_epoch"),
+        "pnl_tz": full.get("pnl_tz") or full.get("timezone"),
+        "timezone": full.get("timezone"),
+        "day_basis": full.get("day_basis"),
+        "cached": True,
+        "cache_ttl_sec": _PNL_TTL,
+    }
+
+
+def _active_bot_labels() -> set:
+    """Human labels of bots currently running (for dashboard PnL cards)."""
+    labels = set()
+    try:
+        if AI_ONLY_MODE:
+            if ai_bot and getattr(ai_bot, "_running", False):
+                labels.add("AI Discretionary 1H")
+            return labels
+        if rotation and getattr(rotation, "_running", False):
+            labels.add("Momentum")
+        if impulse and getattr(impulse, "_running", False):
+            labels.add("Impulse 1D")
+        if validation and getattr(validation, "_running", False):
+            labels.add("MACD+Donchian Validation")
+        if ai_bot and getattr(ai_bot, "_running", False):
+            labels.add("AI Discretionary 1H")
+        if vwap_rev_bot and getattr(vwap_rev_bot, "_running", False):
+            labels.add("VWAP Mean Reversion")
+        if sm_tracker and getattr(sm_tracker, "_running", False):
+            labels.add("Умные деньги")
+    except Exception:
+        pass
+    return labels
+
+
 @app.get("/api/pnl")
 async def get_pnl():
-    """PNL for Dashboard metric cards — all realized figures are computed
-    directly from the History rows (get_paired_trades: DB + OKX bills/fills),
-    so the cards always match the History section exactly. Only the
-    "unrealized" card is taken from OKX positions (matches the exchange).
-    Falls back to OKX bills / in-memory logs when History is empty."""
+    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
+    global _pnl_cache
+    now_s = _time.time()
+    if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
+        return dict(_pnl_cache["data"])
+    async with _pnl_lock:
+        now_s = _time.time()
+        if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
+            return dict(_pnl_cache["data"])
+        data = await _compute_pnl()
+        _pnl_cache = {"ts": _time.time(), "data": data}
+        return dict(data)
+
+
+async def _compute_pnl():
+
+    """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
+
+    Strict tags: clOrdId prefix / DB bot_id / explicit bot label from pairing.
+    Untagged OKX noise never enters Total / 1d / week / strategy cards.
+    """
     from datetime import datetime as dt, timezone as tz, timedelta as td
+
+    STRICT_BOTS = {
+        "AI Discretionary 1H",
+    } if AI_ONLY_MODE else {
+        "Momentum",
+        "Impulse 1D",
+        "MACD+Donchian Validation",
+        "AI Discretionary 1H",
+        "Order Book Scalp",
+        "VWAP Mean Reversion",
+        "Умные деньги",
+    }
+
+    def _normalize_bot(tr: dict) -> str:
+        bot = (tr.get("bot") or "").strip()
+        if not bot:
+            try:
+                bot = (_tag_trade_bot(tr) or "").strip()
+            except Exception:
+                bot = ""
+        if not bot:
+            try:
+                bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
+            except Exception:
+                bot = ""
+        if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
+            bot = "Momentum"
+        elif bot in ("impulse_strategy", IMP_BOT_ID):
+            bot = "Impulse 1D"
+        elif bot in (VAL_BOT_ID, "validation_strategy"):
+            bot = "MACD+Donchian Validation"
+        elif bot in (AI_BOT_ID, "ai_strategy", "ai_discretionary", "ai_discretionary_1h"):
+            bot = "AI Discretionary 1H"
+        elif bot in ("smart_money", "smart_money_mirror"):
+            bot = "Умные деньги"
+
+        inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
+        cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+
+        if AI_ONLY_MODE:
+            if cid.startswith("ai") or bot in (AI_BOT_ID, "ai_strategy", "AI Discretionary 1H"):
+                if cid and cid.startswith(("rot", "imp", "val", "sm", "vwap", "sc", "scalp")):
+                    return ""
+                return "AI Discretionary 1H"
+            return ""
+
+        if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
+            bot = "Impulse 1D"
+        if bot not in STRICT_BOTS:
+            return ""
+        if cid:
+            if cid.startswith("rot"):
+                bot = "Momentum"
+            elif cid.startswith("imp"):
+                bot = "Impulse 1D"
+            elif cid.startswith("ai"):
+                bot = "AI Discretionary 1H"
+            elif cid.startswith("val"):
+                bot = "MACD+Donchian Validation"
+            if bot not in STRICT_BOTS:
+                return ""
+        return bot
 
     realized_1d = 0.0
     realized_7d = 0.0
@@ -3306,45 +5831,109 @@ async def get_pnl():
     source = "none"
     per_bot = {}
     account_total = 0.0
+    skipped_untagged = 0
 
-    # ── 1. Primary: History rows — the single source for the cards ──
-    # `total`/`account_total` cover EVERY closed trade shown in the History
-    # section (Momentum, Impulse 1D, Validation, manual…), so the "Всего"
-    # card equals History's "Итого". `per_bot` is the per-bot breakdown of the
-    # same rows; open rows (pnl=None) contribute nothing.
     try:
+        epoch = await get_pnl_epoch()
+        if not epoch:
+            try:
+                marker = await db.get_setting("trading_stats_reset_marker")
+                if marker:
+                    epoch = dt.now(tz.utc).strftime("%Y-%m-%dT00:00:00")
+                    await db.set_setting("pnl_epoch", epoch)
+            except Exception:
+                pass
+
         resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", [])
-        closed = [t for t in trades if (t.get("reason") or "").lower() != "open"]
-        if closed:
-            source = "history"
+        trades = resp.get("trades", []) or []
+        # Dedup: OKX bills (with ord_id) are authoritative. Remove in-memory/DB
+        # trades without ord_id that duplicate an OKX bill (same inst + pnl).
+        # This prevents double-counting from the multi-source pipeline.
+        _bills_by_inst_pnl: dict = set()
+        for tr in trades:
+            _oid = str(tr.get("ord_id") or "").strip()
+            if _oid:
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _pnl = round(float(tr.get("pnl") or 0), 2)
+                _bills_by_inst_pnl.add((_inst, _pnl))
+        _deduped = []
+        for tr in trades:
+            _oid = str(tr.get("ord_id") or "").strip()
+            if not _oid:
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _pnl = round(float(tr.get("pnl") or 0), 2)
+                if (_inst, _pnl) in _bills_by_inst_pnl:
+                    continue  # skip in-memory duplicate of OKX bill
+            _deduped.append(tr)
+        trades = _deduped
+        closed_tagged = []
+        for tr in trades:
+            reason = (tr.get("reason") or "").lower()
+            if reason in ("open", "add"):
+                continue
+            if tr.get("pnl") is None:
+                continue
+            try:
+                float(tr.get("pnl"))
+            except (TypeError, ValueError):
+                continue
+            if not _trade_after_epoch(tr, epoch):
+                continue
+            bot = _normalize_bot(tr)
+            try:
+                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
+                _et = str(tr.get("exit_time") or tr.get("time") or "")
+                _pnl = float(tr.get("pnl") or 0)
+            except Exception:
+                pass
+            if not bot:
+                skipped_untagged += 1
+                continue
+            tr = dict(tr)
+            tr["bot"] = bot
+            closed_tagged.append(tr)
+
+        if closed_tagged or epoch:
+            source = "history_strict" if closed_tagged else "epoch_empty"
             now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-            for t in closed:
+            week_start = (now - td(days=now.weekday())).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+            active_labels = _active_bot_labels()
+            for tr in closed_tagged:
                 try:
-                    pnl = float(t.get("pnl", 0) or 0)
+                    pnl = float(tr.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-                bot = t.get("bot") or ""
+                bot = tr.get("bot") or ""
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+                if AI_ONLY_MODE:
+                    if bot != "AI Discretionary 1H":
+                        account_total += pnl
+                        continue
+                elif active_labels and bot not in active_labels:
+                    account_total += pnl
+                    continue
                 total_realized += pnl
                 account_total += pnl
                 try:
-                    fee = abs(float(t.get("fee", 0) or 0))
+                    total_fees += abs(float(tr.get("fee", 0) or 0))
                 except (TypeError, ValueError):
-                    fee = 0.0
-                if fee is not None:
-                    total_fees += fee
-                time_str = t.get("time", "") or t.get("exit_time", "")
+                    pass
+                time_str = tr.get("time", "") or tr.get("exit_time", "")
                 if time_str:
                     try:
                         t_time = dt.fromisoformat(time_str)
                         if t_time.tzinfo is None:
                             t_time = t_time.replace(tzinfo=tz.utc)
                         age_sec = (now - t_time).total_seconds()
-                        if age_sec <= 86400:
-                            realized_1d += pnl
+                        try:
+                            if trade_attr.is_calendar_today(time_str):
+                                realized_1d += pnl
+                        except Exception:
+                            if age_sec <= 86400:
+                                realized_1d += pnl
                         if age_sec <= 604800:
                             realized_7d += pnl
                         if age_sec <= 2592000:
@@ -3352,153 +5941,122 @@ async def get_pnl():
                         if t_time >= week_start:
                             realized_week += pnl
                     except (ValueError, OSError, TypeError):
-                        realized_30d += pnl
-                else:
-                    realized_30d += pnl
-            print(f"[pnl] History (primary): total={total_realized:.2f} account_total={account_total:.2f} "
-                  f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} week={realized_week:.2f} "
-                  f"fees={total_fees:.2f} closed={len(closed)} per_bot={per_bot}", flush=True)
+                        pass
+            print(
+                f"[pnl] strict: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                f"week={realized_week:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
+                f"tagged={len(closed_tagged)} skip_untagged={skipped_untagged} epoch={epoch!r}",
+                flush=True,
+            )
+            for tr in closed_tagged:
+                if tr.get("bot") == "AI Discretionary 1H":
+                    try:
+                        _t = tr.get("time") or tr.get("exit_time") or "?"
+                    except Exception:
+                        _t = "?"
+                    print(
+                        f"[pnl-ai] {tr.get('inst_id','')} pnl={float(tr.get('pnl',0) or 0):.2f} "
+                        f"fee={float(tr.get('fee',0) or 0):.2f} time={_t} oid={tr.get('ord_id','')}",
+                        flush=True,
+                    )
     except Exception as e:
         import traceback
         print(f"[pnl] History source error: {e}", flush=True)
         traceback.print_exc()
 
-    # ── 2. Fallback: OKX bills (only if History is empty) ──
-    if source == "none":
-        try:
-            bills = await _fetch_all_trade_bills()
-            if bills:
-                now = dt.now(tz.utc)
-                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                source = "okx_bills"
-                for b in bills:
-                    try:
-                        b_pnl = float(b.get("pnl") or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if b_pnl == 0:
-                        continue
-                    try:
-                        b_fee = abs(float(b.get("fee") or 0))
-                    except (TypeError, ValueError):
-                        b_fee = 0.0
-                    total_fees += b_fee
-                    total_realized += b_pnl
-                    account_total += b_pnl
-                    ts_str = b.get("ts", "")
-                    if ts_str:
-                        try:
-                            b_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
-                            age_sec = (now - b_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += b_pnl
-                            if age_sec <= 604800:
-                                realized_7d += b_pnl
-                            if age_sec <= 2592000:
-                                realized_30d += b_pnl
-                            if b_time >= week_start:
-                                realized_week += b_pnl
-                        except (ValueError, OSError, TypeError):
-                            realized_30d += b_pnl
-                    else:
-                        realized_30d += b_pnl
-                print(f"[pnl] OKX bills fallback: total={total_realized:.2f} "
-                      f"1d={realized_1d:.2f} 7d={realized_7d:.2f} 30d={realized_30d:.2f} "
-                      f"week={realized_week:.2f} fees={total_fees:.2f}", flush=True)
-        except Exception as e:
-            import traceback
-            print(f"[pnl] OKX bills fallback error: {e}", flush=True)
-            traceback.print_exc()
-
-    # ── 3. Fallback: OKX fills pairing (if neither history nor bills) ──
-    if source == "none":
-        try:
-            _fills_cache_ts = 0  # bypass cache
-            raw_fills = await _fetch_okx_fills(limit=300)
-            paired = await _pair_fills(raw_fills)
-            if paired:
-                source = "okx_fills"
-                now = dt.now(tz.utc)
-                week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-                for t in paired:
-                    if t.get("reason") != "closed":
-                        continue
-                    try:
-                        trade_pnl = float(t.get("pnl", 0) or 0)
-                    except (ValueError, TypeError):
-                        continue
-                    total_realized += trade_pnl
-                    account_total += trade_pnl
-                    try:
-                        total_fees += abs(float(t.get("fee", 0) or 0))
-                    except (ValueError, TypeError):
-                        pass
-                    time_str = t.get("time", "")
-                    if time_str:
-                        try:
-                            t_time = dt.fromisoformat(time_str)
-                            if t_time.tzinfo is None:
-                                t_time = t_time.replace(tzinfo=tz.utc)
-                            age_sec = (now - t_time).total_seconds()
-                            if age_sec <= 86400:
-                                realized_1d += trade_pnl
-                            if age_sec <= 604800:
-                                realized_7d += trade_pnl
-                            if age_sec <= 2592000:
-                                realized_30d += trade_pnl
-                            if t_time >= week_start:
-                                realized_week += trade_pnl
-                        except (ValueError, OSError, TypeError):
-                            realized_30d += trade_pnl
-                    else:
-                        realized_30d += trade_pnl
-        except Exception as e:
-            import traceback
-            print(f"[pnl] OKX fills error: {e}", flush=True)
-            traceback.print_exc()
-
-    # ── 4. Last fallback: in-memory from running bots ──
-    if source == "none":
-        now = dt.now(tz.utc)
-        week_start = (now - td(days=now.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
-        all_logs = []
-        if rotation and rotation._trade_log:
-            all_logs.extend(rotation._trade_log)
-
-        if all_logs:
-            source = "memory"
-            for t in all_logs:
-                pnl = t.get("pnl", 0)
-                if not pnl:
-                    continue
-                total_realized += pnl
-                account_total += pnl
-                try:
-                    t_time = dt.fromisoformat(t["time"])
-                    if t_time.tzinfo is None:
-                        t_time = t_time.replace(tzinfo=tz.utc)
-                    age = (now - t_time).total_seconds()
-                    if age <= 86400:
-                        realized_1d += pnl
-                    if age <= 604800:
-                        realized_7d += pnl
-                    if age <= 2592000:
-                        realized_30d += pnl
-                    if t_time >= week_start:
-                        realized_week += pnl
-                except Exception:
-                    realized_30d += pnl
-
-    # ── Unrealized PNL — always from OKX positions (matches exchange) ──
+    # Unrealized from open positions (exchange)
     unrealized = 0.0
     try:
         pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
         if not pos_result.get("error"):
-            for p in pos_result.get("data", []):
-                unrealized += float(p.get("upl", 0) or 0)
+            for pos in pos_result.get("data", []):
+                try:
+                    if abs(float(pos.get("pos", 0) or 0)) <= 0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                unrealized += float(pos.get("upl", 0) or 0)
     except Exception:
         pass
 
+    try:
+        update_daily_pnl(realized_1d + unrealized)
+    except Exception:
+        pass
+
+    # Funding (OKX bills type=8) — cached to avoid extra OKX load every poll
+    funding = 0.0
+    funding_source = "none"
+    funding_n = 0
+    try:
+        global _FUNDING_CACHE, _FUNDING_CACHE_TS
+        now_f = _time.time()
+        if _FUNDING_CACHE_TS and (now_f - _FUNDING_CACHE_TS) < _FUNDING_TTL:
+            funding = float(_FUNDING_CACHE or 0)
+            funding_source = "cache"
+        else:
+            epoch = await get_pnl_epoch()
+            after = ""
+            for _page in range(6):
+                resp_f = await _okx_call(
+                    lambda c, a=after: c.get_bills(
+                        inst_type="SWAP", type="8", limit=100,
+                        **({"after": a} if a else {})
+                    )
+                )
+                if resp_f.get("error"):
+                    if _page == 0:
+                        print(f"[pnl] funding fetch: {resp_f.get('message', '')}", flush=True)
+                    break
+                page_data = resp_f.get("data") or []
+                if not page_data:
+                    break
+                stop = False
+                for b in page_data:
+                    ts = b.get("ts") or b.get("cTime") or ""
+                    try:
+                        if epoch and ts:
+                            from datetime import datetime as _dt, timezone as _tz
+                            t_iso = _dt.fromtimestamp(int(ts) / 1000, tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                            if t_iso[:19] < str(epoch)[:19]:
+                                stop = True
+                                break
+                    except Exception:
+                        pass
+                    try:
+                        v = b.get("pnl")
+                        if v is None or v == "":
+                            v = b.get("balChg")
+                        funding += float(v or 0)
+                        funding_n += 1
+                    except (TypeError, ValueError):
+                        continue
+                if stop or len(page_data) < 100:
+                    break
+                after = page_data[-1].get("billId", "")
+                if not after:
+                    break
+            funding_source = "okx_bills_type8"
+            _FUNDING_CACHE = funding
+            _FUNDING_CACHE_TS = now_f
+    except Exception as e:
+        print(f"[pnl] funding: {e}", flush=True)
+
+    fees_note = (
+        "OKX fillPnl/bill.pnl is usually net of trading fees; "
+        "do not subtract 'fees' again from total. Funding is separate (type=8)."
+    )
+
+    economic = total_realized + unrealized + funding
+
+    per_bot_all = {k: float(v) for k, v in per_bot.items()}
+    active = _active_bot_labels()
+    if AI_ONLY_MODE:
+        active = {"AI Discretionary 1H"}
+        per_bot = {k: v for k, v in per_bot.items() if k == "AI Discretionary 1H"}
+        total_realized = float(per_bot.get("AI Discretionary 1H") or 0.0)
+    elif active:
+        per_bot = {k: v for k, v in per_bot.items() if k in active}
     return {
         "total": round(total_realized, 2),
         "account_total": round(account_total, 2),
@@ -3507,51 +6065,330 @@ async def get_pnl():
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
         "unrealized": round(unrealized, 2),
+        "funding": round(funding, 4),
+        "funding_source": funding_source,
+        "funding_bills": funding_n,
+        "funding_scope": "account",
+        "economic_approx": round(economic, 2),
+        "strategy_realized": round(total_realized, 2),
         "source": source,
+        "pnl_tz": str(getattr(trade_attr.pnl_timezone(), "key", None) or "Europe/Moscow"),
         "fees": round(total_fees, 2),
+        "fees_informational": True,
+        "pnl_includes_fee": True,
+        "fees_note": fees_note,
         "per_bot": {k: round(v, 2) for k, v in per_bot.items()},
+        "per_bot_all": {k: round(v, 2) for k, v in per_bot_all.items()},
+        "active_bots": sorted(active) if active else [],
+        "pnl_epoch": await get_pnl_epoch(),
+        "skipped_untagged": skipped_untagged,
+        "timezone": str(getattr(trade_attr.pnl_timezone(), "key", None) or "Europe/Moscow"),
+        "day_basis": "calendar_pnl_tz",
+    }
+
+
+
+
+@app.get("/api/pnl/reconcile", dependencies=[Depends(require_admin)])
+async def pnl_reconcile():
+    """Compare dashboard strict PnL vs OKX bills (trade + funding) + positions upl.
+
+    Helps detect attribution gaps (untagged), funding drift, and upl mismatch.
+    """
+    from datetime import datetime as dt, timezone as tz
+
+    dash = await get_pnl()
+    epoch = dash.get("pnl_epoch") or await get_pnl_epoch()
+
+    # OKX trade bills — all SWAP closes/opens with pnl
+    okx_trade_pnl = 0.0
+    okx_trade_n = 0
+    okx_tagged_pnl = 0.0
+    okx_untagged_pnl = 0.0
+    try:
+        # Prefer paired pipeline bills if available via get_paired_trades debug
+        # Direct bills type=2 (trade) when API supports type filter
+        for type_arg in ("2", None):
+            try:
+                if type_arg:
+                    resp = await _okx_call(
+                        lambda c, t=type_arg: c.get_bills(inst_type="SWAP", type=t, limit=100)
+                    )
+                else:
+                    resp = await _okx_call(
+                        lambda c: c.get_bills(inst_type="SWAP", limit=100)
+                    )
+                if resp.get("error"):
+                    continue
+                for b in resp.get("data") or []:
+                    sub = str(b.get("subType") or "")
+                    # close subtypes
+                    if sub and sub not in ("5", "6", "3", "4", "1", "2"):
+                        continue
+                    try:
+                        ts = b.get("ts") or ""
+                        if epoch and ts:
+                            t_iso = dt.fromtimestamp(int(ts) / 1000, tz=tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                            if t_iso[:19] < str(epoch)[:19]:
+                                continue
+                    except Exception:
+                        pass
+                    try:
+                        p = float(b.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        p = 0.0
+                    if sub in ("5", "6") or p != 0:
+                        okx_trade_pnl += p
+                        okx_trade_n += 1
+                        cid = str(b.get("clOrdId") or "").lower()
+                        if cid.startswith(("rot", "imp", "ai", "val")):
+                            okx_tagged_pnl += p
+                        else:
+                            okx_untagged_pnl += p
+                break
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[reconcile] bills: {e}", flush=True)
+
+    # Positions upl
+    upl = 0.0
+    n_pos = 0
+    try:
+        pos_result = await _okx_call(lambda c: c.get_positions("SWAP"))
+        if not pos_result.get("error"):
+            for pos in pos_result.get("data") or []:
+                try:
+                    if abs(float(pos.get("pos") or 0)) <= 0:
+                        continue
+                    upl += float(pos.get("upl") or 0)
+                    n_pos += 1
+                except (TypeError, ValueError):
+                    continue
+    except Exception:
+        pass
+
+    r_dash = float(dash.get("total") or 0)
+    u_dash = float(dash.get("unrealized") or 0)
+    f_dash = float(dash.get("funding") or 0)
+
+    return {
+        "ok": abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0,
+        "pnl_epoch": epoch,
+        "dashboard": {
+            "realized_tagged": r_dash,
+            "unrealized": u_dash,
+            "funding": f_dash,
+            "fees_informational": dash.get("fees"),
+            "economic_approx": dash.get("economic_approx"),
+            "skipped_untagged": dash.get("skipped_untagged"),
+            "per_bot": dash.get("per_bot"),
+            "source": dash.get("source"),
+        },
+        "okx": {
+            "trade_pnl_all": round(okx_trade_pnl, 4),
+            "trade_pnl_tagged_clord": round(okx_tagged_pnl, 4),
+            "trade_pnl_untagged": round(okx_untagged_pnl, 4),
+            "trade_bills_n": okx_trade_n,
+            "unrealized_upl": round(upl, 4),
+            "open_positions": n_pos,
+            "funding": f_dash,
+        },
+        "diffs": {
+            "realized_dash_minus_okx_tagged": round(r_dash - okx_tagged_pnl, 4),
+            "unrealized_dash_minus_okx": round(u_dash - upl, 4),
+            "okx_all_minus_dash": round(okx_trade_pnl - r_dash, 4),
+        },
+        "notes": [
+            "Dashboard realized = strategy-tagged closed trades after pnl_epoch only.",
+            "OKX trade_pnl_all may include untagged/manual fills.",
+            "fillPnl usually already net of trading fees; fees on dashboard are informational.",
+            "Funding is separate (bills type=8), included in economic_approx.",
+            "Timestamps and epoch filter use UTC.",
+        ],
+    }
+
+
+@app.get("/api/reports/summary")
+async def reports_summary():
+    """Single reporting snapshot for UI/export — same trade source as History/Dashboard.
+
+    Fields:
+    - realized / unrealized / fees / funding (funding best-effort from OKX bills type=8)
+    - periods 1d/7d/30d/week aligned with /api/pnl
+    - trade_count, wins, losses, win_rate from closed paired trades
+    - source labels for transparency
+    """
+    pnl = await get_pnl()
+    paired = await get_paired_trades(limit=5000)
+    trades = [x for x in (paired.get("trades") or []) if (x.get("reason") or "").lower() in ("closed", "tp", "sl", "trail", "breakeven", "manual", "")]
+    # prefer explicit closed-like
+    closed = []
+    for x in (paired.get("trades") or []):
+        reason = (x.get("reason") or "").lower()
+        if reason in ("open", "tp1"):
+            continue
+        try:
+            if float(x.get("pnl") or 0) == 0 and reason == "open":
+                continue
+        except (TypeError, ValueError):
+            pass
+        closed.append(x)
+
+    fees = 0.0
+    wins = losses = 0
+    for x in closed:
+        try:
+            fees += abs(float(x.get("fee") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            pval = float(x.get("pnl") or 0)
+        except (TypeError, ValueError):
+            pval = 0.0
+        if pval > 0:
+            wins += 1
+        elif pval < 0:
+            losses += 1
+    n = wins + losses
+    win_rate = round(wins / n * 100, 1) if n else 0.0
+
+    funding = 0.0
+    funding_source = "none"
+    try:
+        resp = await _okx_call(lambda c: c.get_bills(inst_type="SWAP", type="8", limit=100))
+        if not resp.get("error"):
+            for b in resp.get("data") or []:
+                try:
+                    # OKX funding often in pnl or balChg
+                    v = b.get("pnl")
+                    if v is None or v == "":
+                        v = b.get("balChg")
+                    funding += float(v or 0)
+                except (TypeError, ValueError):
+                    continue
+            funding_source = "okx_bills_type8"
+    except Exception as e:
+        print(f"[reports] funding fetch: {e}", flush=True)
+
+    net = float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding - 0.0
+    # fees already often embedded in trade pnl on OKX; still surface separately
+    return {
+        "as_of": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "realized_total": pnl.get("total"),
+        "realized_1d": pnl.get("1d"),
+        "realized_7d": pnl.get("7d"),
+        "realized_30d": pnl.get("30d"),
+        "realized_week": pnl.get("week"),
+        "unrealized": pnl.get("unrealized"),
+        "fees_reported": round(fees, 4) if fees else pnl.get("fees"),
+        "funding": round(funding, 4),
+        "funding_source": funding_source,
+        "net_approx": round(float(pnl.get("total") or 0) + float(pnl.get("unrealized") or 0) + funding, 2),
+        "per_bot": pnl.get("per_bot") or {},
+        "trades_closed": len(closed),
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": win_rate,
+        "pnl_source": pnl.get("source"),
+        "note": "PnL matches History paired trades; funding is OKX bills type=8 (best-effort, last page).",
     }
 
 
 _bot_stats_cache = {"ts": 0, "data": {}}  # {"Momentum": {...}, "Impulse 1D": {...}}
-_BOT_STATS_TTL = 60  # seconds
+_BOT_STATS_TTL = 15  # seconds
+
+
+async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
+    """Overlay durable KPI onto strategy status (running or stopped)."""
+    status = dict(status or {})
+    try:
+        all_stats = await _bot_history_stats()
+        stats = all_stats.get(bot_label) or {}
+        status["total_pnl"] = stats.get("total_pnl", status.get("total_pnl", 0))
+        status["total_trades"] = stats.get("total_trades", status.get("total_trades", 0))
+        status["wins"] = stats.get("wins", status.get("wins", 0))
+        status["losses"] = stats.get("losses", status.get("losses", 0))
+        status["win_rate"] = stats.get("win_rate", status.get("win_rate", 0))
+        status["lifetime_pnl"] = status.get("total_pnl")
+        status["total_pnl_source"] = stats.get("total_pnl_source", "okx_history")
+        status["kpi_from_history"] = True
+    except Exception as e:
+        print(f"[kpi] {bot_label}: {e}", flush=True)
+        status["kpi_from_history"] = False
+    return status
 
 
 async def _bot_history_stats() -> dict:
-    """Per-bot cumulative stats (Momentum / Impulse 1D) from the same
-    OKX-history source as /api/pnl, so bot cards survive restarts instead of
-    resetting to 0 when the in-memory trade log is empty.
+    """Per-bot KPI from the SAME pipeline as /api/pnl — works even if bots are stopped.
 
-    Cached for _BOT_STATS_TTL seconds because the status endpoints are polled
-    every ~10s by the dashboard."""
+    Always returns entries for known strategy cards (zeros after pnl_epoch reset).
+    """
     now_s = _time.time()
     if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL:
         return _bot_stats_cache["data"]
-    stats = {}
+
+    KNOWN = (
+        "Momentum", "Impulse 1D", "MACD+Donchian Validation",
+        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
+    )
+    stats = {
+        name: {
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0.0,
+            "total_pnl_source": "okx_history",
+        }
+        for name in KNOWN
+    }
     try:
+        pnl_resp = await get_pnl()
+        per = pnl_resp.get("per_bot") or {}
         resp = await get_paired_trades(limit=5000)
-        for t in resp.get("trades", []):
-            bot = t.get("bot") or ""
-            if bot not in ("Momentum", "Impulse 1D"):
+        epoch = await get_pnl_epoch()
+        counts = {}
+        pnl_sum = {}
+        for tr in resp.get("trades", []) or []:
+            bot = tr.get("bot") or _db_bot_name(tr.get("bot_id") or "") or ""
+            if bot not in KNOWN:
                 continue
-            if (t.get("reason") or "").lower() == "open":
+            if (tr.get("reason") or "").lower() in ("open", "add"):
+                continue
+            if not _trade_after_epoch(tr, epoch):
                 continue
             try:
-                pnl = float(t.get("pnl", 0) or 0)
+                pnl = float(tr.get("pnl", 0) or 0)
             except (TypeError, ValueError):
                 continue
-            s = stats.setdefault(
-                bot, {"total_pnl": 0.0, "total_trades": 0, "wins": 0, "losses": 0})
-            s["total_pnl"] += pnl
-            s["total_trades"] += 1
+            c = counts.setdefault(bot, {"total_trades": 0, "wins": 0, "losses": 0})
+            c["total_trades"] += 1
             if pnl > 0:
-                s["wins"] += 1
-            else:
-                s["losses"] += 1
-        for bot, s in stats.items():
-            total = s["total_trades"]
-            s["total_pnl"] = round(s["total_pnl"], 2)
-            s["win_rate"] = round(s["wins"] / total * 100, 1) if total else 0.0
+                c["wins"] += 1
+            elif pnl < 0:
+                c["losses"] += 1
+            pnl_sum[bot] = pnl_sum.get(bot, 0.0) + pnl
+
+        for bot in KNOWN:
+            mapped_pnl = per.get(bot)
+            if mapped_pnl is None:
+                for k, v in per.items():
+                    if (_db_bot_name(k) or k) == bot:
+                        mapped_pnl = v
+                        break
+            if mapped_pnl is None:
+                mapped_pnl = pnl_sum.get(bot, 0.0)
+            c = counts.get(bot) or {"total_trades": 0, "wins": 0, "losses": 0}
+            total = int(c["total_trades"])
+            stats[bot] = {
+                "total_pnl": round(float(mapped_pnl or 0), 2),
+                "total_trades": total,
+                "wins": int(c.get("wins", 0)),
+                "losses": int(c.get("losses", 0)),
+                "win_rate": round(c["wins"] / total * 100, 1) if total else 0.0,
+                "total_pnl_source": "okx_history",
+            }
     except Exception as e:
         print(f"[bot_stats] error: {e}", flush=True)
     _bot_stats_cache["ts"] = now_s
@@ -3571,7 +6408,12 @@ async def get_all_trades(limit: int = 100):
 
 _paired_cache: dict = {}
 _paired_lock = asyncio.Lock()
-_PAIRED_TTL = 30  # seconds — dashboard polls /api/pnl + /api/trades/paired every 10s
+_PAIRED_TTL = 20
+
+_pnl_cache: dict = {}
+_pnl_lock = asyncio.Lock()
+_PNL_TTL = 15  # seconds
+  # seconds — single-flight shared by /api/pnl and /trades/paired
 
 
 @app.get("/api/trades/paired")
@@ -3588,12 +6430,12 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     now_s = _time.time()
     if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
         trades = _paired_cache["data"]
-        return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+        return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
     async with _paired_lock:
         now_s = _time.time()
         if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
             trades = _paired_cache["data"]
-            return {"trades": trades[-limit:], "debug": dict(_paired_cache["debug"])}
+            return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end)
         trades = resp.get("trades", [])
         if trades:
@@ -3602,20 +6444,22 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
                 "data": trades,
                 "debug": resp.get("debug", {}),
             }
-        return {"trades": trades[-limit:], "debug": resp.get("debug", {})}
+        return {"trades": trades[:limit], "debug": resp.get("debug", {})}
 
 
 _warm_task: Optional[asyncio.Task] = None
-_WARM_INTERVAL = 30
+_WARM_INTERVAL = 45.0
 
 
 async def _warm_dashboard_caches() -> None:
-    """Keep the expensive dashboard caches hot in the background so the first
-    (and every 30s) user request never pays the 3-8s bills/fills/DB pipeline."""
+    """Keep dashboard caches warm without saturating the free-tier instance."""
     while True:
         try:
             await asyncio.sleep(_WARM_INTERVAL)
-            await get_paired_trades(limit=500)
+            try:
+                await asyncio.wait_for(get_paired_trades(limit=300), timeout=25.0)
+            except asyncio.TimeoutError:
+                print("[warm] paired cache timed out (25s) — skip", flush=True)
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -3628,7 +6472,43 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     nothing is stored yet."""
     # 1. Gather all raw trade records: persisted (DB) + live (in-memory).
     raw = []
-    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID]
+    bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID]
+    # Map inst_id -> most recent bot that traded it. Used to tag manual/external
+    # closes (manual_close/exchange_stop) whose close order has no clOrdId and
+    # whose ord_id is empty in the DB — without this, OKX rows lose their bot
+    # attribution and their PnL drops out of strategy cards.
+    # Sources: in-memory trade logs (fast, reliable) + DB trades (fallback).
+    inst_last_bot: dict = {}
+    _bot_name_map = {
+        ROT_BOT_ID: "Momentum", MOM_BOT_ID: "Momentum",
+        IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation",
+        AI_BOT_ID: "AI Discretionary 1H",
+        "rotation": "Momentum", "momentum": "Momentum",
+        "impulse": "Impulse 1D", "validation": "MACD+Donchian Validation",
+        "ai": "AI Discretionary 1H",
+    }
+    # Build from in-memory trade logs (most reliable — survives DB failures)
+    for _bid_name, _bot_obj in [("rotation", rotation), ("impulse", impulse),
+                                  ("validation", validation), ("ai", ai_bot)]:
+        if _bot_obj and hasattr(_bot_obj, '_trade_log') and _bot_obj._trade_log:
+            for _t in reversed(_bot_obj._trade_log):
+                _i = _t.get("symbol") or _t.get("inst_id") or ""
+                if _i and _i not in inst_last_bot:
+                    inst_last_bot[_i] = _bid_name
+    # Fallback: DB trades (if table is populated)
+    if db:
+        try:
+            _ib_rows = await db._fetchall(
+                "SELECT inst_id, bot_id, timestamp FROM trades "
+                "WHERE bot_id IS NOT NULL AND bot_id != '' "
+                "ORDER BY timestamp DESC LIMIT 2000"
+            )
+            for _r in _ib_rows:
+                _i = _r.get("inst_id") or ""
+                if _i and _i not in inst_last_bot:
+                    inst_last_bot[_i] = str(_r.get("bot_id") or "").split(":")[0]
+        except Exception as e:
+            print(f"[trades/paired] inst_last_bot DB fallback: {e}", flush=True)
     if db:
         try:
             for bid in bot_ids:
@@ -3655,8 +6535,10 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             print(f"[trades/paired] DB read error: {e}", flush=True)
 
     # Live in-memory logs (they may include entries not yet flushed to DB).
-    live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation)]
-    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D", VAL_BOT_ID: "MACD+Donchian Validation"}
+    live_bots = [("rotation", rotation), ("impulse", impulse), ("validation", validation),
+                 ("ai", ai_bot)]
+    live_names = {ROT_BOT_ID: "Momentum", IMP_BOT_ID: "Impulse 1D",
+                  VAL_BOT_ID: "MACD+Donchian Validation", AI_BOT_ID: "AI Discretionary 1H"}
     for key, bot in live_bots:
         if bot and bot._trade_log:
             for t in bot._trade_log:
@@ -3702,10 +6584,23 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             except (TypeError, ValueError):
                 bf = 0.0
             prev = bill_by_ord.get(bid)
-            if prev is None or (bp != 0 and prev.get("pnl") == 0):
+            if prev is None:
                 bill_by_ord[bid] = {"pnl": bp, "fee": bf,
                                     "ts": b.get("ts", ""),
                                     "clOrdId": str(b.get("clOrdId", "") or "").strip()}
+            else:
+                # Aggregate pnl/fee across ALL bills sharing the same ordId
+                # (e.g. partial fills where one close order produces multiple
+                # bills). The old code only stored the first bill, which
+                # caused the last-mile enrich (step 4) to overwrite the
+                # correctly aggregated pnl from _pair_bills with a single
+                # bill's pnl — e.g. the ETH close at 20:44 30.08 showed
+                # pnl=13.33 instead of 680.10 (sum of 18 close bills).
+                prev["pnl"] += bp
+                prev["fee"] += bf
+                prev["ts"] = b.get("ts", prev["ts"])
+                if not prev["clOrdId"]:
+                    prev["clOrdId"] = str(b.get("clOrdId", "") or "").strip()
     except Exception as e:
         print(f"[trades/paired] bills fetch error: {e}", flush=True)
 
@@ -3742,14 +6637,81 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     fill_clord = {str(f.get("ordId", "")).strip(): str(f.get("clOrdId", "") or "").strip()
                   for f in raw_fills}
 
-    def _okx_bot(ord_id: str) -> str:
-        cid = fill_clord.get(ord_id, "") or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
-        if cid.startswith("rot"):
-            return "Momentum"
-        if cid.startswith("imp"):
-            return "Impulse 1D"
+    # inst_id -> bot from ENTRY fills (clOrdId prefix). Used as final fallback
+    # for close orders whose own clOrdId is missing (manual/external/exchange_stop).
+    # The ENTRY fill always has the bot's clOrdId (e.g. "rot...").
+    # Only subType 3/4 (entry) fills count, and we iterate NEWEST-first so the
+    # MOST RECENT opener wins — the bot that opened the current/last position is
+    # the rightful owner. (The old code kept the OLDEST entry, which wrongly
+    # attributed ETH to Momentum because an old Momentum entry predated the
+    # AI opens that actually opened the position being closed.)
+    inst_entry_bot: dict = {}
+    _clord_to_bot = {"rot": "Momentum", "imp": "Impulse 1D", "ai": "AI Discretionary 1H",
+                     "val": "MACD+Donchian Validation",
+                     "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+                     "vwap": "VWAP Mean Reversion"}
+    for _f in reversed(raw_fills):
+        _sub = str(_f.get("subType") or "")
+        if _sub not in ("3", "4"):
+            continue  # only entry fills define who opened the position
+        _cid = str(_f.get("clOrdId", "") or "").strip().lower()
+        _fi = _f.get("instId") or _f.get("inst_id") or ""
+        if not _fi or not _cid:
+            continue
+        # Side of the entry: sell opens a short, buy opens a long. A position can
+        # be opened by different bots over time on the SAME instrument (AI opened
+        # an ETH short with ai..., later Momentum opened an ETH long with rot...),
+        # so the opener is keyed by (inst_id, side), not just inst_id.
+        _fside = str(_f.get("side") or "").lower()
+        _entry_side = "short" if _fside == "sell" else ("long" if _fside == "buy" else "")
+        if not _entry_side:
+            continue
+        _key = ( _fi, _entry_side)
+        for _prefix, _bname in _clord_to_bot.items():
+            if _cid.startswith(_prefix) and _key not in inst_entry_bot:
+                inst_entry_bot[_key] = _bname
+                break
+
+    def _okx_bot(ord_id: str, *, entry_ord_id: str = "") -> str:
+        """Map OKX ordId → strategy label via clOrdId prefix or DB trades.bot_id.
+
+        Ownership follows the ENTRY order: the bot that OPENED the position is
+        the rightful owner, even if the closing order carries a different bot's
+        clOrdId (e.g. Momentum adopted an AI position and later closed it with a
+        rot... clOrdId). The close-order clOrdId is only used when no entry
+        clOrdId is known (e.g. manually-opened positions closed by a bot)."""
+        def _match(prefix: str) -> str:
+            m = {
+                "rot": "Momentum", "imp": "Impulse 1D", "ai": "AI Discretionary 1H",
+                "val": "MACD+Donchian Validation",
+                "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+                "vwap": "VWAP Mean Reversion",
+            }
+            for k, v in m.items():
+                if prefix.startswith(k):
+                    return v
+            return ""
+        # ENTRY clOrdId is authoritative for ownership (the opener owns the trade).
+        if entry_ord_id:
+            ecid = (fill_clord.get(entry_ord_id, "")
+                    or bill_by_ord.get(entry_ord_id, {}).get("clOrdId", "")
+                    or "").strip().lower()
+            if ecid:
+                b = _match(ecid)
+                if b:
+                    return b
+        # Fallback: the order's own clOrdId (manual/external opens lack a bot
+        # clOrdId on the entry, so attribute by who closed it).
+        cid = (fill_clord.get(ord_id, "")
+               or bill_by_ord.get(ord_id, {}).get("clOrdId", "")
+               or "").strip().lower()
+        if cid:
+            b = _match(cid)
+            if b:
+                return b
+        # Any bot_id stored for this ord_id (AI/Validation/Scalp/etc.)
         b = _db_bot_name(ord_to_bot.get(ord_id, ""))
-        return b if b in ("Momentum", "Impulse 1D") else ""
+        return b or ""
 
     pair_bills_err = ""
     try:
@@ -3773,6 +6735,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                     pass
             entry_px = t.get("entry", 0) or t.get("entry_price", 0)
             exit_px = t.get("exit_price", 0)
+            entry_ord = str(t.get("entry_ord_id", "") or "").strip()
             okx_rows.append({
                 "time": t.get("time", ""),
                 "entry_time": t.get("entry_time", ""),
@@ -3789,7 +6752,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 "reason": t.get("reason", ""),
                 "pos_side": t.get("pos_side", "long"),
                 "signal_id": t.get("signal_id", 0) or ord_id,
-                "bot": _okx_bot(ord_id),
+                "bot": _okx_bot(ord_id, entry_ord_id=entry_ord),
                 "fee": t.get("fee", "0"),
             })
     except Exception as e:
@@ -3829,6 +6792,41 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             continue
         seen.add(key)
         dedup.append(t)
+
+    # Backfill strategy tag for rows that still lack bot (esp. AI without clOrdId,
+    # and manual/external closes whose close order has no clOrdId + empty ord_id).
+    for t in dedup:
+        if t.get("bot"):
+            continue
+        try:
+            tagged = _tag_trade_bot(t)
+            if tagged:
+                t["bot"] = tagged
+                continue
+        except Exception:
+            pass
+        # DB ord_id map again with full bot name list
+        oid = str(t.get("ord_id") or "").strip()
+        if oid and oid in ord_to_bot:
+            t["bot"] = _db_bot_name(ord_to_bot[oid]) or t.get("bot") or ""
+            continue
+        # Manual/external close fallback: no ord_id / no clOrdId — attribute by
+        # the instrument's most recent entry fill (inst_entry_bot uses the ENTRY
+        # order's clOrdId prefix, which is the most reliable signal for who opened
+        # the position). Fallback to inst_last_bot (in-memory trade log) only if
+        # entry fills are also unavailable.
+        inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
+        # ENTRY fill clOrdId map — most reliable: the person who opened the trade
+        # is the rightful owner, even if the close came from a different bot
+        # (e.g. Momentum's orphan sweep or exchange-stop).
+        if inst and inst in inst_entry_bot:
+            t["bot"] = inst_entry_bot[inst] or t.get("bot") or ""
+            continue
+        # In-memory trade log fallback: last bot that touched this instrument.
+        if inst and inst in inst_last_bot:
+            _raw_name = inst_last_bot[inst]
+            t["bot"] = _bot_name_map.get(_raw_name, _raw_name) or t.get("bot") or ""
+            continue
 
     # 3. Legacy coverage from DB + live memory — ONLY for trades OKX does not
     #    cover (older than the fills window, or missing ord_id with no matching
@@ -3923,6 +6921,41 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             seen.add(key)
             dedup.append(t)
 
+    # Correct attribution: the bot that OPENED the position owns the trade, even
+    # if a different bot closed it (e.g. Momentum adopted an AI position and
+    # closed it with a rot... clOrdId). inst_entry_bot maps (inst_id, side) -> bot
+    # from the ENTRY fill's clOrdId, which is the authoritative opener signal.
+    # Keyed by (inst, side) because the same instrument can have different openers
+    # for different sides (AI short vs Momentum long on the same coin).
+    # Applied AFTER the legacy merge so DB-sourced rows are corrected too.
+    try:
+        for t in dedup:
+            inst = str(t.get("inst_id") or t.get("symbol") or "").strip()
+            if not inst:
+                continue
+            pside = str(t.get("pos_side") or "long").strip().lower()
+            opener = inst_entry_bot.get((inst, pside), "")
+            if not opener:
+                opener = inst_entry_bot.get(inst, "")
+            if not opener:
+                continue
+            cur_bot = str(t.get("bot") or "")
+            if not cur_bot:
+                t["bot"] = opener
+    except Exception as e:
+        print(f"[trades/paired] entry-owner override error: {e}", flush=True)
+
+    # Unified attribution: entry-owner + forced overrides (single module)
+    try:
+        _overrides = await trade_attr.load_overrides(db)
+        trade_attr.apply_attribution(
+            dedup,
+            entry_owner=inst_entry_bot if isinstance(inst_entry_bot, dict) else {},
+            overrides=_overrides,
+        )
+    except Exception as e:
+        print(f"[trades/paired] attribution error: {e}", flush=True)
+
     # 4. Last-mile: enrich any surviving closed row with the exact OKX bill PnL
     #    and fee (covers closes whose fills fell outside the fill window but
     #    whose ord_id is present in the account bills).
@@ -3941,10 +6974,11 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     dedup.sort(key=lambda t: (t.get("exit_time") or t.get("entry_time") or ""), reverse=True)
     print(f"[trades/paired] OKX+bills+DB: {len(dedup)} trades "
           f"(okx_rows={len(okx_rows)}, legacy={len(paired) if flag_raw else 0})", flush=True)
-    return {"trades": dedup[-limit:],
+    return {"trades": dedup[:limit],
             "debug": {"bills": len(bills), "raw_fills": len(raw_fills),
                       "okx_rows": len(okx_rows), "okx_ord_ids": len(okx_ord_ids),
-                      "pair_err": pair_bills_err}}
+                      "pair_err": pair_bills_err,
+                      "inst_entry_bot": _json_safe_dict(inst_entry_bot)}}
 
     # 2. Fallback: fetch real fills from OKX exchange
     try:
@@ -3971,6 +7005,14 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                      if not str(f.get("clOrdId", "")).startswith("val")]
         paired = await _pair_fills(raw_fills)
         if paired:
+            # Build DB positions map for fallback tagging
+            db_pos_map = {}
+            try:
+                db_rows = await db.get_all_positions()
+                for row in db_rows:
+                    db_pos_map[(row.get("inst_id", ""), row.get("side", ""))] = row.get("bot_id", "")
+            except Exception:
+                pass
             result = []
             for t in paired[-limit:]:
                 entry_px = t.get("entry", 0) or t.get("entry_price", 0)
@@ -3991,7 +7033,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                     "reason": t.get("reason", ""),
                     "pos_side": t.get("pos_side", "long"),
                     "signal_id": t.get("ord_id", ""),
-                    "bot": _tag_trade_bot(t),
+                    "bot": _tag_trade_bot(t, db_pos_map=db_pos_map),
                 })
             print(f"[trades/paired] OKX fallback: {len(result)} trades from exchange", flush=True)
             return {"trades": result}
@@ -4292,8 +7334,9 @@ async def mini_log_collect(data: dict):
     return {"saved": len(logs)}
 
 
-@app.post("/api/debug/client-error")
-async def client_error_collect(data: dict):
+@app.post("/api/debug/client-error", dependencies=[Depends(require_admin)])
+async def client_error_collect(request: Request, data: dict):
+    """Admin-only client error sink (was public — spam/DoS vector)."""
     """Collect frontend JS errors (public — no auth, for WebView diagnostics)."""
     err = (data or {}).get("error") or data or {}
     msg = str(err.get("message") or err)[:2000]
@@ -4305,7 +7348,7 @@ async def client_error_collect(data: dict):
     return {"ok": True}
 
 
-@app.get("/api/debug/client-errors")
+@app.get("/api/debug/client-errors", dependencies=[Depends(require_admin)])
 async def client_errors_read():
     """Read recent captured client errors (public, for diagnostics)."""
     return {"errors": [l for l in _MINI_LOG_RING if l.startswith("CLIENT-ERR")][-20:]}

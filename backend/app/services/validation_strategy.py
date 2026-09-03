@@ -18,9 +18,9 @@ from .rotation_strategy import (
 )
 
 VAL_BOT_ID = "validation_strategy"
-VAL_VERSION = "v1"
+VAL_VERSION = "v3"
 VAL_STRATEGY_NAME = f"macd_donchian_validation_{VAL_VERSION}"
-VAL_BOT_NAME = "MACD+Donchian Validation v1"
+VAL_BOT_NAME = "MACD+Donchian Validation v3"
 
 # Вселенная бэктеста: 10 монет, как у Momentum/Impulse (daily OHLC, прокси OKX SWAP).
 VAL_COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
@@ -43,26 +43,25 @@ VAL_SWAP_MAP = {
 VAL_PX_DECIMALS = 4
 
 VAL_DESC = (
-    "MACD+Donchian Validation v1: Donchian breakout (close > 15-дневный максимум) "
-    "с подтверждением MACD-гистограммы > 0. Выходы: chandelier 4×ATR, breakeven при +1.5% "
-    "для всех позиций, частичный тейк 10% (20% позиции), второй тейк 8%, max_hold 3 дня, "
-    "top_k 4 @ 2×. Бэктест (Backtrader, OKX-SWAP daily, 10 монет, 2023–2026): CAGR ~49.7%, "
-    "Sharpe ~1.19, MaxDD ~48%, исполнение по открытию следующего бара."
+    "MACD+Donchian Validation v3 (OOS-focused): Donchian 30 + MACD hist>0, top_k=2 @ 2×. "
+    "Выходы: chandelier 4×ATR, BE +1.5%, partial +8%×40%, TP2 +8%, max_hold 3д. "
+    "BT: CAGR ~24%, MaxDD −31%; OOS 2025-04→2026-08 ~+2% (v2 был −16%). "
+    "Full-sample ниже v2 — обмен на выравнивание OOS. DEMO recommended."
 )
 
 
 def make_validation_config(
     capital: float = 300.0,
-    top_k: int = 4,
-    donchian_n: int = 15,
-    tp_pct: float = 0.10,
-    tp_ratio: float = 0.2,
+    top_k: int = 2,  # v3: fewer slots, OOS-focused
+    donchian_n: int = 30,  # v3: slower breakout, OOS+
+    tp_pct: float = 0.08,  # v2: earlier partial (better OOS vs 0.10)
+    tp_ratio: float = 0.4,  # v3: larger first scale-out
     tp2_pct: float = 0.08,
     be_pct: float = 0.015,
     chandelier_atr: float = 4.0,
     max_hold_days: int = 3,
-    risk_per_trade: float = 0.14,
-    allocation_pct: float = 0.5,
+    risk_per_trade: float = 0.07,  # survival
+    allocation_pct: float = 0.30,  # survival
     max_leverage: float = 2.0,
     poll_interval_sec: int = 300,
     auto_execute: bool = True,
@@ -92,7 +91,7 @@ def make_validation_config(
         breakeven_pct=be_pct,
         partial_tp_pct=tp_pct,
         partial_tp_ratio=tp_ratio,
-        adx_min=25.0,
+        adx_min=30.0,  # survival
         min_roc=0.0,
         vol_mult=999.0,
         rsi_long_max=100.0,

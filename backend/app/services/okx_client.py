@@ -8,6 +8,7 @@ from datetime import datetime
 
 import httpx
 import websockets
+from app.services.risk_guard import assert_can_open
 
 
 class OKXClient:
@@ -62,28 +63,55 @@ class OKXClient:
         sign_path = f"{path}?{qs}" if qs and method == "GET" else path
         headers = self._headers(method, sign_path, body_str)
 
-        try:
-            # Fresh client per request: the shared instance gets bound to a single
-            # event loop, but strategies run in their own threads/loops, which
-            # caused "Event is bound to a different event loop" errors.
-            async with httpx.AsyncClient(timeout=30.0) as _client:
-                if method == "GET":
-                    resp = await _client.get(url, headers=headers)
-                else:
-                    resp = await _client.post(url, headers=headers, content=body_str)
-            data = resp.json()
-            if data.get("code") != "0":
-                detail = data.get("msg", "Unknown error")
-                sdata = data.get("data") or []
-                if sdata:
-                    scode = sdata[0].get("sCode", "")
-                    smsg = sdata[0].get("sMsg", "")
-                    if scode or smsg:
-                        detail = f"{detail} [{scode}: {smsg}]"
-                return {"error": True, "message": detail, "data": sdata}
-            return {"error": False, "data": data.get("data", [])}
-        except Exception as e:
-            return {"error": True, "message": str(e)}
+        # OKX business-level rate-limit / throttling codes worth retrying.
+        RATE_LIMIT_CODES = {"50011", "50013", "50010", "50019"}
+
+        last_err = None
+        for attempt in range(4):
+            try:
+                # Fresh client per request: the shared instance gets bound to a single
+                # event loop, but strategies run in their own threads/loops, which
+                # caused "Event is bound to a different event loop" errors.
+                async with httpx.AsyncClient(timeout=30.0) as _client:
+                    if method == "GET":
+                        resp = await _client.get(url, headers=headers)
+                    else:
+                        resp = await _client.post(url, headers=headers, content=body_str)
+                data = resp.json()
+
+                # HTTP 429 → backoff and retry.
+                if resp.status_code == 429:
+                    wait = 1.0 + attempt * 2.0
+                    last_err = f"HTTP 429 rate limited (attempt {attempt + 1})"
+                    await asyncio.sleep(wait)
+                    continue
+
+                if data.get("code") != "0":
+                    code = str(data.get("code", ""))
+                    # OKX rate-limit / throttle codes → retry with backoff.
+                    if code in RATE_LIMIT_CODES and attempt < 3:
+                        wait = 1.0 + attempt * 2.0
+                        last_err = f"OKX {code} throttled (attempt {attempt + 1})"
+                        await asyncio.sleep(wait)
+                        continue
+                    detail = data.get("msg", "Unknown error")
+                    sdata = data.get("data") or []
+                    if sdata:
+                        scode = sdata[0].get("sCode", "")
+                        smsg = sdata[0].get("sMsg", "")
+                        if scode or smsg:
+                            detail = f"{detail} [{scode}: {smsg}]"
+                    return {"error": True, "message": detail, "data": sdata}
+
+                return {"error": False, "data": data.get("data", [])}
+            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout,
+                    httpx.ReadTimeout, httpx.TransportError) as e:
+                last_err = str(e)
+                await asyncio.sleep(1.0 + attempt)
+            except Exception as e:
+                return {"error": True, "message": str(e)}
+
+        return {"error": True, "message": f"request failed after retries: {last_err}"}
 
     async def get_balance(self) -> dict:
         return await self._request("GET", "/api/v5/account/balance")
@@ -97,6 +125,13 @@ class OKXClient:
     async def get_ticker(self, inst_id: str) -> dict:
         return await self._request("GET", "/api/v5/market/ticker",
                                     params={"instId": inst_id})
+
+    async def get_books(self, inst_id: str, sz: int = 20) -> dict:
+        """Order book depth. sz = levels per side (1..400)."""
+        return await self._request(
+            "GET", "/api/v5/market/books",
+            params={"instId": inst_id, "sz": str(max(1, min(int(sz), 400)))},
+        )
 
     async def get_candles(self, inst_id: str, bar: str = "1H",
                            after: str = None, before: str = None,
@@ -133,11 +168,24 @@ class OKXClient:
             body["tgtCcy"] = tgt_ccy
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
+        # Block new risk-increasing orders when kill switch / daily loss limits hit.
+        # reduce_only closes always pass.
+        assert_can_open(is_reduce_only=bool(reduce_only))
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:
         return await self._request("POST", "/api/v5/cancel-order",
                                     body={"instId": inst_id, "ordId": ord_id})
+
+    async def get_order(self, inst_id: str, ord_id: str = None,
+                        cl_ord_id: str = None) -> dict:
+        """GET /api/v5/trade/order — avgPx, fee, state for a single order."""
+        params = {"instId": inst_id}
+        if ord_id:
+            params["ordId"] = ord_id
+        if cl_ord_id:
+            params["clOrdId"] = cl_ord_id
+        return await self._request("GET", "/api/v5/trade/order", params=params)
 
     async def get_orders(self, inst_type: str = "SWAP", state: str = None,
                           limit: int = 20) -> dict:

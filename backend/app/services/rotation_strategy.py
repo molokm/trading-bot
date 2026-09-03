@@ -1,4 +1,4 @@
-"""Momentum Rotation Strategy v3 — daily-bar model (validated +76% CAGR backtest).
+"""Momentum Rotation Strategy v6.7 — dual partial ladder + alloc 0.45 (BT 2023–2026).
 
 Rewritten to exactly match the winning honest-backtest config:
   - Signal computed on yesterday's daily close (causal), entry today
@@ -21,10 +21,13 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open
+from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 ROT_BOT_ID = "rotation_strategy"
-STRATEGY_VERSION = "v5"
+STRATEGY_VERSION = "v6.10-ls"
 STRATEGY_NAME = f"momentum_rotation_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -39,22 +42,17 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Momentum Rotation v5 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и выбирает до 2 самых сильных тренда. "
-    "Скоринг: ROC(14) показывает импульс, EMA20/50 — направление тренда, ADX(14) — его силу. "
-    "Фильтры отсекают шум: ADX≥25, |ROC|≥4.5%, тренд по EMA, RSI не перекуплен/перепродан, "
-    "волатильность не выше среднего (×2.2), корреляция до 0.85. Рыночный режим (bull/bear/chop по BTC SMA50/200): "
-    "в бычьем — только лонги, в медвежьем — только шорты, в неопределённости — кэш. "
-    "Размер позиции считается от риска 20% капитала, маржа на позицию ≤50% equity: стоп = 4.5× дневной ATR, плечо до 2× "
-    "(чем выше волатильность, тем меньше плечо). После входа: трейлинг-стоп 3× дневной ATR (держит победителей), "
-    "при +5% стоп в безубыток, при +8% закрывается половина позиции, динамический тейк-профит "
-    "(37.6% → 23.7% → 9.2% → безубыток по мере удержания). Минимум держим 11 дней. "
-    "Если монета выпадает из топа — закрываем по рынку. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): "
-    "CAGR ~60%, Sharpe 1.23, MaxDD −52%. Режим cross margin, демо/реал переключается env."
+    "Momentum Rotation v6.7 hybrid. OOS stop/ADX (ADX≥25, stop 3.5×ATR) + conservative risk 10%. "
+    "v6.10-LS: long+short by regime (bull long / bear short / chop cash); risk 8%, ADX26, ROC4.5, gate both sides, TP1 30%, peak-lock 1.8/50%, daily halt −2.5%."
 )
 
 
 @dataclass
 class RotationConfig:
+    # OOS methodology (BTC daily, backtest_service engine):
+    # train 2022-01..2024-06 | test 2024-07..2026-08
+    # tuned vs baseline: test CAGR 34.8% vs 28.2%, DD -19.7% vs -34.9%
+    # Rejected looser ADX=18 (train overfit, test DD to -47%).
     symbols: list = None
     regime_symbols: list = None    # coins used ONLY for market regime, never traded
     capital: float = 10000.0
@@ -63,26 +61,50 @@ class RotationConfig:
     ema_fast: int = 20
     ema_slow: int = 50
     atr_period: int = 14
-    adx_min: float = 25.0
-    min_roc: float = 4.5            # min |roc| to even rank a coin
+    adx_min: float = 26.0          # v6.9-ai: slightly stricter; gate adds regime quality
+    min_roc: float = 4.5            # v6.9-ai: between weak 3.5 and tight 5.0
     sma_long: int = 200            # BTC regime MA
     sma_regime: int = 50           # BTC regime MA (SMA50 < SMA200 => bear)
     min_hold_days: int = 11        # cooldown before rotating again
     max_leverage: float = 2.0
-    risk_per_trade: float = 0.20   # risk of equity per trade (v5 tuning)
-    allocation_pct: float = 0.5    # max margin per position = eq * this
-    atr_stop_mult: float = 4.5     # initial stop = daily ATR * 4.5
+    risk_per_trade: float = 0.08   # v6.9-ai: fewer but gated trades → size moderate
+    allocation_pct: float = 0.30   # cap margin per name
+    atr_stop_mult: float = 3.5     # OOS-validated width
     trail_atr_mult: float = 3.0    # trailing = daily ATR * 3.0 (v5: wide)
-    breakeven_pct: float = 0.05    # move to BE after 5%
-    partial_tp_pct: float = 0.08   # close 50% at +8%
-    partial_tp_ratio: float = 0.5  # fraction to close
+    breakeven_pct: float = 0.025   # BE at +2.5%
+    partial_tp_pct: float = 0.06   # TP1 +6%
+    partial_tp_ratio: float = 0.30 # v6.9-ai: lock a bit more at TP1 (gate = higher quality)
+    partial_tp2_pct: float = 0.12  # TP2 +12%
+    partial_tp2_ratio: float = 0.30
+    # v6.4 exits: lock profit — peak giveback + 1D/4H indicator confirm
+    indicator_exit: bool = True
+    ind_exit_min_hold_hours: float = 2.0    # act intra-day (poll 5m)
+    ind_exit_min_profit_pct: float = 0.8    # soft exit threshold
+    ind_exit_on_ema_flip: bool = True
+    ind_exit_on_roc_flip: bool = True
+    ind_exit_weak_adx: float = 18.0
+    peak_lock_activate_pct: float = 1.8     # v6.9-ai: slightly later — let gated winners breathe
+    peak_giveback_frac: float = 0.50        # keep ≥50% of peak UPL
+    profit_trail_atr_mult: float = 1.5      # tighter trail once in profit (vs 3.0)
+    use_4h_exit_confirm: bool = True        # 4H EMA against + in profit => exit
     roi_table: list = None         # dynamic ROI: [(min_hold_days, tp_pct), ...]
     rsi_period: int = 14
-    rsi_long_max: float = 82.0     # no long if RSI > 82
+    rsi_long_max: float = 80.0     # v6.9-ai: align with gate coin RSI cap spirit
     rsi_short_min: float = 21.0    # no short if RSI < 21
-    vol_mult: float = 2.2          # skip if ATR > avg * 2.2 (v5: stricter)
+    vol_mult: float = 2.0          # skip if ATR > avg * 2.0 (v5.1: BT-validated vs 2.2)
     corr_threshold: float = 0.85   # max correlation between held pairs (v5)
-    allow_short: bool = True       # allow shorting bearish coins
+    allow_short: bool = True       # v6.10: both sides — long in bull, short in bear
+    max_positions: int = 2
+    max_positions_non_bull: int = 1  # outside bull: 1 slot max
+    daily_loss_halt_pct: float = 0.025  # v6.9-ai: halt new opens at -2.5% day
+    # AI desk pattern: quant multi-TF gate + optional LLM veto (never invents entries)
+    gate_enabled: bool = True
+    gate_btc_rsi_min: float = 48.0   # v6.9-ai: soft floor; hard regime still SMA200
+    gate_coin_rsi_max: float = 80.0
+    gate_require_4h: bool = True
+    gate_llm_veto: bool = True
+    desk_telegram: bool = False      # TG desk off (noise)
+    min_volume_ratio: float = 1.1  # require vol > 1.1x 20d avg if volume available
     limit_offset_pct: float = 0.001   # 0.1% below price for limit orders
     limit_wait_sec: int = 300      # 5 min fallback to market
     poll_interval_sec: int = 300
@@ -116,13 +138,15 @@ class RotPosition:
     stop_price: float
     peak_price: float
     breakeven: bool = False
-    partial_done: bool = False   # 50% already closed at TP1
+    partial_done: bool = False   # True after first partial (compat)
+    partial_stage: int = 0       # 0=none, 1=after TP1, 2=after TP2
     opened_at: str = ""
     entry_bar_ts: int = 0
     atr: float = 0.0             # ATR at entry (for dynamic trailing)
     atr_hourly: float = 0.0      # hourly ATR at entry
     leverage: float = 3.0
     signal_id: int = 0
+    tg_message_id: int = 0
     raw_entry: float = 0.0
     algo_id: str = ""            # exchange-side conditional SL algo order
     stop_synced: float = 0.0     # stop price last synced to the exchange
@@ -164,10 +188,15 @@ class RotationStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
+        self._last_managed_day: str = ""  # last UTC day a managed-daily record was written
         self._last_rotate_ts: int = 0
         self._last_daily_check: str = ""
         self._btc_200ma: float = 0.0        # BTC long-MA (for long-only filter)
         self._regime: str = "unknown"        # market regime: bull/bear/chop
+        self._gate_stats = {"allow": 0, "block": 0, "llm_block": 0}
+        self._desk_sent_day = ""
+        self._tf4h_cache: dict = {}
         # cooldowns[coin] = epoch seconds until which the bot must not reopen
         # that coin (set after a manual/external close so it doesn't instantly
         # re-enter the same position the user just closed).
@@ -390,6 +419,38 @@ class RotationStrategy:
         sma = self.sma(closes, period)
         return sma[-1]
 
+
+    def _daily_pnl_pct(self) -> float:
+        """Rough day PnL vs equity from closed trades today + unrealized."""
+        try:
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            closed = 0.0
+            for tr in (self._trade_log or []):
+                ts = (tr.get("time") or tr.get("exit_time") or "")[:10]
+                if ts == day and tr.get("pnl") is not None:
+                    closed += float(tr.get("pnl") or 0)
+            # unrealized approx
+            ur = 0.0
+            for coin, pos in self._positions.items():
+                ind = (self._latest_indicators or {}).get(coin) or {}
+                px = float(ind.get("close_today") or ind.get("price") or pos.entry_price or 0)
+                if px > 0 and pos.entry_price > 0:
+                    if pos.side == "long":
+                        ur += pos.size * (px - pos.entry_price)
+                    else:
+                        ur += pos.size * (pos.entry_price - px)
+            eq = float(self._equity or 10000) or 10000
+            return (closed + ur) / eq
+        except Exception:
+            return 0.0
+
+    def _max_slots(self) -> int:
+        cfg = self.config
+        regime = getattr(self, "_regime", "unknown")
+        if regime == "bull":
+            return int(getattr(cfg, "max_positions", 2) or 2)
+        return int(getattr(cfg, "max_positions_non_bull", 1) or 1)
+
     def _get_regime(self, candles: list) -> str:
         """Market regime: 'bull' (close>200MA), 'bear' (SMA50<200MA), 'chop', 'unknown'."""
         cfg = self.config
@@ -504,6 +565,69 @@ class RotationStrategy:
         lot = abs(self.LOT_SZ.get(coin, 0.01))
         decimals = 0 if lot >= 1 else len(str(lot).rstrip("0").split(".")[1])
         return f"{sz:.{decimals}f}"
+
+
+    async def _resolve_execution(self, client, inst_id: str, place_resp: dict,
+                                 fallback_px: float, side: str = "long",
+                                 size: float = 0.0, entry_px: float = 0.0,
+                                 ct_val: float = 0.01):
+        """After place_order: fetch real avgPx / fee / fillPnl from OKX.
+
+        place_order often returns only ordId (no fillPx). Without this, TG PnL
+        falls back to entry price and disagrees with the exchange / web history.
+        Returns dict: fill_px, fee, pnl, ord_id, source
+        """
+        import asyncio
+        from .pnl_utils import (
+            extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills, order_avg_from_details,
+        )
+        data = place_resp.get("data") or []
+        ord_id = ""
+        if data:
+            ord_id = str(data[0].get("ordId") or data[0].get("ordId") or "")
+        fill_px, fee, _sz = extract_fill_avg(data, fallback_px)
+        source = "place_resp"
+
+        # Poll order + fills until filled or attempts exhausted
+        for attempt in range(6):
+            if ord_id:
+                try:
+                    od = await client.get_order(inst_id, ord_id=ord_id)
+                    rows = od.get("data") or []
+                    if rows:
+                        avg, fee_o, sz_o = order_avg_from_details(rows[0], fallback_px)
+                        st = (rows[0].get("state") or "").lower()
+                        if avg > 0:
+                            fill_px, fee = avg, fee_o
+                            source = "order"
+                        if st in ("filled", "partially_filled") and avg > 0:
+                            break
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_order resolve: {e}", flush=True)
+                try:
+                    fl = await client.get_fills(inst_id=inst_id, ordId=ord_id, limit=50)
+                    frows = fl.get("data") or []
+                    if frows:
+                        net, avg, fees, _ = pnl_from_okx_fills(frows, fallback_px)
+                        if avg > 0:
+                            fill_px = avg
+                            fee = fees
+                            source = "fills"
+                        if net is not None:
+                            return {
+                                "fill_px": fill_px, "fee": fee, "pnl": net,
+                                "ord_id": ord_id, "source": "fills_pnl",
+                            }
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_fills resolve: {e}", flush=True)
+            if attempt < 5:
+                await asyncio.sleep(0.25 * (attempt + 1))
+
+        pnl = close_pnl(side, size, entry_px, fill_px, fee, ct_val)
+        return {
+            "fill_px": fill_px, "fee": fee, "pnl": pnl,
+            "ord_id": ord_id, "source": source,
+        }
 
     async def _place_order(self, client, inst_id: str, side: str, sz: float,
                                       pos_side: str = None, ord_type: str = "market",
@@ -667,16 +791,13 @@ class RotationStrategy:
         if resp.get("error"):
             print(f"[Rotation] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return {}
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=close_sz, entry_px=pos.entry_price,
+            ct_val=self.CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = close_sz * self.CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = close_sz * self.CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         partial_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -689,7 +810,8 @@ class RotationStrategy:
             "signal_id": pos.signal_id, "ord_id": partial_ord_id,
         })
         pos.size -= close_sz
-        pos.partial_done = True
+        pos.partial_stage = min(int(getattr(pos, "partial_stage", 0)) + 1, 2)
+        pos.partial_done = pos.partial_stage >= 1
         # Immediately re-size the exchange-side stop to the reduced position so
         # the exchange never holds a stop larger than the remaining size.
         if pos.algo_id:
@@ -700,7 +822,7 @@ class RotationStrategy:
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz,
                     px=round(fill_px, 2), ord_id=partial_ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -714,17 +836,30 @@ class RotationStrategy:
                           coin=pos.coin, side=pos.side,
                           closed_sz=close_sz, remaining_sz=pos.size,
                           exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
-                          pnl=round(pnl, 2), fee=round(fee, 4), reason="partial_tp",
+                          pnl=round(pnl, 2), fee=round(fee_cost(fee), 4), reason="partial_tp",
                           signal_id=pos.signal_id)
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.partial_msg(
+                _sid = await self._ensure_signal_id(pos)
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, _sid,
+                        bot_id=getattr(self, "BOT_ID", ""),
+                        coin=getattr(pos, "coin", "") or "",
+                    )
+                if not _reply:
+                    print(f"[Rotation] TG close: no open message_id to reply (signal={_sid})", flush=True)
+                else:
+                    print(f"[Rotation] TG close: reply_to={_reply} signal={_sid}", flush=True)
+                _txt = self.notifier.partial_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                     closed_sz=round(close_sz, 4), remaining_sz=round(pos.size, 4),
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                ))
+                    bot_name=self.BOT_NAME, signal_id=_sid,
+                )
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
                 print(f"[Rotation] TG partial notify error: {e}", flush=True)
         return {"fill_px": fill_px, "fee": fee, "pnl": pnl, "close_sz": close_sz}
@@ -739,17 +874,17 @@ class RotationStrategy:
             print(f"[Rotation] Close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
 
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=pos.size, entry_px=pos.entry_price,
+            ct_val=self.CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-
-        if pos.side == "long":
-            pnl = pos.size * self.CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = pos.size * self.CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        if ex.get("ord_id") and fills:
+            fills[0]["ordId"] = ex["ord_id"]
+        elif ex.get("ord_id"):
+            fills = [{"ordId": ex["ord_id"]}]
 
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
@@ -771,7 +906,7 @@ class RotationStrategy:
                     px=round(fill_px, 2),
                     ord_id=close_ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -781,20 +916,33 @@ class RotationStrategy:
 
         print(f"[Rotation] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
-              f"pnl={pnl:+.2f} ({reason})", flush=True)
+              f"pnl={pnl:+.2f} ({reason}) src={ex.get('source', '?')}", flush=True)
         self.analysis.log("rotation", "close",
                           coin=pos.coin, side=pos.side, reason=reason,
                           entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
-                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           leverage=pos.leverage, signal_id=pos.signal_id)
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.close_msg(
+                _sid = await self._ensure_signal_id(pos)
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, _sid,
+                        bot_id=getattr(self, "BOT_ID", ""),
+                        coin=getattr(pos, "coin", "") or "",
+                    )
+                if not _reply:
+                    print(f"[Rotation] TG close: no open message_id to reply (signal={_sid})", flush=True)
+                else:
+                    print(f"[Rotation] TG close: reply_to={_reply} signal={_sid}", flush=True)
+                _txt = self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                ))
+                    bot_name=self.BOT_NAME, signal_id=_sid,
+                )
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
                 print(f"[Rotation] TG close notify error: {e}", flush=True)
 
@@ -902,13 +1050,13 @@ class RotationStrategy:
                                                      resp.get("message", ""))
             return
 
-        fill_px = price
-        fee = 0.0
-        ord_id = ""
-        if fills:
-            fill_px = float(fills[0].get("fillPx", price))
-            fee = float(fills[0].get("fee", 0))
-            ord_id = fills[0].get("ordId", "")
+        ex = await self._resolve_execution(
+            client, inst_id, resp, price,
+            side=side, size=sz, entry_px=price, ct_val=self.CT_VAL.get(coin, 0.01),
+        )
+        fill_px, fee = ex["fill_px"], ex["fee"]
+        ord_id = ex.get("ord_id") or ""
+        fills = resp.get("data", []) or ([{"ordId": ord_id}] if ord_id else [])
 
         now = datetime.now(timezone.utc).isoformat()
         pos = RotPosition(
@@ -925,7 +1073,7 @@ class RotationStrategy:
 
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
+            "size": sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
             "coin": coin, "signal_id": signal_id, "leverage": lev,
         })
@@ -938,7 +1086,7 @@ class RotationStrategy:
                     bot_id=self.BOT_ID, side=order_side, sz=sz,
                     px=round(fill_px, 2), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
                 await self._sync_positions_db()
@@ -952,18 +1100,46 @@ class RotationStrategy:
         self.analysis.log("rotation", "open",
                           coin=coin, side=side, price=round(fill_px, 2),
                           stop=round(stop, 2), size=sz, leverage=lev,
-                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          atr=round(atr_val, 2), fee=round(fee_cost(fee), 4),
                           inst_id=inst_id, signal_id=signal_id)
 
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.open_msg(
+                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
+                if _tg_mid:
+                    try:
+                        if coin in self._positions:
+                            self._positions[coin].tg_message_id = int(_tg_mid)
+                        await self.notifier.remember_open_db(
+                            self.db, signal_id, _tg_mid,
+                            bot_id=getattr(self, "BOT_ID", ""), coin=coin,
+                        )
+                        print(f"[Rotation] TG open msg_id={_tg_mid} signal={signal_id}", flush=True)
+                    except Exception as e:
+                        print(f"[Rotation] TG remember open: {e}", flush=True)
             except Exception as e:
                 print(f"[Rotation] TG open notify error: {e}", flush=True)
+
+    async def _ensure_signal_id(self, pos) -> int:
+        """Guarantee the same trade number on close as on open."""
+        sid = int(getattr(pos, "signal_id", 0) or 0)
+        if sid:
+            return sid
+        if not self.db:
+            return 0
+        try:
+            open_side = "buy" if pos.side == "long" else "sell"
+            inst = getattr(pos, "inst_id", None) or f"{pos.coin}-USDT-SWAP"
+            sid = int(await self.db.find_signal_id(inst, open_side) or 0)
+            if sid:
+                pos.signal_id = sid
+        except Exception as e:
+            print(f"[Rotation] ensure_signal_id: {e}", flush=True)
+        return int(getattr(pos, "signal_id", 0) or 0)
 
     # ─── Core logic ───
 
@@ -992,6 +1168,19 @@ class RotationStrategy:
                     if sz <= 0:
                         continue
                     actual[(coin, "long" if is_long else "short")] = sz
+
+            # Drop positions we adopted incorrectly (another strategy owns them)
+            for coin in list(self._positions.keys()):
+                pos = self._positions[coin]
+                if self.db:
+                    try:
+                        if await self.db.other_bot_owns_position(self.BOT_ID, pos.inst_id, pos.side):
+                            print(f"[{self.BOT_NAME}] drop foreign position {coin} {pos.side} "
+                                  f"(owned by another bot)", flush=True)
+                            del self._positions[coin]
+                            continue
+                    except Exception as e:
+                        print(f"[{self.BOT_NAME}] foreign drop check error: {e}", flush=True)
 
             for coin in list(self._positions.keys()):
                 pos = self._positions[coin]
@@ -1024,10 +1213,7 @@ class RotationStrategy:
                           f"— cooldown {self.MANUAL_CLOSE_COOLDOWN_SEC/3600:.1f}h",
                           flush=True)
                     ct = self.CT_VAL.get(coin, 0.01)
-                    if pos.side == "long":
-                        pnl = pos.size * ct * (fill_px - pos.entry_price)
-                    else:
-                        pnl = pos.size * ct * (pos.entry_price - fill_px)
+                    pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, 0.0, ct)
                     self._equity += pnl
                     now = datetime.now(timezone.utc).isoformat()
                     self._trade_log.append({
@@ -1060,13 +1246,26 @@ class RotationStrategy:
 
                     if self.notifier:
                         try:
-                            self.notifier.fire(self.notifier.close_msg(
+                            _sid = await self._ensure_signal_id(pos)
+                            _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                            if not _reply:
+                                _reply = await self.notifier.resolve_open_message_id(
+                                    self.db, _sid,
+                                    bot_id=getattr(self, "BOT_ID", ""),
+                                    coin=getattr(pos, "coin", "") or "",
+                                )
+                            if not _reply:
+                                print(f"[Rotation] TG reconcile: no open message_id to reply (signal={_sid})", flush=True)
+                            else:
+                                print(f"[Rotation] TG reconcile: reply_to={_reply} signal={_sid}", flush=True)
+                            _txt = self.notifier.close_msg(
                                 coin=coin, side=pos.side,
                                 entry=round(pos.entry_price, 2),
                                 exit_px=round(fill_px, 2), pnl=round(pnl, 2),
                                 reason=close_reason,
-                                bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                            ))
+                                bot_name=self.BOT_NAME, signal_id=_sid,
+                            )
+                            await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
                         except Exception as e:
                             print(f"[Rotation] TG reconcile notify error: {e}", flush=True)
                     del self._positions[coin]
@@ -1090,6 +1289,8 @@ class RotationStrategy:
                 if coin in self._positions:
                     continue
                 inst_id = self.SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 now = datetime.now(timezone.utc).isoformat()
                 # Re-attach the original trade number so close/partial messages
                 # keep the same "Сделка №N" as the open.
@@ -1269,9 +1470,13 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                # Partial TP at +5%
-                if not pos.partial_done and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
+                # Dual partial ladder: TP1 then optional TP2 on remaining
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price >= pos.entry_price * (1 + cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price >= pos.entry_price * (1 + cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price <= pos.stop_price:
                     hit_stop = True
             else:  # short
@@ -1293,10 +1498,118 @@ class RotationStrategy:
                                       price=round(current_price, 2),
                                       entry=round(pos.entry_price, 2),
                                       stop=round(pos.stop_price, 2))
-                if not pos.partial_done and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
+                stage = int(getattr(pos, "partial_stage", 0))
+                if stage == 0 and current_price <= pos.entry_price * (1 - cfg.partial_tp_pct):
                     await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp_ratio)
+                elif (stage == 1 and getattr(cfg, "partial_tp2_pct", 0) > 0
+                      and current_price <= pos.entry_price * (1 - cfg.partial_tp2_pct)):
+                    await self._close_partial(client, pos.inst_id, pos, cfg.partial_tp2_ratio)
                 if current_price >= pos.stop_price:
                     hit_stop = True
+
+            # v6.4: peak giveback + indicator / 4H confirm — do not let green close red
+            if not hit_stop and current_price > 0 and pos.entry_price > 0:
+                try:
+                    entry = float(pos.entry_price)
+                    px = float(current_price)
+                    if pos.side == "long":
+                        upl_pct = (px / entry - 1) * 100
+                        peak_upl = ((pos.peak_price or px) / entry - 1) * 100
+                    else:
+                        upl_pct = (entry / px - 1) * 100
+                        peak_upl = (entry / (pos.peak_price or px) - 1) * 100 if (pos.peak_price or 0) > 0 else upl_pct
+
+                    # Tighter trail once trade is in profit (lock more of the move)
+                    act = float(getattr(cfg, "peak_lock_activate_pct", 1.5) or 1.5)
+                    if peak_upl >= act:
+                        tight = float(getattr(cfg, "profit_trail_atr_mult", 1.5) or 1.5)
+                        tight_step = (pos.atr or entry * 0.02) * tight
+                        if pos.side == "long":
+                            lock_stop = (pos.peak_price or px) - tight_step
+                            # also lock at least ~half of peak gain
+                            frac = float(getattr(cfg, "peak_giveback_frac", 0.45) or 0.45)
+                            floor = entry * (1 + peak_upl / 100.0 * frac)
+                            lock_stop = max(lock_stop, floor)
+                            if lock_stop > pos.stop_price:
+                                pos.stop_price = lock_stop
+                        else:
+                            lock_stop = (pos.peak_price or px) + tight_step
+                            frac = float(getattr(cfg, "peak_giveback_frac", 0.45) or 0.45)
+                            floor = entry * (1 - peak_upl / 100.0 * frac)
+                            lock_stop = min(lock_stop, floor)
+                            if lock_stop < pos.stop_price:
+                                pos.stop_price = lock_stop
+                        # hard giveback exit (even before stop touch if price already gave back)
+                        if peak_upl >= act and upl_pct <= peak_upl * float(getattr(cfg, "peak_giveback_frac", 0.45)):
+                            if upl_pct >= 0.15:  # still green or flat-green
+                                hit_stop = True
+                                reason = f"peak_lock:peak={peak_upl:.1f}%now={upl_pct:.1f}%"
+
+                    # Indicator exit (1D) after short hold
+                    if not hit_stop and getattr(cfg, "indicator_exit", True):
+                        hold_h = 0.0
+                        try:
+                            opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                            hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+                        except Exception:
+                            hold_h = 999.0
+                        min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 2) or 0)
+                        if hold_h >= min_hold:
+                            ema_trend = bool(ind.get("ema_trend"))
+                            roc = float(ind.get("roc") or 0)
+                            adx = float(ind.get("adx") or 0)
+                            min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 0.8) or 0)
+                            reasons = []
+                            if getattr(cfg, "ind_exit_on_ema_flip", True):
+                                if pos.side == "long" and not ema_trend:
+                                    reasons.append("ema_bear")
+                                if pos.side == "short" and ema_trend:
+                                    reasons.append("ema_bull")
+                            if getattr(cfg, "ind_exit_on_roc_flip", True):
+                                min_roc = float(cfg.min_roc or 3.5)
+                                if pos.side == "long" and roc < -min_roc * 0.35:
+                                    reasons.append(f"roc_down:{roc:.1f}")
+                                if pos.side == "short" and roc > min_roc * 0.35:
+                                    reasons.append(f"roc_up:{roc:.1f}")
+                            weak = float(getattr(cfg, "ind_exit_weak_adx", 18) or 0)
+                            if weak and adx and adx < weak and upl_pct >= min_p:
+                                reasons.append(f"adx_fade:{adx:.0f}")
+                            # Was green at peak but now fading + any regime signal
+                            if reasons and (upl_pct >= min_p or (peak_upl >= act and upl_pct >= 0)):
+                                hit_stop = True
+                                reason = "ind_exit:" + "+".join(reasons[:3])
+                            elif len(reasons) >= 2 and upl_pct > -0.5:
+                                hit_stop = True
+                                reason = "ind_exit:" + "+".join(reasons[:3])
+
+                    # 4H EMA confirmation (intraday) when still in profit
+                    if (not hit_stop and getattr(cfg, "use_4h_exit_confirm", True)
+                            and upl_pct >= float(getattr(cfg, "ind_exit_min_profit_pct", 0.8) or 0.8)):
+                        try:
+                            c4 = await self._fetch_candles(client, coin, bar="4H", limit=60)
+                            if len(c4) >= 30:
+                                cl = [c["C"] for c in c4]
+                                ef = self.ema(cl, 12)
+                                es = self.ema(cl, 26)
+                                if pos.side == "long" and ef[-1] < es[-1] and cl[-1] < es[-1]:
+                                    hit_stop = True
+                                    reason = "ind_exit:4h_ema_bear"
+                                elif pos.side == "short" and ef[-1] > es[-1] and cl[-1] > es[-1]:
+                                    hit_stop = True
+                                    reason = "ind_exit:4h_ema_bull"
+                        except Exception as e4:
+                            print(f"[Rotation] 4H exit check {coin}: {e4}", flush=True)
+                except Exception as e:
+                    print(f"[Rotation] exit lock {coin}: {e}", flush=True)
+
+            # Re-evaluate stop after peak-lock may have raised it this cycle
+            if not hit_stop and current_price > 0:
+                if pos.side == "long" and current_price <= pos.stop_price:
+                    hit_stop = True
+                    reason = reason if reason.startswith("peak") or reason.startswith("ind") else "trail_stop"
+                elif pos.side == "short" and current_price >= pos.stop_price:
+                    hit_stop = True
+                    reason = reason if reason.startswith("peak") or reason.startswith("ind") else "trail_stop"
 
             if hit_stop:
                 await self._cancel_exchange_stop(client, pos)
@@ -1324,7 +1637,7 @@ class RotationStrategy:
                     await self._close_position(client, pos.inst_id, pos, "roi")
                     del self._positions[coin]
         # 3. Check if we should rotate
-        slots_full = len(self._positions) >= cfg.top_k
+        slots_full = len(self._positions) >= self._max_slots()
         if slots_full and self._last_daily_check == today_str:
             return  # all slots full, already checked today
 
@@ -1453,17 +1766,58 @@ class RotationStrategy:
                     await self._close_position(client, pos.inst_id, pos, "rotation_exit")
                     del self._positions[coin]
 
-        # 7. Open new positions (fill empty slots)
+        # 7. Open new positions (fill empty slots) — with quant/LLM gate
         opened_any = False
+        self._tf4h_cache = {}
+        btc_ind = dict(indicators.get("BTC") or {})
+        # Map regime → SMA200 flag for shared quant_gate
+        reg = getattr(self, "_regime", "unknown")
+        if "above_sma200" not in btc_ind:
+            btc_ind["above_sma200"] = reg == "bull"
+
         for coin, side in target_coins:
             if coin in self._positions:
                 continue
             ind = indicators.get(coin)
             if not ind:
                 continue
+            cfg = self.config
+            if getattr(cfg, "gate_enabled", True):
+                tf4h = {}
+                if getattr(cfg, "gate_require_4h", True):
+                    tf4h = await self._tf4h_snapshot(client, coin)
+                allow_q, q_reasons = quant_gate(
+                    side, coin, ind, btc_ind, tf4h,
+                    require_btc_sma200=True,
+                    btc_rsi_min=float(getattr(cfg, "gate_btc_rsi_min", 50) or 0),
+                    coin_rsi_max=float(getattr(cfg, "gate_coin_rsi_max", 82) or 100),
+                    require_4h_align=bool(getattr(cfg, "gate_require_4h", True)),
+                )
+                if not allow_q:
+                    self._gate_stats["block"] = self._gate_stats.get("block", 0) + 1
+                    print(f"[Rotation] GATE BLOCK {coin} {side}: {','.join(q_reasons)}", flush=True)
+                    self.analysis.log("rotation", "gate_block", coin=coin, side=side,
+                                      reasons=q_reasons)
+                    continue
+                if getattr(cfg, "gate_llm_veto", True):
+                    allow_l, l_reason = await llm_veto(
+                        coin=coin, side=side,
+                        strength=float(ind.get("roc") or 0),
+                        ind=ind, btc_ind=btc_ind, quant_reasons_ok=True,
+                    )
+                    if not allow_l:
+                        self._gate_stats["llm_block"] = self._gate_stats.get("llm_block", 0) + 1
+                        print(f"[Rotation] LLM VETO {coin} {side}: {l_reason}", flush=True)
+                        self.analysis.log("rotation", "llm_veto", coin=coin, side=side,
+                                          reason=l_reason)
+                        continue
+                self._gate_stats["allow"] = self._gate_stats.get("allow", 0) + 1
+
             lev = self._calc_dynamic_leverage(ind["atr"], ind["close_today"])
             await self._open_position(client, coin, side, ind, lev)
             opened_any = True
+
+        await self._maybe_send_desk(btc_ind)
 
         # Update daily check only when doing a full rotation or opening a trade
         if slots_full or opened_any:
@@ -1473,19 +1827,122 @@ class RotationStrategy:
 
     # ─── Lifecycle ───
 
+
+    async def _tf4h_snapshot(self, client, coin: str) -> dict:
+        """4H EMA/RSI for entry gate (cached per cycle)."""
+        if coin in getattr(self, "_tf4h_cache", {}):
+            return self._tf4h_cache[coin]
+        out = {}
+        try:
+            candles = await self._fetch_candles(client, coin, bar="4H", limit=80)
+            if not candles or len(candles) < 30:
+                self._tf4h_cache[coin] = out
+                return out
+            closes = [c["C"] for c in candles]
+            i = len(closes) - 2
+            ema_f = self.ema(closes, 20)
+            ema_s = self.ema(closes, 50)
+            rsi_arr = self.rsi(closes, 14)
+            out = {
+                "ema_trend": ema_f[i] > ema_s[i],
+                "rsi": rsi_arr[i],
+                "close": closes[i],
+            }
+        except Exception as e:
+            print(f"[Rotation] 4H snapshot {coin}: {e}", flush=True)
+        self._tf4h_cache[coin] = out
+        return out
+
+    async def _maybe_send_desk(self, btc_ind: dict):
+        if not getattr(self.config, "desk_telegram", True):
+            return
+        if not self.notifier:
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_desk_sent_day", "") == day:
+            return
+        if datetime.now(timezone.utc).hour < 6:
+            return
+        try:
+            opens = [
+                {"coin": getattr(p, "coin", "?"), "side": getattr(p, "side", "?")}
+                for p in self._positions.values()
+            ]
+            text = format_desk(
+                btc_ind=btc_ind or {},
+                open_positions=opens,
+                gate_stats=dict(getattr(self, "_gate_stats", {}) or {}),
+                version=f"Momentum {STRATEGY_VERSION}",
+            )
+            if hasattr(self.notifier, "send"):
+                await self.notifier.send(text)
+            elif hasattr(self.notifier, "send_message"):
+                await self.notifier.send_message(text)
+            self._desk_sent_day = day
+            print(f"[Rotation] desk sent: {text[:120]}", flush=True)
+        except Exception as e:
+            print(f"[Rotation] desk error: {e}", flush=True)
+
     async def _poll_loop(self):
         """Main polling loop running in daemon thread's event loop."""
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Rotation] Poll error: {e}", flush=True)
-            await asyncio.sleep(self.config.poll_interval_sec)
+            # chunked sleep so stop() is noticed quickly
+            left = float(self.config.poll_interval_sec or 60)
+            while left > 0 and self._running:
+                step = min(2.0, left)
+                await asyncio.sleep(step)
+                left -= step
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed.
+
+        A bot is 'managed' when its polling loop is alive and heartbeating.
+        The record is written to the analysis log and to the DB settings table
+        (key managed_daily:<bot_id>:<YYYY-MM-DD>) so management coverage can be
+        audited day by day.
+        """
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("rotation", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Rotation] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Rotation] managed_daily db error: {e}", flush=True)
 
     def _thread_target(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._poll_loop())
+        try:
+            self._loop.run_until_complete(self._poll_loop())
+        except RuntimeError as e:
+            # Expected when stop() ends the loop during deploy/restart
+            if "Event loop stopped" not in str(e) and "no running event loop" not in str(e).lower():
+                print(f"[Rotation] thread exit: {e}", flush=True)
+        except Exception as e:
+            print(f"[Rotation] thread error: {e}", flush=True)
+        finally:
+            try:
+                if self._loop and not self._loop.is_closed():
+                    self._loop.close()
+            except Exception:
+                pass
 
     async def start(self):
         if self._running:
@@ -1528,10 +1985,19 @@ class RotationStrategy:
 
     async def stop(self):
         self._running = False
+        # Wake poll sleep without hard-stopping the loop (avoids
+        # "Event loop stopped before Future completed" on deploy).
         if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
+            try:
+                def _wake():
+                    pass
+                self._loop.call_soon_threadsafe(_wake)
+            except Exception:
+                pass
         if self._thread:
-            self._thread.join(timeout=5)
+            # allow up to one poll interval to exit cleanly
+            join_t = min(30, int(getattr(self.config, "poll_interval_sec", 60) or 60) + 3)
+            self._thread.join(timeout=join_t)
             self._thread = None
         if self.db:
             try:
@@ -1599,8 +2065,23 @@ class RotationStrategy:
                 btc_above = btc_ind["close_today"] > self._btc_200ma
                 filters_active.append(f"BTC {'>' if btc_above else '<'} 200MA: {'longs OK' if btc_above else 'longs blocked'}")
 
+        # Heartbeat: the bot is 'managed' only while its poll loop is alive and
+        # heartbeating. A stale heartbeat means the strategy thread died/crashed
+        # even though the process may still be up.
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                last_activity_ts = datetime.fromisoformat(self._last_activity).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        heartbeat_max_age = max(2 * (self.config.poll_interval_sec or 300), 600)
+        managed = bool(self._running) and (time.time() - last_activity_ts) < heartbeat_max_age
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": self.STRATEGY_NAME,
             "version": self.STRATEGY_VERSION,
             "config": cfg,
@@ -1744,6 +2225,11 @@ class RotationStrategy:
             else:
                 await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
             for coin, pos in self._positions.items():
+                await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
+                try:
+                    await self._persist_open_snapshot()
+                except Exception:
+                    pass
                 await self.db.save_position(
                     bot_id=self.BOT_ID, inst_id=pos.inst_id,
                     side=pos.side, size=pos.size,
@@ -1786,8 +2272,9 @@ class RotationStrategy:
             rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=500)
             for t in rows:
                 db_pnl = float(t.get("pnl", 0) or 0)
-                db_fee = float(t.get("fee", 0) or 0)
+                db_fee = fee_cost(t.get("fee", 0))
                 effective_pnl = db_pnl
+                # Open rows: pnl stored as -fee; if missing, treat fee as cost
                 if db_pnl == 0 and db_fee > 0:
                     effective_pnl = -db_fee
                 self._trade_log.append({
@@ -1806,6 +2293,163 @@ class RotationStrategy:
             self._equity = self._capital + total_pnl
         except Exception as e:
             print(f"[Rotation] DB reload error: {e}", flush=True)
+
+
+
+    async def _tg_reply_id(self, pos) -> int:
+        """Best-effort Telegram message_id of the OPEN to reply to."""
+        mid = int(getattr(pos, "tg_message_id", 0) or 0)
+        if mid:
+            return mid
+        if not self.notifier:
+            return 0
+        try:
+            sid = int(getattr(pos, "signal_id", 0) or 0)
+            coin = getattr(pos, "coin", "") or ""
+            mid = await self.notifier.resolve_open_message_id(
+                self.db, signal_id=sid,
+                bot_id=getattr(self, "BOT_ID", ""), coin=coin,
+            )
+            if mid:
+                try:
+                    pos.tg_message_id = int(mid)
+                except Exception:
+                    pass
+            return int(mid or 0)
+        except Exception as e:
+            print(f"[{getattr(self, 'BOT_NAME', 'bot')}] _tg_reply_id: {e}", flush=True)
+            return 0
+
+    async def _persist_open_snapshot(self):
+
+        """Durable open list in settings — survives trade history wipes."""
+        if not self.db:
+            return
+        try:
+            import json
+            payload = []
+            for coin, pos in (self._positions or {}).items():
+                payload.append({
+                    "coin": coin,
+                    "inst_id": getattr(pos, "inst_id", "") or "",
+                    "side": getattr(pos, "side", "long"),
+                    "size": float(getattr(pos, "size", 0) or 0),
+                    "entry_price": float(getattr(pos, "entry_price", 0) or 0),
+                    "tg_message_id": int(getattr(pos, "tg_message_id", 0) or 0),
+                    "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+                })
+            await self.db.set_setting(
+                f"open_positions:{self.BOT_ID}",
+                json.dumps(payload),
+            )
+        except Exception as e:
+            print(f"[{getattr(self, 'BOT_NAME', 'Rot')}] persist open snapshot: {e}", flush=True)
+
+    async def _load_open_snapshot_proof(self, inst_id: str, side: str) -> bool:
+        if not self.db:
+            return False
+        try:
+            import json
+            raw = await self.db.get_setting(f"open_positions:{self.BOT_ID}")
+            if not raw:
+                return False
+            data = json.loads(raw) if isinstance(raw, str) else raw
+            side_l = (side or "long").lower()
+            for p in data or []:
+                if p.get("inst_id") == inst_id and (p.get("side") or "long").lower() == side_l:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _should_adopt_exchange_position(self, coin: str, side: str, inst_id: str) -> bool:
+        """Only restore exchange positions that THIS bot opened.
+
+        Prevents Validation (and other RotationStrategy subclasses sharing the
+        same coin universe) from adopting Momentum/Impulse positions on start
+        or during reconcile — which duplicated open positions in the UI.
+        """
+        if coin in self._positions:
+            return False
+        # Authoritative check first: the OKX exchange knows who opened the
+        # position (entry fill clOrdId prefix). If a DIFFERENT bot's prefix
+        # (ai/imp/val/scl/vwap) is on the entry order, this is not ours —
+        # never adopt it, regardless of what the DB snapshot thinks.
+        try:
+            client = await self._get_client()
+            if client:
+                owner = await self._entry_fill_owner(client, inst_id)
+                if owner and owner != self.CL_ORD_PREFIX:
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: entry fill owned by '{owner}' "
+                          f"({inst_id})", flush=True)
+                    return False
+                if owner == self.CL_ORD_PREFIX:
+                    print(f"[{self.BOT_NAME}] adopt {coin} {side}: entry fill clOrdId='{owner}' is ours",
+                          flush=True)
+                    return True
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] adopt entry-fill owner check error: {e}", flush=True)
+        # Another bot already tracks it in DB
+        if self.db:
+            try:
+                if await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
+                    print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: owned by another bot in DB",
+                          flush=True)
+                    return False
+                mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                if mine:
+                    return True
+                last = await self.db.last_bot_for_instrument(inst_id)
+                if last and str(last).split(":")[0] == self.BOT_ID:
+                    return True
+            except Exception as e:
+                print(f"[{self.BOT_NAME}] adopt ownership check error: {e}", flush=True)
+        # Our in-memory trade log: last event for this inst is an open
+        for tr in reversed(getattr(self, "_trade_log", []) or []):
+            sym = tr.get("symbol") or tr.get("inst_id") or ""
+            if sym != inst_id:
+                continue
+            reason = (tr.get("reason") or "").lower()
+            if reason == "open":
+                return True
+            if reason in ("closed", "exchange_stop", "manual_close", "sl", "tp", "trail"):
+                return False
+            break
+        try:
+            if await self._load_open_snapshot_proof(inst_id, side):
+                print(f"[{self.BOT_NAME}] adopt {coin}: open_positions snapshot proof", flush=True)
+                return True
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] snapshot proof: {e}", flush=True)
+
+        # No proof of ownership — do not claim foreign / orphan positions
+        print(f"[{self.BOT_NAME}] skip adopt {coin} {side}: no local ownership proof",
+              flush=True)
+        return False
+
+    async def _entry_fill_owner(self, client, inst_id: str) -> str:
+        """Map the most recent entry fill's clOrdId prefix to a bot prefix.
+
+        Returns '' if the entry fill has no clOrdId (manual/unknown), the bot
+        prefix (e.g. 'ai'/'imp'/'val'/'scl'/'vwap'/'rot') otherwise.
+        """
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            sub = str(f.get("subType") or "")
+            if sub not in ("3", "4"):
+                continue  # only entry fills (open) count
+            cid = str(f.get("clOrdId") or "").strip().lower()
+            if not cid:
+                return ""  # manual/unknown — let DB/log checks decide
+            for pref in ("ai", "imp", "val", "scl", "vwap", "rot"):
+                if cid.startswith(pref):
+                    return pref
+            return ""
+        return ""
 
     async def _sync_open_positions(self):
         """After restart, detect open positions from OKX and restore _positions +
@@ -1832,6 +2476,8 @@ class RotationStrategy:
                     continue
 
                 side = "long" if is_long else "short"
+                if not await self._should_adopt_exchange_position(coin, side, inst_id):
+                    continue
                 estimated_atr = entry_px * 0.015
                 if is_long:
                     stop_price = entry_px * 0.985
@@ -1857,6 +2503,10 @@ class RotationStrategy:
                     signal_id=restored_signal_id,
                 )
                 self._positions[coin] = pos
+                try:
+                    await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry_px)
+                except Exception as e:
+                    print(f"[Rotation] restore claim: {e}", flush=True)
                 await self._place_exchange_stop(client, pos)
                 print(f"[Rotation] Restored {side.upper()} {coin} sz={sz} @ {entry_px:.2f} "
                       f"stop={stop_price:.2f}", flush=True)

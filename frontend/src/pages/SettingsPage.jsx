@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download, Users, Star, RefreshCw } from 'lucide-react'
+import { Key, Shield, ScrollText, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download, Users, Star, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
@@ -13,6 +13,10 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [status, setStatus] = useState(null)
   const [testSteps, setTestSteps] = useState([])
   const [dangerConfirm, setDangerConfirm] = useState(false)
+  const [risk, setRisk] = useState(null)
+  const [riskBusy, setRiskBusy] = useState(false)
+  const [audit, setAudit] = useState([])
+  const [modeBusy, setModeBusy] = useState(false)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
@@ -44,6 +48,43 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       setTg({ ...s, loaded: true })
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    api.riskStatus().then(setRisk).catch(() => setRisk(null))
+    api.getAudit(30).then(r => setAudit(r.items || [])).catch(() => setAudit([]))
+  }, [])
+
+  const switchMode = async (demo) => {
+    if (!demo) {
+      const ok = window.confirm(t('settings.live_confirm_prompt'))
+      if (!ok) return
+    }
+    setModeBusy(true)
+    try {
+      const r = await api.setMode(demo, demo ? undefined : 'LIVE')
+      onDemoMode?.(r.demo)
+      onConnected?.(true)
+      setForm(f => ({ ...f, demo: r.demo }))
+      setRisk(rs => rs ? { ...rs, okx_demo: r.demo } : rs)
+      const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
+      setAudit(items)
+    } catch (e) {
+      alert(e.message || 'Mode switch failed')
+    }
+    setModeBusy(false)
+  }
+
+
+  const toggleKill = async (enabled) => {
+    setRiskBusy(true)
+    try {
+      const r = await api.riskKill(enabled)
+      setRisk(r)
+    } catch (e) {
+      console.error(e)
+    }
+    setRiskBusy(false)
+  }
 
   const loadSubs = async () => {
     setSubsLoading(true)
@@ -551,7 +592,96 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
 
           {/* Danger Zone */}
           <div className="panel border-[var(--loss)]/30">
-            <div className="panel-header border-b-[var(--loss)]/20">
+         
+        {/* Trading mode DEMO / LIVE */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <Wifi size={13} className="text-[var(--info)]" /> {t('settings.mode_title')}
+          </div>
+          <p className="text-2xs text-[var(--txt-muted)]">{t('settings.mode_tip')}</p>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold px-2 py-1 rounded ${backendConfig?.env_demo || risk?.okx_demo ? 'bg-[var(--warn-dim)] text-[var(--warn)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+              {(form.demo !== false) ? 'DEMO' : 'LIVE'}
+            </span>
+            <button type="button" className="btn btn-ghost btn-sm" disabled={modeBusy} onClick={() => switchMode(true)}>{t('settings.mode_to_demo')}</button>
+            <button type="button" className="btn btn-danger btn-sm" disabled={modeBusy} onClick={() => switchMode(false)}>{t('settings.mode_to_live')}</button>
+          </div>
+        </div>
+
+        {/* Audit log */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <ScrollText size={13} /> {t('settings.audit_title')}
+          </div>
+          <div className="max-h-40 overflow-auto text-2xs space-y-1">
+            {audit.length === 0 ? (
+              <div className="text-[var(--txt-muted)]">{t('settings.audit_empty')}</div>
+            ) : audit.map((row) => (
+              <div key={row.id} className="flex gap-2 border-b border-[var(--border)] py-1">
+                <span className="mono text-[var(--txt-muted)] shrink-0">{(row.ts || '').slice(0, 19)}</span>
+                <span className="font-medium">{row.action}</span>
+                <span className="text-[var(--txt-muted)] truncate">{row.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+   
+        {/* Risk guards */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <Shield size={13} className="text-[var(--warn)]" /> {t('settings.risk_title')}
+          </div>
+          <p className="text-2xs text-[var(--txt-muted)]">{t('settings.risk_tip')}</p>
+          {risk ? (
+            <div className="grid grid-cols-2 gap-2 text-2xs">
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_kill')}</div>
+                <div className={`font-semibold ${risk.kill_switch ? 'text-[var(--loss)]' : 'text-[var(--profit)]'}`}>
+                  {risk.kill_switch ? t('settings.risk_on') : t('settings.risk_off')}
+                </div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">DEMO</div>
+                <div className="font-semibold">{risk.okx_demo ? 'yes' : 'no'}</div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_daily')}</div>
+                <div className="mono">{risk.max_daily_loss_usd > 0 ? `$${risk.max_daily_loss_usd}` : '—'}</div>
+                {risk.daily_pnl_usd != null && (
+                  <div className={`text-[10px] mt-0.5 ${risk.daily_pnl_usd >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    today {risk.daily_pnl_usd >= 0 ? '+' : ''}{Number(risk.daily_pnl_usd).toFixed(2)}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_pos')}</div>
+                <div className="mono">{risk.max_position_usd > 0 ? `$${risk.max_position_usd}` : '—'}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-2xs text-[var(--txt-muted)]">—</div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={riskBusy || risk?.kill_switch}
+              onClick={() => toggleKill(true)}
+            >
+              {t('settings.risk_enable_kill')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={riskBusy || !risk?.kill_switch}
+              onClick={() => toggleKill(false)}
+            >
+              {t('settings.risk_disable_kill')}
+            </button>
+          </div>
+        </div>
+
+<div className="panel-header border-b-[var(--loss)]/20">
               <AlertTriangle size={13} className="text-[var(--loss)]" /> {t('settings.danger_zone')}
             </div>
             <div className="p-4 flex items-start justify-between gap-4">

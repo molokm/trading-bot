@@ -1,29 +1,39 @@
-"""Impulse 1D Strategy — fast momentum entry + cascade exit (daily bars).
+"""Impulse 1D Strategy — fast momentum entry + cascade / indicator exit (daily).
 
-Live implementation of the honest daily-bar backtest (tuned 2026-08, OKX native
-1D, 10 coins, 2023-05..2026-08: CAGR ~63%, Sharpe 1.58, MaxDD ~-36%).
+"
+        "Exits: ATR cascade TP1/TP2, peak-giveback lock, EMA/ROC indicator exit,
+"
+        "wide trail, breakeven, time stop.
+
+Live implementation of the honest daily-bar backtest (v4, OKX native
+1D, 10 coins, 2023-05..2026-08 full-sample: CAGR ~77%, Sharpe ~1.41, MaxDD ~-36.5%; not pure OOS).
   - Signal on yesterday's daily close (causal), entry today at open
   - Entry impulse: 1-day |ROC| >= 3% + volume surge (1.5x) + EMA20>50 trend
+  - Anti-climax: skip if volume >= 3.5x average (exhaustion / FOMO bar)
   - Initial stop = 5 x daily ATR (both sides)
   - Pyramiding DISABLED (v2: adds hurt risk-adjusted returns)
-  - Cascade take-profit: 30% at +2 ATR, 30% at +10 ATR, rest on stop/time
+  - Cascade take-profit: 25% at +2 ATR, 30% at +10 ATR, rest on stop/time
   - Trailing stop = 12 x entry ATR (wide, keeps winners running)
-  - Time exit: 30 days (max_hold_bars)
+  - Time exit: 28 days (max_hold_bars)
   - Risk-per-trade sizing 10% of equity, max leverage 3x, margin cap 50%
 """
 
 import asyncio
 import math
 import threading
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .position_claim import claim_open, claim_or_flatten, sweep_exchange_orphans
+from .impulse_gate import quant_gate, llm_veto, format_desk
 from .analysis_logger import get_logger
 
 IMP_BOT_ID = "impulse_strategy"
-STRATEGY_VERSION = "v2"
+STRATEGY_VERSION = "v2.3-gate"
 STRATEGY_NAME = f"impulse_1d_{STRATEGY_VERSION}"
 
 CT_VAL = {"BTC": 0.01, "ETH": 0.1, "BNB": 0.01, "SOL": 1, "XRP": 100,
@@ -38,15 +48,11 @@ SWAP_MAP = {"BTC": "BTC-USDT-SWAP", "ETH": "ETH-USDT-SWAP",
 COINS = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
 
 STRATEGY_DESC = (
-    "Impulse 1D v2 (2026-08 tuning). Бот ежедневно сканирует 10 монет на дневных барах и входит в сильные "
-    "импульсные движения. Сигнал входа: цена изменилась на ≥3% за 1 день с всплеском объёма "
-    "(выше среднего в 1.5 раза) и трендом EMA20>EMA50; шорты — по симметричному импульсу вниз. "
-    "До 3 позиций одновременно, ранжирование по силе импульса (|ROC|). Пирамидинг отключён (вредит "
-    "риск-скорректированной доходности). Стоп = 5× дневной ATR (обе стороны), риск на сделку 10% капитала, "
-    "плечо до 3× (чем выше волатильность, тем меньше плечо). Выход каскадом: 30% позиции на "
-    "+2 ATR, ещё 30% на +10 ATR, остаток держим с широким трейлингом (12× ATR) и принудительный "
-    "выход через 30 дней. Валидация (BT, нативные 1D, 10 монет, 2023-05..2026-08): CAGR ~63%, "
-    "Sharpe 1.58, MaxDD −36%. Режим cross margin, демо/реал переключается env."
+    "Impulse 1D v2.3-Gate. Daily impulse на 10 монетах: |ROC|≥6% (1D), объём 1.5–3.5× avg (anti-climax), "
+    "EMA20>EMA50. Long-only. Фильтр режима: нет новых long, если BTC < SMA200. "
+    "До 3 позиций (top по |ROC|), риск 4.5% equity, стоп 5×ATR, плечо до 3×. "
+    "Выход: cascade 25%@2ATR + 30%@10ATR, peak-lock после TP1, EMA/ROC exit в плюсе, trail 12×ATR, hold≤28д. "
+    "Gate: quant multi-TF (BTC RSI/SMA200, 4H align) + optional LLM veto; desk в Telegram."
 )
 
 
@@ -57,13 +63,14 @@ class ImpulseConfig:
     top_k: int = 3                    # max concurrent positions (v2)
     # entry / impulse
     impulse_bars: int = 1             # ROC window for the impulse (1 = 1-day ROC)
-    entry_roc: float = 3.0            # |ROC| % over window (v2)
+    entry_roc: float = 6.0  # survival            # |ROC| % over window (v2)
     rsi_conf_min: float = 0.0         # long confirmation RSI floor
     rsi_conf_max: float = 100.0       # not chasing extreme overbought
     ema_fast: int = 20
     ema_slow: int = 50
     adx_min: float = 0.0
     vol_mult: float = 1.5             # volume > avg_vol * this
+    climax_vol_mult: float = 3.5      # v4: skip if vol >= avg * this (anti-climax)
     vol_period: int = 24
     # pyramiding (докупка) — DISABLED in v2 (max_adds=0 hurts risk-adjusted return)
     max_adds: int = 0
@@ -72,21 +79,41 @@ class ImpulseConfig:
     add_atr_mult: float = 0.5         # add when new peak >= last_add_peak + ATR*this
     # risk / sizing
     max_leverage: float = 3.0
-    risk_per_trade: float = 0.10
+    risk_per_trade: float = 0.045  # B-prime: milder size, keep edge
     sl_atr_mult: float = 5.0          # initial stop = entry - ATR*this
     sl_atr_mult_short: float = 5.0    # short-specific stop; 0 = use sl_atr_mult
     trail_atr_mult: float = 12.0      # trail = peak - ATR*this (v2: wide)
     trail_atr_mult_short: float = 12.0 # short-specific trail; 0 = use trail_atr_mult
-    be_pct: float = 0.005             # move stop to breakeven after +0.5%
+    be_pct: float = 0.008             # move stop to BE after +0.8% (less noise)
     cooldown_bars: int = 3            # min bars between entries on the SAME coin (v2)
     # cascade exit (выход частями)
     tp1_atr: float = 2.0
-    tp1_frac: float = 0.3
+    tp1_frac: float = 0.25  # v3: lighter first scale (BT)
     tp2_atr: float = 10.0             # v2: second TP at 10 ATR
     tp2_frac: float = 0.3
-    max_hold_bars: int = 30           # time exit (30 days)
+    max_hold_bars: int = 28  # v3: BT OOS+full improvement           # time exit (30 days)
     exit_ema_death: bool = False
-    allow_short: bool = True
+    # Protect winners: indicator exit + peak giveback lock (aligned with Momentum)
+    indicator_exit: bool = True
+    ind_exit_min_hold_hours: float = 4.0
+    ind_exit_min_profit_pct: float = 0.6
+    ind_exit_on_ema_flip: bool = True
+    ind_exit_on_roc_flip: bool = True
+    peak_lock_activate_pct: float = 1.2   # arm after +1.2% peak UPL
+    peak_lock_keep_frac: float = 0.45     # exit if now < 45% of peak profit
+    soft_partial_pct: float = 0.015       # +1.5% profit → optional extra partial
+    soft_partial_frac: float = 0.30
+    allow_short: bool = False  # survival long-only
+    # B-prime regime / peak-lock
+    btc_sma200_filter: bool = True   # no new longs if BTC close < SMA200
+    peak_lock_after_tp1: bool = True # arm peak-lock only after first scale-out
+    # Entry gate (quant + optional LLM veto — never invents entries)
+    gate_enabled: bool = True
+    gate_btc_rsi_min: float = 50.0
+    gate_coin_rsi_max: float = 88.0
+    gate_require_4h: bool = True
+    gate_llm_veto: bool = True       # IMPULSE_LLM_VETO=0 to disable
+    desk_telegram: bool = False      # TG desk off (noise)
     max_margin_pct: float = 0.5
     limit_offset_pct: float = 0.001
     limit_wait_sec: int = 300
@@ -120,6 +147,7 @@ class ImpPosition:
     avg_vol: float = 0.0
     leverage: float = 3.0
     signal_id: int = 0
+    tg_message_id: int = 0
     raw_entry: float = 0.0
     tp1_atr_pct: float = 0.0
     tp2_atr_pct: float = 0.0
@@ -144,6 +172,9 @@ class ImpulseStrategy:
         self.db = db
         self.notifier = notifier or TelegramNotifier()
         self.analysis = analysis or get_logger()
+        self._gate_stats = {"allow": 0, "block": 0, "llm_block": 0}
+        self._desk_sent_day = ""
+        self._tf4h_cache: dict = {}
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -154,11 +185,25 @@ class ImpulseStrategy:
         self._signal_log: list = []
         self._latest_indicators: dict = {}
         self._started_at: str = ""
+        self._last_activity: str = ""   # heartbeat: set on every poll cycle
         self._last_daily_check: str = ""
+        self._last_managed_day: str = ""
 
     # ─── Indicators (no look-ahead) ───
 
     @staticmethod
+    @staticmethod
+    def sma(data, period):
+        n = len(data)
+        out = [0.0] * n
+        s = 0.0
+        for i, x in enumerate(data):
+            s += float(x)
+            if i >= period:
+                s -= float(data[i - period])
+            out[i] = s / min(i + 1, period)
+        return out
+
     def ema(data, period):
         if len(data) < period:
             return data[:]
@@ -246,6 +291,8 @@ class ImpulseStrategy:
     def _compute_daily_indicators(self, candles: list) -> dict:
         if len(candles) < 70:
             return None
+        if getattr(self.config, "btc_sma200_filter", False) and len(candles) < 210:
+            return None
         closes = [c["C"] for c in candles]
         highs = [c["H"] for c in candles]
         lows = [c["L"] for c in candles]
@@ -264,6 +311,7 @@ class ImpulseStrategy:
         vols = [c["V"] for c in candles[v_lo:i + 1] if c["V"] > 0]
         avg_vol = sum(vols) / len(vols) if vols else 0.0
 
+        sma200_arr = self.sma(closes, 200)
         return {
             "roc": roc_arr[i],
             "ema_fast": ema_f[i],
@@ -274,6 +322,8 @@ class ImpulseStrategy:
             "price": closes[i],
             "vol": candles[i]["V"],
             "avg_vol": avg_vol,
+            "sma200": sma200_arr[i],
+            "above_sma200": closes[i] >= sma200_arr[i] if sma200_arr[i] else True,
             "close_today": closes[-1],
             "date": candles[i]["datetime"].strftime("%Y-%m-%d"),
             "date_today": candles[-1]["datetime"].strftime("%Y-%m-%d"),
@@ -328,6 +378,69 @@ class ImpulseStrategy:
         if not self.client_manager:
             return None
         return self.client_manager.get_client()
+
+
+    async def _resolve_execution(self, client, inst_id: str, place_resp: dict,
+                                 fallback_px: float, side: str = "long",
+                                 size: float = 0.0, entry_px: float = 0.0,
+                                 ct_val: float = 0.01):
+        """After place_order: fetch real avgPx / fee / fillPnl from OKX.
+
+        place_order often returns only ordId (no fillPx). Without this, TG PnL
+        falls back to entry price and disagrees with the exchange / web history.
+        Returns dict: fill_px, fee, pnl, ord_id, source
+        """
+        import asyncio
+        from .pnl_utils import (
+            extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills, order_avg_from_details,
+        )
+        data = place_resp.get("data") or []
+        ord_id = ""
+        if data:
+            ord_id = str(data[0].get("ordId") or data[0].get("ordId") or "")
+        fill_px, fee, _sz = extract_fill_avg(data, fallback_px)
+        source = "place_resp"
+
+        # Poll order + fills until filled or attempts exhausted
+        for attempt in range(6):
+            if ord_id:
+                try:
+                    od = await client.get_order(inst_id, ord_id=ord_id)
+                    rows = od.get("data") or []
+                    if rows:
+                        avg, fee_o, sz_o = order_avg_from_details(rows[0], fallback_px)
+                        st = (rows[0].get("state") or "").lower()
+                        if avg > 0:
+                            fill_px, fee = avg, fee_o
+                            source = "order"
+                        if st in ("filled", "partially_filled") and avg > 0:
+                            break
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_order resolve: {e}", flush=True)
+                try:
+                    fl = await client.get_fills(inst_id=inst_id, ordId=ord_id, limit=50)
+                    frows = fl.get("data") or []
+                    if frows:
+                        net, avg, fees, _ = pnl_from_okx_fills(frows, fallback_px)
+                        if avg > 0:
+                            fill_px = avg
+                            fee = fees
+                            source = "fills"
+                        if net is not None:
+                            return {
+                                "fill_px": fill_px, "fee": fee, "pnl": net,
+                                "ord_id": ord_id, "source": "fills_pnl",
+                            }
+                except Exception as e:
+                    print(f"[{getattr(self, 'BOT_NAME', 'Bot')}] get_fills resolve: {e}", flush=True)
+            if attempt < 5:
+                await asyncio.sleep(0.25 * (attempt + 1))
+
+        pnl = close_pnl(side, size, entry_px, fill_px, fee, ct_val)
+        return {
+            "fill_px": fill_px, "fee": fee, "pnl": pnl,
+            "ord_id": ord_id, "source": source,
+        }
 
     async def _place_order(self, client, inst_id: str, side: str, sz: float,
                            pos_side: str = None, ord_type: str = "market",
@@ -426,16 +539,18 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Partial close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=close_sz, entry_px=pos.entry_price,
+            ct_val=CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = close_sz * CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = close_sz * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        if ex.get("ord_id"):
+            if fills:
+                fills[0]["ordId"] = ex["ord_id"]
+            else:
+                fills = [{"ordId": ex["ord_id"]}]
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         partial_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -459,13 +574,16 @@ class ImpulseStrategy:
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz,
                     px=round(fill_px, 2), ord_id=partial_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
             except Exception as e:
                 print(f"[Impulse] DB save partial error: {e}", flush=True)
             await self._sync_positions_db()
+        # explicit claim (survives net-mode / restart)
+        for _c, _p in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, _p.inst_id, _p.side, _p.size, _p.entry_price)
         print(f"[Impulse] PARTIAL {now[:19]} {pos.coin:4} {pos.side:5} "
               f"closed {close_sz} of {pos.size + close_sz} @ {fill_px:.1f} "
               f"pnl={pnl:+.2f} ({tag})", flush=True)
@@ -473,7 +591,7 @@ class ImpulseStrategy:
                           coin=pos.coin, side=pos.side,
                           closed_sz=close_sz, remaining_sz=pos.size,
                           exit_px=round(fill_px, 2), entry_px=round(pos.entry_price, 2),
-                          pnl=round(pnl, 2), fee=round(fee, 4),
+                          pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
@@ -495,16 +613,18 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Close error {pos.coin}: {resp.get('message', '')}", flush=True)
             return
+        ex = await self._resolve_execution(
+            client, inst_id, resp, pos.entry_price,
+            side=pos.side, size=pos.size, entry_px=pos.entry_price,
+            ct_val=CT_VAL[pos.coin],
+        )
+        fill_px, fee, pnl = ex["fill_px"], ex["fee"], ex["pnl"]
         fills = resp.get("data", [])
-        fill_px = pos.entry_price
-        fee = 0.0
-        if fills:
-            fill_px = float(fills[0].get("fillPx", pos.entry_price))
-            fee = float(fills[0].get("fee", 0))
-        if pos.side == "long":
-            pnl = pos.size * CT_VAL[pos.coin] * (fill_px - pos.entry_price) - fee
-        else:
-            pnl = pos.size * CT_VAL[pos.coin] * (pos.entry_price - fill_px) - fee
+        if ex.get("ord_id"):
+            if fills:
+                fills[0]["ordId"] = ex["ord_id"]
+            else:
+                fills = [{"ordId": ex["ord_id"]}]
         self._equity += pnl
         now = datetime.now(timezone.utc).isoformat()
         close_ord_id = fills[0].get("ordId", "") if fills else ""
@@ -523,7 +643,7 @@ class ImpulseStrategy:
                     px=round(fill_px, 2),
                     ord_id=close_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
                     signal_id=pos.signal_id,
                 )
@@ -532,24 +652,38 @@ class ImpulseStrategy:
                 print(f"[Impulse] DB save trade error: {e}", flush=True)
         print(f"[Impulse] CLOSE  {now[:19]} {pos.coin:4} {pos.side:5} "
               f"entry={pos.entry_price:.1f} exit={fill_px:.1f} "
-              f"pnl={pnl:+.2f} ({reason})", flush=True)
+              f"pnl={pnl:+.2f} ({reason}) src={ex.get('source', '?')}", flush=True)
         self.analysis.log("impulse", "close",
                           coin=pos.coin, side=pos.side, reason=reason,
                           entry_px=round(pos.entry_price, 2), exit_px=round(fill_px, 2),
-                          size=pos.size, pnl=round(pnl, 2), fee=round(fee, 4),
+                          size=pos.size, pnl=round(pnl, 2), fee=round(fee_cost(fee), 4),
                           leverage=pos.leverage, adds=pos.adds,
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.close_msg(
+                _sid = await self._ensure_signal_id(pos)
+                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+                if not _reply:
+                    _reply = await self.notifier.resolve_open_message_id(
+                        self.db, _sid,
+                        bot_id=getattr(self, "BOT_ID", ""),
+                        coin=getattr(pos, "coin", "") or "",
+                    )
+                if not _reply:
+                    print(f"[Impulse] TG close: no open message_id to reply (signal={_sid})", flush=True)
+                else:
+                    print(f"[Impulse] TG close: reply_to={_reply} signal={_sid}", flush=True)
+                _txt = self.notifier.close_msg(
                     coin=pos.coin, side=pos.side, entry=round(pos.entry_price, 2),
                     exit_px=round(fill_px, 2), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                ))
+                    bot_name=self.BOT_NAME, signal_id=_sid,
+                )
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
                 print(f"[Impulse] TG close notify error: {e}", flush=True)
 
     async def _open_position(self, client, coin: str, side: str, ind: dict, lev: float):
+        # Opens only from signal path (this method is only called after signal)
         """Open a new position with limit order + market fallback."""
         inst_id = SWAP_MAP.get(coin, f"{coin}-USDT-SWAP")
         price = ind["close_today"]
@@ -622,13 +756,13 @@ class ImpulseStrategy:
                                                    resp.get("message", ""))
             return
 
-        fill_px = price
-        fee = 0.0
-        ord_id = ""
-        if fills:
-            fill_px = float(fills[0].get("fillPx", price))
-            fee = float(fills[0].get("fee", 0))
-            ord_id = fills[0].get("ordId", "")
+        ex = await self._resolve_execution(
+            client, inst_id, resp, price,
+            side=side, size=sz, entry_px=price, ct_val=CT_VAL.get(coin, 0.01),
+        )
+        fill_px, fee = ex["fill_px"], ex["fee"]
+        ord_id = ex.get("ord_id") or ""
+        fills = resp.get("data", []) or ([{"ordId": ord_id}] if ord_id else [])
 
         now = datetime.now(timezone.utc).isoformat()
         tp1_pct = self.config.tp1_atr * atr_val / fill_px
@@ -647,7 +781,7 @@ class ImpulseStrategy:
 
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": sz, "pnl": -round(fee, 2), "entry": fill_px, "entry_price": fill_px,
+            "size": sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px, "entry_price": fill_px,
             "stop": round(stop, 2), "reason": "open", "pos_side": side,
             "coin": coin, "signal_id": signal_id, "leverage": lev,
         })
@@ -659,7 +793,7 @@ class ImpulseStrategy:
                     bot_id=self.BOT_ID, side=order_side, sz=sz,
                     px=round(fill_px, 2), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
-                    fee=round(fee, 4), fee_ccy="USDT",
+                    fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
                 )
                 await self._sync_positions_db()
@@ -672,15 +806,26 @@ class ImpulseStrategy:
         self.analysis.log("impulse", "open",
                           coin=coin, side=side, price=round(fill_px, 2),
                           stop=round(stop, 2), size=sz, leverage=lev,
-                          atr=round(atr_val, 2), fee=round(fee, 4),
+                          atr=round(atr_val, 2), fee=round(fee_cost(fee), 4),
                           inst_id=inst_id, signal_id=signal_id)
         if self.notifier:
             try:
-                self.notifier.fire(self.notifier.open_msg(
+                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 2),
                     stop=round(stop, 2), size=round(sz, 4), leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
                 ))
+                if _tg_mid:
+                    try:
+                        if coin in self._positions:
+                            self._positions[coin].tg_message_id = int(_tg_mid)
+                        await self.notifier.remember_open_db(
+                            self.db, signal_id, _tg_mid,
+                            bot_id=getattr(self, "BOT_ID", ""), coin=coin,
+                        )
+                        print(f"[Impulse] TG open msg_id={_tg_mid} signal={signal_id}", flush=True)
+                    except Exception as e:
+                        print(f"[Impulse] TG remember open: {e}", flush=True)
             except Exception as e:
                 print(f"[Impulse] TG open notify error: {e}", flush=True)
 
@@ -717,8 +862,7 @@ class ImpulseStrategy:
         if resp.get("error"):
             print(f"[Impulse] Add error {coin}: {resp.get('message', '')}", flush=True)
             return
-        fill_px = float(fills[0].get("fillPx", ind["close_today"])) if fills else ind["close_today"]
-        fee = float(fills[0].get("fee", 0)) if fills else 0.0
+        fill_px, fee, _ = extract_fill_avg(fills, ind["close_today"])
 
         prev_size = pos.size
         pos.size += add_sz
@@ -735,7 +879,7 @@ class ImpulseStrategy:
         now = datetime.now(timezone.utc).isoformat()
         self._trade_log.append({
             "time": now, "side": order_side, "symbol": inst_id,
-            "size": add_sz, "pnl": -round(fee, 2), "entry": fill_px,
+            "size": add_sz, "pnl": -round(fee_cost(fee), 2), "entry": fill_px,
             "entry_price": fill_px, "reason": "add", "pos_side": pos.side,
             "coin": coin, "signal_id": pos.signal_id, "leverage": lev,
         })
@@ -750,7 +894,7 @@ class ImpulseStrategy:
                           add_sz=add_sz, total_sz=pos.size,
                           entry_px=round(pos.entry_price, 2),
                           new_stop=round(pos.stop_price, 2),
-                          leverage=lev, adds=pos.adds, fee=round(fee, 4),
+                          leverage=lev, adds=pos.adds, fee=round(fee_cost(fee), 4),
                           signal_id=pos.signal_id)
         if self.notifier:
             try:
@@ -788,9 +932,39 @@ class ImpulseStrategy:
         except Exception as e:
             print(f"[Impulse] Sync pos error {coin}: {e}", flush=True)
 
+    async def _ensure_signal_id(self, pos) -> int:
+        sid = int(getattr(pos, "signal_id", 0) or 0)
+        if sid:
+            return sid
+        if not self.db:
+            return 0
+        try:
+            open_side = "buy" if pos.side == "long" else "sell"
+            inst = getattr(pos, "inst_id", None) or f"{pos.coin}-USDT-SWAP"
+            sid = int(await self.db.find_signal_id(inst, open_side) or 0)
+            if sid:
+                pos.signal_id = sid
+        except Exception as e:
+            print(f"[Impulse] ensure_signal_id: {e}", flush=True)
+        return int(getattr(pos, "signal_id", 0) or 0)
+
     # ─── Core trading logic (runs once per poll cycle) ───
 
     async def _check_and_trade(self):
+        try:
+            if not getattr(self, "_orphan_swept", False):
+                client = await self._get_client()
+                if client:
+                    mem = {(p.inst_id, p.side) for p in self._positions.values()}
+                    closed = await sweep_exchange_orphans(client, self.db, mem)
+                    self._orphan_swept = True
+                    if closed:
+                        print(f"[Impulse] orphan sweep closed {len(closed)}", flush=True)
+        except Exception as e:
+            print(f"[Impulse] orphan sweep: {e}", flush=True)
+        # Keep ownership badges after restarts
+        for _c, _p in list(self._positions.items()):
+            await claim_open(self.db, self.BOT_ID, _p.inst_id, _p.side, _p.size, _p.entry_price)
         client = await self._get_client()
         if not client:
             print("[Impulse] No client — skip cycle", flush=True)
@@ -799,7 +973,7 @@ class ImpulseStrategy:
         # 1) Refresh candles & indicators for every coin
         indicators = {}
         for coin in self.config.symbols:
-            candles = await self._fetch_candles(client, coin, bar="1D", limit=250)
+            candles = await self._fetch_candles(client, coin, bar="1D", limit=300)
             ind = self._compute_daily_indicators(candles)
             indicators[coin] = ind
             if ind:
@@ -875,26 +1049,98 @@ class ImpulseStrategy:
                           coins=summary)
 
     async def _check_exit(self, client, pos: ImpPosition, ind: dict, price: float) -> bool:
-        """Check stop / time-exit / breakeven / trailing. Returns True if fully closed."""
+        """Stop / peak-lock / indicator exit / trail / BE. Returns True if fully closed."""
         cfg = self.config
         trail_m = cfg.trail_atr_mult_short if pos.side == "short" and cfg.trail_atr_mult_short \
             else cfg.trail_atr_mult
+        entry = float(pos.entry_price or 0)
+        if entry <= 0 or price <= 0:
+            return False
 
-        # stop-loss
+        # Unrealized % (long/short)
+        if pos.side == "long":
+            upl_pct = (price / entry - 1.0) * 100.0
+            pos.peak_price = max(float(pos.peak_price or price), price)
+            peak_upl = (float(pos.peak_price) / entry - 1.0) * 100.0
+        else:
+            upl_pct = (entry / price - 1.0) * 100.0 if price else 0.0
+            pos.peak_price = min(float(pos.peak_price or price), price)
+            peak_upl = (entry / float(pos.peak_price) - 1.0) * 100.0 if pos.peak_price else 0.0
+
+        # 1) Hard stop
         hit = (pos.side == "long" and price <= pos.stop_price) or \
               (pos.side == "short" and price >= pos.stop_price)
         if hit:
             await self._close_position(client, pos, "stop")
             return True
 
-        # time exit
+        # 2) Peak giveback lock — B-prime: only after TP1 so early runners can develop
+        act = float(getattr(cfg, "peak_lock_activate_pct", 1.2) or 1.2)
+        keep = float(getattr(cfg, "peak_lock_keep_frac", 0.45) or 0.45)
+        lock_ok = True
+        if getattr(cfg, "peak_lock_after_tp1", True) and not getattr(pos, "tp1_done", False):
+            lock_ok = False
+        if lock_ok and peak_upl >= act and upl_pct >= 0:
+            min_keep = peak_upl * keep
+            if upl_pct < min_keep:
+                await self._close_position(
+                    client, pos,
+                    f"peak_lock:peak={peak_upl:.1f}%now={upl_pct:.1f}%",
+                )
+                return True
+
+        # 3) Indicator exit (EMA / ROC) while still green or near peak
+        if getattr(cfg, "indicator_exit", True):
+            hold_h = 0.0
+            try:
+                opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                hold_h = (datetime.now(timezone.utc) - opened).total_seconds() / 3600.0
+            except Exception:
+                hold_h = 999.0
+            min_hold = float(getattr(cfg, "ind_exit_min_hold_hours", 4) or 0)
+            if hold_h >= min_hold:
+                ema_trend = bool(ind.get("ema_trend"))
+                roc = float(ind.get("roc") or 0)
+                min_p = float(getattr(cfg, "ind_exit_min_profit_pct", 0.6) or 0)
+                reasons = []
+                if getattr(cfg, "ind_exit_on_ema_flip", True):
+                    if pos.side == "long" and not ema_trend:
+                        reasons.append("ema_bear")
+                    if pos.side == "short" and ema_trend:
+                        reasons.append("ema_bull")
+                if getattr(cfg, "ind_exit_on_roc_flip", True):
+                    # ROC against position (relative to entry impulse threshold)
+                    thr = float(getattr(cfg, "entry_roc", 6.0) or 6.0) * 0.35
+                    if pos.side == "long" and roc < -thr:
+                        reasons.append(f"roc_down:{roc:.1f}")
+                    if pos.side == "short" and roc > thr:
+                        reasons.append(f"roc_up:{roc:.1f}")
+                # Full exit: in profit + regime against us
+                if reasons and (upl_pct >= min_p or (peak_upl >= act and upl_pct >= 0)):
+                    await self._close_position(
+                        client, pos, "ind_exit:" + "+".join(reasons[:3]),
+                    )
+                    return True
+                # Soft partial: fading impulse but still green, lock some profit
+                soft_pct = float(getattr(cfg, "soft_partial_pct", 0.015) or 0)
+                soft_frac = float(getattr(cfg, "soft_partial_frac", 0.30) or 0)
+                if (
+                    reasons
+                    and not pos.tp1_done
+                    and soft_pct > 0
+                    and upl_pct >= soft_pct * 100.0
+                    and soft_frac > 0
+                ):
+                    await self._close_partial(client, pos, soft_frac, "ind_partial")
+                    # continue managing remainder
+
+        # 4) Time exit
         if self._days_held(pos) >= cfg.max_hold_bars:
             await self._close_position(client, pos, "time_exit")
             return True
 
-        # trailing stop
+        # 5) Trailing stop (wide) — after peak/ind checks so we exit on signal first
         if pos.side == "long":
-            pos.peak_price = max(pos.peak_price, price)
             trail = pos.peak_price - trail_m * pos.atr
             if trail > pos.stop_price:
                 pos.stop_price = trail
@@ -903,7 +1149,6 @@ class ImpulseStrategy:
                                   price=round(price, 2), peak=round(pos.peak_price, 2),
                                   new_stop=round(pos.stop_price, 2))
         else:
-            pos.peak_price = min(pos.peak_price, price)
             trail = pos.peak_price + trail_m * pos.atr
             if trail < pos.stop_price:
                 pos.stop_price = trail
@@ -912,7 +1157,7 @@ class ImpulseStrategy:
                                   price=round(price, 2), peak=round(pos.peak_price, 2),
                                   new_stop=round(pos.stop_price, 2))
 
-        # breakeven after min profit
+        # 6) Breakeven after min profit
         if not pos.breakeven:
             if pos.side == "long" and price >= pos.entry_price * (1 + cfg.be_pct):
                 pos.stop_price = max(pos.stop_price, pos.entry_price)
@@ -937,12 +1182,54 @@ class ImpulseStrategy:
         """Optional per-bar management hook (kept for symmetry with rotation bot)."""
         pass
 
+
+    async def _tf4h_snapshot(self, client, coin: str) -> dict:
+        """Lightweight 4H trend/RSI for gate (cached per cycle)."""
+        if coin in self._tf4h_cache:
+            return self._tf4h_cache[coin]
+        out = {}
+        try:
+            candles = await self._fetch_candles(client, coin, bar="4H", limit=80)
+            if not candles or len(candles) < 30:
+                self._tf4h_cache[coin] = out
+                return out
+            closes = [c["C"] for c in candles]
+            i = len(closes) - 2  # last closed 4H
+            ema_f = self.ema(closes, 20)
+            ema_s = self.ema(closes, 50)
+            rsi_arr = self.rsi(closes, 14)
+            out = {
+                "ema_trend": ema_f[i] > ema_s[i],
+                "rsi": rsi_arr[i],
+                "close": closes[i],
+            }
+        except Exception as e:
+            print(f"[Impulse] 4H snapshot {coin}: {e}", flush=True)
+        self._tf4h_cache[coin] = out
+        return out
+
     async def _new_entries(self, client, indicators: dict):
         """Rank candidate coins by impulse strength, open up to free slots."""
         cfg = self.config
         free_slots = cfg.top_k - len(self._positions)
         if free_slots <= 0:
             return
+
+        self._tf4h_cache = {}
+        btc_ind = indicators.get("BTC") or {}
+
+        # B-prime: block new longs when BTC is below SMA200 (bear/chop filter)
+        btc_regime_ok = True
+        if getattr(cfg, "btc_sma200_filter", True):
+            if btc_ind:
+                btc_regime_ok = bool(btc_ind.get("above_sma200", True))
+            if not btc_regime_ok:
+                self.analysis.log(
+                    "impulse", "regime_block",
+                    reason="btc_below_sma200",
+                    btc_px=round(float(btc_ind.get("price") or 0), 2),
+                    sma200=round(float(btc_ind.get("sma200") or 0), 2),
+                )
 
         candidates = []
         for coin, ind in indicators.items():
@@ -955,14 +1242,48 @@ class ImpulseStrategy:
             side, strength = self._entry_signal(coin, ind)
             if not side:
                 continue
+            if side == "long" and not btc_regime_ok:
+                continue
             candidates.append((strength, coin, side, ind))
         if not candidates:
+            await self._maybe_send_desk(btc_ind)
             return
 
         candidates.sort(key=lambda x: -x[0])
         for strength, coin, side, ind in candidates[:free_slots]:
             if coin in self._positions:
                 continue
+            # ── Quant + optional LLM gate (veto only) ──
+            if getattr(cfg, "gate_enabled", True):
+                tf4h = {}
+                if getattr(cfg, "gate_require_4h", True):
+                    tf4h = await self._tf4h_snapshot(client, coin)
+                allow_q, q_reasons = quant_gate(
+                    side, coin, ind, btc_ind, tf4h,
+                    require_btc_sma200=bool(getattr(cfg, "btc_sma200_filter", True)),
+                    btc_rsi_min=float(getattr(cfg, "gate_btc_rsi_min", 50) or 0),
+                    coin_rsi_max=float(getattr(cfg, "gate_coin_rsi_max", 88) or 100),
+                    require_4h_align=bool(getattr(cfg, "gate_require_4h", True)),
+                )
+                if not allow_q:
+                    self._gate_stats["block"] = self._gate_stats.get("block", 0) + 1
+                    print(f"[Impulse] GATE BLOCK {coin} {side}: {','.join(q_reasons)}", flush=True)
+                    self.analysis.log("impulse", "gate_block", coin=coin, side=side,
+                                      reasons=q_reasons, strength=round(strength, 2))
+                    continue
+                if getattr(cfg, "gate_llm_veto", True):
+                    allow_l, l_reason = await llm_veto(
+                        coin=coin, side=side, strength=strength,
+                        ind=ind, btc_ind=btc_ind, quant_reasons_ok=True,
+                    )
+                    if not allow_l:
+                        self._gate_stats["llm_block"] = self._gate_stats.get("llm_block", 0) + 1
+                        print(f"[Impulse] LLM VETO {coin} {side}: {l_reason}", flush=True)
+                        self.analysis.log("impulse", "llm_veto", coin=coin, side=side,
+                                          reason=l_reason)
+                        continue
+                self._gate_stats["allow"] = self._gate_stats.get("allow", 0) + 1
+
             lev = self._calc_dynamic_leverage(ind["atr"], ind["price"])
             if not self.config.auto_execute:
                 print(f"[Impulse] SIGNAL {coin} {side} strength={strength:.1f} "
@@ -974,6 +1295,39 @@ class ImpulseStrategy:
                                   vol=round(ind["vol"], 2), avg_vol=round(ind["avg_vol"], 2))
                 continue
             await self._open_position(client, coin, side, ind, lev)
+
+        await self._maybe_send_desk(btc_ind)
+
+
+    async def _maybe_send_desk(self, btc_ind: dict):
+        if not getattr(self.config, "desk_telegram", True):
+            return
+        if not self.notifier:
+            return
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if getattr(self, "_desk_sent_day", "") == day:
+            return
+        if datetime.now(timezone.utc).hour < 6:
+            return
+        try:
+            opens = [
+                {"coin": p.coin, "side": p.side}
+                for p in self._positions.values()
+            ]
+            text = format_desk(
+                btc_ind=btc_ind or {},
+                open_positions=opens,
+                gate_stats=dict(getattr(self, "_gate_stats", {}) or {}),
+                version=STRATEGY_VERSION,
+            )
+            if hasattr(self.notifier, "send"):
+                await self.notifier.send(text)
+            elif hasattr(self.notifier, "send_message"):
+                await self.notifier.send_message(text)
+            self._desk_sent_day = day
+            print(f"[Impulse] desk sent: {text[:120]}", flush=True)
+        except Exception as e:
+            print(f"[Impulse] desk error: {e}", flush=True)
 
     def _in_cooldown(self, coin: str, bar_date: str) -> bool:
         """Cooldown per coin (cooldown_bars days)."""
@@ -1001,6 +1355,9 @@ class ImpulseStrategy:
         vol_surge = ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.vol_mult
         if not vol_surge:
             return None, 0
+        # v4 anti-climax: skip exhaustion / FOMO volume spikes
+        if cfg.climax_vol_mult and ind["avg_vol"] > 0 and ind["vol"] >= ind["avg_vol"] * cfg.climax_vol_mult:
+            return None, 0
         rsi = ind["rsi"]
         roc = ind["roc"]
         strength = abs(roc)
@@ -1017,14 +1374,134 @@ class ImpulseStrategy:
 
     # ─── DB helpers ───
 
+
+    async def _restore_open_positions(self):
+        """After restart: adopt exchange positions this bot owns (DB proof)."""
+        if self._positions:
+            return
+        client = None
+        try:
+            if hasattr(self, "_get_client"):
+                client = await self._get_client()
+            elif self.client_manager:
+                client = self.client_manager.get_client()
+        except Exception as e:
+            print(f"[Impulse] restore client: {e}", flush=True)
+        if not client:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error") or not result.get("data"):
+                return
+            for p in result.get("data") or []:
+                inst_id = p.get("instId") or ""
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in getattr(self.config, "symbols", COINS):
+                    continue
+                pos_side = (p.get("posSide") or "net").lower()
+                side = "short" if pos_side == "short" else "long"
+                sz = float(p.get("pos") or 0)
+                entry = float(p.get("avgPx") or 0)
+                if sz <= 0 or entry <= 0:
+                    continue
+                if coin in self._positions:
+                    continue
+                # Ownership: our DB claim, or last trade on instrument was Impulse.
+                # If AI/other wrongly claimed after deploy but trades say Impulse — reclaim.
+                own = False
+                if self.db:
+                    try:
+                        mine = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                        if mine:
+                            own = True
+                        last = await self.db.last_bot_for_instrument(inst_id)
+                        last_root = str(last).split(":")[0] if last else ""
+                        if last_root == self.BOT_ID:
+                            own = True
+                        # trade_log proof: last event for this inst is open by us
+                        if not own:
+                            for tr in reversed(getattr(self, "_trade_log", []) or []):
+                                sym = tr.get("symbol") or tr.get("inst_id") or ""
+                                if sym != inst_id:
+                                    continue
+                                reason = (tr.get("reason") or tr.get("event") or "").lower()
+                                if reason in ("open", "signal_open", ""):
+                                    own = True
+                                break
+                        if own and await self.db.other_bot_owns_position_any(self.BOT_ID, inst_id, side):
+                            # Foreign claim (e.g. AI after redeploy) — drop it so Impulse reclaims
+                            try:
+                                if self.db._pg_mode:
+                                    await self.db._execute(
+                                        "DELETE FROM positions WHERE inst_id = $1 AND bot_id <> $2",
+                                        (inst_id, self.BOT_ID),
+                                    )
+                                else:
+                                    await self.db._execute(
+                                        "DELETE FROM positions WHERE inst_id = ? AND bot_id <> ?",
+                                        (inst_id, self.BOT_ID),
+                                    )
+                                print(f"[Impulse] reclaimed {coin} from foreign claim (proof={last_root or 'trade_log'})", flush=True)
+                            except Exception as e:
+                                print(f"[Impulse] reclaim delete: {e}", flush=True)
+                    except Exception as e:
+                        print(f"[Impulse] restore ownership: {e}", flush=True)
+                else:
+                    own = False  # without DB never adopt exchange orphans
+                if not own:
+                    continue
+                atr_est = entry * 0.02
+                if side == "long":
+                    stop = entry * 0.97
+                else:
+                    stop = entry * 1.03
+                pos = ImpPosition(
+                    symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
+                    size=sz, size_original=sz,
+                    entry_price=entry, stop_price=stop, peak_price=entry,
+                    atr=atr_est, opened_at=datetime.now(timezone.utc).isoformat(),
+                    leverage=float(getattr(self.config, "max_leverage", 3) or 3),
+                    raw_entry=entry,
+                )
+                self._positions[coin] = pos
+                await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
+                print(f"[Impulse] RESTORE {side} {coin} sz={sz} @ {entry}", flush=True)
+            if self._positions:
+                await self._sync_positions_db()
+        except Exception as e:
+            print(f"[Impulse] restore error: {e}", flush=True)
+
     async def _sync_positions_db(self):
         if not self.db:
             return
         try:
-            if self.db._pg_mode:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = $1", (self.BOT_ID,))
-            else:
-                await self.db._execute("DELETE FROM positions WHERE bot_id = ?", (self.BOT_ID,))
+            # Never DELETE-all when memory is empty — that wiped Impulse claims on
+            # restart races and let AI/other bots steal SOL etc.
+            if not self._positions:
+                return
+            # Upsert current; remove only Impulse rows for coins no longer held
+            held_inst = {pos.inst_id for pos in self._positions.values()}
+            rows = []
+            try:
+                if self.db._pg_mode:
+                    rows = await self.db._fetchall(
+                        "SELECT inst_id, side FROM positions WHERE bot_id = $1",
+                        (self.BOT_ID,),
+                    ) or []
+                else:
+                    rows = await self.db._fetchall(
+                        "SELECT inst_id, side FROM positions WHERE bot_id = ?",
+                        (self.BOT_ID,),
+                    ) or []
+            except Exception:
+                rows = []
+            for r in rows:
+                iid = (r.get("inst_id") if isinstance(r, dict) else r[0]) if r else None
+                if iid and iid not in held_inst:
+                    try:
+                        await self.db.delete_position_inst(self.BOT_ID, iid, None)
+                    except Exception:
+                        pass
             for coin, pos in self._positions.items():
                 await self.db.save_position(
                     bot_id=self.BOT_ID, inst_id=pos.inst_id,
@@ -1066,10 +1543,40 @@ class ImpulseStrategy:
     async def _poll_loop(self):
         while self._running:
             try:
+                self._last_activity = datetime.now(timezone.utc).isoformat()
                 await self._check_and_trade()
+                self._last_activity = datetime.now(timezone.utc).isoformat()
+                await self._daily_managed_record()
             except Exception as e:
                 print(f"[Impulse] Poll error: {e}", flush=True)
-            await asyncio.sleep(self.config.poll_interval_sec)
+                self._last_activity = datetime.now(timezone.utc).isoformat()
+            left = float(self.config.poll_interval_sec or 60)
+            while left > 0 and self._running:
+                step = min(2.0, left)
+                await asyncio.sleep(step)
+                left -= step
+                self._last_activity = datetime.now(timezone.utc).isoformat()
+
+    async def _daily_managed_record(self):
+        """Once per UTC day, record whether this bot was actively managed."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if self._last_managed_day == day:
+            return
+        self._last_managed_day = day
+        managed = bool(self._running)
+        try:
+            self.analysis.log("impulse", "managed_daily",
+                              day=day, managed=managed,
+                              last_activity=self._last_activity,
+                              open_positions=[p.coin for p in self._positions.values()])
+        except Exception as e:
+            print(f"[Impulse] managed_daily log error: {e}", flush=True)
+        if self.db:
+            try:
+                await self.db.set_setting(f"managed_daily:{self.BOT_ID}:{day}",
+                                          "1" if managed else "0")
+            except Exception as e:
+                print(f"[Impulse] managed_daily db error: {e}", flush=True)
 
     def _thread_runner(self):
         self._loop = asyncio.new_event_loop()
@@ -1083,16 +1590,24 @@ class ImpulseStrategy:
             print(f"[Impulse] Thread error: {e}", flush=True)
 
     async def _start_async(self):
-        self._started_at = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self._started_at = now
+        self._last_activity = now
         await self._ensure_bot()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
+        await self._restore_open_positions()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
         await self._check_and_trade()
+        self._last_activity = datetime.now(timezone.utc).isoformat()
         await self._poll_loop()
 
     async def start(self):
         if self._running:
             return
         self._running = True
-        self._started_at = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc).isoformat()
+        self._started_at = now
+        self._last_activity = now
         if self.db:
             await self._ensure_bot()
         self._thread = threading.Thread(target=self._thread_runner, daemon=True)
@@ -1104,10 +1619,9 @@ class ImpulseStrategy:
         if not self._running:
             return
         self._running = False
-        if self._loop and not self._loop.is_closed():
-            self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread:
-            self._thread.join(timeout=5)
+            join_t = min(30, int(getattr(self.config, "poll_interval_sec", 60) or 60) + 3)
+            self._thread.join(timeout=join_t)
             self._thread = None
         if self.db:
             try:
@@ -1163,10 +1677,35 @@ class ImpulseStrategy:
                 "stage": "tp1_done" if pos.tp1_done else "tp2_done" if pos.tp2_done else "running",
             })
 
+        last_activity_ts = 0.0
+        if self._last_activity:
+            try:
+                la = str(self._last_activity).replace("Z", "+00:00")
+                last_activity_ts = datetime.fromisoformat(la).timestamp()
+            except (TypeError, ValueError):
+                last_activity_ts = 0.0
+        started_ts = 0.0
+        if getattr(self, "_started_at", None):
+            try:
+                sa = str(self._started_at).replace("Z", "+00:00")
+                started_ts = datetime.fromisoformat(sa).timestamp()
+            except (TypeError, ValueError):
+                started_ts = 0.0
+        # Long cycles (10 coins + gate/LLM): allow 4x poll, min 15 min
+        heartbeat_max_age = max(4 * int(self.config.poll_interval_sec or 300), 900)
+        age = (time.time() - last_activity_ts) if last_activity_ts else 1e9
+        grace = (time.time() - started_ts) if started_ts else 1e9
+        managed = bool(self._running) and (age < heartbeat_max_age or grace < heartbeat_max_age)
+
         return {
             "running": self._running,
+            "managed": managed,
+            "last_activity": self._last_activity,
+            "heartbeat_max_age_sec": heartbeat_max_age,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
+            "gate_stats": dict(getattr(self, "_gate_stats", {}) or {}),
+
             "started_at": self._started_at,
             "equity": round(equity, 2),
             "capital": round(self._capital, 2),
