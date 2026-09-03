@@ -203,7 +203,7 @@ def apply_attribution(
         opener = entry_owner.get((inst, pside), "") or entry_owner.get(inst, "")
         if opener:
             cur = str(t.get("bot") or "")
-            if not cur or cur != opener:
+            if not cur:
                 t["bot"] = opener
                 t["_attr"] = "entry_owner"
 

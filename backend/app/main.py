@@ -6786,7 +6786,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             if not opener:
                 continue
             cur_bot = str(t.get("bot") or "")
-            if cur_bot and cur_bot != opener:
+            if not cur_bot:
                 t["bot"] = opener
     except Exception as e:
         print(f"[trades/paired] entry-owner override error: {e}", flush=True)
