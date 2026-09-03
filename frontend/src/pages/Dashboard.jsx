@@ -853,16 +853,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
                 {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
               </AnimatedValue>
-              {(fundingPnl !== 0 || Math.abs(economicPnl - pnlTotal) > 0.01) && (
-                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)] mono">
-                  <span>funding {fundingPnl >= 0 ? '+' : ''}{fmt(fundingPnl)}</span>
-                  <span className="mx-1">·</span>
-                  <span title="strategy realized + upl + account funding">eco {economicPnl >= 0 ? '+' : ''}{fmt(economicPnl)}</span>
-                  {fundingPnl !== 0 && (
-                    <span className="text-[var(--txt-muted)]" title="Funding (account)">fund {fundingPnl >= 0 ? '+' : ''}{fmt(fundingPnl)}</span>
-                  )}
-                </div>
-              )}
               {pnlByBot.length > 0 && (
                 <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (

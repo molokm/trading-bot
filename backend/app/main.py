@@ -2887,7 +2887,7 @@ async def get_pnl_epoch() -> str:
             return str(v).strip()
     except Exception:
         pass
-    return ""
+    return "2026-09-01T00:00:00"
 
 
 def _trade_after_epoch(tr: dict, epoch: str) -> bool:
