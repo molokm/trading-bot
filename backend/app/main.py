@@ -5846,6 +5846,21 @@ async def _compute_pnl():
 
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", []) or []
+        # Dedup by ord_id: keep the trade with the best (highest absolute) PnL
+        # for each order. This prevents double-counting when the same trade
+        # appears in both OKX bills and in-memory/DB logs.
+        _seen_ord: dict = {}
+        _nooid_seq = 0
+        for tr in trades:
+            _oid = str(tr.get("ord_id") or "").strip()
+            if not _oid:
+                _oid = f"_nooid_{_nooid_seq}"
+                _nooid_seq += 1
+            _pnl = abs(float(tr.get("pnl") or 0))
+            _existing = _seen_ord.get(_oid)
+            if _existing is None or _pnl > abs(float(_existing.get("pnl") or 0)):
+                _seen_ord[_oid] = tr
+        trades = list(_seen_ord.values())
         closed_tagged = []
         for tr in trades:
             reason = (tr.get("reason") or "").lower()
