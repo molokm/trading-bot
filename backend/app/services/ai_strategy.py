@@ -1237,6 +1237,7 @@ class AIStrategy:
             "exit_price": fill_px, "fee": round(fee_c, 6),
             "reason": reason, "pos_side": pos.side, "coin": coin,
             "signal_id": signal_id,
+            "ord_id": (fills[0].get("ordId") if fills else ""),
         })
         if self.db:
             try:

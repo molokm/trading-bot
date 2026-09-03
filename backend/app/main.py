@@ -5879,18 +5879,6 @@ async def _compute_pnl():
                 _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
                 _et = str(tr.get("exit_time") or tr.get("time") or "")
                 _pnl = float(tr.get("pnl") or 0)
-                if (
-                    _inst == "ETH-USDT-SWAP"
-                    and "2026-09-01T17:33" in _et
-                    and abs(_pnl - 167.08) < 45
-                ):
-                    bot = "AI Discretionary 1H"
-                if (
-                    _inst == "ETH-USDT-SWAP"
-                    and "2026-09-01T17:33" in _et
-                    and abs(_pnl - 134.17) < 45
-                ):
-                    bot = "AI Discretionary 1H"
             except Exception:
                 pass
             if not bot:
