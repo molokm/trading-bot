@@ -212,6 +212,20 @@ class Database:
                 update_id     INTEGER PRIMARY KEY,
                 processed_at  TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS exchange_close_trades (
+                ord_id        TEXT PRIMARY KEY,
+                inst_id       TEXT NOT NULL,
+                cl_ord_id     TEXT NOT NULL,
+                bot_label     TEXT NOT NULL DEFAULT '',
+                pnl           REAL NOT NULL DEFAULT 0,
+                fee           REAL NOT NULL DEFAULT 0,
+                sz            REAL NOT NULL DEFAULT 0,
+                avg_px        REAL NOT NULL DEFAULT 0,
+                close_ts      INTEGER NOT NULL DEFAULT 0,
+                sub_type      TEXT NOT NULL DEFAULT '5',
+                synced_at     TEXT NOT NULL
+            );
         """)
         await self._conn.commit()
 
@@ -400,6 +414,21 @@ class Database:
                 meta          TEXT
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS exchange_close_trades (
+                ord_id        TEXT PRIMARY KEY,
+                inst_id       TEXT NOT NULL,
+                cl_ord_id     TEXT NOT NULL,
+                bot_label     TEXT NOT NULL DEFAULT '',
+                pnl           DOUBLE PRECISION NOT NULL DEFAULT 0,
+                fee           DOUBLE PRECISION NOT NULL DEFAULT 0,
+                sz            DOUBLE PRECISION NOT NULL DEFAULT 0,
+                avg_px        DOUBLE PRECISION NOT NULL DEFAULT 0,
+                close_ts      BIGINT NOT NULL DEFAULT 0,
+                sub_type      TEXT NOT NULL DEFAULT '5',
+                synced_at     TEXT NOT NULL
+            )
+        """)
 
     # ── Query helpers ──
 
@@ -456,8 +485,126 @@ class Database:
             finally:
                 await conn.close()
         cur = await self._conn.execute(sql, params)
-        await self._conn.commit()
+        self._conn.commit()
         return cur.lastrowid
+
+    # ── Exchange close trades (raw OKX bills → DB) ──
+
+    async def upsert_exchange_close_trades(self, trades: list[dict]) -> int:
+        """Upsert pre-aggregated close trades. Each dict has:
+        ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type.
+        Returns number of rows affected."""
+        if not trades:
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        if self._pg_mode:
+            conn = await self._pg_connect()
+            try:
+                for t in trades:
+                    await conn.execute("""
+                        INSERT INTO exchange_close_trades
+                            (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        ON CONFLICT (ord_id) DO UPDATE SET
+                            inst_id=EXCLUDED.inst_id, cl_ord_id=EXCLUDED.cl_ord_id,
+                            bot_label=EXCLUDED.bot_label, pnl=EXCLUDED.pnl, fee=EXCLUDED.fee,
+                            sz=EXCLUDED.sz, avg_px=EXCLUDED.avg_px, close_ts=EXCLUDED.close_ts,
+                            sub_type=EXCLUDED.sub_type, synced_at=EXCLUDED.synced_at
+                    """, (
+                        t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
+                        t["pnl"], t["fee"], t["sz"], t["avg_px"],
+                        t["close_ts"], t["sub_type"], now,
+                    ))
+                return len(trades)
+            finally:
+                await conn.close()
+        else:
+            for t in trades:
+                await self._execute(
+                    """INSERT OR REPLACE INTO exchange_close_trades
+                       (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
+                     t["pnl"], t["fee"], t["sz"], t["avg_px"],
+                     t["close_ts"], t["sub_type"], now)
+                )
+            return len(trades)
+
+    async def get_exchange_pnl(self, bot_label: str = None, epoch_ms: int = 0) -> list[dict]:
+        """Get aggregated PnL from exchange_close_trades.
+        If bot_label given, filter by it. epoch_ms filters close_ts >= epoch_ms.
+        Returns list of dicts with inst_id, bot_label, total_pnl, total_fee, trade_count."""
+        sql = """
+            SELECT inst_id, bot_label, SUM(pnl) AS total_pnl, SUM(fee) AS total_fee,
+                   COUNT(*) AS trade_count
+            FROM exchange_close_trades
+            WHERE 1=1
+        """
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        sql += " GROUP BY inst_id, bot_label ORDER BY bot_label, inst_id"
+        return await self._fetchall(sql, params)
+
+    async def get_exchange_close_trade_count(self, bot_label: str = None, epoch_ms: int = 0) -> int:
+        """Count distinct close orders (ord_id) in exchange_close_trades."""
+        sql = "SELECT COUNT(DISTINCT ord_id) AS cnt FROM exchange_close_trades WHERE 1=1"
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        row = await self._fetchone(sql, params)
+        return int(row["cnt"]) if row else 0
+
+    async def get_exchange_close_trades_detail(self, bot_label: str = None, epoch_ms: int = 0, limit: int = 500) -> list[dict]:
+        """Get individual close trades from exchange_close_trades."""
+        sql = "SELECT * FROM exchange_close_trades WHERE 1=1"
+        params = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += " AND bot_label = $1"
+                params += (bot_label,)
+            else:
+                sql += " AND bot_label = ?"
+                params += (bot_label,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+                params += (epoch_ms,)
+            else:
+                sql += " AND close_ts >= ?"
+                params += (epoch_ms,)
+        sql += " ORDER BY close_ts DESC"
+        if self._pg_mode:
+            sql += f" LIMIT ${len(params)+1}"
+            params += (limit,)
+        else:
+            sql += " LIMIT ?"
+            params += (limit,)
+        return await self._fetchall(sql, params)
 
     # ── Bots ──
 
