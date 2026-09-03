@@ -5685,7 +5685,6 @@ async def _compute_pnl():
 
     try:
         epoch = await get_pnl_epoch()
-        # If reset marker exists but epoch missing, force start of today UTC
         if not epoch:
             try:
                 marker = await db.get_setting("trading_stats_reset_marker")
@@ -5695,120 +5694,132 @@ async def _compute_pnl():
             except Exception:
                 pass
 
-        resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", []) or []
-        closed_tagged = []
-        for tr in trades:
-            reason = (tr.get("reason") or "").lower()
-            if reason in ("open", "add"):
+        # ── Direct OKX bills: no pairing pipeline, no attribution bugs ──
+        bills = await _fetch_all_trade_bills()
+
+        # Group CLOSE bills (subType 5/6) by ordId → one ordId = one closed trade.
+        # Sum pnl/fee across partial fills sharing the same close order.
+        _close_by_ord: dict = {}
+        for b in bills:
+            sub = str(b.get("subType", "") or "")
+            if sub not in ("5", "6"):
                 continue
-            if tr.get("pnl") is None:
+            oid = str(b.get("ordId", "")).strip()
+            if not oid:
                 continue
             try:
-                float(tr.get("pnl"))
+                bp = float(b.get("pnl") or 0)
             except (TypeError, ValueError):
-                continue
-            if not _trade_after_epoch(tr, epoch):
-                continue
-            bot = _normalize_bot(tr)
-            # Hard corrections (same as paired forced rules)
+                bp = 0.0
             try:
-                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
-                _et = str(tr.get("exit_time") or tr.get("time") or "")
-                _pnl = float(tr.get("pnl") or 0)
-                if (
-                    _inst == "ETH-USDT-SWAP"
-                    and "2026-09-01T17:33" in _et
-                    and abs(_pnl - 167.08) < 45
-                ):
-                    bot = "AI Discretionary 1H"
-                if (
-                    _inst == "ETH-USDT-SWAP"
-                    and "2026-09-01T17:33" in _et
-                    and abs(_pnl - 134.17) < 45
-                ):
-                    bot = "AI Discretionary 1H"
-            except Exception:
-                pass
+                bf = abs(float(b.get("fee") or 0))
+            except (TypeError, ValueError):
+                bf = 0.0
+            ts = b.get("ts") or ""
+            clord = str(b.get("clOrdId", "") or "").strip()
+            inst = b.get("instId", "")
+            if oid not in _close_by_ord:
+                _close_by_ord[oid] = {"pnl": 0.0, "fee": 0.0, "ts": ts, "clord": clord, "inst": inst}
+            _close_by_ord[oid]["pnl"] += bp
+            _close_by_ord[oid]["fee"] += bf
+            if ts and ts > _close_by_ord[oid]["ts"]:
+                _close_by_ord[oid]["ts"] = ts
+            if clord and not _close_by_ord[oid]["clord"]:
+                _close_by_ord[oid]["clord"] = clord
+
+        now = dt.now(tz.utc)
+        week_start = (now - td(days=now.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+
+        _CLORD_BOT = {
+            "ai": "AI Discretionary 1H",
+            "rot": "Momentum", "momentum": "Momentum",
+            "imp": "Impulse 1D",
+            "val": "MACD+Donchian Validation",
+            "scl": "Order Book Scalp", "scalp": "Order Book Scalp",
+            "vwap": "VWAP Mean Reversion",
+            "sm": "Умные деньги",
+        }
+        _AI_ONLY_BOTS = {"ai": "AI Discretionary 1H"}
+
+        for oid, info in _close_by_ord.items():
+            clord = info["clord"].lower()
+            pnl_val = info["pnl"]
+            ts_str = info["ts"]
+            inst_id = info["inst"]
+
+            # Tag bot by clOrdId prefix — single source of truth
+            bot = ""
+            prefix_map = _AI_ONLY_BOTS if AI_ONLY_MODE else _CLORD_BOT
+            for pfx, label in prefix_map.items():
+                if clord.startswith(pfx):
+                    bot = label
+                    break
             if not bot:
                 skipped_untagged += 1
                 continue
-            tr = dict(tr)
-            tr["bot"] = bot
-            closed_tagged.append(tr)
 
-        if closed_tagged or epoch:
-            # epoch set ⇒ zeros are valid (fresh start), do not fall back to raw bills
-            source = "history_strict" if closed_tagged else "epoch_empty"
-            now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
-            active_labels = _active_bot_labels()
-            for tr in closed_tagged:
+            # Epoch filter (compare UTC timestamp)
+            if ts_str and epoch:
                 try:
-                    pnl = float(tr.get("pnl", 0) or 0)
-                except (TypeError, ValueError):
-                    continue
-                bot = tr.get("bot") or ""
-                # Always keep full breakdown for diagnostics
-                if bot:
-                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                # AI-only: totals always AI only (ignore active_labels empty edge)
-                if AI_ONLY_MODE:
-                    if bot != "AI Discretionary 1H":
-                        account_total += pnl
+                    t_iso = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                    if t_iso[:19] < str(epoch)[:19]:
                         continue
-                # Dashboard totals/windows: only ACTIVE bots (if any running)
-                elif active_labels and bot not in active_labels:
-                    account_total += pnl  # account still sees all tagged
-                    continue
-                total_realized += pnl
-                account_total += pnl
-                try:
-                    total_fees += abs(float(tr.get("fee", 0) or 0))
-                except (TypeError, ValueError):
+                except Exception:
                     pass
-                time_str = tr.get("time", "") or tr.get("exit_time", "")
-                if time_str:
+
+            per_bot[bot] = per_bot.get(bot, 0.0) + pnl_val
+
+            if AI_ONLY_MODE and bot != "AI Discretionary 1H":
+                account_total += pnl_val
+                continue
+
+            total_realized += pnl_val
+            account_total += pnl_val
+            total_fees += info["fee"]
+
+            if ts_str:
+                try:
+                    t_time = dt.fromtimestamp(int(ts_str) / 1000, tz=tz.utc)
+                    age_sec = (now - t_time).total_seconds()
                     try:
-                        t_time = dt.fromisoformat(time_str)
-                        if t_time.tzinfo is None:
-                            t_time = t_time.replace(tzinfo=tz.utc)
-                        age_sec = (now - t_time).total_seconds()
-                        try:
-                            if trade_attr.is_calendar_today(time_str):
-                                realized_1d += pnl
-                        except Exception:
-                            if age_sec <= 86400:
-                                realized_1d += pnl
-                        if age_sec <= 604800:
-                            realized_7d += pnl
-                        if age_sec <= 2592000:
-                            realized_30d += pnl
-                        if t_time >= week_start:
-                            realized_week += pnl
-                    except (ValueError, OSError, TypeError):
-                        pass
-            print(
-                f"[pnl] strict: total={total_realized:.2f} 1d={realized_1d:.2f} "
-                f"week={realized_week:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
-                f"tagged={len(closed_tagged)} skip_untagged={skipped_untagged} epoch={epoch!r}",
-                flush=True,
-            )
-            for _dbg in closed_tagged:
-                _b = _dbg.get("bot", "")
-                if _b == "AI Discretionary 1H":
-                    print(
-                        f"[pnl-ai] {_dbg.get('inst_id','')} pnl={_dbg.get('pnl',0):.2f} "
-                        f"time={(_dbg.get('exit_time') or _dbg.get('time',''))[:19]} "
-                        f"src={_dbg.get('source','')} oid={_dbg.get('ord_id','')} "
-                        f"attr={_dbg.get('_attr','')}",
-                        flush=True,
-                    )
+                        if trade_attr.is_calendar_today(ts_str):
+                            realized_1d += pnl_val
+                    except Exception:
+                        if age_sec <= 86400:
+                            realized_1d += pnl_val
+                    if age_sec <= 604800:
+                        realized_7d += pnl_val
+                    if age_sec <= 2592000:
+                        realized_30d += pnl_val
+                    if t_time >= week_start:
+                        realized_week += pnl_val
+                except (ValueError, OSError, TypeError):
+                    pass
+
+        source = "okx_bills_direct"
+        print(
+            f"[pnl] direct: total={total_realized:.2f} 1d={realized_1d:.2f} "
+            f"week={realized_week:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
+            f"trades={len(_close_by_ord)} skip_untagged={skipped_untagged} epoch={epoch!r}",
+            flush=True,
+        )
+        for oid, info in _close_by_ord.items():
+            clord = info["clord"].lower()
+            if clord.startswith("ai"):
+                try:
+                    _t = dt.fromtimestamp(int(info["ts"]) / 1000, tz=tz.utc).strftime("%Y-%m-%dT%H:%M:%S") if info["ts"] else "?"
+                except Exception:
+                    _t = "?"
+                print(
+                    f"[pnl-ai] {info['inst']} pnl={info['pnl']:.2f} fee={info['fee']:.2f} "
+                    f"time={_t} oid={oid}",
+                    flush=True,
+                )
     except Exception as e:
         import traceback
-        print(f"[pnl] History source error: {e}", flush=True)
+        print(f"[pnl] bills error: {e}", flush=True)
         traceback.print_exc()
 
     # No raw OKX-bills fallback into Total — that reintroduced -$1006 without strategy tags.
