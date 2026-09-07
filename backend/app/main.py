@@ -7089,8 +7089,16 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     if db:
         try:
             for bid in bot_ids:
-                rows = await db.get_trades(bot_id=bid, limit=5000)
+                rows = await db.get_trades(
+                    bot_id=bid, limit=5000, account_mode=mode,
+                )
                 for t in rows:
+                    # Defense: skip wrong mode if column missing on old rows
+                    row_mode = (t.get("account_mode") or "").strip().lower()
+                    if row_mode and row_mode != mode:
+                        continue
+                    if not row_mode and mode == "live":
+                        continue  # untagged legacy never enters LIVE
                     px = float(t.get("px", 0) or 0)
                     pnl = float(t.get("pnl", 0) or 0)
                     inst = t.get("inst_id", "")
@@ -7107,6 +7115,8 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                         "pos_side": "long" if t.get("side") == "buy" else "short",
                         "signal_id": t.get("signal_id", 0),
                         "bot_id": bid,
+                        "account_mode": row_mode or mode,
+                        "account_key": t.get("account_key") or ("showcase" if mode == "demo" else "live"),
                     })
         except Exception as e:
             print(f"[trades/paired] DB read error: {e}", flush=True)
@@ -7119,7 +7129,9 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     for key, bot in live_bots:
         if bot and bot._trade_log:
             for t in bot._trade_log:
-                raw.append({
+                if not _trade_matches_mode(t, mode):
+                    continue
+                row = {
                     "time": t.get("time", ""),
                     "side": t.get("side", ""),
                     "symbol": t.get("symbol", ""),
@@ -7131,8 +7143,14 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                     "reason": t.get("reason", "open"),
                     "pos_side": t.get("pos_side", "long"),
                     "signal_id": t.get("signal_id", 0),
-                    "bot_id": t.get("bot_id", ""),
-                })
+                    "bot_id": getattr(bot, "BOT_ID", key),
+                    "account_mode": (t.get("account_mode") or mode),
+                    "account_key": t.get("account_key") or ("showcase" if mode == "demo" else "live"),
+                }
+                # preserve bot label if present on in-memory row
+                if t.get("bot"):
+                    row["bot"] = t.get("bot")
+                raw.append(row)
 
     # 2. OKX authoritative rows FIRST (bills = exact realized PnL/fee per ord_id,
     #    fills = real prices + open/close pairing). A local ledger row is trusted

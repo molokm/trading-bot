@@ -166,3 +166,14 @@ def order_avg_from_details(order_row: dict, fallback_px: float = 0.0):
     except (TypeError, ValueError):
         sz = 0.0
     return avg, fee_cost(order_row.get("fee")), sz
+
+
+def account_tags_from_client(client) -> tuple:
+    """Return (account_mode, account_key) from an OKX client."""
+    try:
+        if client is not None and not getattr(client, "demo", True):
+            return "live", "live"
+    except Exception:
+        pass
+    return "demo", "showcase"
+

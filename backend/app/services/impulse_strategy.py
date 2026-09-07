@@ -22,6 +22,7 @@ import asyncio
 import math
 import threading
 import time
+from app.services.pnl_utils import account_tags_from_client
 from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from typing import Optional
@@ -572,7 +573,9 @@ class ImpulseStrategy:
             try:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz,
-                    px=round(fill_px, 2), ord_id=partial_ord_id,
+                    px=round(fill_px, 2,
+                    account_mode=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[0],
+                    account_key=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[1]), ord_id=partial_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
                     fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=round(pnl, 2), state="filled",
@@ -640,7 +643,9 @@ class ImpulseStrategy:
             try:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=pos.size,
-                    px=round(fill_px, 2),
+                    px=round(fill_px, 2,
+                    account_mode=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[0],
+                    account_key=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[1]),
                     ord_id=close_ord_id,
                     inst_id=pos.inst_id, ord_type="market",
                     fee=round(fee_cost(fee), 4), fee_ccy="USDT",
@@ -791,7 +796,9 @@ class ImpulseStrategy:
                     await self.db.update_signal_status(signal_id, "filled", ord_id)
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=order_side, sz=sz,
-                    px=round(fill_px, 2), ord_id=ord_id,
+                    px=round(fill_px, 2,
+                    account_mode=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[0],
+                    account_key=account_tags_from_client(self.client_manager.get_client() if self.client_manager else None)[1]), ord_id=ord_id,
                     inst_id=inst_id, ord_type="market",
                     fee=round(fee_cost(fee), 4), fee_ccy="USDT",
                     pnl=0, state="filled", signal_id=signal_id,
