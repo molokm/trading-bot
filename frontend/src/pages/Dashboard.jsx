@@ -141,35 +141,36 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const isLive = !demoMode
     try {
       if (isLive) {
-        // Live account: prioritize real money data
-        const [pf, pos, aiSt] = await Promise.all([
+        // Live: portfolio + positions are fast (cached OKX calls) — show UI immediately
+        const [pf, pos] = await Promise.all([
           api.getPortfolio().catch(() => null),
           api.getPositions('SWAP').catch(() => null),
-          api.aiStatus().catch(() => null),
         ])
         if (pf) setPortfolio(pf)
         if (pos) setPositions(pos.positions || [])
-        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-        
-        // Seed PnL early from AI status so cards are not stuck at 0 while /api/pnl loads
-        if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
-          const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
-          setPnl(prev => {
-            if (prev && Number(prev.total) !== 0) return prev
-            return {
-              total: aiP,
-              '1d': Number(prev?.['1d'] ?? 0),
-              week: Number(prev?.week ?? 0),
-              '7d': Number(prev?.['7d'] ?? 0),
-              '30d': aiP,
-              unrealized: Number(prev?.unrealized ?? 0),
-              per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
-              per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
-              source: 'ai_status_seed',
-            }
-          })
-        }
         setLoading(false)
+
+        // aiStatus triggers heavy PnL pipeline — load async without blocking UI
+        api.aiStatus().catch(() => null).then(aiSt => {
+          if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+          if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
+            const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
+            setPnl(prev => {
+              if (prev && Number(prev.total) !== 0) return prev
+              return {
+                total: aiP,
+                '1d': Number(prev?.['1d'] ?? 0),
+                week: Number(prev?.week ?? 0),
+                '7d': Number(prev?.['7d'] ?? 0),
+                '30d': aiP,
+                unrealized: Number(prev?.unrealized ?? 0),
+                per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
+                per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
+                source: 'ai_status_seed',
+              }
+            })
+          }
+        })
       }
       
       // 🔄 PRIORITY 2: Secondary data (tickers, other bots) - load in background
@@ -243,7 +244,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     // 30s cache, so updates arrive a little after the fast tier.
     try {
       const [momTrades, trades, pnlData] = await Promise.all([
-        api.momentumTrades(30).catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : api.momentumTrades(30).catch(() => null),
         api.getPairedTrades(200).catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])

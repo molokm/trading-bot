@@ -517,59 +517,49 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
   }))
 
   const refreshStatus = useCallback(async () => {
-    let anyOk = false
-    try {
-      const m = await api.momentumStatus().catch(() => null)
-      if (m) {
-        anyOk = true
-        setMomentumStatus(m)
-        if (m.config) {
-          setMomLocal(prev => ({
-            symbols: m.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickRotationParams(m.config) },
-          }))
-        }
+    // Skip disabled bots in AI_ONLY_MODE to reduce API calls by 75%
+    const [m, i, v, a] = await Promise.all([
+      AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
+      AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
+      AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
+      api.aiStatus().catch(() => null),
+    ])
+    if (m) {
+      setMomentumStatus(m)
+      if (m.config) {
+        setMomLocal(prev => ({
+          symbols: m.config.symbols || prev.symbols,
+          config: { ...prev.config, ...pickRotationParams(m.config) },
+        }))
       }
-    } catch { /* ignore */ }
-    try {
-      const i = await api.impulseStatus().catch(() => null)
-      if (i) {
-        anyOk = true
-        setImpulseStatus(i)
-        if (i.config) {
-          setImpLocal(prev => ({
-            symbols: i.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickParams(i.config, IMPULSE_PARAMS) },
-          }))
-        }
+    }
+    if (i) {
+      setImpulseStatus(i)
+      if (i.config) {
+        setImpLocal(prev => ({
+          symbols: i.config.symbols || prev.symbols,
+          config: { ...prev.config, ...pickParams(i.config, IMPULSE_PARAMS) },
+        }))
       }
-    } catch { /* ignore */ }
-    try {
-      const v = await api.validationStatus().catch(() => null)
-      if (v) {
-        anyOk = true
-        setValStatus(v)
-        if (v.config) {
-          setValLocal(prev => ({
-            symbols: v.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickParams(v.config, VALIDATION_PARAMS) },
-          }))
-        }
+    }
+    if (v) {
+      setValStatus(v)
+      if (v.config) {
+        setValLocal(prev => ({
+          symbols: v.config.symbols || prev.symbols,
+          config: { ...prev.config, ...pickParams(v.config, VALIDATION_PARAMS) },
+        }))
       }
-    } catch { /* ignore */ }
-    try {
-      const a = await api.aiStatus().catch(() => null)
-      if (a) {
-        anyOk = true
-        setAiStatus(a)
-      }
-    } catch { /* ignore */ }
-    setApiAlive(anyOk)
+    }
+    if (a) {
+      setAiStatus(a)
+    }
+    setApiAlive(!!(m || i || v || a))
   }, [])
 
   useEffect(() => {
     refreshStatus()
-    const id = setInterval(refreshStatus, 10000)
+    const id = setInterval(refreshStatus, 20000)
     return () => clearInterval(id)
   }, [connected, refreshStatus])
 

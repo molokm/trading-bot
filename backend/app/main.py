@@ -2087,8 +2087,7 @@ async def ai_execute(data: dict = None):
 async def ai_get_config():
     """Admin-only. DEMO is the editable workspace; LIVE is promoted snapshot."""
     import json
-    demo_raw = await db.get_setting("ai_config:demo")
-    live_raw = await db.get_setting("ai_config:live")
+    demo_raw, live_raw = await db.get_settings_batch(["ai_config:demo", "ai_config:live"])
     try:
         demo = json.loads(demo_raw) if demo_raw else None
     except Exception:
@@ -3022,9 +3021,9 @@ async def _load_live_creds_from_db() -> None:
     """Restore owner LIVE keys from encrypted settings (if any)."""
     global _live_key, _live_secret, _live_pass
     try:
-        k = await db.get_setting("okx_live_key_enc")
-        s = await db.get_setting("okx_live_secret_enc")
-        p = await db.get_setting("okx_live_pass_enc")
+        k, s, p = await db.get_settings_batch([
+            "okx_live_key_enc", "okx_live_secret_enc", "okx_live_pass_enc",
+        ])
         if k and s and p:
             _live_key = decrypt_str(k) or ""
             _live_secret = decrypt_str(s) or ""
@@ -3583,11 +3582,14 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
     # Merge durable open_positions:{bot_id} snapshots (survive trade wipes)
     try:
         import json
-        for bid in (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, "smart_money"):
+        # Batch-fetch all bot position snapshots in one DB query
+        _bot_ids = (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, "smart_money")
+        _pos_keys = [f"open_positions:{bid}" for bid in _bot_ids]
+        _all_settings = await db.get_settings_batch(_pos_keys)
+        for bid, raw in zip(_bot_ids, _all_settings):
+            if not raw:
+                continue
             try:
-                raw = await db.get_setting(f"open_positions:{bid}")
-                if not raw:
-                    continue
                 data = json.loads(raw) if isinstance(raw, str) else raw
                 for row in data or []:
                     iid = row.get("inst_id") or ""
@@ -3989,15 +3991,25 @@ async def get_tickers(inst_id: str = ""):
     ids = [i.strip() for i in (inst_id or "").split(",") if i.strip()]
     if not ids:
         return {"tickers": []}
+    # Parallel fetch instead of sequential loop — saves ~N× round-trip on cold cache
+    import asyncio as _aio
+    results = await _aio.gather(
+        *(_safe_ticker(iid) for iid in ids),
+        return_exceptions=True,
+    )
     out = []
-    for iid in ids:
-        try:
-            t = await get_ticker(inst_id=iid)
-        except HTTPException:
-            t = {}
-        if t:
-            out.append({"instId": iid, **t})
+    for iid, r in zip(ids, results):
+        if isinstance(r, dict) and r:
+            out.append({"instId": iid, **r})
     return {"tickers": out}
+
+
+async def _safe_ticker(inst_id: str) -> dict:
+    """Single-ticker fetch wrapped for gather — never raises."""
+    try:
+        return await get_ticker(inst_id=inst_id)
+    except Exception:
+        return {}
 
 
 @app.get("/api/market/candles")

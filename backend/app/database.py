@@ -1636,6 +1636,25 @@ class Database:
         row = await self._fetchone(sql, (key,))
         return row["value"] if row else None
 
+    async def get_settings_batch(self, keys: list) -> list:
+        """Batch-fetch multiple settings in one query — returns values in same order as keys."""
+        if not keys:
+            return []
+        if self._pg_mode:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(keys)))
+            rows = await self._fetchall(
+                f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+                tuple(keys),
+            ) or []
+        else:
+            placeholders = ", ".join("?" for _ in keys)
+            rows = await self._fetchall(
+                f"SELECT key, value FROM settings WHERE key IN ({placeholders})",
+                tuple(keys),
+            ) or []
+        by_key = {r.get("key") if isinstance(r, dict) else r[0]: (r.get("value") if isinstance(r, dict) else r[1]) for r in rows}
+        return [by_key.get(k) for k in keys]
+
     async def list_settings_prefix(self, prefix: str) -> list:
         """Return setting keys that start with prefix."""
         try:
