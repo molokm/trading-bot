@@ -739,6 +739,69 @@ class Database:
             (limit,)
         )
 
+
+    async def _ensure_account_isolation_columns_sqlite(self) -> None:
+        """Stage 1: account_mode / account_key on trades (+ exchange closes)."""
+        alters = [
+            "ALTER TABLE trades ADD COLUMN account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE trades ADD COLUMN account_key TEXT NOT NULL DEFAULT 'showcase'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN account_key TEXT NOT NULL DEFAULT 'showcase'",
+        ]
+        for sql in alters:
+            try:
+                await self._conn.execute(sql)
+            except Exception:
+                pass
+        try:
+            await self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_account_mode_ts "
+                "ON trades (account_mode, account_key, timestamp)"
+            )
+        except Exception:
+            pass
+        try:
+            await self._conn.commit()
+        except Exception:
+            pass
+        try:
+            await self._conn.execute(
+                "UPDATE trades SET account_mode='demo', account_key='showcase' "
+                "WHERE account_mode IS NULL OR account_mode='' "
+            )
+            await self._conn.commit()
+        except Exception:
+            pass
+
+    async def _ensure_account_isolation_columns_pg(self, conn) -> None:
+        """Stage 1: account_mode / account_key on trades (+ exchange closes)."""
+        alters = [
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+        ]
+        for sql in alters:
+            try:
+                await conn.execute(sql)
+            except Exception:
+                pass
+        try:
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_account_mode_ts "
+                "ON trades (account_mode, account_key, timestamp)"
+            )
+        except Exception:
+            pass
+        try:
+            await conn.execute(
+                "UPDATE trades SET account_mode='demo', account_key='showcase' "
+                "WHERE account_mode IS NULL OR account_key IS NULL "
+                "OR account_mode='' OR account_key=''"
+            )
+        except Exception:
+            pass
+
     # ── Trades ──
 
     async def save_trade(self, bot_id: str, side: str, sz: str = None,
