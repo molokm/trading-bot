@@ -228,7 +228,12 @@ class Database:
             );
         """)
         await self._conn.commit()
-        await self._ensure_account_isolation_columns_sqlite()
+        try:
+            await self._ensure_account_isolation_columns_sqlite()
+        except AttributeError:
+            print("[db] isolation SQLite migrate method missing — skip", flush=True)
+        except Exception as e:
+            print(f"[db] isolation SQLite migrate: {e}", flush=True)
 
     # ── PostgreSQL schema ──
 
@@ -431,7 +436,25 @@ class Database:
             )
         """)
 
-        await self._ensure_account_isolation_columns_pg(conn)
+        try:
+            await self._ensure_account_isolation_columns_pg(conn)
+        except AttributeError:
+            # Hotfix / partial deploy safety
+            print("[db] isolation PG migrate method missing — skip", flush=True)
+        except Exception as e:
+            print(f"[db] isolation PG migrate: {e}", flush=True)
+
+        # Stage 1 isolation columns (inline fallback — must not crash startup)
+        for _sql in (
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+        ):
+            try:
+                await conn.execute(_sql)
+            except Exception:
+                pass
 
     # ── Query helpers ──
 
