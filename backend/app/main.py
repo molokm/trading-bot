@@ -57,7 +57,7 @@ logger = logging.getLogger("app")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 from dotenv import load_dotenv
-from fastapi import Request, Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Request, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -2826,26 +2826,31 @@ async def credentials_status():
 
 
 @app.post("/api/credentials/test", dependencies=[Depends(require_admin)])
-async def credentials_test(data: dict):
-    key = data.get("apiKey") or data.get("api_key") or ""
-    secret = data.get("secretKey") or data.get("secret_key") or ""
-    passphrase = data.get("passphrase") or ""
+async def credentials_test(data: dict = Body(default=None)):
+    data = data or {}
+    key = (data.get("apiKey") or data.get("api_key") or "").strip()
+    secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
+    passphrase = (data.get("passphrase") or "").strip()
     demo = bool(data.get("demo", True))
     if not (key and secret and passphrase):
         k, s, p, is_demo = _active_owner_creds()
-        key, secret, passphrase, demo = k, s, p, is_demo if data.get("demo") is None else demo
+        key, secret, passphrase = k, s, p
+        if data.get("demo") is None:
+            demo = is_demo
+    if not (key and secret and passphrase):
+        return {"success": False, "message": "Укажите API Key, Secret и Passphrase"}
     try:
-        test_manager = OKXClientManager()
-        result = await test_manager.init_client(key, secret, passphrase, demo)
+        probe = OKXClientManager.new_instance()
+        result = await probe.test_connection(key, secret, passphrase, demo)
         if result.get("error"):
-            return {"success": False, "message": result.get("message", "Connection failed")}
+            return {"success": False, "message": result.get("message", "Connection failed"), "demo": demo}
         return {"success": True, "message": "Connected successfully", "demo": demo}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
 
 @app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
-async def credentials_init(request: Request, data: dict):
+async def credentials_init(request: Request, data: dict = Body(default=None)):
     """Save owner credentials.
 
     demo=true  → optional override of showcase keys (defaults stay env).
@@ -2853,6 +2858,7 @@ async def credentials_init(request: Request, data: dict):
     """
     global _env_key, _env_secret, _env_pass, _env_demo
     global _demo_key, _demo_secret, _demo_pass
+    data = data or {}
     key = (data.get("apiKey") or data.get("api_key") or "").strip()
     secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
     passphrase = (data.get("passphrase") or "").strip()
@@ -2861,40 +2867,35 @@ async def credentials_init(request: Request, data: dict):
     if not key or not secret or not passphrase:
         raise HTTPException(status_code=400, detail="All credentials required")
 
-    # Validate against OKX first
-    test_manager = OKXClientManager()
-    result = await test_manager.init_client(key, secret, passphrase, demo)
-    try:
-        await test_manager.close()
-    except Exception:
-        pass
+    # Real balance probe (init_client alone does not talk to OKX)
+    probe = OKXClientManager.new_instance()
+    result = await probe.test_connection(key, secret, passphrase, demo)
     if result.get("error"):
-        raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+        msg = result.get("message") or "Connection failed"
+        raise HTTPException(status_code=400, detail=f"OKX: {msg}")
 
     if demo:
-        # Showcase / DEMO keys (rarely needed — env is enough)
         _demo_key, _demo_secret, _demo_pass = key, secret, passphrase
         _env_key, _env_secret, _env_pass = key, secret, passphrase
         _env_demo = True
-        result = await client_manager.init_client(key, secret, passphrase, True)
-        if result.get("error"):
-            raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+        await client_manager.init_client(key, secret, passphrase, True)
         await write_audit(request, "credentials.init", detail="demo=showcase")
         return {"message": "Showcase DEMO keys set", "demo": True, "mode": "demo"}
 
-    # LIVE keys for owner
+    # LIVE keys for owner — separate from showcase DEMO
     await _save_live_creds(key, secret, passphrase)
-    _env_demo = False
-    result = await client_manager.init_client(key, secret, passphrase, False)
-    if result.get("error"):
-        _env_demo = True
-        # roll back to showcase
-        await client_manager.init_client(
-            _demo_key or _env_key, _demo_secret or _env_secret, _demo_pass or _env_pass, True
-        )
-        raise HTTPException(status_code=400, detail=result.get("message", "Live connection failed"))
+    try:
+        await client_manager.init_client(key, secret, passphrase, False)
+        _env_demo = False
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Live client init failed: {e}")
     await write_audit(request, "credentials.init", detail="live=owner")
-    return {"message": "Live keys saved — trading on your LIVE account", "demo": False, "mode": "live"}
+    return {
+        "message": "Live-ключи сохранены. DEMO-витрина не изменена. Переключитесь в Live в шапке.",
+        "demo": False,
+        "mode": "live",
+        "live_configured": True,
+    }
 
 
 @app.get("/api/mode", dependencies=[Depends(require_admin)])
