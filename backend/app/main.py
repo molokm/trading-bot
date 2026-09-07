@@ -888,9 +888,16 @@ async def _okx_call_account(coro_factory, mode: str = None):
 
 def _invalidate_account_caches():
     """Drop mode-sensitive caches so Live never shows Demo numbers (and vice versa)."""
-    global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts
+    global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts, _bills_cache
     _fills_cache = None
     _fills_cache_ts = 0
+    try:
+        if isinstance(_bills_cache, dict):
+            _bills_cache.clear()
+        else:
+            _bills_cache = {}
+    except Exception:
+        _bills_cache = {}
     try:
         _paired_cache.clear()
     except Exception:
@@ -908,24 +915,19 @@ def _invalidate_account_caches():
 
 
 def _trade_matches_mode(tr: dict, mode: str) -> bool:
-    """Filter trades for the active account mode.
+    """Strict filter: DEMO and LIVE never share rows.
 
-    - Explicit account_mode wins.
-    - OKX rows fetched under current mode (_from_okx) pass.
-    - Untagged legacy rows: visible in DEMO only (showcase history).
-    - LIVE never shows demo-tagged rows.
+    - Explicit account_mode must equal active mode.
+    - OKX rows must be tagged with the same account_mode (set at fetch).
+    - Untagged legacy → DEMO only.
     """
     if not isinstance(tr, dict):
         return False
     mode = (mode or "demo").lower()
     m = (tr.get("account_mode") or tr.get("mode") or "").strip().lower()
-    if m == "live":
-        return mode == "live"
-    if m == "demo":
-        return mode == "demo"
-    if tr.get("_from_okx") or tr.get("source") in ("okx", "okx_fills", "okx_bills", "exchange"):
-        return True
-    # untagged legacy
+    if m in ("live", "demo"):
+        return m == mode
+    # untagged: only demo showcase history
     return mode == "demo"
 
 
@@ -5539,6 +5541,8 @@ def _pair_bills(bills: list) -> list:
             "exit_price": round(pending["px"], 4),
             "entry_ord_id": entry_ord,
             "reason": "closed", "pos_side": pos_side, "source": "okx_bills",
+            "account_mode": (b.get("account_mode") or ""),
+            "_from_okx": True,
         })
 
     for inst_id, inst_bills in by_inst.items():
@@ -5634,6 +5638,8 @@ def _pair_bills(bills: list) -> list:
                 "entry": round(avg_entry, 4), "entry_price": round(avg_entry, 4),
                 "exit_price": None,
                 "reason": "open", "pos_side": cur["pos_side"], "source": "okx_bills",
+                "account_mode": (cur.get("account_mode") or ""),
+                "_from_okx": True,
             })
 
     rows.sort(key=lambda t: (t.get("time") or ""), reverse=True)
@@ -5672,23 +5678,20 @@ async def _get_okx_realized_pnl() -> dict:
     return pnl
 
 
-_bills_cache: list = []
-_bills_cache_ts: float = 0
+_bills_cache: dict = {}  # mode -> {"ts": float, "data": list}
 _BILLS_TTL = 60  # seconds — avoid OKX 429 from dashboard polls hitting bills every 10s
 
 
-async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
-    """Fetch OKX account bills of trade type (type=2) for the whole available
-    history: recent 7 days via /account/bills, older up to 3 months via
-    /account/bills-archive, paginated backwards by billId.
-
-    Result is cached for _BILLS_TTL seconds: get_paired_trades is polled by the
-    dashboard every ~10s and each full fetch pages up to 20 requests, which
-    trips OKX rate limits (429) and silently kills the authoritative bills."""
-    global _bills_cache, _bills_cache_ts
+async def _fetch_all_trade_bills(limit_per_page: int = 100, mode: str = None) -> list:
+    """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live)."""
+    global _bills_cache
+    mode = (mode or _account_mode()).lower()
+    if mode not in ("demo", "live"):
+        mode = "demo"
     now = _time.time()
-    if _bills_cache and (now - _bills_cache_ts) < _BILLS_TTL:
-        return _bills_cache
+    cached = _bills_cache.get(mode) if isinstance(_bills_cache, dict) else None
+    if cached and (now - cached.get("ts", 0)) < _BILLS_TTL:
+        return list(cached.get("data") or [])
     bills: list = []
     seen: set = set()
     try:
@@ -5703,7 +5706,7 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
                     kw["after"] = after
                 resp = None
                 for attempt in range(3):
-                    resp = await _okx_call(lambda c, e=fn, k=kw: e(c, **k))
+                    resp = await _okx_call_account(lambda c, e=fn, k=kw: e(c, **k), mode=mode)
                     if not resp.get("error"):
                         break
                     msg = str(resp.get("message", ""))
@@ -5711,8 +5714,8 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
                         await asyncio.sleep(1.0 + attempt)
                         continue
                     break
-                if resp.get("error"):
-                    print(f"[bills] {endpoint} error: {resp.get('message', '')}", flush=True)
+                if not resp or resp.get("error"):
+                    print(f"[bills] {mode}/{endpoint} error: {(resp or {}).get('message', '')}", flush=True)
                     break
                 data = resp.get("data", [])
                 if not data:
@@ -5723,9 +5726,10 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
                     if bid in seen:
                         continue
                     seen.add(bid)
-                    # Trade fills only (type=2). Some demo fills carry pnl=0 for
-                    # the opening fill and the real pnl on the closing fill.
                     if str(b.get("type", "")) == "2":
+                        b = dict(b)
+                        b["account_mode"] = mode
+                        b["_from_okx"] = True
                         bills.append(b)
                         added += 1
                 after = data[-1].get("billId", "")
@@ -5733,11 +5737,10 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100) -> list:
                     break
     except Exception as e:
         import traceback
-        print(f"[bills] fetch error: {e}", flush=True)
+        print(f"[bills] {mode} fetch error: {e}", flush=True)
         traceback.print_exc()
-    if bills:
-        _bills_cache = bills
-        _bills_cache_ts = _time.time()
+    if isinstance(_bills_cache, dict):
+        _bills_cache[mode] = {"ts": _time.time(), "data": bills}
     return bills
 
 
@@ -5766,7 +5769,7 @@ async def sync_exchange_close_trades() -> int:
     if _exchange_sync_ts and (now - _exchange_sync_ts) < _EXCHANGE_SYNC_TTL:
         return 0  # recently synced
 
-    bills = await _fetch_all_trade_bills(limit_per_page=100)
+    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
 
     # Group CLOSE bills by ordId
     close_by_ord: dict = {}
@@ -7165,7 +7168,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     flag_raw = bool(raw)
     bills = []
     try:
-        bills = await _fetch_all_trade_bills()
+        bills = await _fetch_all_trade_bills(mode=mode)
         for b in bills:
             bid = str(b.get("ordId", "")).strip()
             if not bid:
@@ -7311,6 +7314,11 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     pair_bills_err = ""
     try:
         fills_paired = _pair_bills(bills) if bills else await _pair_fills(raw_fills)
+        for _fp in fills_paired:
+            if isinstance(_fp, dict):
+                _fp["account_mode"] = _fp.get("account_mode") or mode
+                _fp["_from_okx"] = True
+
         for t in fills_paired:
             inst = t.get("inst_id", "") or t.get("symbol", "")
             is_open = t.get("reason") == "open"

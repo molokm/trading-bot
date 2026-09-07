@@ -531,6 +531,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
     for (const tr of allTrades) {
+      // Never mix DEMO/LIVE cards
+      const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
+      if (trMode === 'demo' && !demoMode) continue
+      if (trMode === 'live' && demoMode) continue
       if (tr.bot === 'Smart Money') continue
       const r = (tr.reason || '').toLowerCase()
       if (r === 'open' || r === 'add') continue
@@ -564,15 +568,19 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap, demoMode])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
     allTrades.filter(t => {
       const r = (t.reason || '').toLowerCase()
-      return r !== 'open' && r !== 'tp1'
+      if (r === 'open' || r === 'tp1') return false
+      const trMode = (t.account_mode || t.mode || '').toLowerCase()
+      if (trMode === 'demo' && !demoMode) return false
+      if (trMode === 'live' && demoMode) return false
+      return true
     })
-  , [allTrades])
+  , [allTrades, demoMode])
 
   // Filtered active trades
   const filteredTrades = useMemo(() => {
