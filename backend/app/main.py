@@ -115,6 +115,7 @@ from app.services.risk_guard import get_status as risk_get_status, set_kill_swit
 from app.services.analysis_logger import DEFAULT_PATH
 from app.services import trade_attribution as trade_attr
 from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, orphan_close_enabled, claim_open
+from app.services.account_context import filter_rows_for_mode
 
 # Legacy bot_id from the retired MomentumStrategy — kept for one-time DB cleanup
 MOM_BOT_ID = "momentum_strategy"
