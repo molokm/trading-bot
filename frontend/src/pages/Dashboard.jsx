@@ -212,9 +212,17 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         setPnl(prev => {
           const nextTot = Math.abs(Number(pnlData.total ?? pnlData.strategy_realized ?? 0))
           const prevTot = Math.abs(Number(prev?.total ?? prev?.strategy_realized ?? 0))
-          // Do not flash 0 over a good value (transient empty OKX/paired)
+          // Do not flash 0 total over a good value — but always take fresh 1d/week
           if (prev && prevTot > 0.01 && nextTot < 0.01 && !pnlData.force_zero) {
-            return { ...prev, sticky: true, sticky_ui: true }
+            return {
+              ...prev,
+              sticky: true,
+              sticky_ui: true,
+              '1d': pnlData['1d'] ?? prev['1d'],
+              week: pnlData.week ?? prev.week,
+              week_start: pnlData.week_start ?? prev.week_start,
+              '7d': pnlData['7d'] ?? prev['7d'],
+            }
           }
           return pnlData
         })
@@ -320,12 +328,28 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return sumClosedSince(86400000)
   })()
   const pnlWeek = (() => {
-    // Prefer calendar week from API; do NOT fall back to rolling 7d (different metric)
-    if (pnl && pnl.week != null && Number(pnl.week) !== 0) return Number(pnl.week)
-    if (pnl && pnl.week != null && (pnl.active_bots || []).length) return Number(pnl.week)
-    if (pnl && pnl['7d'] != null && Number(pnl['7d']) !== 0) return Number(pnl['7d'])
+    // Calendar week Mon→now (MSK). Never use rolling 7d — it inflates Monday.
+    if (pnl && pnl.week != null) return Number(pnl.week)
     if (!activeBotNames.length) return 0
-    return sumClosedSince(7 * 86400000)
+    // Client fallback: only since local Monday 00:00
+    const now = new Date()
+    const day = (now.getDay() + 6) % 7 // Mon=0
+    const monday = new Date(now)
+    monday.setHours(0, 0, 0, 0)
+    monday.setDate(now.getDate() - day)
+    const cutoff = monday.getTime()
+    let s = 0
+    for (const t of (tradeLog || [])) {
+      const reason = String(t.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (t.pnl == null || t.pnl === '') continue
+      if (!isActiveBotTrade(t)) continue
+      const ts = t.exit_time || t.time || t.timestamp || ''
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms) || ms < cutoff) continue
+      s += Number(t.pnl) || 0
+    }
+    return s
   })()
   const pnlMonth = (() => {
     if (pnl && pnl['30d'] != null && (pnl.active_bots || []).length) return Number(pnl['30d'])

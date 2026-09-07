@@ -6450,7 +6450,7 @@ async def get_pnl(request: Request = None):
         if isinstance(data, dict):
             data = dict(data)
             data["account_mode"] = _mode
-        # Sticky last-good: avoid cards flashing 0 when OKX/paired briefly returns empty
+        # Sticky last-good TOTAL only when compute failed empty — never keep stale week/1d
         try:
             prev = (_pnl_cache or {}).get("data") if (_pnl_cache or {}).get("mode") == _mode else None
             if isinstance(prev, dict) and isinstance(data, dict):
@@ -6458,10 +6458,18 @@ async def get_pnl(request: Request = None):
                 new_tot = abs(float(data.get("total") or data.get("strategy_realized") or 0))
                 src = str(data.get("source") or "")
                 if prev_tot > 0.01 and new_tot < 0.01 and src in ("none", "epoch_empty", "", "error"):
-                    data = dict(prev)
-                    data["account_mode"] = _mode
-                    data["sticky"] = True
-                    data["sticky_from"] = src or "empty"
+                    kept = dict(prev)
+                    kept["account_mode"] = _mode
+                    kept["sticky"] = True
+                    kept["sticky_from"] = src or "empty"
+                    # Period cards always from fresh compute (even if 0 on Monday)
+                    kept["1d"] = data.get("1d", 0)
+                    kept["week"] = data.get("week", 0)
+                    kept["7d"] = data.get("7d", data.get("7d_rolling", 0))
+                    kept["7d_rolling"] = data.get("7d_rolling", kept.get("7d"))
+                    kept["week_start"] = data.get("week_start")
+                    kept["week_basis"] = data.get("week_basis") or "calendar_week_pnl_tz_monday"
+                    data = kept
         except Exception:
             pass
         _pnl_cache = {"ts": _time.time(), "data": data, "mode": _mode}
@@ -6656,7 +6664,7 @@ async def _compute_pnl():
                     total_fees += abs(float(tr.get("fee", 0) or 0))
                 except (TypeError, ValueError):
                     pass
-                time_str = tr.get("time", "") or tr.get("exit_time", "")
+                time_str = tr.get("exit_time", "") or tr.get("time", "") or tr.get("timestamp", "")
                 if time_str:
                     try:
                         t_time = dt.fromisoformat(time_str)
