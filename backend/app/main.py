@@ -1144,6 +1144,14 @@ async def me_credentials(request: Request, data: dict = None):
     secret = str(d.get("secretKey", "")).strip()
     passphrase = str(d.get("passphrase", "")).strip()
     demo = bool(d.get("demo", True))
+    if not demo:
+        # Live keys only for paid active plan (signals/pro)
+        urow = await db.get_user_by_telegram(user_id)
+        if not _has_active_plan(urow):
+            raise HTTPException(
+                status_code=403,
+                detail="Live OKX доступен только с активной подпиской. Используйте Demo или оформите Pro.",
+            )
     if not (key and secret and passphrase):
         raise HTTPException(status_code=400, detail="All credentials required")
     # Test before saving.
@@ -5550,6 +5558,146 @@ async def pnl_rebuild_strategy(data: dict = None):
         except Exception as e:
             out["ai_correct_err"] = str(e)
     return out
+
+
+
+# ── Admin: users & accounts ─────────────────────────────────
+
+@app.get("/api/admin/users", dependencies=[Depends(require_admin)])
+async def admin_list_users():
+    """Users + OKX account status for admin panel."""
+    out = []
+    try:
+        rows = await db.list_users()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    for u in rows:
+        tid = str(u.get("telegram_id") or "")
+        running = []
+        try:
+            st = strategy_mgr.status(tid) if tid else {}
+            for k, v in (st or {}).items():
+                if isinstance(v, dict) and v.get("running"):
+                    running.append(k)
+        except Exception:
+            pass
+        out.append({
+            "telegram_id": tid,
+            "username": u.get("username") or "",
+            "first_name": u.get("first_name") or "",
+            "plan": u.get("plan") or "free",
+            "active": _is_active(u),
+            "active_until": u.get("active_until"),
+            "creds_configured": bool(u.get("okx_key_enc")),
+            "okx_demo": bool(u.get("okx_demo", 1)),
+            "mode": "demo" if bool(u.get("okx_demo", 1)) else "live",
+            "capital": u.get("capital"),
+            "created_at": u.get("created_at"),
+            "updated_at": u.get("updated_at"),
+            "bots_running": running,
+        })
+    # Platform (owner) showcase account
+    platform = {
+        "kind": "platform_demo",
+        "label": "Showcase DEMO (env OKX)",
+        "connected": bool(_env_key and _env_secret and _env_pass),
+        "demo": bool(_env_demo),
+        "mode": "demo" if _env_demo else "live",
+        "note": "Общий demo-счёт витрины: гости и превью подписки. Не для личных Live-ключей.",
+    }
+    return {
+        "users": out,
+        "platform": platform,
+        "counts": {
+            "users": len(out),
+            "with_creds": sum(1 for x in out if x["creds_configured"]),
+            "live": sum(1 for x in out if x["creds_configured"] and not x["okx_demo"]),
+            "demo": sum(1 for x in out if x["creds_configured"] and x["okx_demo"]),
+            "active_plans": sum(1 for x in out if x["active"]),
+        },
+    }
+
+
+@app.post("/api/admin/users/plan", dependencies=[Depends(require_admin)])
+async def admin_set_user_plan(data: dict = None):
+    """Set plan + active_until for a telegram user."""
+    d = data or {}
+    tid = str(d.get("telegram_id") or d.get("user_id") or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="telegram_id required")
+    plan = str(d.get("plan") or "free").strip().lower()
+    if plan not in ("free", "signals", "pro"):
+        raise HTTPException(status_code=400, detail="plan must be free|signals|pro")
+    days = int(d.get("days") or 0)
+    active_until = d.get("active_until")
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    if days > 0:
+        active_until = (_dt.now(_tz.utc) + _td(days=days)).isoformat()
+    elif plan == "free":
+        active_until = None
+    fields = {"plan": plan}
+    if active_until is not None:
+        fields["active_until"] = active_until
+    await db.update_user(tid, **fields)
+    try:
+        await db.add_audit("admin_set_plan", actor="admin", detail=f"{tid} plan={plan} until={active_until}")
+    except Exception:
+        pass
+    return {"ok": True, "telegram_id": tid, "plan": plan, "active_until": active_until}
+
+
+@app.post("/api/admin/users/mode", dependencies=[Depends(require_admin)])
+async def admin_set_user_mode(data: dict = None):
+    """Force user OKX mode demo|live (requires existing keys for live)."""
+    d = data or {}
+    tid = str(d.get("telegram_id") or d.get("user_id") or "").strip()
+    mode = str(d.get("mode") or "demo").strip().lower()
+    if not tid:
+        raise HTTPException(status_code=400, detail="telegram_id required")
+    if mode not in ("demo", "live"):
+        raise HTTPException(status_code=400, detail="mode must be demo|live")
+    u = await db.get_user_by_telegram(tid)
+    if not u:
+        raise HTTPException(status_code=404, detail="user not found")
+    if mode == "live" and not u.get("okx_key_enc"):
+        raise HTTPException(status_code=400, detail="Сначала пользователь должен подключить OKX ключи")
+    await db.update_user(tid, okx_demo=1 if mode == "demo" else 0)
+    _clear_user_client(tid)
+    try:
+        strategy_mgr.stop_all(tid)
+    except Exception:
+        pass
+    try:
+        await db.add_audit("admin_set_mode", actor="admin", detail=f"{tid} mode={mode}")
+    except Exception:
+        pass
+    return {"ok": True, "telegram_id": tid, "mode": mode}
+
+
+@app.post("/api/admin/users/clear-credentials", dependencies=[Depends(require_admin)])
+async def admin_clear_user_credentials(data: dict = None):
+    """Remove stored OKX keys for a user."""
+    d = data or {}
+    tid = str(d.get("telegram_id") or d.get("user_id") or "").strip()
+    if not tid:
+        raise HTTPException(status_code=400, detail="telegram_id required")
+    await db.update_user(
+        tid,
+        okx_key_enc="",
+        okx_secret_enc="",
+        okx_pass_enc="",
+        okx_demo=1,
+    )
+    _clear_user_client(tid)
+    try:
+        strategy_mgr.stop_all(tid)
+    except Exception:
+        pass
+    try:
+        await db.add_audit("admin_clear_creds", actor="admin", detail=tid)
+    except Exception:
+        pass
+    return {"ok": True, "telegram_id": tid}
 
 
 @app.post("/api/admin/reset-trading-stats", dependencies=[Depends(require_admin)])
