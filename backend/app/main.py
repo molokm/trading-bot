@@ -6470,6 +6470,7 @@ async def get_pnl(request: Request = None):
 
 async def _compute_pnl():
     _mode = _account_mode()
+    week_start_iso = None
 
     """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
 
@@ -6629,6 +6630,10 @@ async def _compute_pnl():
                 week_start = (now - td(days=now.weekday())).replace(
                     hour=0, minute=0, second=0, microsecond=0
                 )
+            try:
+                week_start_iso = week_start.isoformat()
+            except Exception:
+                week_start_iso = None
             active_labels = _active_bot_labels()
             for tr in closed_tagged:
                 try:
@@ -6668,8 +6673,17 @@ async def _compute_pnl():
                             realized_7d += pnl
                         if age_sec <= 2592000:
                             realized_30d += pnl
-                        if t_time >= week_start:
-                            realized_week += pnl
+                        # Calendar week: Monday 00:00 → Sunday 23:59 in PnL TZ (MSK)
+                        try:
+                            _ws = week_start
+                            _tt = t_time
+                            if _ws.tzinfo is not None:
+                                _tt = _tt.astimezone(_ws.tzinfo)
+                            if _tt >= _ws:
+                                realized_week += pnl
+                        except Exception:
+                            if t_time >= week_start:
+                                realized_week += pnl
                     except (ValueError, OSError, TypeError):
                         pass
             print(
@@ -6794,7 +6808,9 @@ async def _compute_pnl():
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
-        "week_basis": "calendar_week_pnl_tz",
+        "week_basis": "calendar_week_pnl_tz_monday",
+        "week_start": week_start_iso,
+
         "7d_rolling": round(realized_7d, 2),
         "unrealized": round(unrealized, 2),
         "funding": round(funding, 4),
