@@ -1954,39 +1954,98 @@ async def ai_correct_attribution(data: dict = None):
 @app.post("/api/ai/start", dependencies=[Depends(require_admin)])
 async def ai_start(data: dict = None):
     # decorator must be @app.post (not bare post)
-
-    global ai_bot
-    data = data or {}
-    if ai_bot and getattr(ai_bot, "_running", False):
-        return {"message": "AI already running", **ai_bot.get_status()}
-    # Default execute=True on OKX demo so we accumulate real fills+logs for prompt tuning
-    _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
-    if "execute" in data:
-        _exec = bool(data["execute"])
-    elif _demo:
-        _exec = True  # demo always executes (AI_EXECUTE=0 on demo is meaningless)
-    else:
-        env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
-        _exec = env_ex in ("1", "true", "yes", "on")
-    cfg = AIConfig(
-        capital=float(data.get("capital") or os.getenv("AI_CAPITAL", "10000")),
-        max_leverage=float(data.get("max_leverage") or 3),
-        max_positions=int(data.get("max_positions") or 1),
-        risk_per_trade=float(data.get("risk_per_trade") or 0.02),
-        poll_interval_sec=int(data.get("poll_interval_sec") or 120),
-        provider=data.get("provider") or (
-            "bai" if os.getenv("BAI_API_KEY", "").strip()
-            else ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None)
-        ),
-        execute=_exec,
-    )
-    if data.get("symbols"):
-        cfg.symbols = list(data["symbols"])
-    ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
-    ai_bot.start()
-    global _positions_cache
-    _positions_cache = None
-    return {"message": "AI Discretionary started", **ai_bot.get_status()}
+    try:
+        global ai_bot
+        data = data or {}
+        if ai_bot and getattr(ai_bot, "_running", False):
+            return {"message": "AI already running", **ai_bot.get_status()}
+        
+        # Default execute=True on OKX demo so we accumulate real fills+logs for prompt tuning
+        _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+        
+        # Check if live mode has valid credentials
+        if not _demo:
+            if not client_manager or not client_manager.get_client():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live mode requires valid OKX API credentials. Please configure API keys in Settings."
+                )
+            # Verify account has sufficient balance
+            try:
+                client = client_manager.get_client()
+                portfolio = await client.get_balance()
+                if portfolio and portfolio.get("data"):
+                    total_eq = float(portfolio["data"][0].get("totalEq", "0") or 0)
+                    if total_eq < 100:  # Minimum $100 for live trading
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Insufficient balance for live trading. Current: ${total_eq:.2f}, Required: $100+"
+                        )
+            except HTTPException:
+                raise
+            except Exception as e:
+                print(f"[AI] Balance check failed: {e}", flush=True)
+                raise HTTPException(
+                    status_code=400,
+                    detail="Unable to verify account balance. Please check API credentials."
+                )
+        
+        if "execute" in data:
+            _exec = bool(data["execute"])
+        elif _demo:
+            _exec = True  # demo always executes (AI_EXECUTE=0 on demo is meaningless)
+        else:
+            env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
+            _exec = env_ex in ("1", "true", "yes", "on")
+        
+        capital = float(data.get("capital") or os.getenv("AI_CAPITAL", "10000"))
+        
+        # Validate capital vs account balance in live mode
+        if not _demo:
+            try:
+                client = client_manager.get_client()
+                portfolio = await client.get_balance()
+                if portfolio and portfolio.get("data"):
+                    total_eq = float(portfolio["data"][0].get("totalEq", "0") or 0)
+                    if capital > total_eq:
+                        print(f"[AI] Warning: capital ${capital} exceeds account balance ${total_eq}, using ${total_eq}", flush=True)
+                        capital = total_eq
+            except Exception as e:
+                print(f"[AI] Balance validation warning: {e}", flush=True)
+        
+        cfg = AIConfig(
+            capital=capital,
+            max_leverage=float(data.get("max_leverage") or 3),
+            max_positions=int(data.get("max_positions") or 1),
+            risk_per_trade=float(data.get("risk_per_trade") or 0.02),
+            poll_interval_sec=int(data.get("poll_interval_sec") or 120),
+            provider=data.get("provider") or (
+                "bai" if os.getenv("BAI_API_KEY", "").strip()
+                else ("groq" if os.getenv("GROQ_API_KEY", "").strip() else None)
+            ),
+            execute=_exec,
+        )
+        if data.get("symbols"):
+            cfg.symbols = list(data["symbols"])
+        
+        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
+        ai_bot.start()
+        
+        global _positions_cache
+        _positions_cache = None
+        
+        mode_str = "DEMO" if _demo else "LIVE"
+        print(f"[AI] Started in {mode_str} mode, capital=${capital}, execute={_exec}", flush=True)
+        
+        return {"message": f"AI Discretionary started ({mode_str})", **ai_bot.get_status()}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        error_detail = f"Failed to start AI bot: {str(e)}"
+        print(f"[AI] Start error: {error_detail}\n{traceback.format_exc()}", flush=True)
+        raise HTTPException(status_code=500, detail=error_detail)
 
 
 @app.post("/api/ai/stop", dependencies=[Depends(require_admin)])
