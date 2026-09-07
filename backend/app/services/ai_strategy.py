@@ -321,6 +321,18 @@ class AIStrategy:
             pass
         return False
 
+
+    def _account_mode_tag(self) -> tuple:
+        """(account_mode, account_key) for DB isolation."""
+        c = None
+        try:
+            c = self.client_manager.get_client() if self.client_manager else None
+        except Exception:
+            c = None
+        if c is not None and not getattr(c, "demo", True):
+            return "live", "live"
+        return "demo", "showcase"
+
     async def _client(self):
         if not self.client_manager:
             return None
@@ -1157,6 +1169,8 @@ class AIStrategy:
                     inst_id=inst, ord_type="market",
                     fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
                     state="filled", signal_id=pos.signal_id,
+                    account_mode=self._account_mode_tag()[0],
+                    account_key=self._account_mode_tag()[1],
                 )
             except Exception as e:
                 print(f"[AI] db open: {e}", flush=True)
@@ -1166,6 +1180,8 @@ class AIStrategy:
                     coin=coin, side=side, price=round(fill_px, 4),
                     stop=round(stop, 4), size=sz, leverage=lev,
                     bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                    account_mode=self._account_mode_tag()[0],
+                    account_key=self._account_mode_tag()[1],
                 ))
                 if _tg_mid:
                     pos.tg_message_id = int(_tg_mid)

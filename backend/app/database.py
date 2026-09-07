@@ -228,6 +228,7 @@ class Database:
             );
         """)
         await self._conn.commit()
+        await self._ensure_account_isolation_columns_sqlite()
 
     # ── PostgreSQL schema ──
 
@@ -429,6 +430,8 @@ class Database:
                 synced_at     TEXT NOT NULL
             )
         """)
+
+        await self._ensure_account_isolation_columns_pg(conn)
 
     # ── Query helpers ──
 
@@ -742,16 +745,20 @@ class Database:
                          px: str = None, ord_id: str = None, inst_id: str = None,
                          ord_type: str = "market", fee: str = None,
                          fee_ccy: str = None, pnl: float = 0,
-                         state: str = "filled", signal_id: int = None) -> str:
+                         state: str = "filled", signal_id: int = None,
+                         account_mode: str = None, account_key: str = None) -> str:
         trade_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        mode = (account_mode or "demo").strip().lower()
+        if mode not in ("demo", "live"):
+            mode = "demo"
+        akey = (account_key or ("showcase" if mode == "demo" else "live")).strip() or "showcase"
         # sz/px/fee columns are TEXT: normalize to string so both SQLite and
         # asyncpg (Postgres) accept them (asyncpg rejects float for TEXT).
         def _to_str(v):
             if v is None:
                 return ""
             if isinstance(v, float) or isinstance(v, int):
-                # avoid ugly float artifacts (e.g. 10.200000000000001)
                 return str(round(v, 8))
             return str(v)
         sz_s = _to_str(sz)
@@ -760,20 +767,22 @@ class Database:
         if self._pg_mode:
             await self._execute(
                 "INSERT INTO trades (id, bot_id, signal_id, ord_id, inst_id, side, "
-                "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp) "
-                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp, "
+                "account_mode, account_key) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
                 (trade_id, bot_id, signal_id, ord_id, inst_id or "", side,
                  ord_type, sz_s, px_s, fee_s, fee_ccy or "",
-                 pnl, state, now)
+                 pnl, state, now, mode, akey)
             )
         else:
             await self._execute(
                 "INSERT INTO trades (id, bot_id, signal_id, ord_id, inst_id, side, "
-                "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "ord_type, sz, px, fee, fee_ccy, pnl, state, timestamp, "
+                "account_mode, account_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (trade_id, bot_id, signal_id, ord_id, inst_id or "", side,
                  ord_type, sz_s, px_s, fee_s, fee_ccy or "",
-                 pnl, state, now)
+                 pnl, state, now, mode, akey)
             )
         return trade_id
 
@@ -803,16 +812,34 @@ class Database:
             return int(rows[0]["signal_id"])
         return 0
 
-    async def get_trades(self, bot_id: str = None, limit: int = 100) -> list[dict]:
+    async def get_trades(self, bot_id: str = None, limit: int = 100,
+                         account_mode: str = None, account_key: str = None) -> list[dict]:
+        """List trades; optional strict filter by account_mode / account_key."""
+        mode = (account_mode or "").strip().lower() or None
+        akey = (account_key or "").strip() or None
+        if self._pg_mode:
+            clauses, params, n = [], [], 0
+            if bot_id:
+                n += 1; clauses.append(f"bot_id = ${n}"); params.append(bot_id)
+            if mode:
+                n += 1; clauses.append(f"account_mode = ${n}"); params.append(mode)
+            if akey:
+                n += 1; clauses.append(f"account_key = ${n}"); params.append(akey)
+            where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+            n += 1; params.append(limit)
+            sql = f"SELECT * FROM trades{where} ORDER BY timestamp DESC LIMIT ${n}"
+            return await self._fetchall(sql, tuple(params))
+        clauses, params = [], []
         if bot_id:
-            return await self._fetchall(
-                "SELECT * FROM trades WHERE bot_id = $1 ORDER BY timestamp DESC LIMIT $2" if self._pg_mode else "SELECT * FROM trades WHERE bot_id = ? ORDER BY timestamp DESC LIMIT ?",
-                (bot_id, limit)
-            )
-        return await self._fetchall(
-            "SELECT * FROM trades ORDER BY timestamp DESC LIMIT $1" if self._pg_mode else "SELECT * FROM trades ORDER BY timestamp DESC LIMIT ?",
-            (limit,)
-        )
+            clauses.append("bot_id = ?"); params.append(bot_id)
+        if mode:
+            clauses.append("account_mode = ?"); params.append(mode)
+        if akey:
+            clauses.append("account_key = ?"); params.append(akey)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        sql = f"SELECT * FROM trades{where} ORDER BY timestamp DESC LIMIT ?"
+        return await self._fetchall(sql, tuple(params))
 
     async def get_paired_trades(self, limit: int = 20, begin: str = None, end: str = None, bot_ids: list = None) -> list[dict]:
         return await self._get_paired_trades_impl(limit, begin, end, bot_ids)
