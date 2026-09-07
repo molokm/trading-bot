@@ -2827,8 +2827,8 @@ async def credentials_status():
 
 @app.post("/api/credentials/test", dependencies=[Depends(require_admin)])
 async def credentials_test(data: dict):
-    key = data.get("apiKey") or ""
-    secret = data.get("secretKey") or ""
+    key = data.get("apiKey") or data.get("api_key") or ""
+    secret = data.get("secretKey") or data.get("secret_key") or ""
     passphrase = data.get("passphrase") or ""
     demo = bool(data.get("demo", True))
     if not (key and secret and passphrase):
@@ -2853,8 +2853,8 @@ async def credentials_init(request: Request, data: dict):
     """
     global _env_key, _env_secret, _env_pass, _env_demo
     global _demo_key, _demo_secret, _demo_pass
-    key = (data.get("apiKey") or "").strip()
-    secret = (data.get("secretKey") or "").strip()
+    key = (data.get("apiKey") or data.get("api_key") or "").strip()
+    secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
     passphrase = (data.get("passphrase") or "").strip()
     demo = bool(data.get("demo", True))
 

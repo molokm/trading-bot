@@ -145,7 +145,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     timersRef.current = [t1, t2]
 
     try {
-      await api.testCredentials({ ...form, demo: false })
+      await api.testCredentials({
+        apiKey: form.api_key,
+        secretKey: form.secret_key,
+        passphrase: form.passphrase,
+        demo: false,
+      })
       const t3 = setTimeout(() => {
         setTestSteps(prev => [
           { ...prev[0], state: 'done' },
@@ -177,7 +182,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     // Live keys are stored separately — showcase DEMO (env) is never overwritten
     setTesting(true); setStatus(null)
     try {
-      const r = await api.initCredentials({ ...form, demo: false })
+      const r = await api.initCredentials({
+        apiKey: form.api_key,
+        secretKey: form.secret_key,
+        passphrase: form.passphrase,
+        demo: false,
+      })
       setLiveConfigured(true)
       setStatus({
         ok: true,
@@ -197,7 +207,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const handleSave = async () => {
     setTesting(true); setStatus(null)
     try {
-      await api.initCredentials(form)
+      await api.initCredentials({
+        apiKey: form.api_key,
+        secretKey: form.secret_key,
+        passphrase: form.passphrase,
+        demo: form.demo,
+      })
       setStatus({ ok: true, message: t('settings.keys_saved') })
       onConnected?.(true); onDemoMode?.(form.demo)
     } catch (err) { setStatus({ ok: false, message: err.message }) }
