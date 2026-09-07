@@ -99,7 +99,10 @@ function AppLayout() {
         setLatencyMs(Math.round(performance.now() - t0))
         setHealth(h)
         setConnected(h.connected)
-        setDemoMode(h.demo)
+        // Guests always observe showcase DEMO; admin/user follow server mode
+        const role = localStorage.getItem('auth_role')
+        if (role === 'guest') setDemoMode(true)
+        else setDemoMode(!!h.demo)
       } catch {
         setLatencyMs(null)
         setHealth({ status: 'error' })

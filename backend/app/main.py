@@ -156,6 +156,9 @@ if STATIC_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(STATIC_DIR / "assets")), name="assets")
 
 client_manager = OKXClientManager.get_instance()
+# Permanent showcase DEMO client — observers always read this, independent of admin LIVE mode.
+showcase_manager = OKXClientManager.new_instance()
+
 
 _env_key = os.getenv("OKX_API_KEY", "")
 _env_secret = os.getenv("OKX_SECRET_KEY", "")
@@ -369,8 +372,22 @@ async def startup():
                 print(f"[startup] clear stale reset: {e}", flush=True)
 
         print("[startup] 2/7 OKX client init ...", flush=True)
-        if _env_key and _env_secret and _env_pass:
-            await client_manager.init_client(_env_key, _env_secret, _env_pass, _env_demo)
+        # Showcase DEMO — always on for observers
+        if (_demo_key or _env_key) and (_demo_secret or _env_secret) and (_demo_pass or _env_pass):
+            await showcase_manager.init_client(
+                _demo_key or _env_key,
+                _demo_secret or _env_secret,
+                _demo_pass or _env_pass,
+                True,
+            )
+            print("[startup] showcase DEMO ready", flush=True)
+        # Active trading client: LIVE keys if mode=live, else same showcase
+        if not _env_demo and _live_key and _live_secret and _live_pass:
+            await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
+            print("[startup] owner LIVE client ready", flush=True)
+        elif _env_key and _env_secret and _env_pass:
+            await client_manager.init_client(_env_key, _env_secret, _env_pass, True)
+            _env_demo = True
         
         # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
         try:
@@ -748,7 +765,67 @@ async def shutdown():
         pass
 
 
+async def _ensure_showcase() -> Optional[OKXClient]:
+    """Always-on DEMO client for observers / public tracker."""
+    c = showcase_manager.get_client()
+    if c:
+        return c
+    key = _demo_key or _env_key
+    secret = _demo_secret or _env_secret
+    passphrase = _demo_pass or _env_pass
+    if key and secret and passphrase:
+        await showcase_manager.init_client(key, secret, passphrase, True)
+        return showcase_manager.get_client()
+    return None
+
+
+async def resolve_view_client(request: Request = None):
+    """Which OKX account this HTTP caller should see.
+
+    - guest / no personal keys → showcase DEMO (always)
+    - telegram user with live keys + okx_demo=0 → their LIVE
+    - telegram user okx_demo=1 → showcase DEMO (switch back to demo view)
+    - admin + platform mode LIVE + live keys → owner LIVE
+    - admin + platform mode DEMO → showcase DEMO
+    """
+    role, user_id, user_row = "guest", None, None
+    if request is not None:
+        try:
+            role, user_id, user_row = await _me_ctx(request)
+        except Exception:
+            role, user_id, user_row = "guest", None, None
+
+    # Authenticated mini-app user
+    if user_id:
+        wants_demo = True
+        if user_row is not None:
+            wants_demo = bool(user_row.get("okx_demo", 1))
+        if not wants_demo:
+            uc = await _user_okx_client(str(user_id))
+            if uc:
+                return uc, "live", "user"
+        sc = await _ensure_showcase()
+        return sc, "demo", "showcase"
+
+    # Admin owner
+    if role == "admin":
+        if not _env_demo and _live_key and _live_secret and _live_pass:
+            c = client_manager.get_client()
+            if not c or getattr(c, "demo", True):
+                await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
+                c = client_manager.get_client()
+            if c:
+                return c, "live", "owner"
+        sc = await _ensure_showcase()
+        return sc, "demo", "showcase"
+
+    # Guest / public
+    sc = await _ensure_showcase()
+    return sc, "demo", "showcase"
+
+
 async def _okx_call(coro_factory):
+    """Bot/internal calls — uses active client_manager (admin trading context)."""
     client = client_manager.get_client()
     if not client:
         if _env_key and _env_secret and _env_pass:
@@ -763,6 +840,19 @@ async def _okx_call(coro_factory):
             client = client_manager.get_client()
             if client:
                 result = await coro_factory(client)
+    return result
+
+
+async def _okx_call_view(request: Request, coro_factory):
+    """HTTP view calls — guest always DEMO; user/admin per their mode."""
+    client, mode, source = await resolve_view_client(request)
+    if not client:
+        return {"error": True, "message": "API not configured", "view_mode": mode, "view_source": source}
+    result = await coro_factory(client)
+    if isinstance(result, dict):
+        result = dict(result)
+        result.setdefault("view_mode", mode)
+        result.setdefault("view_source", source)
     return result
 
 
@@ -1184,6 +1274,62 @@ async def me_credentials(request: Request, data: dict = None):
     strategy_mgr.stop_all(user_id)
     _clear_user_client(user_id)
     return {"message": "OKX keys connected", "demo": demo}
+
+
+
+@app.get("/api/me/mode")
+async def me_get_mode(request: Request):
+    """Current view mode for this caller (demo showcase vs personal live)."""
+    client, mode, source = await resolve_view_client(request)
+    role, user_id, user_row = await _me_ctx(request)
+    live_ready = False
+    if user_id and user_row:
+        live_ready = bool(user_row.get("okx_key_enc"))
+    elif role == "admin":
+        live_ready = bool(_live_key and _live_secret and _live_pass)
+    return {
+        "mode": mode,
+        "source": source,
+        "demo": mode == "demo",
+        "live": mode == "live",
+        "live_configured": live_ready,
+        "can_switch_live": live_ready and (role == "admin" or _has_active_plan(user_row)),
+    }
+
+
+@app.post("/api/me/mode")
+async def me_set_mode(request: Request, data: dict = None):
+    """Switch this user between showcase DEMO view and personal LIVE account.
+
+    Guests cannot switch. Users need saved keys + active plan for LIVE.
+    Admin uses /api/mode (platform owner) — also accepted here as alias.
+    """
+    global _env_demo
+    role, user_id, user_row = await _me_ctx(request)
+    d = data or {}
+    demo = bool(d.get("demo", True))
+
+    if role == "admin" and user_id is None:
+        # Owner alias → platform mode switch
+        if not demo and str(d.get("confirm", "")).strip() != "LIVE":
+            raise HTTPException(status_code=400, detail='confirm must be "LIVE"')
+        return await set_trading_mode(request, {"demo": demo, "confirm": d.get("confirm", "LIVE" if not demo else "")})
+
+    if not user_id:
+        raise HTTPException(status_code=403, detail="Гость всегда видит DEMO-витрину")
+
+    if not demo:
+        if not _has_active_plan(user_row):
+            raise HTTPException(status_code=403, detail="Live доступен с активной подпиской")
+        if not (user_row or {}).get("okx_key_enc"):
+            raise HTTPException(status_code=400, detail="Сначала подключите Live API-ключи OKX")
+        await db.update_user(user_id, okx_demo=0)
+        _clear_user_client(str(user_id))
+        return {"ok": True, "mode": "live", "demo": False, "live": True}
+
+    await db.update_user(user_id, okx_demo=1)
+    _clear_user_client(str(user_id))
+    return {"ok": True, "mode": "demo", "demo": True, "live": False}
 
 
 @app.post("/api/me/credentials/test")
@@ -2824,12 +2970,12 @@ async def get_audit(limit: int = 100):
 # ── Portfolio ──
 
 @app.get("/api/portfolio")
-async def get_portfolio():
+async def get_portfolio(request: Request):
     global _portfolio_cache, _portfolio_cache_ts
     now_s = _time.time()
     if _portfolio_cache is not None and (now_s - _portfolio_cache_ts) < _POS_CACHE_TTL:
         return _portfolio_cache
-    result = await _okx_call(lambda c: c.get_balance())
+    result = await _okx_call_view(request, lambda c: c.get_balance())
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
     data = result.get("data", [])
@@ -3092,14 +3238,14 @@ async def sweep_orphans():
 
 
 @app.get("/api/positions")
-async def get_positions(inst_type: str = "SWAP"):
+async def get_positions(request: Request, inst_type: str = "SWAP"):
     global _positions_cache, _positions_cache_ts, _POS_RECLAIM_TS
     now_s = _time.time()
     if _positions_cache is not None and (now_s - _positions_cache_ts) < _POS_CACHE_TTL:
         return _positions_cache
     # Heavy OKX fills/algo reclaim — at most once per _POS_RECLAIM_TTL
     do_heavy_reclaim = (now_s - float(_POS_RECLAIM_TS or 0)) >= float(_POS_RECLAIM_TTL or 90)
-    result = await _okx_call(lambda c: c.get_positions(inst_type))
+    result = await _okx_call_view(request, lambda c: c.get_positions(inst_type))
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
     # Build DB positions map for fallback tagging (survives restarts)

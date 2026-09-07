@@ -345,7 +345,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <input type="checkbox" checked={form.demo} onChange={e => setForm({ ...form, demo: e.target.checked })} />
                 <div>
                   <span className="text-sm text-[var(--txt)] font-medium">{t('settings.demo_mode')}</span>
-                  <p className="text-2xs text-[var(--txt-muted)]">Витрина DEMO (env) всегда доступна наблюдателям. Подключайте только Live-ключи своего счёта; переключатель DEMO↔LIVE ниже.</p>
+                  <p className="text-2xs text-[var(--txt-muted)]">Наблюдатели (гости) всегда видят витрину DEMO. Подключите Live-ключи и переключайтесь DEMO↔LIVE только для себя — на остальных это не влияет.</p>
                 </div>
               </label>
 

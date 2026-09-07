@@ -330,6 +330,11 @@ class OKXClientManager:
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def new_instance(cls) -> "OKXClientManager":
+        """Separate manager (e.g. permanent showcase DEMO) — not the singleton."""
+        return cls()
+
     def get_client(self) -> Optional[OKXClient]:
         return self._client
 

@@ -334,6 +334,12 @@ export const api = {
   meImpulseStop: () => request('/me/impulse/stop', { method: 'POST' }),
   meTrades: (limit = 30) => request(`/me/trades?limit=${limit}`),
   mePnl: () => request('/me/pnl'),
+  meMode: () => request('/me/mode'),
+  meSetMode: (demo, confirm) =>
+    request('/me/mode', {
+      method: 'POST',
+      body: JSON.stringify({ demo, confirm: confirm || (demo ? undefined : 'LIVE') }),
+    }),
 
   telegramAuth: (initData) =>
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
