@@ -3094,8 +3094,21 @@ async def get_audit(limit: int = 100):
 async def get_portfolio(request: Request):
     global _portfolio_cache, _portfolio_cache_ts
     now_s = _time.time()
-    if _portfolio_cache is not None and (now_s - _portfolio_cache_ts) < _POS_CACHE_TTL:
-        return _portfolio_cache
+    _view_mode = _account_mode()
+    try:
+        _c, _m, _src = await resolve_view_client(request)
+        if _m:
+            _view_mode = _m
+    except Exception:
+        pass
+    if (
+        isinstance(_portfolio_cache, dict)
+        and _portfolio_cache.get("mode") == _view_mode
+        and (now_s - _portfolio_cache_ts) < _POS_CACHE_TTL
+    ):
+        out = dict(_portfolio_cache.get("data") or _portfolio_cache)
+        out["account_mode"] = _view_mode
+        return out
     result = await _okx_call_view(request, lambda c: c.get_balance())
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", ""))
@@ -3114,8 +3127,11 @@ async def get_portfolio(request: Request):
             "frozenBal": float(d.get("frozenBal", 0)),
         })
     out = {"totalEqUsd": total_eq, "details": details}
-    _portfolio_cache = out
+    _portfolio_cache = {"mode": _view_mode, "data": out}
     _portfolio_cache_ts = _time.time()
+    if isinstance(out, dict):
+        out = dict(out)
+        out["account_mode"] = _view_mode
     return out
 
 
@@ -3362,8 +3378,21 @@ async def sweep_orphans():
 async def get_positions(request: Request, inst_type: str = "SWAP"):
     global _positions_cache, _positions_cache_ts, _POS_RECLAIM_TS
     now_s = _time.time()
-    if _positions_cache is not None and (now_s - _positions_cache_ts) < _POS_CACHE_TTL:
-        return _positions_cache
+    _view_mode = _account_mode()
+    try:
+        _c, _m, _src = await resolve_view_client(request)
+        if _m:
+            _view_mode = _m
+    except Exception:
+        pass
+    if (
+        isinstance(_positions_cache, dict)
+        and _positions_cache.get("mode") == _view_mode
+        and (now_s - _positions_cache_ts) < _POS_CACHE_TTL
+    ):
+        out = dict(_positions_cache.get("data") or {})
+        out["account_mode"] = _view_mode
+        return out
     # Heavy OKX fills/algo reclaim — at most once per _POS_RECLAIM_TTL
     do_heavy_reclaim = (now_s - float(_POS_RECLAIM_TS or 0)) >= float(_POS_RECLAIM_TTL or 90)
     result = await _okx_call_view(request, lambda c: c.get_positions(inst_type))
@@ -3627,8 +3656,11 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
         p["_side_norm"] = side_n
         tagged.append(p)
     out = {"positions": tagged}
-    _positions_cache = out
+    _positions_cache = {"mode": _view_mode, "data": out}
     _positions_cache_ts = _time.time()
+    if isinstance(out, dict):
+        out = dict(out)
+        out["account_mode"] = _view_mode
     return out
 
 
@@ -6402,6 +6434,7 @@ async def _compute_pnl():
 
         resp = await get_paired_trades(limit=5000)
         trades = resp.get("trades", []) or []
+        trades = filter_rows_for_mode(trades, _account_mode())
         # Dedup: OKX bills (with ord_id) are authoritative. Remove in-memory/DB
         # trades without ord_id that duplicate an OKX bill (same inst + pnl).
         # This prevents double-counting from the multi-source pipeline.
