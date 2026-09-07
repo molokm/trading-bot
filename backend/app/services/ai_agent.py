@@ -5,7 +5,7 @@ Providers (env AI_LLM_PROVIDER):
   - groq   : free-tier friendly OpenAI-compatible API (GROQ_API_KEY)
   - openai : OpenAI or any compatible base URL (OPENAI_API_KEY, OPENAI_BASE_URL)
   - gemini : Google Gemini (GEMINI_API_KEY)
-  - bai    : api.b.ai (deepseek-v4-flash) — BAI_API_KEY + BAI_MODEL (default deepseek-v4-flash)
+  - bai    : api.b.ai — BAI_API_KEY + BAI_MODEL
 
 Always returns a validated dict decision; invalid/unsafe → hold.
 """
@@ -564,9 +564,9 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
                 if mid != model:
                     log.warning("LLM model fallback: %s -> %s", model, mid)
                 msg = (data.get("choices") or [{}])[0].get("message") or {}
-                # Reasoning models (deepseek-v4-flash on b.ai) return the
-                # answer in reasoning_content and an EMPTY content. Use it as
-                # fallback so the JSON decision is still parseable.
+                # Some reasoning models return the answer in reasoning_content
+                # and an EMPTY content. Use it as fallback so the JSON decision
+                # is still parseable.
                 text = (msg.get("content") or "").strip()
                 if not text:
                     text = (msg.get("reasoning_content") or "").strip()

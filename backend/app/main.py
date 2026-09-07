@@ -338,6 +338,19 @@ async def startup():
         except Exception as _e:
             print(f"[startup] live creds: {_e}", flush=True)
 
+        # Restore persisted trading mode (demo/live) from DB.
+        # If user previously switched to LIVE, restore it automatically on restart
+        # instead of always defaulting to demo.
+        try:
+            saved_mode = await db.get_setting("trading_mode")
+            if saved_mode == "live" and _live_key and _live_secret and _live_pass:
+                _env_demo = False
+                print("[startup] restored LIVE mode from DB", flush=True)
+            else:
+                print(f"[startup] trading_mode from DB: {saved_mode or 'none (default demo)'}", flush=True)
+        except Exception as e:
+            print(f"[startup] trading_mode restore: {e}", flush=True)
+
         # Restore persistent logout blacklist (survives restart on Render).
         try:
             _bl = await db.get_setting("auth_blacklist")
@@ -3175,6 +3188,10 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
         _env_demo = prev
         raise HTTPException(status_code=400, detail=f"Reconnect failed: {e}")
 
+    try:
+        await db.set_setting("trading_mode", "demo" if demo else "live")
+    except Exception:
+        pass
     try:
         await write_audit(
             request,

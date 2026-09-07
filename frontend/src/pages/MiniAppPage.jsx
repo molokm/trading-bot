@@ -891,7 +891,7 @@ function MiniAppPageInner
                     )}
                   </div>
                   <p className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
-                    Автономный AI-трейдер на базе DeepSeek v4. Анализирует рынок каждый час, 
+                    Автономный AI-трейдер. Анализирует рынок каждый час, 
                     открывает позиции по тренду с адаптивными стоп-лоссами и trailing stop.
                   </p>
                 </div>
