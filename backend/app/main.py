@@ -161,6 +161,12 @@ _env_key = os.getenv("OKX_API_KEY", "")
 _env_secret = os.getenv("OKX_SECRET_KEY", "")
 _env_pass = os.getenv("OKX_PASSPHRASE", "")
 _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true")
+# Showcase DEMO keys (platform) — always from env; observers use this.
+_demo_key, _demo_secret, _demo_pass = _env_key, _env_secret, _env_pass
+# Owner LIVE keys — loaded from encrypted settings on startup / when saved.
+_live_key = ""
+_live_secret = ""
+_live_pass = ""
 # When "0"/"false": keep OKX read access (dashboard/trades) but do NOT auto-start
 # the trading strategies. Use on a local viewer instance to avoid duplicate
 # management of the same account that the deployed (Render) version handles.
@@ -322,6 +328,11 @@ async def startup():
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
+        try:
+            await _load_live_creds_from_db()
+            print(f"[startup] live creds: {'yes' if _live_key else 'no'}", flush=True)
+        except Exception as _e:
+            print(f"[startup] live creds: {_e}", flush=True)
 
         # Restore persistent logout blacklist (survives restart on Render).
         try:
@@ -2618,76 +2629,175 @@ async def risk_kill(request: Request, data: dict = None):
 
 # ── Credentials ──
 
+
+async def _load_live_creds_from_db() -> None:
+    """Restore owner LIVE keys from encrypted settings (if any)."""
+    global _live_key, _live_secret, _live_pass
+    try:
+        k = await db.get_setting("okx_live_key_enc")
+        s = await db.get_setting("okx_live_secret_enc")
+        p = await db.get_setting("okx_live_pass_enc")
+        if k and s and p:
+            _live_key = decrypt_str(k) or ""
+            _live_secret = decrypt_str(s) or ""
+            _live_pass = decrypt_str(p) or ""
+    except Exception as e:
+        print(f"[creds] load live: {e}", flush=True)
+
+
+async def _save_live_creds(key: str, secret: str, passphrase: str) -> None:
+    global _live_key, _live_secret, _live_pass
+    _live_key, _live_secret, _live_pass = key, secret, passphrase
+    await db.set_setting("okx_live_key_enc", encrypt_str(key))
+    await db.set_setting("okx_live_secret_enc", encrypt_str(secret))
+    await db.set_setting("okx_live_pass_enc", encrypt_str(passphrase))
+
+
+def _active_owner_creds() -> tuple:
+    """Keys for current owner mode: demo showcase or live."""
+    if _env_demo:
+        return _demo_key or _env_key, _demo_secret or _env_secret, _demo_pass or _env_pass, True
+    if _live_key and _live_secret and _live_pass:
+        return _live_key, _live_secret, _live_pass, False
+    # Fallback: same env keys with live flag (legacy)
+    return _env_key, _env_secret, _env_pass, False
+
+
 @app.get("/api/credentials/status", dependencies=[Depends(require_admin)])
 async def credentials_status():
-    configured = bool(_env_key and _env_secret and _env_pass)
-    return {"configured": configured, "demo": _env_demo}
+    """Showcase DEMO (env) vs owner LIVE keys status."""
+    await _load_live_creds_from_db()
+    showcase = bool((_demo_key or _env_key) and (_demo_secret or _env_secret) and (_demo_pass or _env_pass))
+    live_ok = bool(_live_key and _live_secret and _live_pass)
+    return {
+        "configured": showcase or live_ok,
+        "showcase_configured": showcase,
+        "live_configured": live_ok,
+        "demo": _env_demo,
+        "mode": "demo" if _env_demo else "live",
+        "note": "Витрина DEMO всегда из env OKX. Live — ваши ключи, переключение в Настройках.",
+    }
 
 
 @app.post("/api/credentials/test", dependencies=[Depends(require_admin)])
 async def credentials_test(data: dict):
-    key = data.get("apiKey", _env_key)
-    secret = data.get("secretKey", _env_secret)
-    passphrase = data.get("passphrase", _env_pass)
-    demo = data.get("demo", _env_demo)
+    key = data.get("apiKey") or ""
+    secret = data.get("secretKey") or ""
+    passphrase = data.get("passphrase") or ""
+    demo = bool(data.get("demo", True))
+    if not (key and secret and passphrase):
+        k, s, p, is_demo = _active_owner_creds()
+        key, secret, passphrase, demo = k, s, p, is_demo if data.get("demo") is None else demo
     try:
         test_manager = OKXClientManager()
         result = await test_manager.init_client(key, secret, passphrase, demo)
         if result.get("error"):
             return {"success": False, "message": result.get("message", "Connection failed")}
-        return {"success": True, "message": "Connected successfully"}
+        return {"success": True, "message": "Connected successfully", "demo": demo}
     except Exception as e:
         return {"success": False, "message": str(e)}
 
 
 @app.post("/api/credentials/init", dependencies=[Depends(require_admin)])
 async def credentials_init(request: Request, data: dict):
+    """Save owner credentials.
+
+    demo=true  → optional override of showcase keys (defaults stay env).
+    demo=false → save LIVE keys (encrypted) and switch platform client to LIVE.
+    """
     global _env_key, _env_secret, _env_pass, _env_demo
-    key = data.get("apiKey", "")
-    secret = data.get("secretKey", "")
-    passphrase = data.get("passphrase", "")
-    demo = data.get("demo", True)
+    global _demo_key, _demo_secret, _demo_pass
+    key = (data.get("apiKey") or "").strip()
+    secret = (data.get("secretKey") or "").strip()
+    passphrase = (data.get("passphrase") or "").strip()
+    demo = bool(data.get("demo", True))
 
     if not key or not secret or not passphrase:
         raise HTTPException(status_code=400, detail="All credentials required")
 
-    _env_key = key
-    _env_secret = secret
-    _env_pass = passphrase
-    _env_demo = demo
-
-    result = await client_manager.init_client(key, secret, passphrase, demo)
+    # Validate against OKX first
+    test_manager = OKXClientManager()
+    result = await test_manager.init_client(key, secret, passphrase, demo)
+    try:
+        await test_manager.close()
+    except Exception:
+        pass
     if result.get("error"):
         raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
-    await write_audit(request, "credentials.init", detail=f"demo={bool(demo)}")
-    return {"message": "Credentials configured", "demo": demo}
+
+    if demo:
+        # Showcase / DEMO keys (rarely needed — env is enough)
+        _demo_key, _demo_secret, _demo_pass = key, secret, passphrase
+        _env_key, _env_secret, _env_pass = key, secret, passphrase
+        _env_demo = True
+        result = await client_manager.init_client(key, secret, passphrase, True)
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result.get("message", "Connection failed"))
+        await write_audit(request, "credentials.init", detail="demo=showcase")
+        return {"message": "Showcase DEMO keys set", "demo": True, "mode": "demo"}
+
+    # LIVE keys for owner
+    await _save_live_creds(key, secret, passphrase)
+    _env_demo = False
+    result = await client_manager.init_client(key, secret, passphrase, False)
+    if result.get("error"):
+        _env_demo = True
+        # roll back to showcase
+        await client_manager.init_client(
+            _demo_key or _env_key, _demo_secret or _env_secret, _demo_pass or _env_pass, True
+        )
+        raise HTTPException(status_code=400, detail=result.get("message", "Live connection failed"))
+    await write_audit(request, "credentials.init", detail="live=owner")
+    return {"message": "Live keys saved — trading on your LIVE account", "demo": False, "mode": "live"}
 
 
 @app.get("/api/mode", dependencies=[Depends(require_admin)])
 async def get_trading_mode():
-    return {"demo": _env_demo, "okx_demo": _env_demo, "live": not _env_demo}
+    await _load_live_creds_from_db()
+    return {
+        "demo": _env_demo,
+        "okx_demo": _env_demo,
+        "live": not _env_demo,
+        "showcase_configured": bool((_demo_key or _env_key) and (_demo_secret or _env_secret)),
+        "live_configured": bool(_live_key and _live_secret and _live_pass),
+        "mode": "demo" if _env_demo else "live",
+    }
 
 
 @app.post("/api/mode", dependencies=[Depends(require_admin)])
 async def set_trading_mode(request: Request, data: dict = None):
-    """Switch DEMO/LIVE for the owner OKX client.
+    """Switch owner client between showcase DEMO and personal LIVE.
 
-    Switching to LIVE requires confirm == "LIVE" to avoid accidental flips.
+    DEMO uses env/showcase keys (always for observers).
+    LIVE requires previously saved live keys; confirm must be "LIVE".
     """
     global _env_demo
     data = data or {}
     demo = bool(data.get("demo", True))
+    await _load_live_creds_from_db()
+
     if not demo:
         if str(data.get("confirm", "")).strip() != "LIVE":
             raise HTTPException(
                 status_code=400,
                 detail='Switching to LIVE requires confirm: "LIVE"',
             )
-    if not (_env_key and _env_secret and _env_pass):
-        raise HTTPException(status_code=400, detail="OKX credentials not configured")
+        if not (_live_key and _live_secret and _live_pass):
+            raise HTTPException(
+                status_code=400,
+                detail="Сначала сохраните Live API-ключи OKX в настройках",
+            )
+        key, secret, passphrase = _live_key, _live_secret, _live_pass
+    else:
+        key = _demo_key or _env_key
+        secret = _demo_secret or _env_secret
+        passphrase = _demo_pass or _env_pass
+        if not (key and secret and passphrase):
+            raise HTTPException(status_code=400, detail="Showcase DEMO keys (env OKX) not configured")
+
     prev = _env_demo
     _env_demo = demo
-    result = await client_manager.init_client(_env_key, _env_secret, _env_pass, demo)
+    result = await client_manager.init_client(key, secret, passphrase, demo)
     if result.get("error"):
         _env_demo = prev
         raise HTTPException(status_code=400, detail=result.get("message", "Reconnect failed"))
@@ -2696,7 +2806,13 @@ async def set_trading_mode(request: Request, data: dict = None):
         "mode.switch",
         detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
     )
-    return {"ok": True, "demo": _env_demo, "live": not _env_demo}
+    return {
+        "ok": True,
+        "demo": _env_demo,
+        "live": not _env_demo,
+        "mode": "demo" if _env_demo else "live",
+        "live_configured": bool(_live_key and _live_secret and _live_pass),
+    }
 
 
 @app.get("/api/audit", dependencies=[Depends(require_admin)])

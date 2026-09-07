@@ -17,6 +17,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [riskBusy, setRiskBusy] = useState(false)
   const [audit, setAudit] = useState([])
   const [modeBusy, setModeBusy] = useState(false)
+  const [liveConfigured, setLiveConfigured] = useState(false)
+  const [showcaseConfigured, setShowcaseConfigured] = useState(true)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
@@ -52,6 +54,18 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   useEffect(() => {
     api.riskStatus().then(setRisk).catch(() => setRisk(null))
     api.getAudit(30).then(r => setAudit(r.items || [])).catch(() => setAudit([]))
+    api.getMode?.().then(m => {
+      if (!m) return
+      setLiveConfigured(!!m.live_configured)
+      setShowcaseConfigured(m.showcase_configured !== false)
+      setForm(f => ({ ...f, demo: !!m.demo }))
+      onDemoMode?.(!!m.demo)
+    }).catch(() => {})
+    api.credentialsStatus?.().then(s => {
+      if (!s) return
+      setLiveConfigured(!!s.live_configured)
+      setShowcaseConfigured(!!s.showcase_configured)
+    }).catch(() => {})
   }, [])
 
   const switchMode = async (demo) => {
@@ -65,6 +79,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       onDemoMode?.(r.demo)
       onConnected?.(true)
       setForm(f => ({ ...f, demo: r.demo }))
+      if (r.live_configured != null) setLiveConfigured(!!r.live_configured)
       setRisk(rs => rs ? { ...rs, okx_demo: r.demo } : rs)
       const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
       setAudit(items)
@@ -308,7 +323,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
                   API Key <Tip text={t('settings.get_key_tip')} />
                 </label>
-                <input className="w-full mt-1.5" placeholder="OKX API Key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
+                <input className="w-full mt-1.5" placeholder="OKX API Key (Live или Demo)" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
               </div>
 
               <div>
@@ -330,7 +345,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <input type="checkbox" checked={form.demo} onChange={e => setForm({ ...form, demo: e.target.checked })} />
                 <div>
                   <span className="text-sm text-[var(--txt)] font-medium">{t('settings.demo_mode')}</span>
-                  <p className="text-2xs text-[var(--txt-muted)]">{t('settings.demo_tip')}</p>
+                  <p className="text-2xs text-[var(--txt-muted)]">Витрина DEMO (env) всегда доступна наблюдателям. Подключайте только Live-ключи своего счёта; переключатель DEMO↔LIVE ниже.</p>
                 </div>
               </label>
 
@@ -604,6 +619,9 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               {(form.demo !== false) ? 'DEMO' : 'LIVE'}
             </span>
             <button type="button" className="btn btn-ghost btn-sm" disabled={modeBusy} onClick={() => switchMode(true)}>{t('settings.mode_to_demo')}</button>
+            <span className="text-2xs text-[var(--txt-muted)] w-full mt-1">
+              Витрина DEMO: {showcaseConfigured ? 'активна' : 'нет env-ключей'} · Live-ключи: {liveConfigured ? 'сохранены' : 'не подключены'}
+            </span>
             <button type="button" className="btn btn-danger btn-sm" disabled={modeBusy} onClick={() => switchMode(false)}>{t('settings.mode_to_live')}</button>
           </div>
         </div>
