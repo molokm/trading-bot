@@ -92,7 +92,7 @@ _DEPRECATED_GROQ_MODELS = {
     "mixtral-8x7b-32768",
 }
 # 120b hits free-tier TPD/RPM hard — pin to 20b unless AI_ALLOW_LARGE_MODEL=1
-_GROQ_DEFAULT_MODEL = "qwen/qwen3.8-27b"  # free tier ~2M TPD vs gpt-oss ~200k
+_GROQ_DEFAULT_MODEL = "openai/gpt-oss-20b"  # Groq native; was product default before Qwen pin
 _GROQ_LARGE_MODELS = {
     "openai/gpt-oss-120b",
     "gpt-oss-120b",
@@ -111,9 +111,9 @@ def _resolve_groq_model(model: str | None) -> str:
     if m in _GROQ_LARGE_MODELS or m.endswith("gpt-oss-120b"):
         if not allow_large:
             return _GROQ_DEFAULT_MODEL
-    # Prefer Qwen when env still points at low-TPD gpt-oss-20b unless forced
+    # Prefer classic Groq gpt-oss-20b if env still points at Qwen pin (unless forced)
     force = os.getenv("AI_FORCE_MODEL", "").strip().lower() in ("1", "true", "yes", "on")
-    if not force and m in ("openai/gpt-oss-20b", "gpt-oss-20b"):
+    if not force and (m.startswith("qwen/") or m in ("qwen3.8-27b", "qwen3.6-27b")):
         return _GROQ_DEFAULT_MODEL
     return m
 
@@ -509,9 +509,9 @@ async def _call_provider(provider: str, user_msg: str) -> str:
 
 # Fallback chain when a Groq model id is deprecated / not on the account
 _GROQ_MODEL_FALLBACKS = (
-    "qwen/qwen3.8-27b",   # highest free TPD on Groq (~2M)
+    "openai/gpt-oss-20b",  # primary Groq model
+    "qwen/qwen3.8-27b",
     "qwen/qwen3.6-27b",
-    "openai/gpt-oss-20b",  # last resort — low TPD (~200k)
     # never auto-chain 120b — burns org quota
 )
 
