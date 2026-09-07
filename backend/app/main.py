@@ -908,23 +908,25 @@ def _invalidate_account_caches():
 
 
 def _trade_matches_mode(tr: dict, mode: str) -> bool:
-    """Strict filter: only trades tagged with this account mode.
+    """Filter trades for the active account mode.
 
-    Untagged legacy rows are kept only in demo mode (historical showcase).
-    Live mode requires explicit account_mode=live (or okx-sourced fill without demo tag).
+    - Explicit account_mode wins.
+    - OKX rows fetched under current mode (_from_okx) pass.
+    - Untagged legacy rows: visible in DEMO only (showcase history).
+    - LIVE never shows demo-tagged rows.
     """
     if not isinstance(tr, dict):
         return False
+    mode = (mode or "demo").lower()
     m = (tr.get("account_mode") or tr.get("mode") or "").strip().lower()
-    if m in ("live", "demo"):
-        return m == mode
-    # OKX fill rows often have no tag — allowed only when fetched under that mode
+    if m == "live":
+        return mode == "live"
+    if m == "demo":
+        return mode == "demo"
     if tr.get("_from_okx") or tr.get("source") in ("okx", "okx_fills", "okx_bills", "exchange"):
         return True
-    # legacy in-memory / DB without tag
-    if mode == "demo":
-        return True
-    return False
+    # untagged legacy
+    return mode == "demo"
 
 
 # ── Access control ──
@@ -2777,7 +2779,13 @@ async def health(request: Request):
     except Exception:
         pass
 
-    _env_demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+    # IMPORTANT: do not re-bind _env_demo from env here — it shadows the
+    # runtime Demo/Live switch and makes the UI forget LIVE after health poll.
+    _env_okx_demo_default = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+    try:
+        _ui_demo = bool(_env_demo)
+    except Exception:
+        _ui_demo = _env_okx_demo_default
 
     # Optional heavy diagnostics (manual only — never for UptimeRobot)
     want_diag = False
@@ -2801,7 +2809,7 @@ async def health(request: Request):
     return {
         "status": "ok",
         "connected": connected,
-        "demo": _env_demo,
+        "demo": locals().get("_ui_demo", _env_demo),
         "version": os.environ.get("RENDER_GIT_COMMIT", "")[:12],
         "uptime_sec": uptime,
         "bots": {
@@ -7031,11 +7039,14 @@ async def _warm_dashboard_caches() -> None:
             print(f"[warm] paired cache: {e}", flush=True)
 
 
-async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str = None):
+async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str = None, mode: str = None):
+    """Paired entry+exit trades for one account mode only (demo XOR live).
+
+    Sourced from DB + in-memory logs; OKX fills from the matching client.
+    """
     mode = (mode or _account_mode()).lower()
-    """Paired entry+exit trades — all bots, all time, sourced from the DB
-    (persisted) plus live in-memory logs. Fallback to OKX fills only when
-    nothing is stored yet."""
+    if mode not in ("demo", "live"):
+        mode = "demo"
     # 1. Gather all raw trade records: persisted (DB) + live (in-memory).
     raw = []
     bot_ids = [ROT_BOT_ID, MOM_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID]
@@ -7171,7 +7182,7 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
         print(f"[trades/paired] bills fetch error: {e}", flush=True)
 
     try:
-        raw_fills = await _fetch_okx_fills(limit=1000)
+        raw_fills = await _fetch_okx_fills(limit=1000, mode=mode)
     except Exception as e:
         print(f"[trades/paired] fills fetch error: {e}", flush=True)
         raw_fills = []
