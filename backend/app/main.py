@@ -695,7 +695,7 @@ async def startup():
         _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
         if _env_key and _env_secret and _env_pass and _ai_auto:
             global ai_bot
-            _demo = os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on")
+            _demo = _env_demo
             # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
             # On live, respect AI_EXECUTE env with default off.
             if _demo:
@@ -944,8 +944,8 @@ PUBLIC_API_PATHS = {
     "/api/auth/status",
     "/api/auth/logout",
     "/api/auth/telegram",   # Telegram Login / mini-app init
+    "/api/ai/status",       # read-only bot status (no secrets — fixes polling after JWT rotation)
     # Intentionally NOT public:
-    # /api/ai/status — requires auth (was used for recon)
     # /api/debug/client-error(s) — admin only (spam / log injection)
     # /api/tracker — requires auth
     # /api/risk/status — requires auth (was leaking kill-switch state)
