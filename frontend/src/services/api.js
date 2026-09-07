@@ -96,7 +96,13 @@ export const api = {
     request('/risk/kill', { method: 'POST', body: JSON.stringify({ enabled }) }),
   getMode: () => request('/mode'),
   setMode: (demo, confirm) =>
-    request('/mode', { method: 'POST', body: JSON.stringify({ demo, confirm }) }),
+    request('/mode', {
+      method: 'POST',
+      body: JSON.stringify({
+        demo: !!demo,
+        confirm: demo ? undefined : (confirm || 'LIVE'),
+      }),
+    }),
   getAudit: (limit = 50) => request(`/audit?limit=${limit}`),
   reportSummary: () => request('/reports/summary'),
 

@@ -2912,7 +2912,7 @@ async def get_trading_mode():
 
 
 @app.post("/api/mode", dependencies=[Depends(require_admin)])
-async def set_trading_mode(request: Request, data: dict = None):
+async def set_trading_mode(request: Request, data: dict = Body(default=None)):
     """Switch owner client between showcase DEMO and personal LIVE.
 
     DEMO uses env/showcase keys (always for observers).
@@ -2920,11 +2920,17 @@ async def set_trading_mode(request: Request, data: dict = None):
     """
     global _env_demo
     data = data or {}
-    demo = bool(data.get("demo", True))
+    # JSON may send demo as bool or string
+    raw_demo = data.get("demo", True)
+    if isinstance(raw_demo, str):
+        demo = raw_demo.strip().lower() in ("1", "true", "yes", "demo")
+    else:
+        demo = bool(raw_demo)
     await _load_live_creds_from_db()
 
     if not demo:
-        if str(data.get("confirm", "")).strip() != "LIVE":
+        confirm = str(data.get("confirm") or "").strip()
+        if confirm != "LIVE":
             raise HTTPException(
                 status_code=400,
                 detail='Switching to LIVE requires confirm: "LIVE"',
@@ -2935,6 +2941,14 @@ async def set_trading_mode(request: Request, data: dict = None):
                 detail="Сначала сохраните Live API-ключи OKX в настройках",
             )
         key, secret, passphrase = _live_key, _live_secret, _live_pass
+        # Soft probe so user sees OKX error instead of opaque 500
+        probe = OKXClientManager.new_instance()
+        check = await probe.test_connection(key, secret, passphrase, False)
+        if check.get("error"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"OKX Live: {check.get('message') or 'connection failed'}",
+            )
     else:
         key = _demo_key or _env_key
         secret = _demo_secret or _env_secret
@@ -2943,16 +2957,24 @@ async def set_trading_mode(request: Request, data: dict = None):
             raise HTTPException(status_code=400, detail="Showcase DEMO keys (env OKX) not configured")
 
     prev = _env_demo
-    _env_demo = demo
-    result = await client_manager.init_client(key, secret, passphrase, demo)
-    if result.get("error"):
+    try:
+        await client_manager.init_client(key, secret, passphrase, demo)
+        _env_demo = demo
+        # Keep showcase DEMO client intact for observers
+        if demo:
+            await _ensure_showcase()
+    except Exception as e:
         _env_demo = prev
-        raise HTTPException(status_code=400, detail=result.get("message", "Reconnect failed"))
-    await write_audit(
-        request,
-        "mode.switch",
-        detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
-    )
+        raise HTTPException(status_code=400, detail=f"Reconnect failed: {e}")
+
+    try:
+        await write_audit(
+            request,
+            "mode.switch",
+            detail=f"{'DEMO' if prev else 'LIVE'} -> {'DEMO' if demo else 'LIVE'}",
+        )
+    except Exception:
+        pass
     return {
         "ok": True,
         "demo": _env_demo,
