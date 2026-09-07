@@ -311,14 +311,21 @@ class AIStrategy:
         }
 
     def _is_demo(self) -> bool:
-        if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
-            return True
+        """Detect demo mode from the actual OKX client, not from env var.
+
+        The OKX_DEMO env var is always "true" on Render (render.yaml), even after
+        the user switches to LIVE via /api/mode. The client's .demo attribute is
+        the authoritative source — it is set by OKXClientManager.init_client().
+        """
         try:
             c = self.client_manager.get_client() if self.client_manager else None
-            if c is not None and getattr(c, "demo", False):
-                return True
+            if c is not None:
+                return bool(getattr(c, "demo", True))
         except Exception:
             pass
+        # Fallback: if no client yet, check env (first tick before mode switch)
+        if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
+            return True
         return False
 
 
@@ -1700,8 +1707,12 @@ class AIStrategy:
     async def _tick(self):
         client = await self._client()
         if not client:
-            print("[AI] no OKX client", flush=True)
+            if self._tick_count == 0:
+                print("[AI] tick #0: no OKX client — check if mode was switched and API keys are saved", flush=True)
             return
+        if self._tick_count == 0:
+            _demo = getattr(client, "demo", None)
+            print(f"[AI] tick #0: OKX client ready, client.demo={_demo}, execute={self._execute_enabled()}, capital=${self._capital:.2f}", flush=True)
         if not self._positions:
             await self._restore_open_positions(client)
         # Once per process-ish: sweep unclaimed exchange positions
