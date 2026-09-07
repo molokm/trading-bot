@@ -922,11 +922,17 @@ class AIStrategy:
 
     def _snapshot(self) -> dict:
         open_list = []
+        try:
+            _c = self.client_manager.get_client() if self.client_manager else None
+            _mode = "live" if (_c is not None and not getattr(_c, "demo", True)) else "demo"
+        except Exception:
+            _mode = "demo"
         for coin, p in self._positions.items():
             open_list.append({
                 "coin": coin, "side": p.side, "size": p.size,
                 "entry_price": p.entry_price, "stop_price": p.stop_price,
                 "take_price": p.take_price, "leverage": p.leverage,
+                "account_mode": _mode,
             })
         quant = self._build_quant()
         candidates = []

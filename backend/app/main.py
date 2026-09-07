@@ -889,8 +889,11 @@ async def _okx_call_account(coro_factory, mode: str = None):
 def _invalidate_account_caches():
     """Drop mode-sensitive caches so Live never shows Demo numbers (and vice versa)."""
     global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts, _bills_cache
+    global _positions_cache, _positions_cache_ts
     _fills_cache = None
     _fills_cache_ts = 0
+    _positions_cache = None
+    _positions_cache_ts = 0
     try:
         if isinstance(_bills_cache, dict):
             _bills_cache.clear()
@@ -3057,6 +3060,18 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
     except Exception:
         pass
     _invalidate_account_caches()
+    # Drop bot memory from previous mode; restore only from the NEW OKX client
+    try:
+        if ai_bot is not None:
+            try:
+                ai_bot._positions.clear()
+            except Exception:
+                pass
+            client = client_manager.get_client()
+            if client and hasattr(ai_bot, "_restore_open_positions"):
+                await ai_bot._restore_open_positions(client)
+    except Exception as e:
+        print(f"[mode.switch] AI position resync: {e}", flush=True)
     return {
         "ok": True,
         "demo": _env_demo,

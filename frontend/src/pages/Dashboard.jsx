@@ -491,11 +491,44 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       })
     }
 
-    // 1a. Bot-owned opens (have stops/stage)
-    for (const p of (momentumStatus?.open_positions || [])) pushOpen(p, 'Momentum')
-    for (const p of (impulseStatus?.open_positions || [])) pushOpen(p, 'Impulse 1D')
-    for (const p of (validationStatus?.open_positions || [])) pushOpen(p, 'Validation')
-    for (const p of (aiStatus?.open_positions || [])) pushOpen(p, 'AI Discretionary 1H')
+    // Exchange keys for CURRENT mode only (API positions are mode-scoped)
+    const exchangeKeys = new Set()
+    for (const p of (positions || [])) {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) continue
+      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
+      const inst = p.instId || p.inst_id || ''
+      if (inst) exchangeKeys.add(`${inst}|${posSide}`)
+      const coin = (inst || '').replace('-USDT-SWAP', '')
+      if (coin) exchangeKeys.add(`${coin}|${posSide}`)
+    }
+
+    const isOnExchange = (p) => {
+      if (!exchangeKeys.size) return false
+      const coin = (p.coin || p.symbol || '').toUpperCase()
+      const inst = (p.inst_id || p.instId || (coin ? `${coin}-USDT-SWAP` : '')).toUpperCase()
+      const side = (p.side || p.pos_side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+      if (coin && exchangeKeys.has(`${coin}|${side}`)) return true
+      if (inst && exchangeKeys.has(`${inst}|${side}`)) return true
+      return false
+    }
+
+    // 1a. Bot-owned opens — only if still open on THIS mode's exchange account
+    for (const p of (momentumStatus?.open_positions || [])) {
+      if (isOnExchange(p)) pushOpen(p, 'Momentum')
+    }
+    for (const p of (impulseStatus?.open_positions || [])) {
+      if (isOnExchange(p)) pushOpen(p, 'Impulse 1D')
+    }
+    for (const p of (validationStatus?.open_positions || [])) {
+      if (isOnExchange(p)) pushOpen(p, 'Validation')
+    }
+    for (const p of (aiStatus?.open_positions || [])) {
+      const m = (p.account_mode || '').toLowerCase()
+      if (m === 'demo' && !demoMode) continue
+      if (m === 'live' && demoMode) continue
+      if (isOnExchange(p)) pushOpen(p, 'AI Discretionary 1H')
+    }
     // Smart Money opens/trades live only on /smart-money — not on main dashboard
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
