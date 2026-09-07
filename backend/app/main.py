@@ -856,6 +856,77 @@ async def _okx_call_view(request: Request, coro_factory):
     return result
 
 
+def _account_mode() -> str:
+    """Current owner trading environment: demo | live (never mixed)."""
+    return "demo" if _env_demo else "live"
+
+
+async def _okx_call_account(coro_factory, mode: str = None):
+    """Call OKX on the isolated account for mode (demo showcase vs live keys).
+
+    Demo → showcase_manager (env simulated). Live → client_manager with live keys.
+    Does not cross-read the other environment.
+    """
+    mode = (mode or _account_mode()).lower()
+    if mode == "live":
+        await _load_live_creds_from_db()
+        client = client_manager.get_client()
+        if not client or getattr(client, "demo", True):
+            if not (_live_key and _live_secret and _live_pass):
+                return {"error": True, "message": "Live keys not configured"}
+            await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
+            client = client_manager.get_client()
+        if not client:
+            return {"error": True, "message": "Live client unavailable"}
+        return await coro_factory(client)
+    # demo
+    client = await _ensure_showcase()
+    if not client:
+        return {"error": True, "message": "Demo showcase not configured"}
+    return await coro_factory(client)
+
+
+def _invalidate_account_caches():
+    """Drop mode-sensitive caches so Live never shows Demo numbers (and vice versa)."""
+    global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts
+    _fills_cache = None
+    _fills_cache_ts = 0
+    try:
+        _paired_cache.clear()
+    except Exception:
+        pass
+    try:
+        _pnl_cache.clear()
+    except Exception:
+        pass
+    _portfolio_cache = None
+    _portfolio_cache_ts = 0
+    try:
+        setattr(_fetch_okx_fills, "_cache_key", "")
+    except Exception:
+        pass
+
+
+def _trade_matches_mode(tr: dict, mode: str) -> bool:
+    """Strict filter: only trades tagged with this account mode.
+
+    Untagged legacy rows are kept only in demo mode (historical showcase).
+    Live mode requires explicit account_mode=live (or okx-sourced fill without demo tag).
+    """
+    if not isinstance(tr, dict):
+        return False
+    m = (tr.get("account_mode") or tr.get("mode") or "").strip().lower()
+    if m in ("live", "demo"):
+        return m == mode
+    # OKX fill rows often have no tag — allowed only when fetched under that mode
+    if tr.get("_from_okx") or tr.get("source") in ("okx", "okx_fills", "okx_bills", "exchange"):
+        return True
+    # legacy in-memory / DB without tag
+    if mode == "demo":
+        return True
+    return False
+
+
 # ── Access control ──
 
 PUBLIC_API_PATHS = {
@@ -2975,12 +3046,14 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
         )
     except Exception:
         pass
+    _invalidate_account_caches()
     return {
         "ok": True,
         "demo": _env_demo,
         "live": not _env_demo,
         "mode": "demo" if _env_demo else "live",
         "live_configured": bool(_live_key and _live_secret and _live_pass),
+        "account_mode": _account_mode(),
     }
 
 
@@ -5095,12 +5168,15 @@ _FILLS_TTL = 30  # seconds
 _fills_errors: list[str] = []
 
 
-async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
-    """Fetch fills from OKX. If inst_id given, fetch only for that instrument (up to 300).
-    Otherwise fetch all SWAP fills (up to 300 total with pagination)."""
+async def _fetch_okx_fills(limit: int = 100, inst_id: str = None, mode: str = None) -> list[dict]:
+    """Fetch fills from OKX for a single account mode (demo XOR live).
+
+    mode=None → current owner _account_mode(). Never mixes environments.
+    """
     global _fills_cache, _fills_cache_ts, _fills_cache_limit, _fills_errors
-    # Cache key includes inst_id
-    cache_key = inst_id or "__all__"
+    mode = (mode or _account_mode()).lower()
+    # Cache key includes inst_id AND account mode (isolation)
+    cache_key = f"{mode}:{inst_id or '__all__'}"
     now = _time.time()
     if (_fills_cache and (now - _fills_cache_ts) < _FILLS_TTL
             and _fills_cache_limit >= limit and getattr(_fetch_okx_fills, '_cache_key', '') == cache_key):
@@ -5119,7 +5195,7 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
             params = {"inst_type": "SWAP", "instId": inst_id, "limit": 100}
             if after_ts:
                 params["after"] = after_ts
-            r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
+            r1 = await _okx_call_account(lambda c, p=params: c.get_fills_history(**p), mode=mode)
             data = r1.get("data", [])
             print(f"[_fetch_okx_fills] {inst_id} page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
             if r1.get("error"):
@@ -5138,7 +5214,7 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
             params = {"inst_type": "SWAP", "limit": 100}
             if after_ts:
                 params["after"] = after_ts
-            r1 = await _okx_call(lambda c, p=params: c.get_fills_history(**p))
+            r1 = await _okx_call_account(lambda c, p=params: c.get_fills_history(**p), mode=mode)
             data = r1.get("data", [])
             print(f"[_fetch_okx_fills] all-SWAP page {page+1}: error={r1.get('error')}, data_len={len(data)}", flush=True)
             if r1.get("error"):
@@ -5153,7 +5229,7 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
 
         # Fallback to regular fills if no results
         if not all_fills:
-            r2 = await _okx_call(lambda c: c.get_fills(limit=100))
+            r2 = await _okx_call_account(lambda c: c.get_fills(limit=100), mode=mode)
             print(f"[_fetch_okx_fills] fills (fallback): error={r2.get('error')}, data_len={len(r2.get('data', []))}", flush=True)
             if r2.get("error"):
                 errors.append(f"fills: {r2.get('message', '')}")
@@ -5162,6 +5238,10 @@ async def _fetch_okx_fills(limit: int = 100, inst_id: str = None) -> list[dict]:
 
     # Sort by timestamp ascending (oldest first — needed for _pair_fills)
     all_fills.sort(key=lambda f: f.get("ts", "0"))
+    for _f in all_fills:
+        if isinstance(_f, dict):
+            _f["account_mode"] = mode
+            _f["_from_okx"] = True
     _fills_cache = all_fills
     _fills_cache_ts = now
     _fills_cache_limit = effective_limit
@@ -6169,22 +6249,39 @@ def _active_bot_labels() -> set:
 
 
 @app.get("/api/pnl")
-async def get_pnl():
+async def get_pnl(request: Request = None):
     """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
     global _pnl_cache
+    _mode = _account_mode()
     now_s = _time.time()
-    if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
-        return dict(_pnl_cache["data"])
+    if (
+        _pnl_cache
+        and _pnl_cache.get("mode") == _mode
+        and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL
+    ):
+        out = dict(_pnl_cache["data"])
+        out["account_mode"] = _mode
+        return out
     async with _pnl_lock:
         now_s = _time.time()
-        if _pnl_cache and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL:
-            return dict(_pnl_cache["data"])
+        if (
+            _pnl_cache
+            and _pnl_cache.get("mode") == _mode
+            and (now_s - _pnl_cache.get("ts", 0)) < _PNL_TTL
+        ):
+            out = dict(_pnl_cache["data"])
+            out["account_mode"] = _mode
+            return out
         data = await _compute_pnl()
-        _pnl_cache = {"ts": _time.time(), "data": data}
+        if isinstance(data, dict):
+            data = dict(data)
+            data["account_mode"] = _mode
+        _pnl_cache = {"ts": _time.time(), "data": data, "mode": _mode}
         return dict(data)
 
 
 async def _compute_pnl():
+    _mode = _account_mode()
 
     """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
 
@@ -6322,8 +6419,11 @@ async def _compute_pnl():
             if not bot:
                 skipped_untagged += 1
                 continue
+            if not _trade_matches_mode(tr, _account_mode()):
+                continue
             tr = dict(tr)
             tr["bot"] = bot
+            tr["account_mode"] = tr.get("account_mode") or _account_mode()
             closed_tagged.append(tr)
 
         if closed_tagged or epoch:
@@ -6833,10 +6933,20 @@ async def _bot_history_stats() -> dict:
 
 @app.get("/api/trades")
 async def get_all_trades(limit: int = 100):
-    """Trades from Rotation strategy (not OKX fills)."""
-    if rotation:
-        return {"trades": rotation._trade_log[-limit:]}
-    return {"trades": []}
+    """Trades for current account mode only (demo XOR live)."""
+    mode = _account_mode()
+    out = []
+    logs = []
+    if ai_bot and getattr(ai_bot, "_trade_log", None):
+        logs.extend(ai_bot._trade_log)
+    if rotation and getattr(rotation, "_trade_log", None):
+        logs.extend(rotation._trade_log)
+    if impulse and getattr(impulse, "_trade_log", None):
+        logs.extend(impulse._trade_log)
+    for tr in logs:
+        if _trade_matches_mode(tr, mode):
+            out.append(tr)
+    return {"trades": out[-limit:], "account_mode": mode}
 
 
 _paired_cache: dict = {}
@@ -6861,23 +6971,45 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
     cache expiry and stalled the dashboard."""
     global _paired_cache
     now_s = _time.time()
-    if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
+    _mode = _account_mode()
+    if (
+        _paired_cache
+        and _paired_cache.get("mode") == _mode
+        and (now_s - _paired_cache["ts"]) < _PAIRED_TTL
+    ):
         trades = _paired_cache["data"]
-        return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
+        return {
+            "trades": trades[:limit],
+            "debug": dict(_paired_cache["debug"]),
+            "account_mode": _mode,
+        }
     async with _paired_lock:
         now_s = _time.time()
-        if _paired_cache and (now_s - _paired_cache["ts"]) < _PAIRED_TTL:
+        if (
+            _paired_cache
+            and _paired_cache.get("mode") == _mode
+            and (now_s - _paired_cache["ts"]) < _PAIRED_TTL
+        ):
             trades = _paired_cache["data"]
-            return {"trades": trades[:limit], "debug": dict(_paired_cache["debug"])}
-        resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end)
+            return {
+                "trades": trades[:limit],
+                "debug": dict(_paired_cache["debug"]),
+                "account_mode": _mode,
+            }
+        resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end, mode=_mode)
         trades = resp.get("trades", [])
         if trades:
             _paired_cache = {
                 "ts": _time.time(),
                 "data": trades,
                 "debug": resp.get("debug", {}),
+                "mode": _mode,
             }
-        return {"trades": trades[:limit], "debug": resp.get("debug", {})}
+        return {
+            "trades": trades[:limit],
+            "debug": resp.get("debug", {}),
+            "account_mode": _mode,
+        }
 
 
 _warm_task: Optional[asyncio.Task] = None
@@ -6900,6 +7032,7 @@ async def _warm_dashboard_caches() -> None:
 
 
 async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str = None):
+    mode = (mode or _account_mode()).lower()
     """Paired entry+exit trades — all bots, all time, sourced from the DB
     (persisted) plus live in-memory logs. Fallback to OKX fills only when
     nothing is stored yet."""

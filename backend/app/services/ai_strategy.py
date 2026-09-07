@@ -1135,6 +1135,15 @@ class AIStrategy:
             self._record_exec("open_claim_fail_flat", coin=coin, side=side)
             return
         self._trade_log.append({
+            "account_mode": (
+                "demo"
+                if (
+                    self.client_manager
+                    and self.client_manager.get_client()
+                    and getattr(self.client_manager.get_client(), "demo", True)
+                )
+                else "live"
+            ),
             "time": pos.opened_at, "side": order_side, "symbol": inst,
             "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
             "reason": "open", "pos_side": side, "coin": coin,
@@ -1232,6 +1241,15 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI] find_signal_id: {e}", flush=True)
         self._trade_log.append({
+            "account_mode": (
+                "demo"
+                if (
+                    self.client_manager
+                    and self.client_manager.get_client()
+                    and getattr(self.client_manager.get_client(), "demo", True)
+                )
+                else "live"
+            ),
             "time": now, "side": close_side, "symbol": pos.inst_id,
             "size": pos.size, "pnl": round(pnl, 2), "entry_price": pos.entry_price,
             "exit_price": fill_px, "fee": round(fee_c, 6),
