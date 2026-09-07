@@ -303,6 +303,15 @@ export const api = {
   subsDeactivate: (payload) =>
     request('/subs/deactivate', { method: 'POST', body: JSON.stringify(payload || {}) }),
 
+  // ── Admin users & accounts ──
+  adminUsers: () => request('/admin/users'),
+  adminUserPlan: (payload) =>
+    request('/admin/users/plan', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  adminUserMode: (payload) =>
+    request('/admin/users/mode', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  adminClearCreds: (payload) =>
+    request('/admin/users/clear-credentials', { method: 'POST', body: JSON.stringify(payload || {}) }),
+
   // ── Multi-tenant /api/me/* (mini-app user accounts) ──
   me: () => request('/me'),
   meCredentials: (creds) =>

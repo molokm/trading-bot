@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
+  LayoutDashboard, Bot, BarChart3, ScrollText, Settings, Users,
   TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
@@ -14,6 +14,7 @@ const BacktestPage = lazy(() => import('./pages/BacktestPage'))
 const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const AdminPage = lazy(() => import('./pages/AdminPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
 const SmartMoneyPage = lazy(() => import('./pages/SmartMoneyPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
@@ -128,7 +129,10 @@ function AppLayout() {
     { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
+    ...(isAdmin ? [
+      { to: '/admin', icon: Users, label: 'Админка' },
+      { to: '/settings', icon: Settings, label: t('nav.settings') },
+    ] : []),
   ]
 
   return (
@@ -246,6 +250,7 @@ function AppLayout() {
           <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
           <Route path="/docs" element={<DocsPage />} />
         </Routes>
