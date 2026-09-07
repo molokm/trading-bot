@@ -213,6 +213,11 @@ export const api = {
     request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
   aiStop: () =>
     request('/ai/stop', { method: 'POST' }),
+  aiGetConfig: () => request('/ai/config'),
+  aiSaveConfig: (config) =>
+    request('/ai/config', { method: 'PUT', body: JSON.stringify(config || {}) }),
+  aiPromoteConfig: () =>
+    request('/ai/config/promote', { method: 'POST', body: JSON.stringify({}) }),
   aiDecide: () =>
     request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
   aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),

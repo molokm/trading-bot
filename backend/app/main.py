@@ -2022,6 +2022,104 @@ async def ai_execute(data: dict = None):
 
 
 
+
+@app.get("/api/ai/config", dependencies=[Depends(require_admin)])
+async def ai_get_config():
+    """Admin-only. DEMO is the editable workspace; LIVE is promoted snapshot."""
+    import json
+    demo_raw = await db.get_setting("ai_config:demo")
+    live_raw = await db.get_setting("ai_config:live")
+    try:
+        demo = json.loads(demo_raw) if demo_raw else None
+    except Exception:
+        demo = None
+    try:
+        live = json.loads(live_raw) if live_raw else None
+    except Exception:
+        live = None
+    runtime = {}
+    try:
+        if ai_bot:
+            runtime = ai_bot.export_config_dict()
+    except Exception:
+        runtime = {}
+    if not demo:
+        demo = runtime or {}
+    return {
+        "editable": bool(_env_demo),
+        "account_mode": "demo" if _env_demo else "live",
+        "demo": demo,
+        "live": live,
+        "runtime": runtime,
+        "policy": {
+            "edit_only_in_demo": True,
+            "live_is_promoted_snapshot": True,
+            "admin_only": True,
+        },
+    }
+
+
+@app.put("/api/ai/config", dependencies=[Depends(require_admin)])
+async def ai_put_config(request: Request, data: dict = Body(default=None)):
+    """Save AI settings — only allowed in DEMO mode (admin)."""
+    import json
+    if not _env_demo:
+        raise HTTPException(
+            status_code=400,
+            detail="Настройки AI редактируются только в DEMO. Переключитесь в Demo, сохраните, затем «В LIVE».",
+        )
+    data = data or {}
+    # accept nested {config:{...}} or flat
+    cfg = data.get("config") if isinstance(data.get("config"), dict) else data
+    if not isinstance(cfg, dict) or not cfg:
+        raise HTTPException(status_code=400, detail="Empty config")
+    # strip non-config keys
+    for k in ("editable", "account_mode", "demo", "live", "runtime", "policy", "config"):
+        cfg.pop(k, None)
+    await db.set_setting("ai_config:demo", json.dumps(cfg, ensure_ascii=False))
+    if ai_bot:
+        try:
+            ai_bot.apply_config_dict(cfg, keep_execute=True)
+        except Exception as e:
+            print(f"[ai/config] apply demo: {e}", flush=True)
+    try:
+        await write_audit(request, "ai.config.save_demo", detail="demo settings updated")
+    except Exception:
+        pass
+    return {"ok": True, "saved": "demo", "account_mode": "demo"}
+
+
+@app.post("/api/ai/config/promote", dependencies=[Depends(require_admin)])
+async def ai_promote_config(request: Request):
+    """Copy DEMO settings → LIVE snapshot. LIVE trading will use this snapshot."""
+    import json
+    if not _env_demo:
+        # allow promote from either mode but source is always demo store
+        pass
+    demo_raw = await db.get_setting("ai_config:demo")
+    if not demo_raw and ai_bot:
+        demo_raw = json.dumps(ai_bot.export_config_dict(), ensure_ascii=False)
+        await db.set_setting("ai_config:demo", demo_raw)
+    if not demo_raw:
+        raise HTTPException(status_code=400, detail="Нет DEMO-настроек для трансляции в LIVE")
+    await db.set_setting("ai_config:live", demo_raw)
+    # If currently in LIVE, apply immediately
+    if not _env_demo and ai_bot:
+        try:
+            ai_bot.apply_config_dict(json.loads(demo_raw), keep_execute=True)
+        except Exception as e:
+            print(f"[ai/config] apply live after promote: {e}", flush=True)
+    try:
+        await write_audit(request, "ai.config.promote", detail="demo -> live")
+    except Exception:
+        pass
+    return {
+        "ok": True,
+        "promoted": True,
+        "message": "Настройки DEMO скопированы в LIVE. В Live-режиме бот использует этот снимок.",
+    }
+
+
 @app.get("/api/ai/logs", dependencies=[Depends(require_admin)])
 async def ai_logs(limit: int = 200, event: str = None):
     """Export AI decision/trade logs for prompt tuning.
@@ -3060,6 +3158,22 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
     except Exception:
         pass
     _invalidate_account_caches()
+    # Apply mode-specific AI settings: DEMO = workspace, LIVE = promoted snapshot
+    try:
+        import json as _json
+        if ai_bot:
+            key = "ai_config:demo" if demo else "ai_config:live"
+            raw = await db.get_setting(key)
+            if raw:
+                ai_bot.apply_config_dict(_json.loads(raw), keep_execute=True)
+            elif demo:
+                # seed demo from runtime once
+                await db.set_setting(
+                    "ai_config:demo",
+                    _json.dumps(ai_bot.export_config_dict(), ensure_ascii=False),
+                )
+    except Exception as e:
+        print(f"[mode.switch] ai config apply: {e}", flush=True)
     # Drop bot memory from previous mode; restore only from the NEW OKX client
     try:
         if ai_bot is not None:

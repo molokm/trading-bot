@@ -914,6 +914,66 @@ class AIStrategy:
                 pass
         return self._adapt
 
+
+    def apply_config_dict(self, data: dict, *, keep_execute: bool = True) -> None:
+        """Apply persisted settings onto runtime AIConfig (admin DEMO→LIVE flow)."""
+        if not data or not isinstance(data, dict):
+            return
+        cfg = self.config
+        skip = {"execute"} if keep_execute else set()
+        for k, v in data.items():
+            if k in skip or k.startswith("_"):
+                continue
+            if not hasattr(cfg, k):
+                continue
+            try:
+                cur = getattr(cfg, k)
+                if isinstance(cur, bool):
+                    setattr(cfg, k, bool(v))
+                elif isinstance(cur, int) and not isinstance(cur, bool):
+                    setattr(cfg, k, int(v))
+                elif isinstance(cur, float):
+                    setattr(cfg, k, float(v))
+                elif isinstance(cur, list):
+                    setattr(cfg, k, list(v) if v is not None else list(cur))
+                elif isinstance(cur, str) or cur is None:
+                    setattr(cfg, k, v)
+                else:
+                    setattr(cfg, k, v)
+            except Exception:
+                continue
+
+    def export_config_dict(self) -> dict:
+        """Serializable subset of AIConfig for DEMO/LIVE settings store."""
+        cfg = self.config
+        out = {}
+        for k, v in getattr(cfg, "__dataclass_fields__", {}).items() if False else []:
+            pass
+        # AIConfig may be a plain class not dataclass — export known attrs
+        keys = [
+            "symbols", "capital", "max_leverage", "max_positions", "risk_per_trade",
+            "allocation_pct", "bar", "candle_limit", "poll_interval_sec",
+            "min_confidence", "min_adx", "adx_soft_floor", "adx_align_bypass",
+            "min_roc_abs", "min_stop_pct", "max_stop_pct", "min_take_pct",
+            "max_hold_hours", "block_llm_error_opens", "indicator_exit",
+            "min_hold_minutes", "exit_min_profit_pct", "exit_on_ema_cross",
+            "exit_on_price_vs_ema", "exit_on_roc_flip", "exit_weak_adx",
+            "trail_activate_pct", "trail_lock_pct", "ema_fast", "ema_slow",
+            "ema_trend", "adx_period", "roc_period", "rsi_period",
+            "quant_min_align", "block_chop_opens", "adapt_enabled",
+            "adapt_window", "adapt_min_trades", "conf_floor", "conf_ceil",
+            "align_floor", "align_ceil", "size_cap_floor", "size_cap_ceil",
+            "provider",
+        ]
+        for k in keys:
+            if hasattr(cfg, k):
+                v = getattr(cfg, k)
+                if isinstance(v, list):
+                    out[k] = list(v)
+                else:
+                    out[k] = v
+        return out
+
     def _effective_min_confidence(self) -> float:
         return float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
 

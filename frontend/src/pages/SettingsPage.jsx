@@ -17,6 +17,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [riskBusy, setRiskBusy] = useState(false)
   const [audit, setAudit] = useState([])
   const [modeBusy, setModeBusy] = useState(false)
+  const [aiCfgMsg, setAiCfgMsg] = useState('')
+  const [aiCfgBusy, setAiCfgBusy] = useState(false)
   const [liveConfigured, setLiveConfigured] = useState(false)
   const [showcaseConfigured, setShowcaseConfigured] = useState(true)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
@@ -340,6 +342,58 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         <div className="space-y-4">
           <div className="panel">
             <div className="panel-header">
+
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 mb-4">
+            <div className="text-sm font-semibold mb-1">AI — настройки (только админ)</div>
+            <p className="text-xs text-[var(--muted)] mb-3">
+              Редактирование и отработка — только в <b>DEMO</b>. После проверки нажмите
+              «В LIVE», чтобы перенести снимок настроек на реальный счёт.
+              В LIVE настройки не редактируются.
+            </p>
+            <div className="flex flex-wrap gap-2 items-center">
+              <button
+                type="button"
+                disabled={aiCfgBusy}
+                className="px-3 py-1.5 rounded-lg text-sm bg-[var(--accent)] text-white disabled:opacity-50"
+                onClick={async () => {
+                  setAiCfgBusy(true)
+                  setAiCfgMsg('')
+                  try {
+                    // Seed/save current runtime into DEMO workspace (only works in demo)
+                    const cur = await api.aiGetConfig()
+                    const payload = cur.demo || cur.runtime || {}
+                    await api.aiSaveConfig(payload)
+                    setAiCfgMsg('DEMO-настройки сохранены')
+                  } catch (e) {
+                    setAiCfgMsg(e.message || 'Ошибка сохранения DEMO')
+                  }
+                  setAiCfgBusy(false)
+                }}
+              >
+                Сохранить в DEMO
+              </button>
+              <button
+                type="button"
+                disabled={aiCfgBusy}
+                className="px-3 py-1.5 rounded-lg text-sm border border-[var(--border)]"
+                onClick={async () => {
+                  if (!window.confirm('Перенести текущие DEMO-настройки AI в LIVE?')) return
+                  setAiCfgBusy(true)
+                  setAiCfgMsg('')
+                  try {
+                    const r = await api.aiPromoteConfig()
+                    setAiCfgMsg(r.message || 'Настройки перенесены в LIVE')
+                  } catch (e) {
+                    setAiCfgMsg(e.message || 'Ошибка трансляции')
+                  }
+                  setAiCfgBusy(false)
+                }}
+              >
+                В LIVE
+              </button>
+              {aiCfgMsg && <span className="text-xs text-[var(--muted)]">{aiCfgMsg}</span>}
+            </div>
+          </div>
               <Key size={13} className="text-[var(--profit)]" /> {t('settings.api_keys')}
               {backendConfig?.has_credentials && (
                 <span className="ml-auto status-badge status-live"><span className="dot" /> {t('settings.connected')}</span>
