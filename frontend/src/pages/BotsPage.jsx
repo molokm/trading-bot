@@ -300,9 +300,9 @@ function BotCard({
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
   managed, lastActivity, heartbeatMaxAge, apiAlive,
-  isGuest, loading, t,,
+  isGuest, loading, t,
   capitalValue, onCapitalChange, showCapital,
-}) { {
+}) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
     <div className="panel !overflow-visible flex flex-col transition-colors hover:border-[var(--border-hover)]">
