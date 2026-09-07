@@ -6386,6 +6386,8 @@ async def pnl_summary():
         "per_bot": full.get("per_bot", {}),
         "active_bots": full.get("active_bots", []),
         "source": full.get("source", ""),
+        "sticky": full.get("sticky", False),
+        "account_mode": full.get("account_mode"),
         "pnl_epoch": full.get("pnl_epoch"),
         "pnl_tz": full.get("pnl_tz") or full.get("timezone"),
         "timezone": full.get("timezone"),
@@ -6400,8 +6402,8 @@ def _active_bot_labels() -> set:
     labels = set()
     try:
         if AI_ONLY_MODE:
-            if ai_bot and getattr(ai_bot, "_running", False):
-                labels.add("AI Discretionary 1H")
+            # History PnL must stay visible even if the bot is temporarily stopped
+            labels.add("AI Discretionary 1H")
             return labels
         if rotation and getattr(rotation, "_running", False):
             labels.add("Momentum")
@@ -6448,6 +6450,20 @@ async def get_pnl(request: Request = None):
         if isinstance(data, dict):
             data = dict(data)
             data["account_mode"] = _mode
+        # Sticky last-good: avoid cards flashing 0 when OKX/paired briefly returns empty
+        try:
+            prev = (_pnl_cache or {}).get("data") if (_pnl_cache or {}).get("mode") == _mode else None
+            if isinstance(prev, dict) and isinstance(data, dict):
+                prev_tot = abs(float(prev.get("total") or prev.get("strategy_realized") or 0))
+                new_tot = abs(float(data.get("total") or data.get("strategy_realized") or 0))
+                src = str(data.get("source") or "")
+                if prev_tot > 0.01 and new_tot < 0.01 and src in ("none", "epoch_empty", "", "error"):
+                    data = dict(prev)
+                    data["account_mode"] = _mode
+                    data["sticky"] = True
+                    data["sticky_from"] = src or "empty"
+        except Exception:
+            pass
         _pnl_cache = {"ts": _time.time(), "data": data, "mode": _mode}
         return dict(data)
 
@@ -7128,7 +7144,7 @@ _PAIRED_TTL = 20
 
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
-_PNL_TTL = 15  # seconds
+_PNL_TTL = 45  # seconds — reduce card flicker
   # seconds — single-flight shared by /api/pnl and /trades/paired
 
 

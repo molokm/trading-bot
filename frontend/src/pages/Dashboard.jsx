@@ -209,7 +209,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        setPnl(pnlData)
+        setPnl(prev => {
+          const nextTot = Math.abs(Number(pnlData.total ?? pnlData.strategy_realized ?? 0))
+          const prevTot = Math.abs(Number(prev?.total ?? prev?.strategy_realized ?? 0))
+          // Do not flash 0 over a good value (transient empty OKX/paired)
+          if (prev && prevTot > 0.01 && nextTot < 0.01 && !pnlData.force_zero) {
+            return { ...prev, sticky: true, sticky_ui: true }
+          }
+          return pnlData
+        })
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
         setPnl({
