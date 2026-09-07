@@ -25,7 +25,7 @@ log = logging.getLogger("ai_agent")
 # ── provider rotation & cooldown ──────────────────────────────
 _llm_cooldowns: dict[str, float] = {}  # provider -> expiry timestamp (time.time())
 _last_provider_used: str | None = None  # last successfully used provider
-PROVIDER_ROTATION_ORDER = ["bai", "groq", "openrouter", "gemini", "openai"]
+PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai", "bai"]
 COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
 COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
 
@@ -310,11 +310,13 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     """Ask LLM (or mock) for a decision given market snapshot."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
-        # Auto: BAI (api.b.ai deepseek) primary when key present, else Groq, else mock
-        if os.getenv("BAI_API_KEY", "").strip():
+        # Auto: Groq first (product default), then BAI, else mock
+        if os.getenv("GROQ_API_KEY", "").strip():
+            provider = "groq"
+        elif os.getenv("BAI_API_KEY", "").strip():
             provider = "bai"
         else:
-            provider = "groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock"
+            provider = "mock"
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
 
     user_payload = {
@@ -409,7 +411,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai,bai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
         if x.strip()
     ]
     chain = [primary]
@@ -497,12 +499,14 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             user=user_msg,
         )
     if provider == "bai":
+        # BAI often rejects response_format=json_object → 400; parse free text instead
         return await _openai_compatible(
             api_key=os.getenv("BAI_API_KEY", ""),
             base_url=os.getenv("BAI_BASE_URL", "https://api.b.ai/v1"),
             model=os.getenv("BAI_MODEL", "deepseek-v4-flash"),
             system=SYSTEM_PROMPT,
             user=user_msg,
+            json_mode=False,
         )
     raise RuntimeError(f"unknown or unconfigured provider {provider}")
 
