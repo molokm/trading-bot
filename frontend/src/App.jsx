@@ -87,6 +87,7 @@ function AppLayout() {
   const [health, setHealth] = useState({ status: 'checking' })
   const [latencyMs, setLatencyMs] = useState(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [modeBusy, setModeBusy] = useState(false)
 
   const isGuest = auth?.role === 'guest'
   const isAdmin = auth?.role === 'admin'
@@ -122,6 +123,24 @@ function AppLayout() {
     localStorage.removeItem('auth_token')
     localStorage.removeItem('auth_role')
     setAuth(null)
+  }
+
+  const switchTradingMode = async (toDemo) => {
+    if (!isAdmin) return
+    if (!toDemo) {
+      const ok = window.confirm('Перейти в LIVE (реальный счёт OKX)? Как на бирже: демо и лайв разделены.')
+      if (!ok) return
+    }
+    setModeBusy(true)
+    try {
+      const r = await api.setMode(!!toDemo, toDemo ? undefined : 'LIVE')
+      setDemoMode(!!r.demo)
+      setConnected(true)
+    } catch (e) {
+      alert(e.message || 'Не удалось переключить режим')
+    } finally {
+      setModeBusy(false)
+    }
   }
 
   const navItems = [
@@ -172,11 +191,36 @@ function AppLayout() {
         {/* Right: Status + Controls */}
         <div className="flex items-center gap-2">
           {/* Connection Status */}
-          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
-            <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
-            </span>
+          <div data-tour="status" className="flex items-center gap-2 px-1.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <span className={`w-1.5 h-1.5 rounded-full ml-1 ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
+            {!connected ? (
+              <span className="text-2xs font-semibold text-[var(--loss)] pr-2">OFFLINE</span>
+            ) : isAdmin ? (
+              <div className="flex items-center rounded-md overflow-hidden border border-[var(--border)] text-2xs font-bold">
+                <button
+                  type="button"
+                  disabled={modeBusy}
+                  onClick={() => switchTradingMode(true)}
+                  className={`px-2.5 py-1 transition-colors ${demoMode ? 'bg-[var(--warn)] text-black' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+                  title="Демо-торговля (витрина OKX Demo)"
+                >
+                  Demo
+                </button>
+                <button
+                  type="button"
+                  disabled={modeBusy}
+                  onClick={() => switchTradingMode(false)}
+                  className={`px-2.5 py-1 transition-colors ${!demoMode ? 'bg-[var(--loss)] text-white' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+                  title="Реальная торговля (Live OKX)"
+                >
+                  Live
+                </button>
+              </div>
+            ) : (
+              <span className={`text-2xs font-semibold pr-2 ${demoMode ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
+                {demoMode ? 'DEMO' : 'LIVE'}
+              </span>
+            )}
             {health?.version ? (
               <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title="Build / git commit">
                 {String(health.version).slice(0, 7)}
@@ -240,6 +284,22 @@ function AppLayout() {
       {isGuest && (
         <div className="flex-shrink-0 px-4 py-1.5 text-center text-2xs bg-amber-500/10 border-b border-amber-500/20 text-amber-200/90">
           {t('nav.guest_banner')}
+        </div>
+      )}
+
+      {connected && demoMode && (
+        <div data-tour="demo-trading-banner" className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-1.5 bg-[var(--warn-dim)] border-b border-[var(--warn)]/30 text-2xs text-[var(--warn)]">
+          <span className="font-semibold">Демо-торговля · виртуальные средства (как Demo Trading на OKX)</span>
+          {isAdmin && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm text-2xs"
+              disabled={modeBusy}
+              onClick={() => switchTradingMode(false)}
+            >
+              Выйти в Live
+            </button>
+          )}
         </div>
       )}
 

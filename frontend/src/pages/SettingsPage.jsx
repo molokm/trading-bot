@@ -628,22 +628,51 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
           {/* Danger Zone */}
           <div className="panel border-[var(--loss)]/30">
          
-        {/* Trading mode DEMO / LIVE */}
+        {/* Trading mode DEMO / LIVE — как на OKX */}
         <div className="panel p-4 space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
-            <Wifi size={13} className="text-[var(--info)]" /> {t('settings.mode_title')}
+            <Wifi size={13} className="text-[var(--info)]" /> Режим торговли (как на OKX)
           </div>
-          <p className="text-2xs text-[var(--txt-muted)]">{t('settings.mode_tip')}</p>
-          <div className="flex items-center gap-2">
-            <span className={`text-xs font-bold px-2 py-1 rounded ${backendConfig?.env_demo || risk?.okx_demo ? 'bg-[var(--warn-dim)] text-[var(--warn)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-              {(form.demo !== false) ? 'DEMO' : 'LIVE'}
-            </span>
-            <button type="button" className="btn btn-ghost btn-sm" disabled={modeBusy} onClick={() => switchMode(true)}>{t('settings.mode_to_demo')}</button>
-            <span className="text-2xs text-[var(--txt-muted)] w-full mt-1">
-              Витрина DEMO: {showcaseConfigured ? 'активна' : 'нет env-ключей'} · Live-ключи: {liveConfigured ? 'сохранены' : 'не подключены'}
-            </span>
-            <button type="button" className="btn btn-danger btn-sm" disabled={modeBusy} onClick={() => switchMode(false)}>{t('settings.mode_to_live')}</button>
+          <p className="text-2xs text-[var(--txt-muted)] leading-relaxed">
+            Demo и Live — разные среды (как Demo Trading / Live на OKX). Наблюдатели всегда в Demo.
+            Переключатель меняет только ваш контекст.
+          </p>
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+            <div className="inline-flex rounded-lg overflow-hidden border border-[var(--border)] text-xs font-bold">
+              <button
+                type="button"
+                disabled={modeBusy}
+                onClick={() => switchMode(true)}
+                className={`px-4 py-2 transition-colors ${form.demo !== false ? 'bg-[var(--warn)] text-black' : 'bg-[var(--bg)] text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+              >
+                Demo trading
+              </button>
+              <button
+                type="button"
+                disabled={modeBusy || !liveConfigured}
+                onClick={() => switchMode(false)}
+                className={`px-4 py-2 transition-colors ${form.demo === false ? 'bg-[var(--loss)] text-white' : 'bg-[var(--bg)] text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+                title={!liveConfigured ? 'Сначала сохраните Live API-ключи' : 'Реальная торговля'}
+              >
+                Live trading
+              </button>
+            </div>
+            <div className="text-2xs text-[var(--txt-muted)]">
+              Demo: {showcaseConfigured ? 'витрина OKX готова' : 'нет env-ключей'}
+              {' · '}
+              Live: {liveConfigured ? 'ключи сохранены' : 'не подключены'}
+            </div>
           </div>
+          {form.demo !== false && (
+            <div className="text-2xs px-3 py-2 rounded-md bg-[var(--warn-dim)] text-[var(--warn)] border border-[var(--warn)]/30">
+              Сейчас: <strong>Demo trading</strong> — виртуальные средства. Чтобы торговать реально, нажмите Live trading.
+            </div>
+          )}
+          {form.demo === false && (
+            <div className="text-2xs px-3 py-2 rounded-md bg-[var(--loss-dim)] text-[var(--loss)] border border-[var(--loss)]/30">
+              Сейчас: <strong>Live trading</strong> — реальный счёт. Вернуться в Demo — без влияния на Live-позиции.
+            </div>
+          )}
         </div>
 
         {/* Audit log */}
