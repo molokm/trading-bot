@@ -145,7 +145,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     timersRef.current = [t1, t2]
 
     try {
-      await api.testCredentials(form)
+      await api.testCredentials({ ...form, demo: false })
       const t3 = setTimeout(() => {
         setTestSteps(prev => [
           { ...prev[0], state: 'done' },
@@ -171,6 +171,27 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       }, 1200)
       timersRef.current.push(t5, t6)
     }
+  }
+
+  const handleSaveLive = async () => {
+    // Live keys are stored separately — showcase DEMO (env) is never overwritten
+    setTesting(true); setStatus(null)
+    try {
+      const r = await api.initCredentials({ ...form, demo: false })
+      setLiveConfigured(true)
+      setStatus({
+        ok: true,
+        message: r?.message || 'Live-ключи сохранены отдельно. DEMO-витрина не затронута — переключайтесь DEMO↔LIVE.',
+      })
+      onConnected?.(true)
+      onDemoMode?.(false)
+      setForm(f => ({ ...f, demo: false, api_key: '', secret_key: '', passphrase: '' }))
+      const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
+      setAudit(items)
+    } catch (err) {
+      setStatus({ ok: false, message: err.message })
+    }
+    setTesting(false)
   }
 
   const handleSave = async () => {
@@ -341,22 +362,21 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <input className="w-full mt-1.5" placeholder="OKX Passphrase" value={form.passphrase} onChange={e => setForm({ ...form, passphrase: e.target.value })} />
               </div>
 
-              <label className="flex items-center gap-3 pt-2">
-                <input type="checkbox" checked={form.demo} onChange={e => setForm({ ...form, demo: e.target.checked })} />
-                <div>
-                  <span className="text-sm text-[var(--txt)] font-medium">{t('settings.demo_mode')}</span>
-                  <p className="text-2xs text-[var(--txt-muted)]">Наблюдатели (гости) всегда видят витрину DEMO. Подключите Live-ключи и переключайтесь DEMO↔LIVE только для себя — на остальных это не влияет.</p>
-                </div>
-              </label>
+              <div className="p-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-2xs text-[var(--txt-muted)] leading-relaxed">
+                <strong className="text-[var(--txt)]">Отдельный Live-ключ.</strong>
+                {' '}Витрина DEMO берётся из env и <em>не перезаписывается</em>.
+                Сюда добавляются только ваши Live API-ключи. Переключение DEMO↔LIVE — кнопками ниже.
+                {liveConfigured ? ' · Live уже сохранён.' : ''}
+              </div>
 
               <div className="flex gap-3 pt-2">
                 <button className="btn btn-primary flex-1" onClick={handleTest} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
-                  {t('settings.test')}
+                  Проверить Live
                 </button>
-                <button className="btn btn-ghost flex-1" onClick={handleSave} disabled={testing}>
+                <button className="btn btn-ghost flex-1" onClick={handleSaveLive} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
-                  {t('settings.save')}
+                  Сохранить Live-ключ
                 </button>
               </div>
 
