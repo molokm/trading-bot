@@ -5,7 +5,7 @@ import {
   Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert
 } from 'lucide-react'
 import { api } from '../services/api'
-import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
+import { MetricCard, EnhancedMetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader, Skeleton, SkeletonMetricCard } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 import { fmtTs } from '../utils/time'
 
@@ -135,58 +135,99 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   async function loadData() {
     if (!connected) { setLoading(false); return }
     if (document.hidden) return
-    // Fast tier — renders immediately; the slow tier below fills in when ready.
+    
+    // 🚀 PRIORITY 1: Live account critical data (portfolio, positions, AI status)
+    // Load these first for instant UX when live account is connected
+    const isLive = !demoMode
     try {
+      if (isLive) {
+        // Live account: prioritize real money data
+        const [pf, pos, aiSt] = await Promise.all([
+          api.getPortfolio().catch(() => null),
+          api.getPositions('SWAP').catch(() => null),
+          api.aiStatus().catch(() => null),
+        ])
+        if (pf) setPortfolio(pf)
+        if (pos) setPositions(pos.positions || [])
+        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+        
+        // Seed PnL early from AI status so cards are not stuck at 0 while /api/pnl loads
+        if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
+          const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
+          setPnl(prev => {
+            if (prev && Number(prev.total) !== 0) return prev
+            return {
+              total: aiP,
+              '1d': Number(prev?.['1d'] ?? 0),
+              week: Number(prev?.week ?? 0),
+              '7d': Number(prev?.['7d'] ?? 0),
+              '30d': aiP,
+              unrealized: Number(prev?.unrealized ?? 0),
+              per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
+              per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
+              source: 'ai_status_seed',
+            }
+          })
+        }
+        setLoading(false)
+      }
+      
+      // 🔄 PRIORITY 2: Secondary data (tickers, other bots) - load in background
       const [
-        pf,
-        pos,
+        pf2,
+        pos2,
         tk,
         momStatus,
         impStatus,
         valStatus,
-        aiSt,
+        aiSt2,
         smartMoneySt,
         vwapRevSt,
         priceTickers,
       ] = await Promise.all([
-        api.getPortfolio().catch(() => null),
-        api.getPositions('SWAP').catch(() => null),
+        isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
+        isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
-        api.aiStatus().catch(() => null),
+        isLive ? Promise.resolve(null) : api.aiStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
-      if (pf) setPortfolio(pf)
-      if (pos) setPositions(pos.positions || [])
+      
+      // Demo mode: update portfolio/positions from second batch
+      if (!isLive) {
+        if (pf2) setPortfolio(pf2)
+        if (pos2) setPositions(pos2.positions || [])
+        if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
+        
+        if (aiSt2 && (aiSt2.total_pnl != null || aiSt2.lifetime_pnl != null)) {
+          const aiP = Number(aiSt2.lifetime_pnl ?? aiSt2.total_pnl ?? 0)
+          setPnl(prev => {
+            if (prev && Number(prev.total) !== 0) return prev
+            return {
+              total: aiP,
+              '1d': Number(prev?.['1d'] ?? 0),
+              week: Number(prev?.week ?? 0),
+              '7d': Number(prev?.['7d'] ?? 0),
+              '30d': aiP,
+              unrealized: Number(prev?.unrealized ?? 0),
+              per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
+              per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
+              source: 'ai_status_seed',
+            }
+          })
+        }
+      }
+      
       if (tk) setTicker(tk)
       if (momStatus) setMomentumStatus(momStatus)
       if (impStatus) setImpulseStatus(impStatus)
       if (valStatus) setValidationStatus(valStatus)
-      if (aiSt && !aiSt.detail) setAiStatus(aiSt)
       setSmartMoneyStatus(smartMoneySt)
       setVwapRevStatus(vwapRevSt)
-      // Seed PnL early from AI status so cards are not stuck at 0 while /api/pnl loads
-      if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
-        const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
-        setPnl(prev => {
-          if (prev && Number(prev.total) !== 0) return prev
-          return {
-            total: aiP,
-            '1d': Number(prev?.['1d'] ?? 0),
-            week: Number(prev?.week ?? 0),
-            '7d': Number(prev?.['7d'] ?? 0),
-            '30d': aiP,
-            unrealized: Number(prev?.unrealized ?? 0),
-            per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
-            per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
-            source: 'ai_status_seed',
-          }
-        })
-      }
 
       if (priceTickers?.tickers) {
         const byCoin = {}
@@ -877,56 +918,49 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
       <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.balance')}
-          value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
+          value={totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}
+          icon={Wallet}
           mono
           tip={t('dash.balance_tip')}
           sparkData={sparkData[0]}
+          subtitle={demoMode ? 'Demo Account' : 'Live Account'}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.unrealized')}
-          value={
-            <AnimatedValue className={unrealizedPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
-            </AnimatedValue>
-          }
+          value={unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
           changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
+          icon={Activity}
           mono
           tip={t('dash.unrealized_tip')}
           sparkData={sparkData[1]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.pnl_day')}
-          value={
-            <AnimatedValue className={pnlDay >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
-            </AnimatedValue>
-          }
+          value={pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
+          icon={pnlDay >= 0 ? TrendingUp : TrendingDown}
           mono
           tip={`${t('dash.pnl_day_tip')} (${pnlTz}, только активные боты)`}
           sparkData={sparkData[2]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.pnl_week')}
-          value={
-            <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
-            </AnimatedValue>
-          }
+          value={pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
           changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
+          icon={BarChart3}
           mono
           tip={t('dash.pnl_week_tip')}
           sparkData={sparkData[3]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.total_pnl')}
           value={
             <div className="flex flex-col gap-0.5">
-              <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
+              <span className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
                 {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
-              </AnimatedValue>
+              </span>
               {pnlByBot.length > 0 && (
                 <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (
@@ -942,6 +976,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           }
           changeType={pnlTotal >= 0 ? 'positive' : 'negative'}
+          icon={pnlTotal >= 0 ? ArrowUpRight : ArrowDownRight}
           mono
           tip={t('dash.total_pnl_tip')}
           sparkData={sparkData[4]}
