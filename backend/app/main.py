@@ -323,7 +323,7 @@ async def debug_server_hits():
 
 @app.on_event("startup")
 async def startup():
-    global _STARTED_AT
+    global _STARTED_AT, _env_demo
     _STARTED_AT = _time.time()
     try:
         print("[startup] 0/7 auth secrets ...", flush=True)
