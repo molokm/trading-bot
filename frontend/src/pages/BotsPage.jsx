@@ -300,8 +300,9 @@ function BotCard({
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
   managed, lastActivity, heartbeatMaxAge, apiAlive,
-  isGuest, loading, t,
-}) {
+  isGuest, loading, t,,
+  capitalValue, onCapitalChange, showCapital,
+}) { {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
     <div className="panel !overflow-visible flex flex-col transition-colors hover:border-[var(--border-hover)]">
@@ -432,7 +433,22 @@ function BotCard({
         {/* ─── Actions ─── */}
         {!isGuest && (
           <div className="flex gap-1.5 pt-1 mt-auto">
-            <button
+            
+            {showCapital && statusMode !== 'live' && (
+              <div className="flex items-center gap-2 mr-auto min-w-0">
+                <label className="text-[0.65rem] text-[var(--txt-muted)] whitespace-nowrap">Сумма, $</label>
+                <input
+                  type="number"
+                  min={100}
+                  step={100}
+                  value={capitalValue ?? ''}
+                  onChange={(e) => onCapitalChange?.(Number(e.target.value))}
+                  className="w-28 px-2 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+                  title="Капитал для торговли бота в Live"
+                />
+              </div>
+            )}
+<button
               className={`btn btn-sm flex-1 ${statusMode === 'live' ? 'btn-danger' : 'btn-primary'}`}
               onClick={onToggle}
               disabled={loading}
@@ -458,7 +474,7 @@ function loadSavedConfig(key, fallback) {
   }
 }
 
-export default function BotsPage({ connected, isGuest }) {
+export default function BotsPage({ connected, isGuest, demoMode = true }) {
   const { t } = useTranslation()
   const strategyDesc = getStrategyDesc(t)
 
@@ -470,6 +486,14 @@ export default function BotsPage({ connected, isGuest }) {
   const [valLoading, setValLoading] = useState(false)
   const [aiStatus, setAiStatus] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
+  const [aiCapital, setAiCapital] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('ai_live_capital') || '10000')
+      return Number.isFinite(v) && v >= 100 ? v : 10000
+    } catch {
+      return 10000
+    }
+  })
   const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [sliderOpen, setSliderOpen] = useState(false)
@@ -604,8 +628,10 @@ export default function BotsPage({ connected, isGuest }) {
       if (aiStatus?.running) {
         await api.aiStop()
       } else {
+        const cap = Math.max(100, Number(aiCapital) || 10000)
+        try { localStorage.setItem('ai_live_capital', String(cap)) } catch {}
         await api.aiStart({
-          capital: 10000,
+          capital: cap,
           provider: 'groq',
           execute: true,
           max_positions: 1,
@@ -847,6 +873,9 @@ export default function BotsPage({ connected, isGuest }) {
             isGuest={isGuest}
             loading={aiLoading}
             t={t}
+            showCapital={!demoMode && !aiRunning}
+            capitalValue={aiCapital}
+            onCapitalChange={(v) => setAiCapital(v)}
           />
         )}
 

@@ -289,7 +289,7 @@ function AppLayout() {
 
       {connected && demoMode && (
         <div data-tour="demo-trading-banner" className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-1.5 bg-[var(--warn-dim)] border-b border-[var(--warn)]/30 text-2xs text-[var(--warn)]">
-          <span className="font-semibold">Демо-торговля · виртуальные средства (как Demo Trading на OKX)</span>
+          <span className="font-semibold">Демо-торговля · виртуальные средства</span>
           {isAdmin && (
             <button
               type="button"
@@ -308,7 +308,7 @@ function AppLayout() {
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
-          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
+          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
           <Route path="/smart-money" element={<SmartMoneyPage connected={connected} isGuest={isGuest} />} />
           <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
