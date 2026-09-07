@@ -927,6 +927,34 @@ class Database:
         sql = f"SELECT * FROM trades{where} ORDER BY timestamp DESC LIMIT ?"
         return await self._fetchall(sql, tuple(params))
 
+    async def get_trades_multi_bot(self, bot_ids: list, limit: int = 5000,
+                                    account_mode: str = None) -> list[dict]:
+        """Fetch trades for multiple bot_ids in a single query (replaces N sequential get_trades calls)."""
+        if not bot_ids:
+            return []
+        mode = (account_mode or "").strip().lower() or None
+        if self._pg_mode:
+            placeholders = ", ".join(f"${i+1}" for i in range(len(bot_ids)))
+            clauses = [f"bot_id IN ({placeholders})"]
+            params: list = list(bot_ids)
+            if mode:
+                params.append(mode)
+                clauses.append(f"account_mode = ${len(params)}")
+            where = " WHERE " + " AND ".join(clauses)
+            params.append(limit)
+            sql = f"SELECT * FROM trades{where} ORDER BY timestamp DESC LIMIT ${len(params)}"
+        else:
+            qmarks = ", ".join("?" for _ in bot_ids)
+            clauses = [f"bot_id IN ({qmarks})"]
+            params: list = list(bot_ids)
+            if mode:
+                clauses.append("account_mode = ?")
+                params.append(mode)
+            where = " WHERE " + " AND ".join(clauses)
+            params.append(limit)
+            sql = f"SELECT * FROM trades{where} ORDER BY timestamp DESC LIMIT ?"
+        return await self._fetchall(sql, tuple(params))
+
     async def get_paired_trades(self, limit: int = 20, begin: str = None, end: str = None, bot_ids: list = None) -> list[dict]:
         return await self._get_paired_trades_impl(limit, begin, end, bot_ids)
 

@@ -1825,41 +1825,8 @@ async def ai_status():
     internal = status.get("lifetime_pnl", status.get("total_pnl"))
     status["total_pnl_internal"] = internal
     status["lifetime_pnl_internal"] = internal
-    try:
-        # Prefer same totals as /api/pnl (includes entry-owner + forced overrides)
-        pnl_resp = await get_pnl()
-        per = pnl_resp.get("per_bot_all") or pnl_resp.get("per_bot") or {}
-        ai_pnl = float(per.get("AI Discretionary 1H") or 0)
-        # Trade counts from paired list (label AI after overrides)
-        resp = await get_paired_trades(limit=5000)
-        ai_n = 0
-        ai_wins = 0
-        epoch = await get_pnl_epoch()
-        for tr in resp.get("trades", []) or []:
-            if (tr.get("reason") or "").lower() in ("open", "add"):
-                continue
-            if tr.get("pnl") is None:
-                continue
-            if not _trade_after_epoch(tr, epoch):
-                continue
-            if (tr.get("bot") or "").strip() != "AI Discretionary 1H":
-                continue
-            try:
-                pnl = float(tr.get("pnl") or 0)
-            except (TypeError, ValueError):
-                continue
-            ai_n += 1
-            if pnl > 0:
-                ai_wins += 1
-        status["total_pnl"] = round(ai_pnl, 2)
-        status["lifetime_pnl"] = round(ai_pnl, 2)
-        status["total_trades"] = ai_n
-        status["wins"] = ai_wins
-        status["win_rate"] = round(100.0 * ai_wins / ai_n, 1) if ai_n else 0.0
-        status["total_pnl_source"] = "okx_history"
-    except Exception as e:
-        print(f"[ai/status] history pnl: {e}", flush=True)
-        status["total_pnl"] = status.get("lifetime_pnl") or status.get("total_pnl") or 0
+    # _apply_history_kpi calls _bot_history_stats which already computes
+    # get_pnl() + get_paired_trades(5000) — no need to duplicate that work.
     return await _apply_history_kpi(status, "AI Discretionary 1H")
 
 
@@ -7359,52 +7326,48 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 _i = _t.get("symbol") or _t.get("inst_id") or ""
                 if _i and _i not in inst_last_bot:
                     inst_last_bot[_i] = _bid_name
-    # Fallback: DB trades (if table is populated)
+    # Fallback: DB trades (if table is populated) — batch query instead of N sequential
     if db:
         try:
-            _ib_rows = await db._fetchall(
-                "SELECT inst_id, bot_id, timestamp FROM trades "
-                "WHERE bot_id IS NOT NULL AND bot_id != '' "
-                "ORDER BY timestamp DESC LIMIT 2000"
+            _ib_rows, _all_rows = await asyncio.gather(
+                db._fetchall(
+                    "SELECT inst_id, bot_id, timestamp FROM trades "
+                    "WHERE bot_id IS NOT NULL AND bot_id != '' "
+                    "ORDER BY timestamp DESC LIMIT 2000"
+                ),
+                db.get_trades_multi_bot(bot_ids, limit=5000, account_mode=mode),
             )
             for _r in _ib_rows:
                 _i = _r.get("inst_id") or ""
                 if _i and _i not in inst_last_bot:
                     inst_last_bot[_i] = str(_r.get("bot_id") or "").split(":")[0]
-        except Exception as e:
-            print(f"[trades/paired] inst_last_bot DB fallback: {e}", flush=True)
-    if db:
-        try:
-            for bid in bot_ids:
-                rows = await db.get_trades(
-                    bot_id=bid, limit=5000, account_mode=mode,
-                )
-                for t in rows:
-                    # Defense: skip wrong mode if column missing on old rows
-                    row_mode = (t.get("account_mode") or "").strip().lower()
-                    if row_mode and row_mode != mode:
-                        continue
-                    if not row_mode and mode == "live":
-                        continue  # untagged legacy never enters LIVE
-                    px = float(t.get("px", 0) or 0)
-                    pnl = float(t.get("pnl", 0) or 0)
-                    inst = t.get("inst_id", "")
-                    raw.append({
-                        "time": t.get("timestamp", ""),
-                        "side": t.get("side", ""),
-                        "symbol": inst,
-                        "inst_id": inst,
-                        "ord_id": str(t.get("ord_id", "") or "").strip(),
-                        "entry_price": px,
-                        "exit_price": None,
-                        "pnl": pnl,
-                        "reason": "open" if pnl == 0 else "closed",
-                        "pos_side": "long" if t.get("side") == "buy" else "short",
-                        "signal_id": t.get("signal_id", 0),
-                        "bot_id": bid,
-                        "account_mode": row_mode or mode,
-                        "account_key": t.get("account_key") or ("showcase" if mode == "demo" else "live"),
-                    })
+            for t in _all_rows:
+                bid = t.get("bot_id") or ""
+                # Defense: skip wrong mode if column missing on old rows
+                row_mode = (t.get("account_mode") or "").strip().lower()
+                if row_mode and row_mode != mode:
+                    continue
+                if not row_mode and mode == "live":
+                    continue  # untagged legacy never enters LIVE
+                px = float(t.get("px", 0) or 0)
+                pnl = float(t.get("pnl", 0) or 0)
+                inst = t.get("inst_id", "")
+                raw.append({
+                    "time": t.get("timestamp", ""),
+                    "side": t.get("side", ""),
+                    "symbol": inst,
+                    "inst_id": inst,
+                    "ord_id": str(t.get("ord_id", "") or "").strip(),
+                    "entry_price": px,
+                    "exit_price": None,
+                    "pnl": pnl,
+                    "reason": "open" if pnl == 0 else "closed",
+                    "pos_side": "long" if t.get("side") == "buy" else "short",
+                    "signal_id": t.get("signal_id", 0),
+                    "bot_id": bid,
+                    "account_mode": row_mode or mode,
+                    "account_key": t.get("account_key") or ("showcase" if mode == "demo" else "live"),
+                })
         except Exception as e:
             print(f"[trades/paired] DB read error: {e}", flush=True)
 
@@ -7451,8 +7414,44 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
     bill_by_ord = {}
     flag_raw = bool(raw)
     bills = []
+    raw_fills = []
+    val_ord_ids = set()
+    ord_to_bot = {}
     try:
-        bills = await _fetch_all_trade_bills(mode=mode)
+        # Parallelize: OKX bills + OKX fills + 2 DB aux queries (all independent)
+        async def _safe_bills():
+            return await _fetch_all_trade_bills(mode=mode)
+        async def _safe_fills():
+            return await _fetch_okx_fills(limit=1000, mode=mode)
+        async def _safe_val_ord():
+            if not db:
+                return []
+            try:
+                return await db._fetchall(
+                    "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL AND ord_id != ''"
+                    if not db._pg_mode else
+                    "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL AND ord_id != ''",
+                    (VAL_BOT_ID,))
+            except Exception:
+                return []
+        async def _safe_ord_bot():
+            if not db:
+                return []
+            try:
+                return await db._fetchall(
+                    "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
+                )
+            except Exception:
+                return []
+        _bills_r, _fills_r, _val_r, _obot_r = await asyncio.gather(
+            _safe_bills(), _safe_fills(), _safe_val_ord(), _safe_ord_bot(),
+            return_exceptions=True,
+        )
+        bills = _bills_r if isinstance(_bills_r, list) else []
+        raw_fills = _fills_r if isinstance(_fills_r, list) else []
+        val_ord_ids = {str(r["ord_id"]).strip() for r in (_val_r if isinstance(_val_r, list) else []) if r.get("ord_id")}
+        ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0]
+                      for r in (_obot_r if isinstance(_obot_r, list) else []) if r.get("ord_id")}
         for b in bills:
             bid = str(b.get("ordId", "")).strip()
             if not bid:
@@ -7471,51 +7470,18 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                                     "ts": b.get("ts", ""),
                                     "clOrdId": str(b.get("clOrdId", "") or "").strip()}
             else:
-                # Aggregate pnl/fee across ALL bills sharing the same ordId
-                # (e.g. partial fills where one close order produces multiple
-                # bills). The old code only stored the first bill, which
-                # caused the last-mile enrich (step 4) to overwrite the
-                # correctly aggregated pnl from _pair_bills with a single
-                # bill's pnl — e.g. the ETH close at 20:44 30.08 showed
-                # pnl=13.33 instead of 680.10 (sum of 18 close bills).
                 prev["pnl"] += bp
                 prev["fee"] += bf
                 prev["ts"] = b.get("ts", prev["ts"])
                 if not prev["clOrdId"]:
                     prev["clOrdId"] = str(b.get("clOrdId", "") or "").strip()
     except Exception as e:
-        print(f"[trades/paired] bills fetch error: {e}", flush=True)
-
-    try:
-        raw_fills = await _fetch_okx_fills(limit=1000, mode=mode)
-    except Exception as e:
-        print(f"[trades/paired] fills fetch error: {e}", flush=True)
-        raw_fills = []
+        print(f"[trades/paired] parallel fetch error: {e}", flush=True)
     raw_fills = [f for f in raw_fills
                  if not str(f.get("clOrdId", "") or "").startswith("val")]
-    try:
-        val_ord_ids = {str(r["ord_id"]).strip() for r in await db._fetchall(
-            "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL"
-            " AND ord_id != ''"
-            if not db._pg_mode else
-            "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL"
-            " AND ord_id != ''",
-            (VAL_BOT_ID,)) if r.get("ord_id")}
-    except Exception:
-        val_ord_ids = set()
     if val_ord_ids:
         raw_fills = [f for f in raw_fills
                      if str(f.get("ordId", "")).strip() not in val_ord_ids]
-
-    # ord_id -> bot (attribution fallback for orders without clOrdId)
-    try:
-        _rows = await db._fetchall(
-            "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-        )
-        ord_to_bot = {str(r["ord_id"]).strip(): str(r["bot_id"]).split(":")[0]
-                      for r in _rows if r.get("ord_id")}
-    except Exception:
-        ord_to_bot = {}
     fill_clord = {str(f.get("ordId", "")).strip(): str(f.get("clOrdId", "") or "").strip()
                   for f in raw_fills}
 
