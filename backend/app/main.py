@@ -6618,9 +6618,17 @@ async def _compute_pnl():
         if closed_tagged or epoch:
             source = "history_strict" if closed_tagged else "epoch_empty"
             now = dt.now(tz.utc)
-            week_start = (now - td(days=now.weekday())).replace(
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            # Calendar week in PnL timezone (Europe/Moscow by default) — same basis as "today"
+            try:
+                _ptz = trade_attr.pnl_timezone()
+                _local = now.astimezone(_ptz)
+                week_start = (_local - td(days=_local.weekday())).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+            except Exception:
+                week_start = (now - td(days=now.weekday())).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
             active_labels = _active_bot_labels()
             for tr in closed_tagged:
                 try:
@@ -6786,6 +6794,8 @@ async def _compute_pnl():
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
+        "week_basis": "calendar_week_pnl_tz",
+        "7d_rolling": round(realized_7d, 2),
         "unrealized": round(unrealized, 2),
         "funding": round(funding, 4),
         "funding_source": funding_source,

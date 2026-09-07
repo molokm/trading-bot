@@ -320,9 +320,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return sumClosedSince(86400000)
   })()
   const pnlWeek = (() => {
-    const apiW = pnl?.week ?? pnl?.['7d']
-    if (pnl && apiW != null && (pnl.active_bots || []).length) return Number(apiW)
-    if (pnl && Number(apiW ?? 0) !== 0) return Number(apiW)
+    // Prefer calendar week from API; do NOT fall back to rolling 7d (different metric)
+    if (pnl && pnl.week != null && Number(pnl.week) !== 0) return Number(pnl.week)
+    if (pnl && pnl.week != null && (pnl.active_bots || []).length) return Number(pnl.week)
+    if (pnl && pnl['7d'] != null && Number(pnl['7d']) !== 0) return Number(pnl['7d'])
     if (!activeBotNames.length) return 0
     return sumClosedSince(7 * 86400000)
   })()
