@@ -7107,7 +7107,7 @@ async def reports_summary():
     }
 
 
-_bot_stats_cache = {"ts": 0, "data": {}}  # {"Momentum": {...}, "Impulse 1D": {...}}
+_bot_stats_cache = {"ts": 0, "data": {}, "mode": ""}  # mode-aware cache
 _BOT_STATS_TTL = 15  # seconds
 
 
@@ -7137,7 +7137,8 @@ async def _bot_history_stats() -> dict:
     Always returns entries for known strategy cards (zeros after pnl_epoch reset).
     """
     now_s = _time.time()
-    if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL:
+    current_mode = _account_mode()
+    if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL and _bot_stats_cache.get("mode") == current_mode:
         return _bot_stats_cache["data"]
 
     KNOWN = (
@@ -7205,6 +7206,7 @@ async def _bot_history_stats() -> dict:
         print(f"[bot_stats] error: {e}", flush=True)
     _bot_stats_cache["ts"] = now_s
     _bot_stats_cache["data"] = stats
+    _bot_stats_cache["mode"] = current_mode
     return stats
 
 
@@ -7350,7 +7352,9 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
                 db._fetchall(
                     "SELECT inst_id, bot_id, timestamp FROM trades "
                     "WHERE bot_id IS NOT NULL AND bot_id != '' "
-                    "ORDER BY timestamp DESC LIMIT 2000"
+                    "AND account_mode = $1 "
+                    "ORDER BY timestamp DESC LIMIT 2000",
+                    (mode,),
                 ),
                 db.get_trades_multi_bot(bot_ids, limit=5000, account_mode=mode),
             )
@@ -7444,20 +7448,38 @@ async def _get_paired_trades_impl(limit: int = 500, begin: str = None, end: str 
             if not db:
                 return []
             try:
-                return await db._fetchall(
-                    "SELECT ord_id FROM trades WHERE bot_id = ? AND ord_id IS NOT NULL AND ord_id != ''"
-                    if not db._pg_mode else
-                    "SELECT ord_id FROM trades WHERE bot_id = $1 AND ord_id IS NOT NULL AND ord_id != ''",
-                    (VAL_BOT_ID,))
+                if db._pg_mode:
+                    return await db._fetchall(
+                        "SELECT ord_id FROM trades "
+                        "WHERE bot_id = $1 AND ord_id IS NOT NULL AND ord_id != '' "
+                        "AND account_mode = $2",
+                        (VAL_BOT_ID, mode))
+                else:
+                    return await db._fetchall(
+                        "SELECT ord_id FROM trades "
+                        "WHERE bot_id = ? AND ord_id IS NOT NULL AND ord_id != '' "
+                        "AND account_mode = ?",
+                        (VAL_BOT_ID, mode))
             except Exception:
                 return []
         async def _safe_ord_bot():
             if not db:
                 return []
             try:
-                return await db._fetchall(
-                    "SELECT bot_id, ord_id FROM trades WHERE ord_id IS NOT NULL AND ord_id != ''"
-                )
+                if db._pg_mode:
+                    return await db._fetchall(
+                        "SELECT bot_id, ord_id FROM trades "
+                        "WHERE ord_id IS NOT NULL AND ord_id != '' "
+                        "AND account_mode = $1",
+                        (mode,),
+                    )
+                else:
+                    return await db._fetchall(
+                        "SELECT bot_id, ord_id FROM trades "
+                        "WHERE ord_id IS NOT NULL AND ord_id != '' "
+                        "AND account_mode = ?",
+                        (mode,),
+                    )
             except Exception:
                 return []
         _bills_r, _fills_r, _val_r, _obot_r = await asyncio.gather(
