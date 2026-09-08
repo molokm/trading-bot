@@ -1003,10 +1003,16 @@ class AIStrategy:
         except Exception:
             _mode = "demo"
         for coin, p in self._positions.items():
+            _side = getattr(p, "side", p.get("side") if isinstance(p, dict) else "?")
+            _size = getattr(p, "size", p.get("size") if isinstance(p, dict) else 0)
+            _entry = getattr(p, "entry_price", p.get("entry_price") if isinstance(p, dict) else 0)
+            _stop = getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0)
+            _take = getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0)
+            _lev = getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0)
             open_list.append({
-                "coin": coin, "side": p.side, "size": p.size,
-                "entry_price": p.entry_price, "stop_price": p.stop_price,
-                "take_price": p.take_price, "leverage": p.leverage,
+                "coin": coin, "side": _side, "size": _size,
+                "entry_price": _entry, "stop_price": _stop,
+                "take_price": _take, "leverage": _lev,
                 "account_mode": _mode,
             })
         quant = self._build_quant()
@@ -1728,7 +1734,9 @@ class AIStrategy:
             n = int(getattr(self, "_orphan_tick", 0) or 0) + 1
             self._orphan_tick = n
             if n == 1 or n % 10 == 0:
-                mem = {(p.inst_id, p.side) for p in self._positions.values()}
+                mem = {(getattr(p, "inst_id", p.get("inst_id") if isinstance(p, dict) else "?"),
+                       getattr(p, "side", p.get("side") if isinstance(p, dict) else "?"))
+                      for p in self._positions.values()}
                 closed = await sweep_exchange_orphans(client, self.db, mem)
                 if closed:
                     print(f"[AI] orphan sweep closed {len(closed)}: {closed}", flush=True)
@@ -1736,7 +1744,11 @@ class AIStrategy:
             print(f"[AI] orphan sweep: {e}", flush=True)
         # Keep DB ownership fresh so UI never loses the badge after restart
         for coin, pos in list(self._positions.items()):
-            await claim_open(self.db, self.BOT_ID, pos.inst_id, pos.side, pos.size, pos.entry_price)
+            _inst = getattr(pos, "inst_id", pos.get("inst_id") if isinstance(pos, dict) else "")
+            _side = getattr(pos, "side", pos.get("side") if isinstance(pos, dict) else "")
+            _sz = getattr(pos, "size", pos.get("size") if isinstance(pos, dict) else 0)
+            _entry = getattr(pos, "entry_price", pos.get("entry_price") if isinstance(pos, dict) else 0)
+            await claim_open(self.db, self.BOT_ID, _inst, _side, _sz, _entry)
         await self._fetch_indicators(client)
         await self._manage_stops(client)
         snap = self._snapshot()
@@ -2406,10 +2418,14 @@ class AIStrategy:
             ),
             "open_positions": [
                 {
-                    "coin": p.coin, "symbol": p.inst_id, "side": p.side,
-                    "size": p.size, "entry_price": p.entry_price,
-                    "stop_price": p.stop_price, "take_price": p.take_price,
-                    "leverage": p.leverage,
+                    "coin": getattr(p, "coin", p.get("coin") if isinstance(p, dict) else "?"),
+                    "symbol": getattr(p, "inst_id", p.get("inst_id") if isinstance(p, dict) else "?"),
+                    "side": getattr(p, "side", p.get("side") if isinstance(p, dict) else "?"),
+                    "size": getattr(p, "size", p.get("size") if isinstance(p, dict) else 0),
+                    "entry_price": getattr(p, "entry_price", p.get("entry_price") if isinstance(p, dict) else 0),
+                    "stop_price": getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0),
+                    "take_price": getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0),
+                    "leverage": getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0),
                 }
                 for p in self._positions.values()
             ],

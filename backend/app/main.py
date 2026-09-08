@@ -77,7 +77,7 @@ from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
-from app.services.ai_strategy import AIStrategy, AIConfig, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
+from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
 from app.services.ai_agent import llm_status
 from app.services.orderbook_scalp_strategy import (
     OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID,
@@ -3654,12 +3654,13 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
             elif bot_label.startswith("AI") and ai_bot:
                 pos_map = getattr(ai_bot, "_positions", None)
                 if pos_map is not None and coin not in pos_map:
-                    # AI may use dict positions
                     try:
-                        pos_map[coin] = {
-                            "inst_id": inst_id, "coin": coin, "side": side,
-                            "size": sz, "entry_price": entry, "stop_price": stop,
-                        }
+                        pos_map[coin] = AIPosition(
+                            coin=coin, inst_id=inst_id, side=side,
+                            size=sz, entry_price=entry, stop_price=stop,
+                            take_price=entry * (1.06 if side == "long" else 0.94),
+                            leverage=3.0, opened_at=now_iso,
+                        )
                     except Exception:
                         pass
                     print(f"[positions] injected {coin} → AI", flush=True)
