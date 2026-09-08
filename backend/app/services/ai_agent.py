@@ -377,9 +377,10 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             msg = str(e)
             log.warning("LLM provider %s failed: %s", prov, msg)
             errors.append(f"{prov}:{msg[:120]}")
-            # Rate limit → long cooldown; other errors → short cooldown
+            # Rate limit / credit errors → long cooldown; other errors → short cooldown
             is_rate = "429" in msg or "rate" in msg.lower() or "limit" in msg.lower()
-            mark_provider_cooldown(prov, COOLDOWN_ON_RATE_LIMIT if is_rate else COOLDOWN_ON_ERROR)
+            is_credit = "balance" in msg.lower() or "credit" in msg.lower() or "insufficient" in msg.lower()
+            mark_provider_cooldown(prov, COOLDOWN_ON_RATE_LIMIT if (is_rate or is_credit) else COOLDOWN_ON_ERROR)
             continue
 
     if raw is None:
@@ -411,7 +412,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai,bai").split(",")
         if x.strip()
     ]
     chain = [primary]

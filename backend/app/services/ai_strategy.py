@@ -258,13 +258,21 @@ class AIStrategy:
             is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
         )
         # Preferred provider: BAI first, then config, then env, then groq
-        if os.getenv("BAI_API_KEY", "").strip():
+        # But skip providers that are on cooldown (no API key or exhausted).
+        if os.getenv("BAI_API_KEY", "").strip() and is_provider_available("bai"):
             preferred = "bai"
-        elif self.config.provider:
+        elif self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
             preferred = str(self.config.provider).strip().lower()
         else:
             env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
-            preferred = env or ("groq" if os.getenv("GROQ_API_KEY", "").strip() else "mock")
+            if env and is_provider_available(env):
+                preferred = env
+            elif os.getenv("GROQ_API_KEY", "").strip() and is_provider_available("groq"):
+                preferred = "groq"
+            elif os.getenv("OPENROUTER_API_KEY", "").strip() and is_provider_available("openrouter"):
+                preferred = "openrouter"
+            else:
+                preferred = env or "mock"
         # If preferred is available, use it
         if preferred != "mock" and is_provider_available(preferred):
             return preferred
