@@ -5989,18 +5989,15 @@ async def sync_exchange_close_trades() -> int:
 
     bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
 
-    # Group CLOSE bills by ordId — non-zero pnl = close trade (exit)
+    # Group CLOSE bills by ordId — subType 5/6 = close per OKX SWAP bills API
     close_by_ord: dict = {}
     _bills_with_pnl = 0
     _sub_types_seen = set()
     for b in bills:
         _sub_types_seen.add(str(b.get("subType", "") or ""))
-        try:
-            bp = float(b.get("pnl") or 0)
-        except (TypeError, ValueError):
-            bp = 0.0
-        if abs(bp) < 0.0001:
-            continue  # skip open/add fills — only close trades have non-zero pnl
+        sub = str(b.get("subType", "") or "")
+        if sub not in ("5", "6"):
+            continue
         oid = str(b.get("ordId", "")).strip()
         if not oid:
             continue
@@ -6024,7 +6021,7 @@ async def sync_exchange_close_trades() -> int:
             close_by_ord[oid] = {
                 "inst_id": inst, "cl_ord_id": clord, "ts": ts,
                 "pnl": 0.0, "fee": 0.0, "sz": 0.0, "px_sum": 0.0, "px_n": 0,
-                "sub_type": str(b.get("subType", "") or ""),
+                "sub_type": sub,
             }
         close_by_ord[oid]["pnl"] += bp
         close_by_ord[oid]["fee"] += bf
@@ -6721,8 +6718,115 @@ async def _compute_pnl():
                 flush=True,
             )
         else:
-            # Empty: no close trades in DB yet
+            # Empty: no close trades in DB yet — fallback to old pipeline
             source = "epoch_empty" if epoch else "none"
+            print(f"[pnl] exchange_close_trades empty, falling back to paired pipeline", flush=True)
+            try:
+                resp = await get_paired_trades(limit=5000)
+                trades = resp.get("trades", []) or []
+                trades = filter_rows_for_mode(trades, _account_mode())
+                # Tag and accumulate
+                for tr in trades:
+                    reason = (tr.get("reason") or "").lower()
+                    if reason in ("open", "add"):
+                        continue
+                    if tr.get("pnl") is None:
+                        continue
+                    try:
+                        float(tr.get("pnl"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not _trade_after_epoch(tr, epoch):
+                        continue
+                    bot = ""
+                    try:
+                        bot = (_tag_trade_bot(tr) or "").strip()
+                    except Exception:
+                        bot = ""
+                    if not bot:
+                        try:
+                            bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
+                        except Exception:
+                            bot = ""
+                    # Normalize
+                    if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
+                        bot = "Momentum"
+                    elif bot in ("impulse_strategy", IMP_BOT_ID):
+                        bot = "Impulse 1D"
+                    elif bot in (VAL_BOT_ID, "validation_strategy"):
+                        bot = "MACD+Donchian Validation"
+                    elif bot in (AI_BOT_ID, "ai_strategy", "ai_discretionary", "ai_discretionary_1h"):
+                        bot = "AI Discretionary 1H"
+                    elif bot in ("smart_money", "smart_money_mirror"):
+                        bot = "Умные деньги"
+                    # AI_ONLY_MODE filter
+                    if AI_ONLY_MODE:
+                        cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
+                        if cid.startswith("ai") or bot in (AI_BOT_ID, "ai_strategy", "AI Discretionary 1H"):
+                            if cid and cid.startswith(("rot", "imp", "val", "sm", "vwap", "sc", "scalp")):
+                                bot = ""
+                            else:
+                                bot = "AI Discretionary 1H"
+                        else:
+                            bot = ""
+                    if not bot:
+                        continue
+                    try:
+                        pnl = float(tr.get("pnl", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    per_bot[bot] = per_bot.get(bot, 0.0) + pnl
+                    try:
+                        total_fees += abs(float(tr.get("fee", 0) or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    time_str = tr.get("exit_time", "") or tr.get("time", "") or tr.get("timestamp", "")
+                    if time_str:
+                        try:
+                            t_time = dt.fromisoformat(time_str)
+                            if t_time.tzinfo is None:
+                                t_time = t_time.replace(tzinfo=tz.utc)
+                            now_fb = dt.now(tz.utc)
+                            age_sec = (now_fb - t_time).total_seconds()
+                            try:
+                                if trade_attr.is_calendar_today(time_str):
+                                    realized_1d += pnl
+                            except Exception:
+                                if age_sec <= 86400:
+                                    realized_1d += pnl
+                            if age_sec <= 604800:
+                                realized_7d += pnl
+                            if age_sec <= 2592000:
+                                realized_30d += pnl
+                            try:
+                                _ptz = trade_attr.pnl_timezone()
+                                _local_t = t_time.astimezone(_ptz)
+                                _now_local = now_fb.astimezone(_ptz)
+                                week_start_fb = (_local_t - td(days=_local_t.weekday())).replace(
+                                    hour=0, minute=0, second=0, microsecond=0
+                                )
+                                week_start_iso = week_start_fb.isoformat()
+                                if _local_t >= week_start_fb:
+                                    realized_week += pnl
+                            except Exception:
+                                pass
+                        except (ValueError, OSError, TypeError):
+                            pass
+                if AI_ONLY_MODE:
+                    ai_pnl = per_bot.get("AI Discretionary 1H", 0.0)
+                    total_realized = ai_pnl
+                    account_total = sum(per_bot.values())
+                else:
+                    total_realized = sum(per_bot.values())
+                    account_total = total_realized
+                source = "paired_fallback"
+                print(
+                    f"[pnl] fallback: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                    f"per_bot={ {k: round(v,2) for k,v in per_bot.items()} }",
+                    flush=True,
+                )
+            except Exception as e2:
+                print(f"[pnl] fallback also failed: {e2}", flush=True)
 
     except Exception as e:
         import traceback
