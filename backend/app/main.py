@@ -5991,7 +5991,10 @@ async def sync_exchange_close_trades() -> int:
 
     # Group CLOSE bills by ordId — non-zero pnl = close trade (exit)
     close_by_ord: dict = {}
+    _bills_with_pnl = 0
+    _sub_types_seen = set()
     for b in bills:
+        _sub_types_seen.add(str(b.get("subType", "") or ""))
         try:
             bp = float(b.get("pnl") or 0)
         except (TypeError, ValueError):
@@ -6062,6 +6065,8 @@ async def sync_exchange_close_trades() -> int:
             "close_ts": close_ts,
             "sub_type": info["sub_type"],
         })
+
+    print(f"[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}", flush=True)
 
     if rows:
         try:
