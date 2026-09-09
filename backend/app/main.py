@@ -6113,6 +6113,41 @@ async def pnl_rebuild_exchange():
     }
 
 
+@app.get("/api/debug/bills", dependencies=[Depends(require_admin)])
+async def debug_bills():
+    """Temporary: show raw OKX bills to diagnose sync filter."""
+    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
+    from collections import Counter
+    sub_counter = Counter()
+    pnl_nonzero = 0
+    for b in bills:
+        sub = str(b.get("subType", "") or "")
+        sub_counter[sub] += 1
+        try:
+            if abs(float(b.get("pnl") or 0)) > 0.0001:
+                pnl_nonzero += 1
+        except (TypeError, ValueError):
+            pass
+    samples = []
+    for b in bills[:10]:
+        samples.append({
+            "subType": b.get("subType"),
+            "pnl": b.get("pnl"),
+            "balChg": b.get("balChg"),
+            "fee": b.get("fee"),
+            "type": b.get("type"),
+            "instId": b.get("instId"),
+            "ordId": str(b.get("ordId", ""))[-8:],
+        })
+    return {
+        "total_bills": len(bills),
+        "subTypes": dict(sub_counter),
+        "pnl_nonzero": pnl_nonzero,
+        "samples": samples,
+        "mode": _account_mode(),
+    }
+
+
 @app.post("/api/pnl/rebuild-strategy", dependencies=[Depends(require_admin)])
 async def pnl_rebuild_strategy(data: dict = None):
     """Reassign SOL off AI -> Impulse and rebuild each strategy PnL from DB trades only."""
