@@ -7059,6 +7059,12 @@ async def _bot_history_stats() -> dict:
     if now_s - _bot_stats_cache["ts"] < _BOT_STATS_TTL and _bot_stats_cache.get("mode") == current_mode:
         return _bot_stats_cache["data"]
 
+    # Ensure exchange_close_trades is populated before reading
+    try:
+        await sync_exchange_close_trades()
+    except Exception as e:
+        print(f"[bot_stats] sync_exchange_close_trades: {e}", flush=True)
+
     KNOWN = (
         "Momentum", "Impulse 1D", "MACD+Donchian Validation",
         "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
