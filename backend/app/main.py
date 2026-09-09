@@ -7240,6 +7240,37 @@ async def _bot_history_stats() -> dict:
 
         counts = {}
         pnl_sum = {}
+
+        if not rows:
+            # Fallback: use paired trades pipeline when exchange_close_trades is empty
+            try:
+                resp = await get_paired_trades(limit=5000)
+                trades = resp.get("trades", []) or []
+                for tr in trades:
+                    bot = (tr.get("bot") or _db_bot_name(tr.get("bot_id") or "") or "").strip()
+                    if bot not in KNOWN:
+                        continue
+                    reason = (tr.get("reason") or "").lower()
+                    if reason in ("open", "add"):
+                        continue
+                    if not _trade_after_epoch(tr, epoch):
+                        continue
+                    try:
+                        pnl_val = float(tr.get("pnl", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    c = counts.setdefault(bot, {"total_trades": 0, "wins": 0, "losses": 0})
+                    c["total_trades"] += 1
+                    if pnl_val > 0:
+                        c["wins"] += 1
+                    elif pnl_val < 0:
+                        c["losses"] += 1
+                    pnl_sum[bot] = pnl_sum.get(bot, 0.0) + pnl_val
+                if pnl_sum:
+                    print(f"[bot_stats] fallback paired: bots={list(pnl_sum.keys())}", flush=True)
+            except Exception as e:
+                print(f"[bot_stats] fallback error: {e}", flush=True)
+
         for r in rows:
             bot = (r.get("bot_label") or "").strip()
             if not bot:
