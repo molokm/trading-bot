@@ -5979,8 +5979,8 @@ _EXCHANGE_SYNC_TTL = 60  # 1 minute — exchange_close_trades must stay fresh fo
 
 
 async def sync_exchange_close_trades() -> int:
-    """Fetch all OKX close bills (type=2, subType 5/6), group by ordId, tag by
-    clOrdId prefix, and upsert into exchange_close_trades table.
+    """Fetch all OKX trade bills (type=2), filter close trades (non-zero pnl),
+    group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
     Returns number of trades synced."""
     global _exchange_sync_ts
     now = _time.time()
@@ -5989,19 +5989,18 @@ async def sync_exchange_close_trades() -> int:
 
     bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
 
-    # Group CLOSE bills by ordId
+    # Group CLOSE bills by ordId — non-zero pnl = close trade (exit)
     close_by_ord: dict = {}
     for b in bills:
-        sub = str(b.get("subType", "") or "")
-        if sub not in ("5", "6"):
-            continue
-        oid = str(b.get("ordId", "")).strip()
-        if not oid:
-            continue
         try:
             bp = float(b.get("pnl") or 0)
         except (TypeError, ValueError):
             bp = 0.0
+        if abs(bp) < 0.0001:
+            continue  # skip open/add fills — only close trades have non-zero pnl
+        oid = str(b.get("ordId", "")).strip()
+        if not oid:
+            continue
         try:
             bf = abs(float(b.get("fee") or 0))
         except (TypeError, ValueError):
@@ -6022,7 +6021,7 @@ async def sync_exchange_close_trades() -> int:
             close_by_ord[oid] = {
                 "inst_id": inst, "cl_ord_id": clord, "ts": ts,
                 "pnl": 0.0, "fee": 0.0, "sz": 0.0, "px_sum": 0.0, "px_n": 0,
-                "sub_type": sub,
+                "sub_type": str(b.get("subType", "") or ""),
             }
         close_by_ord[oid]["pnl"] += bp
         close_by_ord[oid]["fee"] += bf
