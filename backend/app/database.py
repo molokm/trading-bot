@@ -584,6 +584,39 @@ class Database:
         sql += " GROUP BY inst_id, bot_label ORDER BY bot_label, inst_id"
         return await self._fetchall(sql, params)
 
+    async def get_exchange_pnl_timebucket(self, bot_label: str = None,
+                                          account_mode: str = None,
+                                          epoch_ms: int = 0) -> list[dict]:
+        """Return close trades with close_ts for deterministic time-bucket aggregation.
+
+        Unlike get_exchange_pnl (pre-aggregated), this returns individual rows
+        so the caller can bucket by 1d/7d/30d/week using close_ts."""
+        sql = """
+            SELECT ord_id, inst_id, bot_label, pnl, fee, close_ts
+            FROM exchange_close_trades WHERE 1=1
+        """
+        params: tuple = ()
+        if bot_label:
+            if self._pg_mode:
+                sql += f" AND bot_label = ${len(params)+1}"
+            else:
+                sql += " AND bot_label = ?"
+            params += (bot_label,)
+        if account_mode:
+            if self._pg_mode:
+                sql += f" AND account_mode = ${len(params)+1}"
+            else:
+                sql += " AND account_mode = ?"
+            params += (account_mode,)
+        if epoch_ms:
+            if self._pg_mode:
+                sql += f" AND close_ts >= ${len(params)+1}"
+            else:
+                sql += " AND close_ts >= ?"
+            params += (epoch_ms,)
+        sql += " ORDER BY close_ts DESC"
+        return await self._fetchall(sql, params)
+
     async def get_exchange_close_trade_count(self, bot_label: str = None, epoch_ms: int = 0) -> int:
         """Count distinct close orders (ord_id) in exchange_close_trades."""
         sql = "SELECT COUNT(DISTINCT ord_id) AS cnt FROM exchange_close_trades WHERE 1=1"

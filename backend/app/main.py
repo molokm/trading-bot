@@ -5975,7 +5975,7 @@ _CLORD_BOT_MAP = {
 }
 
 _exchange_sync_ts: float = 0
-_EXCHANGE_SYNC_TTL = 300  # 5 minutes between full syncs
+_EXCHANGE_SYNC_TTL = 60  # 1 minute — exchange_close_trades must stay fresh for PnL
 
 
 async def sync_exchange_close_trades() -> int:
@@ -6537,74 +6537,14 @@ async def _compute_pnl():
     _mode = _account_mode()
     week_start_iso = None
 
-    """Dashboard PnL: ONLY closed trades with hard strategy binding, after pnl_epoch.
+    """Dashboard PnL from exchange_close_trades (deterministic DB source).
 
-    Strict tags: clOrdId prefix / DB bot_id / explicit bot label from pairing.
-    Untagged OKX noise never enters Total / 1d / week / strategy cards.
+    Replaces the old get_paired_trades() pipeline which recomputed from raw
+    OKX bills on every call, causing PnL to fluctuate without new trades.
+    exchange_close_trades is synced from OKX bills via sync_exchange_close_trades()
+    and upserted by ord_id (dedup at DB level).
     """
     from datetime import datetime as dt, timezone as tz, timedelta as td
-
-    STRICT_BOTS = {
-        "AI Discretionary 1H",
-    } if AI_ONLY_MODE else {
-        "Momentum",
-        "Impulse 1D",
-        "MACD+Donchian Validation",
-        "AI Discretionary 1H",
-        "Order Book Scalp",
-        "VWAP Mean Reversion",
-        "Умные деньги",
-    }
-
-    def _normalize_bot(tr: dict) -> str:
-        bot = (tr.get("bot") or "").strip()
-        if not bot:
-            try:
-                bot = (_tag_trade_bot(tr) or "").strip()
-            except Exception:
-                bot = ""
-        if not bot:
-            try:
-                bot = (_db_bot_name(tr.get("bot_id") or "") or "").strip()
-            except Exception:
-                bot = ""
-        if bot in ("rotation_strategy", "momentum_strategy", MOM_BOT_ID, ROT_BOT_ID):
-            bot = "Momentum"
-        elif bot in ("impulse_strategy", IMP_BOT_ID):
-            bot = "Impulse 1D"
-        elif bot in (VAL_BOT_ID, "validation_strategy"):
-            bot = "MACD+Donchian Validation"
-        elif bot in (AI_BOT_ID, "ai_strategy", "ai_discretionary", "ai_discretionary_1h"):
-            bot = "AI Discretionary 1H"
-        elif bot in ("smart_money", "smart_money_mirror"):
-            bot = "Умные деньги"
-
-        inst_u = (tr.get("inst_id") or tr.get("symbol") or "").upper()
-        cid = str(tr.get("clOrdId") or tr.get("cl_ord_id") or "").lower()
-
-        if AI_ONLY_MODE:
-            if cid.startswith("ai") or bot in (AI_BOT_ID, "ai_strategy", "AI Discretionary 1H"):
-                if cid and cid.startswith(("rot", "imp", "val", "sm", "vwap", "sc", "scalp")):
-                    return ""
-                return "AI Discretionary 1H"
-            return ""
-
-        if bot == "AI Discretionary 1H" and "SOL" in inst_u and not cid.startswith("ai"):
-            bot = "Impulse 1D"
-        if bot not in STRICT_BOTS:
-            return ""
-        if cid:
-            if cid.startswith("rot"):
-                bot = "Momentum"
-            elif cid.startswith("imp"):
-                bot = "Impulse 1D"
-            elif cid.startswith("ai"):
-                bot = "AI Discretionary 1H"
-            elif cid.startswith("val"):
-                bot = "MACD+Donchian Validation"
-            if bot not in STRICT_BOTS:
-                return ""
-        return bot
 
     realized_1d = 0.0
     realized_7d = 0.0
@@ -6628,63 +6568,33 @@ async def _compute_pnl():
             except Exception:
                 pass
 
-        resp = await get_paired_trades(limit=5000)
-        trades = resp.get("trades", []) or []
-        trades = filter_rows_for_mode(trades, _account_mode())
-        # Dedup: OKX bills (with ord_id) are authoritative. Remove in-memory/DB
-        # trades without ord_id that duplicate an OKX bill (same inst + pnl).
-        # This prevents double-counting from the multi-source pipeline.
-        _bills_by_inst_pnl: dict = set()
-        for tr in trades:
-            _oid = str(tr.get("ord_id") or "").strip()
-            if _oid:
-                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
-                _pnl = round(float(tr.get("pnl") or 0), 2)
-                _bills_by_inst_pnl.add((_inst, _pnl))
-        _deduped = []
-        for tr in trades:
-            _oid = str(tr.get("ord_id") or "").strip()
-            if not _oid:
-                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
-                _pnl = round(float(tr.get("pnl") or 0), 2)
-                if (_inst, _pnl) in _bills_by_inst_pnl:
-                    continue  # skip in-memory duplicate of OKX bill
-            _deduped.append(tr)
-        trades = _deduped
-        closed_tagged = []
-        for tr in trades:
-            reason = (tr.get("reason") or "").lower()
-            if reason in ("open", "add"):
-                continue
-            if tr.get("pnl") is None:
-                continue
+        # Ensure exchange_close_trades is fresh before reading PnL
+        try:
+            await sync_exchange_close_trades()
+        except Exception as e:
+            print(f"[pnl] sync_exchange_close_trades: {e}", flush=True)
+
+        epoch_ms = 0
+        if epoch:
             try:
-                float(tr.get("pnl"))
-            except (TypeError, ValueError):
-                continue
-            if not _trade_after_epoch(tr, epoch):
-                continue
-            bot = _normalize_bot(tr)
-            try:
-                _inst = str(tr.get("inst_id") or tr.get("symbol") or "")
-                _et = str(tr.get("exit_time") or tr.get("time") or "")
-                _pnl = float(tr.get("pnl") or 0)
+                epoch_ms = int(dt.fromisoformat(epoch).replace(tzinfo=tz.utc).timestamp() * 1000)
             except Exception:
                 pass
-            if not bot:
-                skipped_untagged += 1
-                continue
-            if not _trade_matches_mode(tr, _account_mode()):
-                continue
-            tr = dict(tr)
-            tr["bot"] = bot
-            tr["account_mode"] = tr.get("account_mode") or _account_mode()
-            closed_tagged.append(tr)
 
-        if closed_tagged or epoch:
-            source = "history_strict" if closed_tagged else "epoch_empty"
+        # Bot filter: AI_ONLY_MODE → only AI trades count toward total
+        bot_filter = "AI Discretionary 1H" if AI_ONLY_MODE else None
+
+        # Primary source: deterministic DB rows (ord_id PK = no duplicates)
+        rows = await db.get_exchange_pnl_timebucket(
+            bot_label=bot_filter,
+            account_mode=_mode,
+            epoch_ms=epoch_ms,
+        )
+
+        if rows:
+            source = "exchange_close_trades"
             now = dt.now(tz.utc)
-            # Calendar week in PnL timezone (Europe/Moscow by default) — same basis as "today"
+            # Calendar week in PnL timezone (Europe/Moscow by default)
             try:
                 _ptz = trade_attr.pnl_timezone()
                 _local = now.astimezone(_ptz)
@@ -6699,78 +6609,85 @@ async def _compute_pnl():
                 week_start_iso = week_start.isoformat()
             except Exception:
                 week_start_iso = None
-            active_labels = _active_bot_labels()
-            for tr in closed_tagged:
+
+            for r in rows:
                 try:
-                    pnl = float(tr.get("pnl", 0) or 0)
+                    pnl = float(r.get("pnl", 0) or 0)
                 except (TypeError, ValueError):
                     continue
-                bot = tr.get("bot") or ""
+                bot = (r.get("bot_label") or "").strip()
+                close_ts_ms = int(r.get("close_ts", 0) or 0)
+
+                # Per-bot aggregation
                 if bot:
                     per_bot[bot] = per_bot.get(bot, 0.0) + pnl
-                if AI_ONLY_MODE:
-                    if bot != "AI Discretionary 1H":
-                        account_total += pnl
-                        continue
-                elif active_labels and bot not in active_labels:
-                    account_total += pnl
-                    continue
-                total_realized += pnl
-                account_total += pnl
+
+                # Fees
                 try:
-                    total_fees += abs(float(tr.get("fee", 0) or 0))
+                    total_fees += abs(float(r.get("fee", 0) or 0))
                 except (TypeError, ValueError):
                     pass
-                time_str = tr.get("exit_time", "") or tr.get("time", "") or tr.get("timestamp", "")
-                if time_str:
+
+                # Time-bucket aggregation from close_ts (milliseconds)
+                if close_ts_ms:
                     try:
-                        t_time = dt.fromisoformat(time_str)
-                        if t_time.tzinfo is None:
-                            t_time = t_time.replace(tzinfo=tz.utc)
-                        age_sec = (now - t_time).total_seconds()
-                        try:
-                            if trade_attr.is_calendar_today(time_str):
-                                realized_1d += pnl
-                        except Exception:
-                            if age_sec <= 86400:
-                                realized_1d += pnl
-                        if age_sec <= 604800:
-                            realized_7d += pnl
-                        if age_sec <= 2592000:
-                            realized_30d += pnl
-                        # Calendar week: Monday 00:00 → Sunday 23:59 in PnL TZ (MSK)
-                        try:
-                            _ws = week_start
-                            _tt = t_time
-                            if _ws.tzinfo is not None:
-                                _tt = _tt.astimezone(_ws.tzinfo)
-                            if _tt >= _ws:
-                                realized_week += pnl
-                        except Exception:
-                            if t_time >= week_start:
-                                realized_week += pnl
+                        t_time = dt.fromtimestamp(close_ts_ms / 1000, tz=tz.utc)
                     except (ValueError, OSError, TypeError):
-                        pass
+                        continue
+
+                    # 1d: calendar today in PnL timezone
+                    try:
+                        _ptz = trade_attr.pnl_timezone()
+                        _local_t = t_time.astimezone(_ptz)
+                        _now_local = now.astimezone(_ptz)
+                        if _local_t.date() == _now_local.date():
+                            realized_1d += pnl
+                    except Exception:
+                        age_sec = (now - t_time).total_seconds()
+                        if age_sec <= 86400:
+                            realized_1d += pnl
+
+                    # 7d / 30d by age
+                    age_sec = (now - t_time).total_seconds()
+                    if age_sec <= 604800:
+                        realized_7d += pnl
+                    if age_sec <= 2592000:
+                        realized_30d += pnl
+
+                    # Calendar week: Monday 00:00 in PnL TZ
+                    try:
+                        _ws = week_start
+                        _tt = t_time
+                        if _ws.tzinfo is not None:
+                            _tt = _tt.astimezone(_ws.tzinfo)
+                        if _tt >= _ws:
+                            realized_week += pnl
+                    except Exception:
+                        if t_time >= week_start:
+                            realized_week += pnl
+
+            # AI_ONLY_MODE: total = AI only; account_total = all bots
+            if AI_ONLY_MODE:
+                ai_pnl = per_bot.get("AI Discretionary 1H", 0.0)
+                total_realized = ai_pnl
+                account_total = sum(per_bot.values())
+            else:
+                total_realized = sum(per_bot.values())
+                account_total = total_realized
+
             print(
-                f"[pnl] strict: total={total_realized:.2f} 1d={realized_1d:.2f} "
+                f"[pnl] exchange: total={total_realized:.2f} 1d={realized_1d:.2f} "
                 f"week={realized_week:.2f} per_bot={ {k: round(v,2) for k,v in per_bot.items()} } "
-                f"tagged={len(closed_tagged)} skip_untagged={skipped_untagged} epoch={epoch!r}",
+                f"trades={len(rows)} epoch={epoch!r}",
                 flush=True,
             )
-            for tr in closed_tagged:
-                if tr.get("bot") == "AI Discretionary 1H":
-                    try:
-                        _t = tr.get("time") or tr.get("exit_time") or "?"
-                    except Exception:
-                        _t = "?"
-                    print(
-                        f"[pnl-ai] {tr.get('inst_id','')} pnl={float(tr.get('pnl',0) or 0):.2f} "
-                        f"fee={float(tr.get('fee',0) or 0):.2f} time={_t} oid={tr.get('ord_id','')}",
-                        flush=True,
-                    )
+        else:
+            # Empty: no close trades in DB yet
+            source = "epoch_empty" if epoch else "none"
+
     except Exception as e:
         import traceback
-        print(f"[pnl] History source error: {e}", flush=True)
+        print(f"[pnl] exchange_close_trades error: {e}", flush=True)
         traceback.print_exc()
 
     # Unrealized from open positions (exchange)
@@ -7133,7 +7050,7 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
 
 
 async def _bot_history_stats() -> dict:
-    """Per-bot KPI from the SAME pipeline as /api/pnl — works even if bots are stopped.
+    """Per-bot KPI from exchange_close_trades — deterministic, no recomputation.
 
     Always returns entries for known strategy cards (zeros after pnl_epoch reset).
     """
@@ -7153,27 +7070,33 @@ async def _bot_history_stats() -> dict:
             "wins": 0,
             "losses": 0,
             "win_rate": 0.0,
-            "total_pnl_source": "okx_history",
+            "total_pnl_source": "exchange_close_trades",
         }
         for name in KNOWN
     }
     try:
-        pnl_resp = await get_pnl()
-        per = pnl_resp.get("per_bot") or {}
-        resp = await get_paired_trades(limit=5000)
+        from datetime import datetime as dt, timezone as tz
         epoch = await get_pnl_epoch()
+        epoch_ms = 0
+        if epoch:
+            try:
+                epoch_ms = int(dt.fromisoformat(epoch).replace(tzinfo=tz.utc).timestamp() * 1000)
+            except Exception:
+                pass
+
+        rows = await db.get_exchange_pnl_timebucket(
+            account_mode=current_mode,
+            epoch_ms=epoch_ms,
+        )
+
         counts = {}
         pnl_sum = {}
-        for tr in resp.get("trades", []) or []:
-            bot = tr.get("bot") or _db_bot_name(tr.get("bot_id") or "") or ""
-            if bot not in KNOWN:
-                continue
-            if (tr.get("reason") or "").lower() in ("open", "add"):
-                continue
-            if not _trade_after_epoch(tr, epoch):
+        for r in rows:
+            bot = (r.get("bot_label") or "").strip()
+            if not bot:
                 continue
             try:
-                pnl = float(tr.get("pnl", 0) or 0)
+                pnl = float(r.get("pnl", 0) or 0)
             except (TypeError, ValueError):
                 continue
             c = counts.setdefault(bot, {"total_trades": 0, "wins": 0, "losses": 0})
@@ -7185,23 +7108,16 @@ async def _bot_history_stats() -> dict:
             pnl_sum[bot] = pnl_sum.get(bot, 0.0) + pnl
 
         for bot in KNOWN:
-            mapped_pnl = per.get(bot)
-            if mapped_pnl is None:
-                for k, v in per.items():
-                    if (_db_bot_name(k) or k) == bot:
-                        mapped_pnl = v
-                        break
-            if mapped_pnl is None:
-                mapped_pnl = pnl_sum.get(bot, 0.0)
+            total_pnl = pnl_sum.get(bot, 0.0)
             c = counts.get(bot) or {"total_trades": 0, "wins": 0, "losses": 0}
             total = int(c["total_trades"])
             stats[bot] = {
-                "total_pnl": round(float(mapped_pnl or 0), 2),
+                "total_pnl": round(total_pnl, 2),
                 "total_trades": total,
                 "wins": int(c.get("wins", 0)),
                 "losses": int(c.get("losses", 0)),
                 "win_rate": round(c["wins"] / total * 100, 1) if total else 0.0,
-                "total_pnl_source": "okx_history",
+                "total_pnl_source": "exchange_close_trades",
             }
     except Exception as e:
         print(f"[bot_stats] error: {e}", flush=True)
