@@ -77,6 +77,7 @@ from app.services.strategy_manager import StrategyManager, PerUserClientManager
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
+from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, STRATEGY_NAME as AI_SCALE_NAME
 from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
 from app.services.ai_agent import llm_status
 from app.services.orderbook_scalp_strategy import (
@@ -221,6 +222,7 @@ equity_tracker: Optional[EquityTracker] = None
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
 ai_bot = None
+ai_scale_bot = None
 scalp_bot = None  # Order Book Scalp instance (retired)
 vwap_rev_bot = None  # VWAP Mean Reversion instance
 sm_tracker = None  # Smart Money Tracker instance
@@ -2058,6 +2060,65 @@ async def ai_stop():
     return {"message": "AI stopped", "running": False}
 
 
+
+
+@app.get("/api/ai-scale/status")
+async def ai_scale_status():
+    global ai_scale_bot
+    if not ai_scale_bot:
+        return {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.0-scale"}
+    return ai_scale_bot.get_status()
+
+
+@app.post("/api/ai-scale/start", dependencies=[Depends(require_admin)])
+async def ai_scale_start(data: dict = None):
+    global ai_scale_bot
+    data = data or {}
+    if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
+        return {"message": "AI Scale-In already running", **ai_scale_bot.get_status()}
+    _demo = bool(_env_demo)
+    # Prefer demo for this experimental bot
+    if not _demo:
+        # Allow live only if explicitly requested
+        if not data.get("allow_live"):
+            raise HTTPException(
+                status_code=400,
+                detail="AI Scale-In пока запускайте в DEMO (переключите режим или allow_live=1).",
+            )
+    client = client_manager.get_client() if client_manager else None
+    if not client:
+        raise HTTPException(status_code=400, detail="OKX client not configured")
+    _exec = bool(data["execute"]) if "execute" in data else True
+    capital = float(data.get("capital") or 10000)
+    cfg = AIScaleConfig(
+        capital=capital,
+        max_leverage=float(data.get("max_leverage") or 3),
+        max_positions=1,
+        risk_per_trade=float(data.get("risk_per_trade") or 0.02),
+        poll_interval_sec=int(data.get("poll_interval_sec") or 120),
+        execute=_exec,
+        scale_enabled=True,
+        max_adds=int(data.get("max_adds") or 3),
+        min_adverse_pct=float(data.get("min_adverse_pct") or 0.4),
+        max_adverse_pct=float(data.get("max_adverse_pct") or 3.5),
+        provider=data.get("provider"),
+    )
+    if data.get("symbols"):
+        cfg.symbols = list(data["symbols"])
+    ai_scale_bot = AIScaleStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
+    ai_scale_bot.start()
+    print(f"[AI-Scale] Started DEMO capital={capital} execute={_exec}", flush=True)
+    return {"message": "AI Scale-In started", **ai_scale_bot.get_status()}
+
+
+@app.post("/api/ai-scale/stop", dependencies=[Depends(require_admin)])
+async def ai_scale_stop():
+    global ai_scale_bot
+    if ai_scale_bot:
+        ai_scale_bot.stop()
+    return {"message": "AI Scale-In stopped", "running": False}
+
+
 @app.post("/api/ai/execute", dependencies=[Depends(require_admin)])
 async def ai_execute(data: dict = None):
     """Toggle AI auto-trading (execute=on/off) at runtime. Optionally resets
@@ -2980,6 +3041,7 @@ async def health(request: Request):
             "impulse": _bot_flag(impulse),
             "validation": _bot_flag(validation),
             "ai": _bot_flag(ai_bot),
+        "ai_scale": _bot_flag(ai_scale_bot),
             "scalp": False,
             "vwap_rev": _bot_flag(vwap_rev_bot),
             "smart_money": bool(getattr(sm_tracker, "_running", False)),
@@ -5986,6 +6048,7 @@ async def _fetch_all_trade_bills(limit_per_page: int = 100, mode: str = None) ->
 # ── Exchange close trades sync: OKX bills → DB ──
 
 _CLORD_BOT_MAP = {
+    "ais": "AI Scale-In 1H",
     "ai": "AI Discretionary 1H",
     "rot": "Momentum", "momentum": "Momentum",
     "imp": "Impulse 1D",
@@ -6527,8 +6590,8 @@ def _active_bot_labels() -> set:
     labels = set()
     try:
         if AI_ONLY_MODE:
-            # History PnL must stay visible even if the bot is temporarily stopped
             labels.add("AI Discretionary 1H")
+            labels.add("AI Scale-In 1H")
             return labels
         if rotation and getattr(rotation, "_running", False):
             labels.add("Momentum")

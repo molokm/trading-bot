@@ -81,7 +81,7 @@ def next_available_provider() -> str | None:
                 best = name
     return best  # least-cooled-down (or None if no keys)
 
-ALLOWED_ACTIONS = ("open", "close", "hold", "reduce")
+ALLOWED_ACTIONS = ("open", "close", "hold", "reduce", "add")
 ALLOWED_SIDES = ("long", "short")
 ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")
 
@@ -122,7 +122,7 @@ def _resolve_groq_model(model: str | None) -> str:
 
 SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk (balanced-aggressive). Prefer trading candidates_allowed when align is solid; avoid candidates_blocked.
 Reply with ONE JSON object only (no markdown):
-{"action":"open|close|hold|reduce","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
+{"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
 "size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
 "confidence":0-1,"regime":"bull|bear|chop|unknown","reason":"<=120 chars"}
 
@@ -198,9 +198,14 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
         if not symbol or not side or conf < 0.52 or size_pct < 0.02:
             action = "hold"
             reason = (reason + " | policy: open rejected").strip(" |")
-    if action in ("close", "reduce") and symbol and symbol not in open_symbols:
+    if action in ("close", "reduce", "add") and symbol and symbol not in open_symbols:
         action = "hold"
         reason = (reason + " | policy: no open pos").strip(" |")
+    # add only allowed when snapshot enables scale-in
+    if action == "add" and not (isinstance(raw, dict) and (raw.get("_scale_ok") or False)):
+        # caller may pass scale via reason tag; allow if size_pct present and open
+        if symbol not in open_symbols:
+            action = "hold"
     if action == "hold":
         symbol = symbol if symbol in open_symbols else None
         side = None

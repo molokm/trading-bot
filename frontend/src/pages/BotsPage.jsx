@@ -1,6 +1,6 @@
 const AI_ONLY_MODE = true
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import {
+import { Brain, 
   Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
   ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot
 } from 'lucide-react'
@@ -486,6 +486,9 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
   const [valLoading, setValLoading] = useState(false)
   const [aiStatus, setAiStatus] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
+  const [aiScaleStatus, setAiScaleStatus] = useState(null)
+  const [aiScaleLoading, setAiScaleLoading] = useState(false)
+  const [aiScaleCapital, setAiScaleCapital] = useState(5000)
   const [aiCapital, setAiCapital] = useState(() => {
     try {
       const v = Number(localStorage.getItem('ai_live_capital') || '10000')
@@ -518,11 +521,12 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
 
   const refreshStatus = useCallback(async () => {
     // Skip disabled bots in AI_ONLY_MODE to reduce API calls by 75%
-    const [m, i, v, a] = await Promise.all([
+    const [m, i, v, a, asc] = await Promise.all([
       AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
       AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
       AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
       api.aiStatus().catch(() => null),
+      api.aiScaleStatus().catch(() => null),
     ])
     if (m) {
       setMomentumStatus(m)
@@ -553,6 +557,9 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
     }
     if (a) {
       setAiStatus(a)
+    }
+    if (asc) {
+      setAiScaleStatus(asc)
     }
     setApiAlive(!!(m || i || v || a))
   }, [])
@@ -631,6 +638,25 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setAiLoading(false)
+  }
+
+  const aiScaleToggle = async () => {
+    setAiScaleLoading(true)
+    try {
+      if (aiScaleStatus?.running) {
+        await api.aiScaleStop()
+      } else {
+        const cap = Math.max(100, Number(aiScaleCapital) || 5000)
+        await api.aiScaleStart({
+          capital: cap,
+          execute: true,
+          max_adds: 3,
+          symbols: ['BTC', 'ETH', 'SOL', 'XRP'],
+        })
+      }
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setAiScaleLoading(false)
   }
 
   const handleSave = (botData) => {
@@ -868,6 +894,46 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
             onCapitalChange={(v) => setAiCapital(v)}
           />
         )}
+
+        {/* AI Scale-In — DCA by AI when trend holds */}
+        <BotCard
+          id="ai-scale"
+          name="AI Scale-In 1H"
+          stratId="ai_scale_1h"
+          version={aiScaleStatus?.version || 'v1.0'}
+          icon={Brain}
+          accentDim="from-violet-500/20"
+          accentTxt="text-violet-400"
+          statusMode={aiScaleStatus?.running ? 'live' : 'idle'}
+          statusLabel={aiScaleStatus?.running ? 'Running' : 'Stopped'}
+          coins={aiScaleStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
+          description={
+            aiScaleStatus?.description
+            || 'Вход по AI-сигналу. Если цена против, но тренд по индикаторам держится — AI докупает частями. Выход тоже через AI/индикаторы.'
+          }
+          tags={[
+            'Scale-In',
+            'AI sizing',
+            `adds≤${aiScaleStatus?.scale_in?.max_adds || 3}`,
+          ]}
+          pnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
+          trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
+          winRate={aiScaleStatus?.win_rate}
+          sparklinePnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
+          startedAt={aiScaleStatus?.running && aiScaleStatus?.started_at ? Date.parse(aiScaleStatus.started_at) : null}
+          openPositions={aiScaleStatus?.open_positions || []}
+          managed={aiScaleStatus?.running}
+          lastActivity={aiScaleStatus?.last_activity}
+          heartbeatMaxAge={(aiScaleStatus?.config?.poll_interval_sec || 120) * 3}
+          apiAlive={apiAlive}
+          onToggle={aiScaleToggle}
+          isGuest={isGuest}
+          loading={aiScaleLoading}
+          t={t}
+          showCapital={!!demoMode && !aiScaleStatus?.running}
+          capitalValue={aiScaleCapital}
+          onCapitalChange={(v) => setAiScaleCapital(v)}
+        />
 
       </div>
 

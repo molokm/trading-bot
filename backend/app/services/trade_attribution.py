@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 CLORD_PREFIX_TO_BOT = {
     "rot": "Momentum",
     "imp": "Impulse 1D",
+    "ais": "AI Scale-In 1H",
     "ai": "AI Discretionary 1H",
     "val": "MACD+Donchian Validation",
     "scl": "Order Book Scalp",
@@ -34,6 +35,7 @@ BOT_ID_TO_LABEL = {
     "impulse_strategy": "Impulse 1D",
     "validation_strategy": "MACD+Donchian Validation",
     "ai_strategy": "AI Discretionary 1H",
+    "ai_scale_strategy": "AI Scale-In 1H",
     "smart_money": "Умные деньги",
     "smart_money_mirror": "Умные деньги",
 }

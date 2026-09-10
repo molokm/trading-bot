@@ -209,6 +209,12 @@ export const api = {
 
   // ── AI Discretionary ──
   aiStatus: () => request('/ai/status'),
+  aiScaleStatus: () => request('/ai-scale/status'),
+  aiScaleStart: (config = {}) =>
+    request('/ai-scale/start', { method: 'POST', body: JSON.stringify(config || {}) }),
+  aiScaleStop: () =>
+    request('/ai-scale/stop', { method: 'POST' }),
+
   aiStart: (config = {}) =>
     request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
   aiStop: () =>
