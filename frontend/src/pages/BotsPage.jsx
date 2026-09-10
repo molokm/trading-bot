@@ -489,6 +489,8 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
   const [aiScaleLoading, setAiScaleLoading] = useState(false)
   const [aiScaleCapital, setAiScaleCapital] = useState(5000)
+  const [abCompare, setAbCompare] = useState(null)
+  const [abLoading, setAbLoading] = useState(false)
   const [aiCapital, setAiCapital] = useState(() => {
     try {
       const v = Number(localStorage.getItem('ai_live_capital') || '10000')
@@ -561,6 +563,11 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
     if (asc) {
       setAiScaleStatus(asc)
     }
+    try {
+      const ab = await api.aiAbCompare().catch(() => null)
+      if (ab) setAbCompare(ab)
+    } catch {}
+
     setApiAlive(!!(m || i || v || a))
   }, [])
 
@@ -638,6 +645,18 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setAiLoading(false)
+  }
+
+  const abStartBoth = async () => {
+    setAbLoading(true)
+    try {
+      await api.aiAbStart({
+        capital_a: Math.max(100, Number(aiCapital) || 5000),
+        capital_b: Math.max(100, Number(aiScaleCapital) || 4000),
+      })
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setAbLoading(false)
   }
 
   const aiScaleToggle = async () => {
@@ -895,7 +914,41 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
           />
         )}
 
-        {/* AI Scale-In — DCA by AI when trend holds */}
+        
+        {/* Demo A/B compare */}
+        {demoMode && abCompare && (
+          <div className="panel col-span-full px-4 py-3 mb-2 border border-violet-500/30 bg-violet-500/5 rounded-[var(--radius-lg)]">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <div className="text-sm font-semibold text-violet-300">Demo A/B · Discretionary vs Scale-In</div>
+              {!isGuest && (
+                <button
+                  type="button"
+                  disabled={abLoading}
+                  onClick={abStartBoth}
+                  className="text-xs px-3 py-1.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-white disabled:opacity-50"
+                >
+                  {abLoading ? '…' : 'Старт A/B (оба)'}
+                </button>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              {[abCompare.a, abCompare.b].filter(Boolean).map((s) => (
+                <div key={s.label} className="rounded-lg border border-[var(--border)] p-3 bg-[var(--bg-elevated)]">
+                  <div className="font-medium mb-1">{s.label} {s.running ? '· live' : '· stop'}</div>
+                  <div>PnL: <span className={Number(s.pnl) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>${Number(s.pnl || 0).toFixed(2)}</span></div>
+                  <div>Сделок: {s.trades ?? 0} · WR: {s.win_rate != null ? `${s.win_rate}%` : '—'}</div>
+                  <div>Открыто: {s.open ?? 0} · session: ${Number(s.session_pnl || 0).toFixed(2)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-2 text-[11px] text-[var(--text-muted)]">
+              {abCompare.winner ? `Лидер: ${abCompare.winner}. ` : ''}{abCompare.note}
+              {' '}Рекомендуется: A=BTC/ETH, B=SOL/XRP, ≥5 сделок каждый, горизонт ~7 дней.
+            </div>
+          </div>
+        )}
+
+{/* AI Scale-In — DCA by AI when trend holds */}
         <BotCard
           id="ai-scale"
           name="AI Scale-In 1H"

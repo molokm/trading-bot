@@ -2098,9 +2098,9 @@ async def ai_scale_start(data: dict = None):
         poll_interval_sec=int(data.get("poll_interval_sec") or 120),
         execute=_exec,
         scale_enabled=True,
-        max_adds=int(data.get("max_adds") or 3),
-        min_adverse_pct=float(data.get("min_adverse_pct") or 0.4),
-        max_adverse_pct=float(data.get("max_adverse_pct") or 3.5),
+        max_adds=int(data.get("max_adds") or 2),
+        min_adverse_pct=float(data.get("min_adverse_pct") or 0.6),
+        max_adverse_pct=float(data.get("max_adverse_pct") or 2.2),
         provider=data.get("provider"),
     )
     if data.get("symbols"):
@@ -2117,6 +2117,120 @@ async def ai_scale_stop():
     if ai_scale_bot:
         ai_scale_bot.stop()
     return {"message": "AI Scale-In stopped", "running": False}
+
+
+
+@app.get("/api/ai/ab-compare")
+async def ai_ab_compare():
+    """Demo A/B: Discretionary vs Scale-In side-by-side metrics."""
+    global ai_bot, ai_scale_bot
+
+    def _side(bot, label: str, bot_id: str) -> dict:
+        if not bot:
+            return {
+                "label": label,
+                "bot_id": bot_id,
+                "running": False,
+                "version": None,
+                "pnl": 0.0,
+                "trades": 0,
+                "win_rate": None,
+                "open": 0,
+                "session_pnl": 0.0,
+                "lessons": [],
+            }
+        try:
+            st = bot.get_status() if hasattr(bot, "get_status") else {}
+        except Exception as e:
+            return {"label": label, "bot_id": bot_id, "running": False, "error": str(e)}
+        lessons = []
+        try:
+            lessons = list(getattr(bot, "_daily_lessons", None) or [])[:3]
+        except Exception:
+            pass
+        pnl = st.get("lifetime_pnl")
+        if pnl is None:
+            pnl = st.get("total_pnl") or 0
+        trades = st.get("lifetime_trades")
+        if trades is None:
+            trades = st.get("total_trades") or 0
+        return {
+            "label": label,
+            "bot_id": bot_id,
+            "running": bool(st.get("running")),
+            "version": st.get("version"),
+            "pnl": round(float(pnl or 0), 2),
+            "trades": int(trades or 0),
+            "win_rate": st.get("win_rate"),
+            "open": len(st.get("open_positions") or []),
+            "session_pnl": round(float(st.get("session_pnl") or 0), 2),
+            "execute": st.get("execute") or st.get("execute_orders"),
+            "lessons": lessons,
+            "scale_in": st.get("scale_in"),
+        }
+
+    a = _side(ai_bot, "AI Discretionary 1H", "ai_strategy")
+    b = _side(ai_scale_bot, "AI Scale-In 1H", "ai_scale_strategy")
+    winner = None
+    note = "Запустите оба бота в DEMO с разным капиталом. Для чистого A/B не торгуйте одну монету двумя ботами одновременно."
+    if a.get("trades", 0) >= 3 or b.get("trades", 0) >= 3:
+        if float(a.get("pnl") or 0) > float(b.get("pnl") or 0) + 1:
+            winner = a["label"]
+        elif float(b.get("pnl") or 0) > float(a.get("pnl") or 0) + 1:
+            winner = b["label"]
+        else:
+            winner = "tie"
+        note = f"По lifetime PnL лидирует: {winner}." if winner != "tie" else "Пока паритет по PnL."
+    return {
+        "mode": "demo" if _env_demo else "live",
+        "a": a,
+        "b": b,
+        "winner": winner,
+        "note": note,
+        "guidance": {
+            "min_trades_each": 5,
+            "suggested_symbols_a": ["BTC", "ETH"],
+            "suggested_symbols_b": ["SOL", "XRP"],
+            "horizon_days": 7,
+        },
+    }
+
+
+@app.post("/api/ai/ab-start", dependencies=[Depends(require_admin)])
+async def ai_ab_start(data: dict = None):
+    """Start both AI bots on DEMO for A/B (split symbols recommended)."""
+    data = data or {}
+    if not _env_demo:
+        raise HTTPException(status_code=400, detail="A/B start only in DEMO mode")
+    cap_a = float(data.get("capital_a") or data.get("capital") or 5000)
+    cap_b = float(data.get("capital_b") or max(100, cap_a * 0.8))
+    # Reuse start endpoints logic via internal calls
+    global ai_bot, ai_scale_bot
+    out = {"started": []}
+    if not (ai_bot and getattr(ai_bot, "_running", False)):
+        r = await ai_start({
+            "capital": cap_a,
+            "execute": True,
+            "symbols": data.get("symbols_a") or ["BTC", "ETH"],
+            "max_positions": 1,
+        })
+        out["started"].append("discretionary")
+        out["a"] = r
+    else:
+        out["a"] = {"message": "already running"}
+    if not (ai_scale_bot and getattr(ai_scale_bot, "_running", False)):
+        r2 = await ai_scale_start({
+            "capital": cap_b,
+            "execute": True,
+            "symbols": data.get("symbols_b") or ["SOL", "XRP"],
+            "max_adds": 2,
+        })
+        out["started"].append("scale_in")
+        out["b"] = r2
+    else:
+        out["b"] = {"message": "already running"}
+    out["compare"] = await ai_ab_compare()
+    return out
 
 
 @app.post("/api/ai/execute", dependencies=[Depends(require_admin)])

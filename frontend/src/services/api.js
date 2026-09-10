@@ -214,6 +214,8 @@ export const api = {
     request('/ai-scale/start', { method: 'POST', body: JSON.stringify(config || {}) }),
   aiScaleStop: () =>
     request('/ai-scale/stop', { method: 'POST' }),
+  aiAbCompare: () => request('/ai/ab-compare'),
+  aiAbStart: (body = {}) => request('/ai/ab-start', { method: 'POST', body: JSON.stringify(body || {}) }),
 
   aiStart: (config = {}) =>
     request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
