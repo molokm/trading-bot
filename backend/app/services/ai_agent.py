@@ -81,6 +81,8 @@ def next_available_provider() -> str | None:
                 best = name
     return best  # least-cooled-down (or None if no keys)
 
+_ACTIVE_SYSTEM_PROMPT = None  # set per call_llm
+
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce", "add")
 ALLOWED_SIDES = ("long", "short")
 ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")
@@ -119,6 +121,19 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 
+
+SYSTEM_PROMPT_MANAGE = """You MANAGE an open OKX USDT-SWAP position (do not open a new coin).
+Reply with ONE JSON object only:
+{"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
+"size_pct":0.25-0.75,"confidence":0-1,"reason":"<=120 chars"}
+
+Rules:
+1) Prefer close if trend flipped (EMA/ROC against side) or ADX collapsed.
+2) reduce if in profit but momentum fading; lock gains.
+3) add ONLY if open_positions.can_add is true AND adverse move is moderate.
+4) hold if trend intact and stop not threatened.
+5) Cite 2 metrics in reason. DEFAULT=hold if unsure.
+"""
 
 SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk (balanced-aggressive). Prefer trading candidates_allowed when align is solid; avoid candidates_blocked.
 Reply with ONE JSON object only (no markdown):
@@ -323,8 +338,13 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         else:
             provider = "mock"
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
+    global _ACTIVE_SYSTEM_PROMPT
+    mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
+    _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
 
     user_payload = {
+        "decision_mode": mode,
+        "decision_trigger": snapshot.get("decision_trigger"),
         "equity": snapshot.get("equity"),
         "capital": snapshot.get("capital"),
         "max_leverage": snapshot.get("max_leverage"),
@@ -464,7 +484,7 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             api_key=os.getenv("GROQ_API_KEY", ""),
             base_url=os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"),
             model=_resolve_groq_model(os.getenv("AI_LLM_MODEL")),
-            system=SYSTEM_PROMPT,
+            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
         )
     if provider == "openai":
@@ -476,7 +496,7 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             api_key=os.getenv("OPENAI_API_KEY", ""),
             base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             model=om,
-            system=SYSTEM_PROMPT,
+            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
         )
     if provider == "openrouter":
@@ -494,14 +514,14 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             api_key=key,
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             model=om,
-            system=SYSTEM_PROMPT,
+            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
         )
     if provider == "gemini":
         return await _gemini(
             api_key=os.getenv("GEMINI_API_KEY", ""),
             model=os.getenv("GEMINI_MODEL") or "gemini-2.0-flash",
-            system=SYSTEM_PROMPT,
+            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
         )
     if provider == "bai":
@@ -510,7 +530,7 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             api_key=os.getenv("BAI_API_KEY", ""),
             base_url=os.getenv("BAI_BASE_URL", "https://api.b.ai/v1"),
             model=os.getenv("BAI_MODEL", "deepseek-v4-flash"),
-            system=SYSTEM_PROMPT,
+            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
             json_mode=False,
         )

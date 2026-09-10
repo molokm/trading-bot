@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.3-agg"
+STRATEGY_VERSION = "v1.4-bar"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -92,7 +92,12 @@ class AIConfig:
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
-    poll_interval_sec: int = 120           # 2m — more reactive (uses more LLM tokens)
+    poll_interval_sec: int = 120           # monitor loop; LLM only on 1H close by default
+    # Phase-1 efficiency: decide on closed 1H bar, not every poll
+    decide_on_bar_close: bool = True
+    bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
+    llm_min_interval_sec: int = 180        # hard floor between LLM calls even if bars glitch
+    daily_loss_limit_pct: float = 0.03     # block new opens after -3% day (realized session)
     min_confidence: float = 0.62
     min_adx: float = 15.0                  # was 18 — still filtered, but less dead
     # Soft ADX: if align is strong, allow down to adx_soft_floor
@@ -191,6 +196,10 @@ class AIStrategy:
         self._last_tick_error = None
         self._started_at = None
         self._tick_count = 0
+        self._last_closed_bar_ts = {}  # coin -> ms of last CLOSED 1H bar we already decided on
+        self._last_llm_ts = 0.0
+        self._daily_realized = 0.0
+        self._daily_realized_day = ""
         self._tick_fail_count = 0
         self._consecutive_fails = 0
         self._llm_error_count = 0
@@ -552,6 +561,12 @@ class AIStrategy:
                 rows = list(reversed(resp.get("data") or []))
                 if len(rows) < 60:
                     continue
+                # OKX candle[0] = ts ms; [-1] forming, [-2] last closed
+                try:
+                    closed_idx = -2 if len(rows) >= 2 else -1
+                    closed_bar_ts = int(float(rows[closed_idx][0]))
+                except Exception:
+                    closed_bar_ts = 0
                 closes = [float(r[4]) for r in rows]
                 highs = [float(r[2]) for r in rows]
                 lows = [float(r[3]) for r in rows]
@@ -643,6 +658,7 @@ class AIStrategy:
 
                 out[coin] = {
                     "close": _r(c),
+                    "closed_bar_ts": closed_bar_ts,
                     "ema21": _r(e21),
                     "ema50": _r(e50),
                     "ema200": _r(e200),
@@ -1322,6 +1338,7 @@ class AIStrategy:
         fee_c = fee_cost(fee)
         pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
@@ -1718,6 +1735,44 @@ class AIStrategy:
             return ""
         return ""
 
+
+    def _new_closed_bars(self) -> list:
+        """Coins whose last CLOSED 1H bar is newer than last LLM decision for that coin."""
+        fresh = []
+        for coin, ind in (self._latest_indicators or {}).items():
+            ts = int(ind.get("closed_bar_ts") or 0)
+            if ts <= 0:
+                continue
+            prev = int(self._last_closed_bar_ts.get(coin, 0) or 0)
+            if ts > prev:
+                fresh.append(coin)
+        return fresh
+
+    def _mark_bars_decided(self, coins: list = None):
+        for coin, ind in (self._latest_indicators or {}).items():
+            if coins is not None and coin not in coins:
+                continue
+            ts = int(ind.get("closed_bar_ts") or 0)
+            if ts > 0:
+                self._last_closed_bar_ts[coin] = ts
+
+    def _daily_loss_blocks_open(self) -> bool:
+        try:
+            from datetime import datetime, timezone
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if day != getattr(self, "_daily_realized_day", ""):
+                self._daily_realized_day = day
+                self._daily_realized = 0.0
+            lim = float(getattr(self.config, "daily_loss_limit_pct", 0.03) or 0)
+            if lim <= 0:
+                return False
+            eq = float(self._capital or 10000)
+            if eq <= 0:
+                return False
+            return float(self._daily_realized) <= -lim * eq
+        except Exception:
+            return False
+
     async def _tick(self):
         client = await self._client()
         if not client:
@@ -1751,12 +1806,34 @@ class AIStrategy:
             await claim_open(self.db, self.BOT_ID, _inst, _side, _sz, _entry)
         await self._fetch_indicators(client)
         await self._manage_stops(client)
-        snap = self._snapshot()
         try:
             self._refresh_adaptive()
         except Exception:
             pass
+
+        # Phase-1: LLM only on new CLOSED 1H bar (stops still every tick)
+        decide_bar = bool(getattr(self.config, "decide_on_bar_close", True))
+        fresh = self._new_closed_bars() if decide_bar else list((self._latest_indicators or {}).keys())
+        import time as _time
+        now_ts = _time.time()
+        min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
+        gap_ok = (now_ts - float(getattr(self, "_last_llm_ts", 0) or 0)) >= min_gap
+        # Always allow manage path more often if we have open positions and a fresh bar
+        need_llm = bool(fresh) and gap_ok
+        if decide_bar and not fresh:
+            if self._tick_count % 10 == 0:
+                print(f"[AI] skip LLM — waiting for next closed {getattr(self.config, 'bar', '1H')} bar", flush=True)
+            self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+            return
+        if not gap_ok and decide_bar:
+            if self._tick_count % 10 == 0:
+                print(f"[AI] skip LLM — min interval {min_gap:.0f}s", flush=True)
+            return
+
         snap = self._snapshot()  # include fresh adaptive + reflection
+        snap["decision_trigger"] = "bar_close" if decide_bar else "poll"
+        snap["fresh_bars"] = fresh
+        snap["decision_mode"] = "manage" if self._positions else "entry"
         try:
             decision = await call_llm(snap, provider=self._provider())
         except Exception as e:
@@ -1767,6 +1844,15 @@ class AIStrategy:
             decision["reason"] = f"llm_exception: {str(e)[:200]}"
         prov_used = decision.get("provider_used") or self._provider()
         self._last_provider_used = prov_used
+        import time as _time
+        self._last_llm_ts = _time.time()
+        try:
+            self._mark_bars_decided(list(fresh) if fresh else None)
+        except Exception:
+            try:
+                self._mark_bars_decided(None)
+            except Exception:
+                pass
         if "llm_error" in (decision.get("reason") or ""):
             self._llm_error_count += 1
             self._last_llm_error = decision["reason"][:200]
@@ -1826,6 +1912,10 @@ class AIStrategy:
             if len(self._positions) >= self.config.max_positions:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="max_positions")
+                return
+            if self._daily_loss_blocks_open():
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="daily_loss_limit")
                 return
             ind = self._latest_indicators.get(coin) or {}
             adx = float(ind.get("adx") or 0)
