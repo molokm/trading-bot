@@ -1100,7 +1100,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         : (botName === 'Impulse' || botName === 'Impulse 1D')
                         ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
                         : botName === 'AI Scale-In 1H' || botName === 'AI Scale-In'
-                        ? 'text-violet-400'
+                        ? { label: 'SCL', cls: 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30' }
                         : botName === 'Validation' || botName === 'MACD+Donchian Validation'
                         ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                         : botName === 'AI Discretionary 1H'

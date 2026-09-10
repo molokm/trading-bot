@@ -735,9 +735,35 @@ async def startup():
                 f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
                 flush=True,
             )
+            # AI Scale-In auto-start (Demo A/B companion; default ON)
+            _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+            if _scale_auto:
+                try:
+                    global ai_scale_bot
+                    from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig
+                    scfg = AIScaleConfig(
+                        capital=float(os.getenv("AI_SCALE_CAPITAL", os.getenv("AI_CAPITAL", "5000"))),
+                        max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                        max_positions=1,
+                        risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                        poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                        execute=_exec,
+                        scale_enabled=True,
+                        max_adds=2,
+                    )
+                    ai_scale_bot = AIScaleStrategy(
+                        config=scfg, client_manager=client_manager, db=db, notifier=telegram,
+                    )
+                    ai_scale_bot.start()
+                    print(
+                        f"[startup]   AI Scale-In RUNNING execute={_exec} capital={scfg.capital}",
+                        flush=True,
+                    )
+                except Exception as _se:
+                    print(f"[startup]   AI Scale-In FAILED: {_se}", flush=True)
         else:
             print(
-                "[startup]   AI skipped (need OKX keys + BOTS_AUTO_START; set AI_AUTO_START=0 to disable)",
+                "[startup]   AI skipped (need OKX keys; set AI_AUTO_START=0 to disable)",
                 flush=True,
             )
     except Exception as e:
@@ -3753,6 +3779,8 @@ def _db_bot_name(bot_id: str) -> str:
         return "MACD+Donchian Validation"
     if base == AI_BOT_ID:
         return "AI Discretionary 1H"
+    if base == AI_SCALE_BOT_ID or base == "ai_scale_strategy":
+        return "AI Scale-In 1H"
     if base == SCALP_BOT_ID:
         return "Order Book Scalp"
     if base == VWAP_BOT_ID:
@@ -3880,7 +3908,7 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
     try:
         import json
         # Batch-fetch all bot position snapshots in one DB query
-        _bot_ids = (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, "smart_money")
+        _bot_ids = (ROT_BOT_ID, IMP_BOT_ID, VAL_BOT_ID, AI_BOT_ID, AI_SCALE_BOT_ID, "smart_money")
         _pos_keys = [f"open_positions:{bid}" for bid in _bot_ids]
         _all_settings = await db.get_settings_batch(_pos_keys)
         for bid, raw in zip(_bot_ids, _all_settings):
@@ -4002,6 +4030,16 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
         if not bot_name:
             bot_name = _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
 
+        # AI_ONLY: stale MAC/MOM/IMP claims must not win over AI / Scale-In
+        if AI_ONLY_MODE and bot_name in (
+            "MACD+Donchian Validation", "Validation", "Momentum", "Impulse 1D", "Impulse",
+        ):
+            if not (validation and getattr(validation, "_running", False) and "MAC" in bot_name):
+                if not (impulse and getattr(impulse, "_running", False) and "Impulse" in bot_name):
+                    if not (rotation and getattr(rotation, "_running", False) and bot_name == "Momentum"):
+                        print(f"[positions] ignore stale claim {inst} → {bot_name}", flush=True)
+                        bot_name = ""
+
         if not bot_name and inst:
             try:
                 last_bot = await db.last_bot_for_instrument(inst)
@@ -4019,9 +4057,10 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
             try:
                 fills = await _fetch_okx_fills(limit=100)
                 prefix_map = {
+                    "ais": (AI_SCALE_BOT_ID, "AI Scale-In 1H"),
+                    "ai": (AI_BOT_ID, "AI Discretionary 1H"),
                     "rot": (ROT_BOT_ID, "Momentum"),
                     "imp": (IMP_BOT_ID, "Impulse 1D"),
-                    "ai": (AI_BOT_ID, "AI Discretionary 1H"),
                     "val": (VAL_BOT_ID, "MACD+Donchian Validation"),
                 }
                 for f in fills or []:
@@ -4107,6 +4146,10 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                     univ = list(getattr(getattr(ai_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
                     if coin in univ:
                         candidates.append((AI_BOT_ID, "AI Discretionary 1H", ai_bot))
+                if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
+                    univ = list(getattr(getattr(ai_scale_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
+                    if coin in univ:
+                        candidates.append((AI_SCALE_BOT_ID, "AI Scale-In 1H", ai_scale_bot))
                 # Only auto-claim when exactly one candidate is running for this coin
                 if len(candidates) == 1:
                     bid, label, _bot = candidates[0]
