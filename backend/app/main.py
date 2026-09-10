@@ -707,9 +707,9 @@ async def startup():
         # AI runs independently: only needs OKX keys + AI_AUTO_START (default ON).
         # Not gated by BOTS_AUTO_START so we can disable the other bots while
         # keeping AI active for observation.
+        global ai_bot, ai_scale_bot, _positions_cache
         _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
         if _env_key and _env_secret and _env_pass and _ai_auto:
-            global ai_bot
             _demo = _env_demo
             # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
             # On live, respect AI_EXECUTE env with default off.
@@ -729,7 +729,6 @@ async def startup():
             ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
                                notifier=telegram)
             ai_bot.start()
-            global _positions_cache
             _positions_cache = None
             print(
                 f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
@@ -748,7 +747,6 @@ async def startup():
         print("[startup] AI Scale-In (SCL) auto-start ...", flush=True)
         _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
         if _env_key and _env_secret and _env_pass and _scale_auto:
-            global ai_scale_bot
             if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
                 print("[startup]   AI Scale-In already running", flush=True)
             else:
@@ -773,7 +771,6 @@ async def startup():
                     config=scfg, client_manager=client_manager, db=db, notifier=telegram,
                 )
                 ai_scale_bot.start()
-                global _positions_cache
                 _positions_cache = None
                 print(
                     f"[startup]   AI Scale-In (SCL) RUNNING execute={_exec_s} capital={scfg.capital}",
