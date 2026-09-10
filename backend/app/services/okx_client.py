@@ -126,6 +126,13 @@ class OKXClient:
         return await self._request("GET", "/api/v5/market/ticker",
                                     params={"instId": inst_id})
 
+    async def get_funding_rate(self, inst_id: str) -> dict:
+        """Public funding rate for SWAP (fundingRate, nextFundingRate, fundingTime)."""
+        return await self._request(
+            "GET", "/api/v5/public/funding-rate",
+            params={"instId": inst_id},
+        )
+
     async def get_books(self, inst_id: str, sz: int = 20) -> dict:
         """Order book depth. sz = levels per side (1..400)."""
         return await self._request(

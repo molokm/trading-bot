@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.4-bar"
+STRATEGY_VERSION = "v1.5-quant"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -98,6 +98,11 @@ class AIConfig:
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
     llm_min_interval_sec: int = 180        # hard floor between LLM calls even if bars glitch
     daily_loss_limit_pct: float = 0.03     # block new opens after -3% day (realized session)
+    # Phase-3: funding + BTC leadership filter
+    funding_filter_enabled: bool = True
+    funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
+    btc_filter_enabled: bool = True
+    btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
     min_confidence: float = 0.62
     min_adx: float = 15.0                  # was 18 — still filtered, but less dead
     # Soft ADX: if align is strong, allow down to adx_soft_floor
@@ -200,6 +205,8 @@ class AIStrategy:
         self._last_llm_ts = 0.0
         self._daily_realized = 0.0
         self._daily_realized_day = ""
+        self._funding_cache = {}  # coin -> {rate, ts}
+        self._funding_cache_ts = 0.0
         self._tick_fail_count = 0
         self._consecutive_fails = 0
         self._llm_error_count = 0
@@ -688,6 +695,42 @@ class AIStrategy:
         return out
 
 
+
+    async def _refresh_funding(self, client) -> None:
+        """Cache OKX funding rates (TTL ~5 min) into indicators."""
+        import time as _time
+        now = _time.time()
+        if now - float(getattr(self, "_funding_cache_ts", 0) or 0) < 300 and self._funding_cache:
+            for coin, fr in self._funding_cache.items():
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["funding_rate"] = fr.get("rate")
+                    self._latest_indicators[coin]["funding_time"] = fr.get("time")
+            return
+        if not client or not hasattr(client, "get_funding_rate"):
+            return
+        cache = {}
+        for coin in (self.config.symbols or []):
+            inst = f"{coin}-USDT-SWAP"
+            try:
+                resp = await client.get_funding_rate(inst)
+                rows = resp.get("data") or []
+                if resp.get("error") or not rows:
+                    continue
+                row = rows[0]
+                rate = float(row.get("fundingRate") or row.get("nextFundingRate") or 0)
+                cache[coin] = {
+                    "rate": rate,
+                    "time": row.get("fundingTime") or row.get("nextFundingTime"),
+                }
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["funding_rate"] = rate
+                    self._latest_indicators[coin]["funding_time"] = cache[coin]["time"]
+            except Exception as e:
+                print(f"[AI] funding {coin}: {e}", flush=True)
+        if cache:
+            self._funding_cache = cache
+            self._funding_cache_ts = now
+
     def _adx_blocks_open(self, adx: float, align_best: float) -> bool:
         """True if ADX is too weak for an open.
 
@@ -728,6 +771,7 @@ class AIStrategy:
                 "align_score": best,
                 "adx": ind.get("adx"),
                 "rsi": ind.get("rsi"),
+                "funding_rate": ind.get("funding_rate"),
                 "block_open": (
                     (reg == "chop" and best < float(getattr(self.config, "quant_min_align", 0.45) or 0.45))
                     or (reg != "chop" and best < 0.42)
@@ -742,16 +786,29 @@ class AIStrategy:
                 break
         if g == "unknown" and regimes:
             g = max(set(regimes), key=regimes.count)
+        # BTC leadership
+        btc = by_coin.get("BTC") or {}
+        btc_ind = (self._latest_indicators or {}).get("BTC") or {}
+        btc_roc = float(btc_ind.get("roc") or btc_ind.get("roc_3") or 0)
+        btc_impulse = None
+        thr = float(getattr(self.config, "btc_roc_block", 0.6) or 0.6)
+        if abs(btc_roc) >= thr:
+            btc_impulse = "up" if btc_roc > 0 else "down"
         return {
             "global_regime": g,
             # Global chop no longer hard-blocks every open — per-coin
             # block_open (align/adx gates) decides instead.
             "block_open": False,
             "coins": by_coin,
+            "btc_roc": round(btc_roc, 4),
+            "btc_impulse": btc_impulse,
+            "btc_regime": btc.get("regime"),
             "min_align": float(self._effective_min_align()),
             "min_adx": float(self.config.min_adx or 22),
             "min_confidence": float(self._effective_min_confidence()),
             "adapt_preset": (self._adapt or {}).get("preset"),
+            "funding_filter": bool(getattr(self.config, "funding_filter_enabled", True)),
+            "btc_filter": bool(getattr(self.config, "btc_filter_enabled", True)),
         }
 
     def _quant_veto_open(self, decision: dict) -> str | None:
@@ -783,6 +840,31 @@ class AIStrategy:
             return "quant_veto:short_in_bull"
         if reg == "bear" and side == "long":
             return "quant_veto:long_in_bear"
+
+        # Funding: paying high funding against the side is toxic for holds on 1H
+        if getattr(self.config, "funding_filter_enabled", True):
+            fr = cq.get("funding_rate")
+            if fr is None:
+                fr = (self._latest_indicators or {}).get(coin, {}).get("funding_rate")
+            try:
+                fr = float(fr) if fr is not None else None
+            except (TypeError, ValueError):
+                fr = None
+            lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+            if fr is not None and lim > 0:
+                # long pays when funding > 0; short pays when funding < 0
+                if side == "long" and fr >= lim:
+                    return f"quant_veto:funding_long:{fr:.5f}"
+                if side == "short" and fr <= -lim:
+                    return f"quant_veto:funding_short:{fr:.5f}"
+
+        # BTC impulse: don't fight BTC on alts
+        if getattr(self.config, "btc_filter_enabled", True) and coin != "BTC":
+            impulse = q.get("btc_impulse")
+            if impulse == "up" and side == "short":
+                return f"quant_veto:btc_impulse_up_no_alt_short"
+            if impulse == "down" and side == "long":
+                return f"quant_veto:btc_impulse_down_no_alt_long"
         return None
 
     def _closed_trades(self) -> list:
@@ -1805,6 +1887,10 @@ class AIStrategy:
             _entry = getattr(pos, "entry_price", pos.get("entry_price") if isinstance(pos, dict) else 0)
             await claim_open(self.db, self.BOT_ID, _inst, _side, _sz, _entry)
         await self._fetch_indicators(client)
+        try:
+            await self._refresh_funding(client)
+        except Exception as e:
+            print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
         try:
             self._refresh_adaptive()
