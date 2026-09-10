@@ -334,6 +334,7 @@ async def startup():
         print("[startup] 1/7 DB init ...", flush=True)
         await db.init()
         await telegram.load_from_db(db)
+        print(f"[TG] status={telegram.status} configured={telegram.configured}", flush=True)
         try:
             await _load_live_creds_from_db()
             print(f"[startup] live creds: {'yes' if _live_key else 'no'}", flush=True)
@@ -773,7 +774,7 @@ async def startup():
                 ai_scale_bot.start()
                 _positions_cache = None
                 print(
-                    f"[startup]   AI Scale-In (SCL) RUNNING execute={_exec_s} capital={scfg.capital}",
+                    f"[startup]   AI Scale-In (SCL) RUNNING execute={_exec_s} capital={scfg.capital} tg={telegram.configured}",
                     flush=True,
                 )
         else:

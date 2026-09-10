@@ -1457,7 +1457,7 @@ class AIStrategy:
                 )
             except Exception as e:
                 print(f"[AI] db open: {e}", flush=True)
-        if self.notifier:
+        if self.notifier and getattr(self.notifier, 'configured', True):
             try:
                 _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
                     coin=coin, side=side, price=round(fill_px, 4),
@@ -1570,6 +1570,8 @@ class AIStrategy:
                 print(f"[AI] db close: {e}", flush=True)
         if self.notifier:
             try:
+                if not getattr(self.notifier, 'configured', True):
+                    raise RuntimeError('tg not configured')
                 _reply = int(getattr(pos, "tg_message_id", 0) or 0)
                 if not _reply and self.notifier:
                     _reply = await self.notifier.resolve_open_message_id(

@@ -284,6 +284,7 @@ function MiniAppPageInner
   const [loaded, setLoaded] = useState(false)
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
+  const [modeSwitching, setModeSwitching] = useState(false)
   const [portfolio, setPortfolio] = useState(null)
   const [rotation, setRotation] = useState(null)
   const [impulse, setImpulse] = useState(null)
@@ -681,6 +682,30 @@ function MiniAppPageInner
     setBotAction(null)
   }
 
+  const switchTradingMode = async (wantDemo) => {
+    if (modeSwitching || wantDemo === demoMode) return
+    if (!wantDemo) {
+      const ok = window.confirm(
+        'Переключить на LIVE? Будут показаны данные реального счёта (если ключи подключены).'
+      )
+      if (!ok) return
+    }
+    setModeSwitching(true)
+    try {
+      if (role === 'user') {
+        await withTimeout(api.meSetMode(wantDemo, wantDemo ? undefined : 'LIVE'), 20000)
+      } else {
+        // admin / owner showcase toggle
+        await withTimeout(api.setMode(wantDemo, wantDemo ? undefined : 'LIVE'), 20000)
+      }
+      setDemoMode(!!wantDemo)
+      await load()
+    } catch (e) {
+      alert(e.message || 'Не удалось сменить режим')
+    }
+    setModeSwitching(false)
+  }
+
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
 
 
@@ -850,8 +875,34 @@ function MiniAppPageInner
             connected ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'
           }`}>
             <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse' : 'bg-[var(--loss)]'}`} />
-            {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+            {connected ? 'ON' : 'OFF'}
           </span>
+          <div className="flex items-center gap-1 rounded-lg border border-[var(--border)] p-0.5 bg-[var(--surface)]">
+            <button
+              type="button"
+              disabled={!connected || modeSwitching}
+              onClick={() => switchTradingMode(true)}
+              className={`px-2 py-1 rounded-md text-2xs font-bold transition-colors ${
+                demoMode
+                  ? 'bg-[var(--info)] text-white'
+                  : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'
+              }`}
+            >
+              DEMO
+            </button>
+            <button
+              type="button"
+              disabled={!connected || modeSwitching}
+              onClick={() => switchTradingMode(false)}
+              className={`px-2 py-1 rounded-md text-2xs font-bold transition-colors ${
+                !demoMode
+                  ? 'bg-[var(--loss)] text-white'
+                  : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'
+              }`}
+            >
+              {modeSwitching ? '…' : 'LIVE'}
+            </button>
+          </div>
           {role === 'user' && me?.plan && (
             <span className={`ml-1 px-2 py-1 rounded-lg text-2xs font-bold ${
               me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
