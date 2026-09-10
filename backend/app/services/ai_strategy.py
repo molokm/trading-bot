@@ -238,6 +238,10 @@ class AIStrategy:
         self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
 
     # ── lifecycle ──────────────────────────────────────────────
+    def _clord_prefix(self) -> str:
+        """OKX clOrdId prefix for this bot's orders (must not be a prefix of another bot)."""
+        return "ai"
+
     def start(self):
         if self._running:
             return
@@ -1803,9 +1807,34 @@ class AIStrategy:
         # if last was closing opposite, not ours
         return False
 
+
+    async def _drop_foreign_positions(self, client) -> None:
+        """If memory holds a position whose entry fill belongs to another bot — release."""
+        if not self._positions or not client:
+            return
+        my = (self._clord_prefix() or "").lower()
+        for coin, pos in list(self._positions.items()):
+            try:
+                owner = await self._entry_fill_owner(client, pos.inst_id)
+            except Exception:
+                continue
+            if owner and my and owner != my:
+                print(
+                    f"[{self.BOT_NAME}] drop foreign {coin}: fill_owner={owner!r} mine={my!r}",
+                    flush=True,
+                )
+                self._positions.pop(coin, None)
+                try:
+                    await release_open(self.db, self.BOT_ID, pos.inst_id, pos.side)
+                except Exception:
+                    pass
+
     async def _restore_open_positions(self, client):
         """Adopt exchange positions owned by this bot (DB) after restart."""
-        if self._positions or not client:
+        if not client:
+            return
+        await self._drop_foreign_positions(client)
+        if self._positions:
             return
         try:
             result = await client.get_positions("SWAP")
@@ -1829,15 +1858,24 @@ class AIStrategy:
                 # order carries an "ai" clOrdId, the position IS ours even if the DB
                 # claim was lost (e.g. claim write failed before this restart).
                 try:
-                    ai_owner = await self._entry_fill_owner(client, inst_id)
+                    fill_owner = await self._entry_fill_owner(client, inst_id)
                 except Exception:
-                    ai_owner = ""
-                if ai_owner == "ai":
-                    print(f"[AI] restore {coin}: entry fill clOrdId='ai' — ours (DB claim missing)", flush=True)
+                    fill_owner = ""
+                my_pfx = (self._clord_prefix() or "ai").lower()
+                # Only adopt fills that match THIS bot's prefix (ai vs ais are distinct)
+                if fill_owner == my_pfx:
+                    print(
+                        f"[{self.BOT_NAME}] restore {coin}: clOrdId prefix={my_pfx!r} — ours",
+                        flush=True,
+                    )
                     await self._restore_adopt_position(client, inst_id, coin, side, sz, entry)
                     continue
-                if ai_owner and ai_owner != "ai":
-                    print(f"[AI] skip restore {coin}: entry fill owned by '{ai_owner}'", flush=True)
+                if fill_owner and fill_owner != my_pfx:
+                    print(
+                        f"[{self.BOT_NAME}] skip restore {coin}: entry owned by '{fill_owner}' "
+                        f"(need {my_pfx!r})",
+                        flush=True,
+                    )
                     continue
                 try:
                     if not self.db:
@@ -1849,17 +1887,15 @@ class AIStrategy:
                     if not owned and hasattr(self.db, "find_position"):
                         owned = await self.db.find_position(self.BOT_ID, inst_id, side)
                     if not owned:
-                        # Also check last_bot only as positive signal for THIS bot
-                        last = None
-                        if hasattr(self.db, "last_bot_for_instrument"):
-                            last = await self.db.last_bot_for_instrument(inst_id)
-                        if last != self.BOT_ID:
-                            print(
-                                f"[AI] skip restore {coin}: not claimed by AI "
-                                f"(last={last or 'none'}) — leave for owner/orphan policy",
-                                flush=True,
-                            )
-                            continue
+                        # No DB claim for THIS bot. last_bot alone is not enough when
+                        # fill clOrdId is missing/unknown — refuse adopt (prevents
+                        # Scale-In stealing Discretionary / Impulse positions).
+                        print(
+                            f"[{self.BOT_NAME}] skip restore {coin}: no DB claim for "
+                            f"{self.BOT_ID} and fill_owner={fill_owner!r}",
+                            flush=True,
+                        )
+                        continue
                 except Exception as e:
                     print(f"[AI] restore ownership: {e} — skip adopt", flush=True)
                     continue
@@ -1916,7 +1952,7 @@ class AIStrategy:
             signal_id=restored_sid,
         )
         await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
-        print(f"[AI] RESTORE({side}) {coin} sz={sz} @ {entry} sid={restored_sid} (ai clOrdId)", flush=True)
+        print(f"[{self.BOT_NAME}] RESTORE({side}) {coin} sz={sz} @ {entry} sid={restored_sid} pfx={self._clord_prefix()}", flush=True)
 
     async def _entry_fill_owner(self, client, inst_id: str) -> str:
         """Map the most recent entry fill's clOrdId prefix to a bot prefix.
@@ -1936,7 +1972,8 @@ class AIStrategy:
             cid = str(f.get("clOrdId") or "").strip().lower()
             if not cid:
                 return ""  # manual/unknown — let DB/log checks decide
-            for pref in ("ai", "imp", "val", "scl", "vwap", "rot"):
+            # Longest prefixes first — "ais" must win over "ai"
+            for pref in ("ais", "ai", "imp", "val", "scl", "vwap", "rot", "sm"):
                 if cid.startswith(pref):
                     return pref
             return ""
