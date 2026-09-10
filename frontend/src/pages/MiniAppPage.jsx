@@ -290,6 +290,7 @@ function MiniAppPageInner
   const [impulse, setImpulse] = useState(null)
   const [validation, setValidation] = useState(null)
   const [aiBot, setAiBot] = useState(null)
+  const [aiScale, setAiScale] = useState(null)
   const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
   const [trades, setTrades] = useState([])
@@ -329,6 +330,7 @@ function MiniAppPageInner
       for (const p of (impulse?.open_positions || [])) pushOpen(p)
       for (const p of (validation?.open_positions || [])) pushOpen(p)
       for (const p of (aiBot?.open_positions || [])) pushOpen(p)
+      for (const p of (aiScale?.open_positions || [])) pushOpen(p)
 
       const toRow = (tr, isOpen = false) => {
         const inst = tr.inst_id || tr.symbol || ''
@@ -373,7 +375,7 @@ function MiniAppPageInner
       }
       // Paired API empty (slow/timeout/empty) — fallback to bot recent_trades
       const botTrades = []
-      for (const bot of [aiBot, rotation, impulse, validation]) {
+      for (const bot of [aiBot, aiScale, rotation, impulse, validation]) {
         for (const tr of (bot?.recent_trades || [])) {
           if (tr && typeof tr === 'object') {
             const reason = String(tr.reason || '').toLowerCase()
@@ -389,7 +391,7 @@ function MiniAppPageInner
       console.error('[mini] displayTrades', e)
       return []
     }
-  }, [trades, positions, rotation, impulse, validation, aiBot])
+  }, [trades, positions, rotation, impulse, validation, aiBot, aiScale])
 
   useEffect(() => {
     if (!showLogs) return
@@ -561,6 +563,7 @@ function MiniAppPageInner
       impulse: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus()),
       validation: () => AI_ONLY_MODE ? null : api.validationStatus(),
       ai: () => api.aiStatus(),
+      aiScale: () => api.aiScaleStatus(),
       pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(80),
@@ -581,6 +584,7 @@ function MiniAppPageInner
           case 'impulse': setImpulse(v); break
           case 'validation': setValidation(v); break
           case 'ai': setAiBot(v); break
+          case 'aiScale': setAiScale(v); break
           case 'positions': {
             const pos = Array.isArray(v) ? v : (v?.positions || v?.data || [])
             setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
@@ -767,6 +771,7 @@ function MiniAppPageInner
   if (impulse?.running) activeNames.push('Impulse 1D', 'Impulse')
   if (validation?.running) activeNames.push('MACD+Donchian Validation', 'Validation')
   if (aiBot?.running) activeNames.push('AI Discretionary 1H')
+  if (aiScale?.running) activeNames.push('AI Scale-In 1H', 'AI Scale-In')
   const tradeIsActive = (tr) => {
     if (!activeNames.length) return false
     const b = String(tr?.bot || '')
@@ -860,9 +865,12 @@ function MiniAppPageInner
   }
 
   return (
-    <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div
+      className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden"
+      style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
       {/* ═══ Header ═══ */}
-      <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
+      <div className="flex-shrink-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[var(--info)] via-[#6b5ce7] to-[#4a3fd1] flex items-center justify-center shadow-lg">
             <Zap size={16} className="text-white" />
@@ -921,7 +929,7 @@ function MiniAppPageInner
         </button>
       </div>
 
-      <div className="p-3 space-y-3">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-3 space-y-3 pb-8" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
         {/* ═══ AI Discretionary Welcome Banner ═══ */}
         {connected && aiBot && (
           <Card className="relative overflow-hidden border-[var(--info)]/30 bg-gradient-to-br from-[var(--info)]/10 via-transparent to-transparent">
@@ -1128,15 +1136,23 @@ function MiniAppPageInner
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
-            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H', true)}
+            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
+            {!!aiScale?.running && botCard('AI Scale-In', aiScale, 'text-fuchsia-400', 'SCL 1H')}
+            {!aiBot?.running && (
+              <Card className="py-2.5 opacity-70">
+                <div className="text-2xs font-bold text-[var(--txt-muted)]">AI 1H</div>
+                <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
+              </Card>
+            )}
+            {!aiScale?.running && (
+              <Card className="py-2.5 opacity-70">
+                <div className="text-2xs font-bold text-[var(--txt-muted)]">SCL 1H</div>
+                <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
+              </Card>
+            )}
             {!AI_ONLY_MODE && !!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
             {!AI_ONLY_MODE && !!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
             {!AI_ONLY_MODE && !!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
-            {!(AI_ONLY_MODE ? aiBot?.running : (rotation?.running || impulse?.running || validation?.running || aiBot?.running)) && (
-              <div className="col-span-2 text-2xs text-[var(--txt-muted)] py-2">
-                Нет активных ботов
-              </div>
-            )}
           </div>
         </div>
 
@@ -1148,7 +1164,7 @@ function MiniAppPageInner
               {t('mini.no_positions')}
             </Card>
           ) : (
-            <div className="space-y-1.5 max-h-56 overflow-y-auto overscroll-contain pr-0.5">
+            <div className="space-y-1.5 max-h-[min(50vh,22rem)] overflow-y-auto overscroll-y-contain pr-1" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
               {(Array.isArray(positions) ? positions : []).filter(Boolean).map((p, i) => {
                 const upl = Number(p?.upl || 0)
                 const side = String(p?.posSide || p?.pos_side || 'net').toLowerCase()
@@ -1213,6 +1229,8 @@ function MiniAppPageInner
                   const isOpen = tr.isOpen || reason === 'open'
                   const botShort = (tr.bot || '')
                     .replace('AI Discretionary 1H', 'AI')
+                    .replace('AI Scale-In 1H', 'SCL')
+                    .replace('AI Scale-In', 'SCL')
                     .replace('MACD+Donchian Validation', 'Valid')
                     .replace('Impulse 1D', 'Impulse')
                     .replace('Momentum', 'Mom')
