@@ -53,6 +53,79 @@ function isAdmin(isGuest) {
 }
 
 /* ═══════ Dashboard ═══════ */
+
+/** Unified bot panel on Dashboard (same layout for Discretionary & Scale-In). */
+function DashBotPanel({
+  title, version, running, loading, accent = 'text-[var(--accent)]',
+  pnl, trades, winRate, openCount, model, capital, pulse, tagline,
+  isGuest, onStart, onStop, startLabel, t,
+}) {
+  const pnlN = Number(pnl ?? 0)
+  const pnlCls = pnlN >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+  return (
+    <div className="panel flex-shrink-0">
+      <div className="panel-header">
+        <Bot size={13} className={accent} />
+        <span className="flex-1 truncate">{title}</span>
+        {loading && !running && (
+          <span className="text-2xs text-[var(--warn)] mr-1">…</span>
+        )}
+        {version && (
+          <span className="text-2xs text-[var(--txt-muted)] mono mr-1">{version}</span>
+        )}
+        {running
+          ? <StatusBadge mode="live" label={t('dash.running')} />
+          : <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+      </div>
+      <div className="p-3 space-y-2.5 text-2xs">
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">PnL</div>
+            <div className={`mono font-semibold ${pnlCls}`}>
+              {pnlN >= 0 ? '+' : ''}{pnlN.toFixed(2)}
+            </div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Сделок</div>
+            <div className="mono font-semibold">{trades ?? 0}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">WR</div>
+            <div className="mono font-semibold">{winRate != null ? `${winRate}%` : '—'}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Поз.</div>
+            <div className="mono font-semibold">{openCount ?? 0}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[var(--txt-muted)]">
+          {model && <span>Модель: <span className="text-[var(--txt)] mono">{model}</span></span>}
+          {capital != null && <span>Капитал: <span className="text-[var(--txt)] mono">${Number(capital).toLocaleString()}</span></span>}
+          {tagline && <span className="w-full text-[11px]">{tagline}</span>}
+        </div>
+        {(pulse) && (
+          <div className="p-2 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-28 overflow-y-auto text-[11px] leading-relaxed text-[var(--txt)] whitespace-pre-wrap break-words">
+            {pulse}
+          </div>
+        )}
+        {!isGuest && (
+          <div className="flex flex-col gap-1.5 pt-0.5">
+            {running ? (
+              <button type="button" className="btn btn-danger btn-sm w-full" onClick={onStop}>
+                <Square size={12} /> {t('dash.stop_bot')}
+              </button>
+            ) : (
+              <button type="button" className="btn btn-primary btn-sm w-full" onClick={onStart}>
+                <Play size={12} /> {startLabel || t('dash.start')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
@@ -1356,477 +1429,69 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                 {/* ═══ RIGHT — Filters + Bots ═══ */}
         <div className="flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
-          {/* Filter Chips */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Filter size={13} className="text-[var(--info)]" />
-              {t('dash.filters')}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="text-2xs text-[var(--txt-muted)] mb-1">{t('dash.instrument')}</div>
-              <div className="flex flex-wrap gap-1">
-                {PAIRS.map(p => (
-                  <Chip key={p} active={filterPair === p} onClick={() => setFilterPair(p)}>{p === 'Все' ? t('dash.all') : p}</Chip>
-                ))}
-              </div>
-              <div className="text-2xs text-[var(--txt-muted)] mb-1 mt-3">{t('dash.exit_reason')}</div>
-              <div className="flex flex-wrap gap-1">
-                {[{ k: 'all', l: t('dash.all') }, { k: 'tp', l: 'TP' }, { k: 'sl', l: 'SL' }, { k: 'trail', l: 'Trail' }, { k: 'breakeven', l: 'BE' }, { k: 'manual', l: 'Manual' }].map(r => (
-                  <Chip key={r.k} active={filterReason === r.k} onClick={() => setFilterReason(r.k)}>{r.l}</Chip>
-                ))}
-              </div>
-            </div>
-          </div>
 
-          {/* ─── Momentum Bot (only when running) ─── */}
-          {!AI_ONLY_MODE && !!momentumStatus?.running && (
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Bot size={13} className="text-[var(--info)]" />
-              <span className="flex-1">{t('dash.momentum_bot')}</span>
-              {momentumStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--info)] uppercase tracking-wide mr-1">
-                  {momentumStatus.version}
-                </span>
-              )}
-              {momentumStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              {momentumStatus?.running ? (
-                <>
-                  <div className="grid grid-cols-4 gap-1.5">
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(momentumStatus.config?.capital || 10000).toLocaleString()}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                      <div className={`mono text-xs font-bold mt-0.5 ${momentumCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        ${momentumCardPnl >= 0 ? '+' : ''}{momentumCardPnl.toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0}/{momentumStatus.config?.max_positions || 2}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{momentumStatus.config?.max_leverage || 1}</div>
-                    </div>
-                  </div>
-                  {momentumStatus.open_positions?.length > 0 && (
-                    <div className="space-y-1">
-                      {momentumStatus.open_positions.map((p, i) => {
-                        const isLong = p.side !== 'short'
-                        return (
-                          <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                            <div className="flex items-center gap-1.5">
-                              <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                              <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                            </div>
-                            <span className="mono text-[var(--txt-muted)]" title={t('dash.open_no_pnl')}>
-                              @{p.entry_price != null ? Number(p.entry_price).toFixed(2) : (p.entry != null ? Number(p.entry).toFixed(2) : '—')}
-                            </span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {!isGuest && (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-4">
-                  <p className="text-xs text-[var(--txt-muted)] mb-2">{t('dash.bot_not_running')}</p>
-                  {!isGuest && (
-                    <button className="btn btn-primary btn-sm" onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}>
-                      <Play size={12} /> {t('dash.start')}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-          )}
+          <DashBotPanel
+            title="AI Discretionary 1H"
+            version={aiStatus?.version}
+            running={!!aiStatus?.running}
+            loading={!aiStatus}
+            accent="text-[var(--accent)]"
+            pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? aiCardPnl ?? 0}
+            trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
+            winRate={aiStatus?.win_rate}
+            openCount={(aiStatus?.open_positions || []).length}
+            model={aiStatus?.model || aiStatus?.llm?.model}
+            capital={aiStatus?.capital ?? aiStatus?.config?.capital}
+            pulse={aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
+            tagline={aiStatus?.config?.symbols ? (aiStatus.config.symbols || []).join(' · ') : 'BTC · ETH · SOL · XRP'}
+            isGuest={isGuest}
+            t={t}
+            startLabel={`${t('dash.start')} AI`}
+            onStart={async () => {
+              try {
+                await api.aiStart({ capital: 10000, provider: 'groq', execute: true })
+                loadData()
+              } catch (e) { alert(e.message) }
+            }}
+            onStop={async () => {
+              try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
+            }}
+          />
 
-          {/* ─── Impulse 1D Bot (only when running) ─── */}
-          {!AI_ONLY_MODE && !!impulseStatus?.running && (
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Zap size={13} className="text-[var(--profit)]" />
-              <span className="flex-1">{t('dash.impulse_bot')}</span>
-              {impulseStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--profit)] uppercase tracking-wide mr-1">
-                  {impulseStatus.version}
-                </span>
-              )}
-              {impulseStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!impulseStatus?.running && impulseStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-4 gap-1.5">
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(impulseStatus?.config?.capital || 10000).toLocaleString?.()}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${impulseCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${impulseCardPnl >= 0 ? '+' : ''}{impulseCardPnl.toFixed(2)}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{impulseStatus?.open_positions?.length || 0}/{impulseStatus?.config?.top_k || 4}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{impulseStatus?.config?.max_leverage || 1}</div>
-                </div>
-              </div>
-              {impulseStatus?.open_positions?.length > 0 && (
-                <div className="space-y-1">
-                  {impulseStatus.open_positions.map((p, i) => {
-                    const isLong = p.side !== 'short'
-                    return (
-                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                        </div>
-                        <span className="mono text-[var(--txt-muted)]" title={t('dash.open_no_pnl')}>
-                          @{p.entry_price != null ? Number(p.entry_price).toFixed(2) : (p.entry != null ? Number(p.entry).toFixed(2) : '—')}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              {!isGuest && (
-                <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.impulseStop(); loadData() } catch (e) { alert(e.message) } }}>
-                  <Square size={12} /> {t('dash.stop_bot')}
-                </button>
-              )}
-            </div>
-          </div>
-          )}
-
-          {/* ─── Validation Bot (only when running) ─── */}
-          {!AI_ONLY_MODE && !!validationStatus?.running && (
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <FlaskConical size={13} className="text-[var(--warn)]" />
-              <span className="flex-1">{t('dash.validation_bot')}</span>
-              {validationStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--warn)] uppercase tracking-wide mr-1">
-                  {validationStatus.version}
-                </span>
-              )}
-              {validationStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!validationStatus?.running && validationStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-4 gap-1.5">
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(validationStatus?.config?.capital || 300).toLocaleString?.()}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${validationCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${validationCardPnl >= 0 ? '+' : ''}{validationCardPnl.toFixed(2)}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{validationStatus?.open_positions?.length || 0}/{validationStatus?.config?.top_k || 4}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{validationStatus?.config?.max_leverage || 1}</div>
-                </div>
-              </div>
-              {validationStatus?.open_positions?.length > 0 && (
-                <div className="space-y-1">
-                  {validationStatus.open_positions.map((p, i) => {
-                    const isLong = p.side !== 'short'
-                    return (
-                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                        </div>
-                        <span className="mono text-[var(--txt-muted)]" title={t('dash.open_no_pnl')}>
-                          @{p.entry_price != null ? Number(p.entry_price).toFixed(2) : (p.entry != null ? Number(p.entry).toFixed(2) : '—')}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              {!isGuest && (
-                <>
-                  {validationStatus?.running ? (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.validationStop(); loadData() } catch (e) { alert(e.message) } }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  ) : (
-                    <button className="btn btn-primary btn-sm w-full" onClick={async () => { try { await api.validationStart({}); loadData() } catch (e) { alert(e.message) } }}>
-                      <Play size={12} /> {t('dash.start')}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-          )}
-
-          {/* ─── AI Discretionary (primary strategy) ─── */}
-          {(AI_ONLY_MODE || !!aiStatus?.running) && (
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Bot size={13} className="text-[var(--accent)]" />
-              AI Discretionary 1H
-              {!aiStatus && (
-                <span className="ml-2 text-2xs text-[var(--warn)]">загрузка статуса…</span>
-              )}
-              {aiStatus?.version && (
-                <span className="ml-1 text-2xs text-[var(--txt-muted)] mono">{aiStatus.version}</span>
-              )}
-              {aiStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!aiStatus?.running && aiStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            {/* Health indicator */}
-            {aiStatus?.health && (() => {
-              const h = aiStatus.health
-              const poll = (aiStatus?.config?.poll_interval_sec || 120) * 3
-              const lastTs = h.last_activity ? Date.parse(h.last_activity) : 0
-              const stale = lastTs ? (Date.now() - lastTs) > poll * 1000 : false
-              const hasErrors = h.consecutive_fails > 0 || h.last_tick_error
-              const rateLimited = h.llm_rate_limited && h.llm_rate_limit_until > Date.now() / 1000
-              let dotColor = 'var(--profit)'
-              let statusText = `♥ ${h.tick_count} ticks`
-              if (rateLimited) { dotColor = 'var(--loss)'; statusText = `⏳ rate limit ${Math.max(0, Math.ceil(h.llm_rate_limit_until - Date.now() / 1000))}s` }
-              else if (h.last_tick_error) { dotColor = 'var(--loss)'; statusText = `✕ ${h.last_tick_error.slice(0, 40)}` }
-              else if (h.last_llm_error) { dotColor = 'var(--warn)'; statusText = `⚠ LLM: ${h.last_llm_error.slice(0, 40)}` }
-              else if (stale) { dotColor = 'var(--warn)'; statusText = `⏰ stale ${Math.floor((Date.now() - lastTs) / 60000)}м` }
-              else if (h.last_provider_used && h.last_provider_used !== aiStatus?.provider) { dotColor = 'var(--warn)'; statusText = `↻ fallback ${h.last_provider_used}` }
-              const ago = lastTs ? Math.floor((Date.now() - lastTs) / 60000) : null
-              return (
-                <div className="px-3 pb-1 flex items-center gap-1.5 text-2xs">
-                  <span className="inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse" style={{ background: dotColor }} />
-                  <span className="text-[var(--txt-muted)] truncate">{statusText}</span>
-                  {ago != null && <span className="text-[var(--txt-muted)] ml-auto whitespace-nowrap">{ago < 1 ? '<1м' : `${ago}м`} ago</span>}
-                </div>
-              )
-            })()}
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-2 gap-1.5 text-2xs">
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-[var(--txt-muted)]">LLM</div>
-                  <div className="mono font-semibold text-[var(--txt)] mt-0.5">
-                    {aiStatus?.provider || aiStatus?.llm?.provider || '—'}
-                    {(aiStatus?.groq_key_configured || aiStatus?.llm?.groq_key_configured) ? ' ✓' : ''}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-[var(--txt-muted)]">Execute</div>
-                  <div className={`mono font-semibold mt-0.5 ${(aiStatus?.execute || aiStatus?.llm?.execute) ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
-                    {(aiStatus?.execute || aiStatus?.llm?.execute) ? 'ON' : 'OFF (signals)'}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-[var(--txt-muted)]">Model</div>
-                  <div className="mono text-[var(--txt)] mt-0.5 truncate" title={aiStatus?.model || aiStatus?.llm?.model || ''}>
-                    {(aiStatus?.model || aiStatus?.llm?.model || '—').toString().slice(0, 22)}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono font-semibold text-[var(--txt)] mt-0.5">
-                    {aiStatus?.open_positions?.length || 0}/{aiStatus?.config?.max_positions || 1}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)] col-span-2">
-                  <div className="text-[var(--txt-muted)]">{t('dash.total_pnl')}</div>
-                  <div className={`mono font-semibold mt-0.5 ${aiCardPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    {aiCardPnl >= 0 ? '+' : ''}{aiCardPnl.toFixed(2)}
-                    {aiStatus?.total_pnl_source === 'okx_history' && (
-                      <span className="text-2xs text-[var(--txt-muted)] font-normal ml-1">hist</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-              {(aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision) && (
-                <div className="p-1.5 rounded-md bg-[var(--bg)] text-2xs">
-                  <div className="text-[var(--txt-muted)] mb-0.5">Статус рынка</div>
-                  <div className="text-[var(--txt)] whitespace-pre-wrap break-words max-h-40 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--bg-elevated)] p-2 text-[11px] leading-relaxed">
-                    {aiStatus.pulse
-                      || aiStatus.description
-                      || aiStatus.last_decision?.pulse
-                      || aiStatus.last_decision?.reason
-                      || 'Ожидание данных рынка…'}
-                  </div>
-                </div>
-              )}
-              {!isGuest && (
-                <div className="flex flex-col gap-1.5">
-                  {aiStatus?.running ? (
-                    <>
-                      <button
-                        className="btn btn-secondary btn-sm w-full"
-                        disabled={aiBusy}
-                        onClick={async () => {
-                          setAiBusy(true)
-                          try {
-                            const r = await api.aiDecide()
-                            setAiStatus(prev => ({ ...(prev || {}), last_decision: r.decision }))
-                            loadData()
-                          } catch (e) { alert(e.message) }
-                          finally { setAiBusy(false) }
-                        }}
-                      >
-                        {aiBusy ? '…' : 'Decide now'}
-                      </button>
-                      <button className="btn btn-secondary btn-sm w-full" onClick={async () => {
-                        try {
-                          const r = await api.aiLogs(100)
-                          console.log('AI logs', r)
-                          alert(`Logs: memory=${r.memory_n} file=${r.file_n} (см. console + /api/ai/logs/download)`)
-                        } catch (e) { alert(e.message) }
-                      }}>
-                        Export logs
-                      </button>
-                      <button className="btn btn-danger btn-sm w-full" onClick={async () => {
-                        try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
-                      }}>
-                        <Square size={12} /> {t('dash.stop_bot')}
-                      </button>
-                    </>
-                  ) : (
-                    <button className="btn btn-primary btn-sm w-full" onClick={async () => {
-                      try {
-                        await api.aiStart({ capital: 10000, provider: 'groq', execute: true })
-                        loadData()
-                      } catch (e) { alert(e.message) }
-                    }}>
-                      <Play size={12} /> {t('dash.start')} (demo exec)
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-          )}
+          <DashBotPanel
+            title="AI Scale-In 1H"
+            version={aiScaleStatus?.version}
+            running={!!aiScaleStatus?.running}
+            loading={!aiScaleStatus}
+            accent="text-fuchsia-400"
+            pnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
+            trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
+            winRate={aiScaleStatus?.win_rate}
+            openCount={(aiScaleStatus?.open_positions || []).length}
+            model={aiScaleStatus?.model || aiScaleStatus?.llm?.model}
+            capital={aiScaleStatus?.capital ?? aiScaleStatus?.config?.capital}
+            pulse={aiScaleStatus?.pulse || aiScaleStatus?.description}
+            tagline={
+              `Scale-in ≤${aiScaleStatus?.scale_in?.max_adds ?? 2}` +
+              (aiScaleStatus?.config?.symbols
+                ? ` · ${(aiScaleStatus.config.symbols || []).join(' · ')}`
+                : ' · BTC · ETH · SOL · XRP')
+            }
+            isGuest={isGuest}
+            t={t}
+            startLabel={`${t('dash.start')} Scale-In`}
+            onStart={async () => {
+              try {
+                await api.aiScaleStart({ capital: 5000, execute: true, max_adds: 2 })
+                loadData()
+              } catch (e) { alert(e.message) }
+            }}
+            onStop={async () => {
+              try { await api.aiScaleStop(); loadData() } catch (e) { alert(e.message) }
+            }}
+          />
 
 
-          {/* ─── AI Scale-In ─── */}
-          {(AI_ONLY_MODE || !!aiScaleStatus?.running) && (
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Bot size={13} className="text-violet-400" />
-              AI Scale-In 1H
-              {aiScaleStatus?.version && (
-                <span className="ml-1 text-2xs text-[var(--txt-muted)] mono">{aiScaleStatus.version}</span>
-              )}
-              {aiScaleStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!aiScaleStatus?.running && aiScaleStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2 text-2xs">
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <div className="text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono font-semibold ${Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    {Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}
-                    {Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0).toFixed(2)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-[var(--txt-muted)]">Сделок</div>
-                  <div className="mono">{aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}</div>
-                </div>
-                <div>
-                  <div className="text-[var(--txt-muted)]">WR</div>
-                  <div className="mono">{aiScaleStatus?.win_rate != null ? `${aiScaleStatus.win_rate}%` : '—'}</div>
-                </div>
-              </div>
-              {(aiScaleStatus?.description || aiScaleStatus?.pulse) && (
-                <div className="p-1.5 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-24 overflow-y-auto text-[11px] leading-relaxed">
-                  {aiScaleStatus.pulse || aiScaleStatus.description}
-                </div>
-              )}
-              <div className="text-[var(--txt-muted)]">
-                Scale-in: adds≤{aiScaleStatus?.scale_in?.max_adds ?? 2}
-                {aiScaleStatus?.open_positions?.length ? ` · поз: ${aiScaleStatus.open_positions.length}` : ''}
-              </div>
-              {!isGuest && (
-                <div className="flex flex-col gap-1.5">
-                  {aiScaleStatus?.running ? (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => {
-                      try { await api.aiScaleStop(); loadData() } catch (e) { alert(e.message) }
-                    }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  ) : (
-                    <button className="btn btn-primary btn-sm w-full" onClick={async () => {
-                      try {
-                        await api.aiScaleStart({ capital: 5000, execute: true, max_adds: 2 })
-                        loadData()
-                      } catch (e) { alert(e.message) }
-                    }}>
-                      <Play size={12} /> {t('dash.start')} Scale-In
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-          )}
-
-          {/* ─── Market Data ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <BarChart3 size={13} className="text-[var(--info)]" />
-              BTC-USDT
-              {ticker && (
-                <span className={`ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-2xs font-bold ${
-                  parseFloat(btcChange) >= 0
-                    ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                    : 'bg-[var(--loss-dim)] text-[var(--loss)]'
-                }`}>
-                  {parseFloat(btcChange) >= 0 ? '▲' : '▼'} {parseFloat(btcChange) >= 0 ? '+' : '-'}{Math.abs(parseFloat(btcChange)).toFixed(2)}%
-                </span>
-              )}
-            </div>
-            <div className="p-3">
-              {ticker && (
-                <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-[var(--border)]">
-                  <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">{t('dash.trend')}</span>
-                  <Sparkline data={btcSparkData} />
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-2xs">
-                {ticker ? [
-                  { l: t('dash.last'), v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
-                  { l: t('dash.bid'), v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: t('dash.ask'), v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                  { l: t('dash.high_24h'), v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: t('dash.low_24h'), v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                ].map(item => (
-                  <div key={item.l} className="flex justify-between">
-                    <span className="text-[var(--txt-muted)]">{item.l}</span>
-                    <span className={`mono font-medium ${item.c}`}>{item.v}</span>
-                  </div>
-                )) : (
-                  <span className="text-[var(--txt-muted)] col-span-2 text-center py-2">{t('dash.no_data')}</span>
-                )}
-              </div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
