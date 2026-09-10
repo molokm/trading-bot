@@ -151,6 +151,7 @@ Hard rules:
 7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
 8) If quant.block_open is true → hold.
 9) Respect adaptive.min_confidence and adaptive.size_cap; read reflection (recent trade outcomes) before opening.
+10) Obey daily_lessons RULE* if present — they are derived from recent losing patterns.
 """
 
 
@@ -365,11 +366,13 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             "hint": snapshot.get("policy_hint") or "",
         },
         "reflection": snapshot.get("reflection") or "",
+        "daily_lessons": snapshot.get("daily_lessons") or [],
+        "journal_tail": snapshot.get("journal_tail") or [],
         "adaptive": snapshot.get("adaptive"),
     }
     user_msg = (
         "Quant-preprocessed market snapshot + self-reflection. Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:2200]
+        + json.dumps(user_payload, ensure_ascii=False)[:3200]
     )
 
     if provider == "mock" or not provider:

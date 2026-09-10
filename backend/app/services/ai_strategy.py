@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.6-time"
+STRATEGY_VERSION = "v1.7-journal"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -232,6 +232,9 @@ class AIStrategy:
                 if k in st["adapt"]:
                     self._adapt[k] = st["adapt"][k]
         self._reflection = str(st.get("reflection") or "")
+        self._journal = list(st.get("journal") or [])[-100:]
+        self._daily_lessons = list(st.get("daily_lessons") or [])[-10:]
+        self._last_lesson_day = str(st.get("last_lesson_day") or "")
         self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
 
     # ── lifecycle ──────────────────────────────────────────────
@@ -907,23 +910,110 @@ class AIStrategy:
             "streak_kind": kind,
         }
 
+    def _journal_append(self, entry: dict) -> None:
+        """Append closed-trade journal row (in-memory, persisted with lifetime)."""
+        try:
+            row = {
+                "time": entry.get("time") or datetime.now(timezone.utc).isoformat(),
+                "coin": entry.get("coin") or entry.get("symbol"),
+                "side": entry.get("side"),
+                "pnl": round(float(entry.get("pnl") or 0), 4),
+                "reason": str(entry.get("reason") or "")[:80],
+                "hold_min": entry.get("hold_min"),
+                "entry": entry.get("entry_price") or entry.get("entry"),
+                "exit": entry.get("exit_price") or entry.get("exit"),
+            }
+            self._journal = (getattr(self, "_journal", None) or []) + [row]
+            self._journal = self._journal[-100:]
+        except Exception as e:
+            print(f"[AI] journal_append: {e}", flush=True)
+
+    def _build_daily_lessons(self) -> list:
+        """Derive up to 3 actionable rules from recent journal (phase5)."""
+        journal = list(getattr(self, "_journal", None) or self._closed_trades())[-30:]
+        if len(journal) < 3:
+            return list(getattr(self, "_daily_lessons", None) or [])[:3]
+        by_coin: dict = {}
+        by_reason: dict = {}
+        losses = []
+        wins = []
+        for t in journal:
+            coin = (t.get("coin") or t.get("symbol") or "?").replace("-USDT-SWAP", "")
+            pnl = float(t.get("pnl") or 0)
+            reason = str(t.get("reason") or "unknown")
+            by_coin.setdefault(coin, {"pnl": 0.0, "n": 0, "wins": 0})
+            by_coin[coin]["pnl"] += pnl
+            by_coin[coin]["n"] += 1
+            if pnl > 0:
+                by_coin[coin]["wins"] += 1
+                wins.append(t)
+            else:
+                losses.append(t)
+            by_reason[reason] = by_reason.get(reason, 0) + (1 if pnl <= 0 else 0)
+        lessons = []
+        # Worst coin
+        if by_coin:
+            worst = min(by_coin.items(), key=lambda x: x[1]["pnl"])
+            if worst[1]["pnl"] < 0 and worst[1]["n"] >= 2:
+                lessons.append(
+                    f"Avoid weak setups on {worst[0]} (recent sum PnL {worst[1]['pnl']:+.1f} over {worst[1]['n']} trades)."
+                )
+        # Dominant loss reason
+        if by_reason:
+            top_r = max(by_reason.items(), key=lambda x: x[1])
+            if top_r[1] >= 2:
+                lessons.append(
+                    f"Frequent loss exit={top_r[0]} x{top_r[1]} — tighten entry or exit earlier on that path."
+                )
+        # Streak / size
+        loss_n = len(losses)
+        if loss_n >= 3 and len(journal) >= 5:
+            lessons.append(
+                "Recent losses cluster — prefer hold unless align>=0.7 and RR>=2; cut size."
+            )
+        if not lessons and wins:
+            lessons.append("No strong anti-pattern — keep requiring RR>=1.8 and bar-close only.")
+        # Dedup
+        out = []
+        for L in lessons:
+            if L not in out:
+                out.append(L)
+        return out[:3]
+
+    def _maybe_refresh_daily_lessons(self) -> None:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        force = (day != getattr(self, "_last_lesson_day", ""))
+        if force or not getattr(self, "_daily_lessons", None):
+            self._daily_lessons = self._build_daily_lessons()
+            self._last_lesson_day = day
+            if self._daily_lessons:
+                print(f"[AI] daily_lessons: {self._daily_lessons}", flush=True)
+
     def _build_reflection(self, stats: dict) -> str:
-        closed = self._closed_trades()[-5:]
+        self._maybe_refresh_daily_lessons()
+        closed = self._closed_trades()[-8:]
         parts = []
         if stats.get("n"):
             parts.append(
                 f"Last {stats['n']} trades: WR={stats.get('win_rate')}% "
                 f"sumPnL={stats.get('sum_pnl')} streak={stats.get('streak_kind')}x{stats.get('streak')}"
             )
-        for t in closed:
+        # Journal tail (compact)
+        for t in closed[-5:]:
+            coin = (t.get("coin") or t.get("symbol") or "").replace("-USDT-SWAP", "")
             parts.append(
-                f"{t.get('coin') or t.get('symbol')} {t.get('side')} "
-                f"pnl={float(t.get('pnl') or 0):+.2f} reason={t.get('reason')}"
+                f"{coin} {t.get('side')} pnl={float(t.get('pnl') or 0):+.2f} "
+                f"exit={t.get('reason')}"
             )
+        lessons = getattr(self, "_daily_lessons", None) or []
+        for i, L in enumerate(lessons, 1):
+            parts.append(f"RULE{i}:{L}")
         preset = (self._adapt or {}).get("preset")
         if preset:
-            parts.append(f"Active preset={preset}; conf>={(self._adapt or {}).get('min_confidence')}")
-        return " | ".join(parts)[:500]
+            parts.append(
+                f"Active preset={preset}; conf>={(self._adapt or {}).get('min_confidence')}"
+            )
+        return " | ".join(parts)[:900]
 
     def _refresh_adaptive(self, force_log: bool = False) -> dict:
         """Bounded self-tune from rolling trade outcomes. Never exceeds floor/ceil."""
@@ -1143,6 +1233,8 @@ class AIStrategy:
             "indicators": self._latest_indicators,
             "adaptive": self._adapt,
             "reflection": self._reflection,
+            "daily_lessons": list(getattr(self, "_daily_lessons", None) or []),
+            "journal_tail": list(getattr(self, "_journal", None) or [])[-5:],
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
             "llm": llm_status(),
@@ -1498,6 +1590,22 @@ class AIStrategy:
             except Exception:
                 pass
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        try:
+            hold_min = None
+            try:
+                opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+                hold_min = round((datetime.now(timezone.utc) - opened).total_seconds() / 60.0, 1)
+            except Exception:
+                pass
+            self._journal_append({
+                "time": datetime.now(timezone.utc).isoformat(),
+                "coin": coin, "side": pos.side, "pnl": pnl, "reason": reason,
+                "hold_min": hold_min, "entry": pos.entry_price, "exit": fill_px,
+            })
+            self._maybe_refresh_daily_lessons()
+            self._reflection = self._build_reflection(self._rolling_stats())
+        except Exception as e:
+            print(f"[AI] journal on close: {e}", flush=True)
         try:
             self.analysis.log(
                 "ai", "close", coin=coin, side=pos.side, entry=pos.entry_price,
@@ -2355,6 +2463,9 @@ class AIStrategy:
                     "reason": (self._adapt or {}).get("reason"),
                 },
                 "reflection": self._reflection,
+                "journal": list(getattr(self, "_journal", None) or [])[-50:],
+                "daily_lessons": list(getattr(self, "_daily_lessons", None) or [])[:5],
+                "last_lesson_day": getattr(self, "_last_lesson_day", ""),
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             })
             await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", blob)
