@@ -930,54 +930,8 @@ function MiniAppPageInner
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-3 space-y-3 pb-8" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
-        {/* ═══ AI Discretionary Welcome Banner ═══ */}
-        {connected && aiBot && (
-          <Card className="relative overflow-hidden border-[var(--info)]/30 bg-gradient-to-br from-[var(--info)]/10 via-transparent to-transparent">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-[var(--info)]/5 rounded-full blur-2xl" />
-            <div className="relative z-10">
-              <div className="flex items-start gap-3 mb-2">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center flex-shrink-0">
-                  <Bot size={20} className="text-white" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h3 className="text-sm font-bold text-[var(--txt)]">AI Discretionary 1H</h3>
-                    {aiBot.running && (
-                      <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[var(--profit-dim)] text-[var(--profit)] text-2xs font-bold">
-                        <span className="w-1.5 h-1.5 rounded-full bg-[var(--profit)] animate-pulse" />
-                        Active
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-2xs text-[var(--txt-secondary)] leading-relaxed">
-                    Автономный AI-трейдер. Анализирует рынок каждый час, 
-                    открывает позиции по тренду с адаптивными стоп-лоссами и trailing stop.
-                  </p>
-                </div>
-              </div>
-              {aiBot.running && (
-                <div className="flex gap-2 text-2xs">
-                  <div className="flex-1 px-2 py-1.5 rounded-lg bg-[var(--surface-raised)]">
-                    <div className="text-[var(--txt-muted)] mb-0.5">PnL</div>
-                    <div className={`font-bold mono ${(aiBot.lifetime_pnl || 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {pnlSign(aiBot.lifetime_pnl || 0)}
-                    </div>
-                  </div>
-                  <div className="flex-1 px-2 py-1.5 rounded-lg bg-[var(--surface-raised)]">
-                    <div className="text-[var(--txt-muted)] mb-0.5">Trades</div>
-                    <div className="font-bold text-[var(--txt)]">{aiBot.trade_count || 0}</div>
-                  </div>
-                  <div className="flex-1 px-2 py-1.5 rounded-lg bg-[var(--surface-raised)]">
-                    <div className="text-[var(--txt-muted)] mb-0.5">Win Rate</div>
-                    <div className="font-bold text-[var(--txt)]">{aiBot.win_rate ? `${(aiBot.win_rate * 100).toFixed(0)}%` : '—'}</div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </Card>
-        )}
         {/* ═══ Data unavailable banner ═══ */}
-        {loaded && !portfolio && !rotation && !impulse && !validation && !aiBot && (
+        {loaded && !portfolio && !rotation && !impulse && !validation && !aiBot && !aiScale && (
           <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--warn-dim)] border border-[var(--warn)]">
             <span className="text-xs text-[var(--txt)]">{t('mini.data_error')}</span>
             <button
