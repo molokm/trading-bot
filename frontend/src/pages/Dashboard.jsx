@@ -13,7 +13,7 @@ const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX'
 
 // Coins the bot actively trades — shown as live price cards on the dashboard
 const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
-/** Single-strategy product mode — only AI Discretionary is shown/managed */
+/** AI product mode — Discretionary + optional Scale-In on dashboard */
 const AI_ONLY_MODE = true
 
 
@@ -63,6 +63,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
+  const [aiScaleStatus, setAiScaleStatus] = useState(null)
   const [smartMoneyStatus, setSmartMoneyStatus] = useState(null)
   const [vwapRevStatus, setVwapRevStatus] = useState(null)
   const [aiBusy, setAiBusy] = useState(false)
@@ -182,6 +183,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         impStatus,
         valStatus,
         aiSt2,
+        aiScaleSt2,
         smartMoneySt,
         vwapRevSt,
         priceTickers,
@@ -193,6 +195,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
         isLive ? Promise.resolve(null) : api.aiStatus().catch(() => null),
+        isLive ? Promise.resolve(null) : api.aiScaleStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
@@ -203,6 +206,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         if (pf2) setPortfolio(pf2)
         if (pos2) setPositions(pos2.positions || [])
         if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
+        if (aiScaleSt2 && !aiScaleSt2.detail) setAiScaleStatus(aiScaleSt2)
         
         if (aiSt2 && (aiSt2.total_pnl != null || aiSt2.lifetime_pnl != null)) {
           const aiP = Number(aiSt2.lifetime_pnl ?? aiSt2.total_pnl ?? 0)
@@ -314,6 +318,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const names = []
     if (AI_ONLY_MODE) {
       if (aiStatus?.running) names.push('AI Discretionary 1H')
+      if (aiScaleStatus?.running) names.push('AI Scale-In 1H')
       return names
     }
     if (momentumStatus?.running) names.push('Momentum')
@@ -427,6 +432,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     'MACD+Donchian Validation': 'MACD+Donchian Validation',
     ai_strategy: 'AI Discretionary 1H',
     'AI Discretionary 1H': 'AI Discretionary 1H',
+    ai_scale_strategy: 'AI Scale-In 1H',
+    'AI Scale-In 1H': 'AI Scale-In 1H',
     orderbook_scalp: 'Order Book Scalp',
     smart_money: 'Умные деньги',
     'Умные деньги': 'Умные деньги',
@@ -498,6 +505,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+    addPositions(aiScaleStatus?.open_positions, 'AI Scale-In 1H')
     addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
@@ -1692,6 +1700,70 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       } catch (e) { alert(e.message) }
                     }}>
                       <Play size={12} /> {t('dash.start')} (demo exec)
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+          )}
+
+
+          {/* ─── AI Scale-In ─── */}
+          {(AI_ONLY_MODE || !!aiScaleStatus?.running) && (
+          <div className="panel flex-shrink-0">
+            <div className="panel-header">
+              <Bot size={13} className="text-violet-400" />
+              AI Scale-In 1H
+              {aiScaleStatus?.version && (
+                <span className="ml-1 text-2xs text-[var(--txt-muted)] mono">{aiScaleStatus.version}</span>
+              )}
+              {aiScaleStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
+              {!aiScaleStatus?.running && aiScaleStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+            </div>
+            <div className="p-3 space-y-2 text-2xs">
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <div className="text-[var(--txt-muted)]">PnL</div>
+                  <div className={`mono font-semibold ${Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}
+                    {Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0).toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[var(--txt-muted)]">Сделок</div>
+                  <div className="mono">{aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}</div>
+                </div>
+                <div>
+                  <div className="text-[var(--txt-muted)]">WR</div>
+                  <div className="mono">{aiScaleStatus?.win_rate != null ? `${aiScaleStatus.win_rate}%` : '—'}</div>
+                </div>
+              </div>
+              {(aiScaleStatus?.description || aiScaleStatus?.pulse) && (
+                <div className="p-1.5 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-24 overflow-y-auto text-[11px] leading-relaxed">
+                  {aiScaleStatus.pulse || aiScaleStatus.description}
+                </div>
+              )}
+              <div className="text-[var(--txt-muted)]">
+                Scale-in: adds≤{aiScaleStatus?.scale_in?.max_adds ?? 2}
+                {aiScaleStatus?.open_positions?.length ? ` · поз: ${aiScaleStatus.open_positions.length}` : ''}
+              </div>
+              {!isGuest && (
+                <div className="flex flex-col gap-1.5">
+                  {aiScaleStatus?.running ? (
+                    <button className="btn btn-danger btn-sm w-full" onClick={async () => {
+                      try { await api.aiScaleStop(); loadData() } catch (e) { alert(e.message) }
+                    }}>
+                      <Square size={12} /> {t('dash.stop_bot')}
+                    </button>
+                  ) : (
+                    <button className="btn btn-primary btn-sm w-full" onClick={async () => {
+                      try {
+                        await api.aiScaleStart({ capital: 5000, execute: true, max_adds: 2 })
+                        loadData()
+                      } catch (e) { alert(e.message) }
+                    }}>
+                      <Play size={12} /> {t('dash.start')} Scale-In
                     </button>
                   )}
                 </div>
