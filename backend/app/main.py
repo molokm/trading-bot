@@ -6002,6 +6002,11 @@ async def sync_exchange_close_trades() -> int:
         if not oid:
             continue
         try:
+            # OKX close bill realized pnl (already fee-aware on most accounts)
+            bp = float(b.get("pnl") if b.get("pnl") not in (None, "") else 0)
+        except (TypeError, ValueError):
+            bp = 0.0
+        try:
             bf = abs(float(b.get("fee") or 0))
         except (TypeError, ValueError):
             bf = 0.0
@@ -6022,6 +6027,7 @@ async def sync_exchange_close_trades() -> int:
                 "inst_id": inst, "cl_ord_id": clord, "ts": ts,
                 "pnl": 0.0, "fee": 0.0, "sz": 0.0, "px_sum": 0.0, "px_n": 0,
                 "sub_type": sub,
+                "account_mode": (b.get("account_mode") or _account_mode()),
             }
         close_by_ord[oid]["pnl"] += bp
         close_by_ord[oid]["fee"] += bf
@@ -6050,6 +6056,9 @@ async def sync_exchange_close_trades() -> int:
                 close_ts = int(info["ts"])
             except (TypeError, ValueError):
                 pass
+        # AI-only mode: untagged closes after epoch still belong to the only bot
+        if not bot_label and AI_ONLY_MODE:
+            bot_label = "AI Discretionary 1H"
         rows.append({
             "ord_id": oid,
             "inst_id": info["inst_id"],
@@ -6061,6 +6070,8 @@ async def sync_exchange_close_trades() -> int:
             "avg_px": round(avg_px, 6),
             "close_ts": close_ts,
             "sub_type": info["sub_type"],
+            "account_mode": info.get("account_mode") or _account_mode(),
+            "account_key": "showcase" if _account_mode() == "demo" else "live",
         })
 
     print(f"[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}", flush=True)
@@ -6626,6 +6637,13 @@ async def _compute_pnl():
             account_mode=_mode,
             epoch_ms=epoch_ms,
         )
+        # Legacy rows without account_mode must still count (pre-isolation syncs)
+        if not rows:
+            rows = await db.get_exchange_pnl_timebucket(
+                bot_label=bot_filter,
+                account_mode=None,
+                epoch_ms=epoch_ms,
+            )
 
         if rows:
             source = "exchange_close_trades"

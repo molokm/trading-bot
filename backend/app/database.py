@@ -529,17 +529,20 @@ class Database:
                 for t in trades:
                     await conn.execute("""
                         INSERT INTO exchange_close_trades
-                            (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
-                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                            (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at, account_mode, account_key)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
                         ON CONFLICT (ord_id) DO UPDATE SET
                             inst_id=EXCLUDED.inst_id, cl_ord_id=EXCLUDED.cl_ord_id,
                             bot_label=EXCLUDED.bot_label, pnl=EXCLUDED.pnl, fee=EXCLUDED.fee,
                             sz=EXCLUDED.sz, avg_px=EXCLUDED.avg_px, close_ts=EXCLUDED.close_ts,
-                            sub_type=EXCLUDED.sub_type, synced_at=EXCLUDED.synced_at
+                            sub_type=EXCLUDED.sub_type, synced_at=EXCLUDED.synced_at,
+                            account_mode=EXCLUDED.account_mode, account_key=EXCLUDED.account_key
                     """, (
                         t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
                         t["pnl"], t["fee"], t["sz"], t["avg_px"],
                         t["close_ts"], t["sub_type"], now,
+                        t.get("account_mode") or "demo",
+                        t.get("account_key") or "showcase",
                     ))
                 return len(trades)
             finally:
@@ -548,11 +551,13 @@ class Database:
             for t in trades:
                 await self._execute(
                     """INSERT OR REPLACE INTO exchange_close_trades
-                       (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at, account_mode, account_key)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
                      t["pnl"], t["fee"], t["sz"], t["avg_px"],
-                     t["close_ts"], t["sub_type"], now)
+                     t["close_ts"], t["sub_type"], now,
+                     t.get("account_mode") or "demo",
+                     t.get("account_key") or "showcase")
                 )
             return len(trades)
 
