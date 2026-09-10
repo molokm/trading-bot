@@ -735,39 +735,57 @@ async def startup():
                 f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
                 flush=True,
             )
-            # AI Scale-In auto-start (Demo A/B companion; default ON)
-            _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
-            if _scale_auto:
-                try:
-                    global ai_scale_bot
-                    from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig
-                    scfg = AIScaleConfig(
-                        capital=float(os.getenv("AI_SCALE_CAPITAL", os.getenv("AI_CAPITAL", "5000"))),
-                        max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
-                        max_positions=1,
-                        risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
-                        poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
-                        execute=_exec,
-                        scale_enabled=True,
-                        max_adds=2,
-                    )
-                    ai_scale_bot = AIScaleStrategy(
-                        config=scfg, client_manager=client_manager, db=db, notifier=telegram,
-                    )
-                    ai_scale_bot.start()
-                    print(
-                        f"[startup]   AI Scale-In RUNNING execute={_exec} capital={scfg.capital}",
-                        flush=True,
-                    )
-                except Exception as _se:
-                    print(f"[startup]   AI Scale-In FAILED: {_se}", flush=True)
         else:
             print(
-                "[startup]   AI skipped (need OKX keys; set AI_AUTO_START=0 to disable)",
+                "[startup]   AI Discretionary skipped (AI_AUTO_START=0 or no OKX keys)",
                 flush=True,
             )
     except Exception as e:
         print(f"[startup]   AI FAILED: {e}", flush=True)
+
+    # AI Scale-In (SCL) — independent auto-start after deploy/restart (default ON)
+    try:
+        print("[startup] AI Scale-In (SCL) auto-start ...", flush=True)
+        _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+        if _env_key and _env_secret and _env_pass and _scale_auto:
+            global ai_scale_bot
+            if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
+                print("[startup]   AI Scale-In already running", flush=True)
+            else:
+                _demo = _env_demo
+                if _demo:
+                    _exec_s = True
+                else:
+                    env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
+                    _exec_s = env_ex not in ("0", "false", "no", "off")
+                from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig
+                scfg = AIScaleConfig(
+                    capital=float(os.getenv("AI_SCALE_CAPITAL", "5000")),
+                    max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                    max_positions=1,
+                    risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                    poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                    execute=_exec_s,
+                    scale_enabled=True,
+                    max_adds=2,
+                )
+                ai_scale_bot = AIScaleStrategy(
+                    config=scfg, client_manager=client_manager, db=db, notifier=telegram,
+                )
+                ai_scale_bot.start()
+                global _positions_cache
+                _positions_cache = None
+                print(
+                    f"[startup]   AI Scale-In (SCL) RUNNING execute={_exec_s} capital={scfg.capital}",
+                    flush=True,
+                )
+        else:
+            print(
+                "[startup]   AI Scale-In skipped (AI_SCALE_AUTO_START=0 or no OKX keys)",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"[startup]   AI Scale-In FAILED: {e}", flush=True)
 
 
 @app.on_event("shutdown")
