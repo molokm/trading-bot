@@ -1943,8 +1943,28 @@ async def ai_start(data: dict = None):
         # Use the runtime _env_demo (changed by /api/mode), NOT os.getenv which is always "true"
         _demo = _env_demo
 
-        # Check OKX client is available
-        client = client_manager.get_client() if client_manager else None
+        # Bind OKX client to the selected account (DEMO showcase vs LIVE keys)
+        client = None
+        if _demo:
+            await _ensure_showcase()
+            k = _demo_key or _env_key
+            s = _demo_secret or _env_secret
+            pw = _demo_pass or _env_pass
+            if k and s and pw:
+                await client_manager.init_client(k, s, pw, True)
+            client = client_manager.get_client() if client_manager else None
+        else:
+            await _load_live_creds_from_db()
+            if not (_live_key and _live_secret and _live_pass):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Live-ключи не сохранены. Настройки → Сохранить Live-ключ (без галочки Demo).",
+                )
+            await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
+            client = client_manager.get_client() if client_manager else None
+            if client and getattr(client, "demo", True):
+                raise HTTPException(status_code=400, detail="Клиент всё ещё в Demo — Live-ключи не применились")
+
         if not client:
             raise HTTPException(
                 status_code=400,
@@ -1974,8 +1994,9 @@ async def ai_start(data: dict = None):
         elif _demo:
             _exec = True
         else:
-            env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
-            _exec = env_ex in ("1", "true", "yes", "on")
+            # Live: default execute ON when started from UI; set AI_EXECUTE=0 to force signals-only
+            env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
+            _exec = env_ex not in ("0", "false", "no", "off")
 
         capital = float(data.get("capital") or os.getenv("AI_CAPITAL", "10000"))
 
