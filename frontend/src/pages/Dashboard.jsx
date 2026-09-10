@@ -364,16 +364,29 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return sumClosedSince(365 * 86400000)
   })()
   const pnlDay = (() => {
-    if (pnl && pnl['1d'] != null && (pnl.active_bots || []).length) return Number(pnl['1d'])
+    // Prefer API calendar today (MSK). Fallback: last 24h only if API missing.
+    if (pnl && pnl['1d'] != null && pnl.source && pnl.source !== 'ai_status_seed') {
+      return Number(pnl['1d'])
+    }
     if (pnl && Number(pnl['1d'] ?? 0) !== 0) return Number(pnl['1d'])
     if (!activeBotNames.length) return 0
     return sumClosedSince(86400000)
   })()
   const pnlWeek = (() => {
-    // Calendar week Mon→now (MSK). Never use rolling 7d — it inflates Monday.
-    if (pnl && pnl.week != null) return Number(pnl.week)
+    // Calendar week Mon 00:00 MSK → now. Must include "today".
+    const apiWeek = pnl && pnl.week != null && pnl.source && pnl.source !== 'ai_status_seed'
+      ? Number(pnl.week) : null
+    const apiDay = pnl && pnl['1d'] != null && pnl.source && pnl.source !== 'ai_status_seed'
+      ? Number(pnl['1d']) : null
+    if (apiWeek != null) {
+      // If API week is 0 but today is not — trust Monday client sum / at least today
+      if (Math.abs(apiWeek) < 0.01 && apiDay != null && Math.abs(apiDay) > 0.01) {
+        // continue to client fallback below
+      } else {
+        return apiWeek
+      }
+    }
     if (!activeBotNames.length) return 0
-    // Client fallback: only since local Monday 00:00
     const now = new Date()
     const day = (now.getDay() + 6) % 7 // Mon=0
     const monday = new Date(now)
@@ -391,6 +404,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (!Number.isFinite(ms) || ms < cutoff) continue
       s += Number(t.pnl) || 0
     }
+    // At least include displayed day when log empty but day known
+    if (Math.abs(s) < 0.01 && apiDay != null && Math.abs(apiDay) > 0.01) return apiDay
+    if (Math.abs(s) < 0.01 && Math.abs(pnlDay) > 0.01) return pnlDay
     return s
   })()
   const pnlMonth = (() => {
