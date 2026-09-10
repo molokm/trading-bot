@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.5-quant"
+STRATEGY_VERSION = "v1.6-time"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -112,7 +112,9 @@ class AIConfig:
     min_stop_pct: float = 0.018
     max_stop_pct: float = 0.05
     min_take_pct: float = 0.035
-    max_hold_hours: float = 24.0
+    max_hold_hours: float = 12.0            # phase4: hard time-stop
+    time_stop_stale_hours: float = 8.0      # close if no meaningful progress
+    time_stop_min_progress_pct: float = 0.15  # need at least this UPL% to keep past stale
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
@@ -1590,15 +1592,30 @@ class AIStrategy:
                 held_sec = (datetime.now(timezone.utc) - opened).total_seconds()
                 held_min = held_sec / 60.0
                 held_h = held_sec / 3600.0
-                if held_h >= float(self.config.max_hold_hours or 24):
+                if held_h >= float(self.config.max_hold_hours or 12):
                     await self._close(client, coin, "max_hold")
                     continue
             except Exception:
-                pass
+                held_h = 0.0
             ind = self._latest_indicators.get(coin) or {}
             px = float(ind.get("close") or 0)
             if px <= 0:
                 continue
+            # Phase4 time-stop: no progress after N hours → exit (don't bleed to SL)
+            try:
+                stale_h = float(getattr(self.config, "time_stop_stale_hours", 8) or 0)
+                min_prog = float(getattr(self.config, "time_stop_min_progress_pct", 0.15) or 0)
+                if stale_h > 0 and held_h >= stale_h:
+                    upl0 = self._unrealized_pct(pos, px)
+                    if upl0 < min_prog:
+                        print(
+                            f"[AI] time_stop_stale {coin} held={held_h:.1f}h upl={upl0:+.2f}%",
+                            flush=True,
+                        )
+                        await self._close(client, coin, "time_stop_stale")
+                        continue
+            except Exception as e:
+                print(f"[AI] time_stop check: {e}", flush=True)
 
             # Peak / trail: move stop to lock part of profit
             if pos.side == "long":

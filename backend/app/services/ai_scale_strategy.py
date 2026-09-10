@@ -19,7 +19,7 @@ from .position_claim import claim_open
 
 AI_SCALE_BOT_ID = "ai_scale_strategy"
 STRATEGY_NAME = "AI Scale-In 1H"
-STRATEGY_VERSION = "v1.0-scale"
+STRATEGY_VERSION = "v1.1-strict"
 STRATEGY_DESC = (
     "Копия AI Discretionary: вход по сигналу, докупки частями если цена против "
     "но тренд по индикаторам сохраняется. Объём входа и add определяет AI."
@@ -29,16 +29,18 @@ STRATEGY_DESC = (
 @dataclass
 class AIScaleConfig(AIConfig):
     max_positions: int = 1
-    # Scale-in
+    # Scale-in (phase4: stricter)
     scale_enabled: bool = True
-    max_adds: int = 3                    # extras after initial entry
-    min_adverse_pct: float = 0.4         # min adverse move % to consider add
-    max_adverse_pct: float = 3.5         # do not add if move is too deep
-    min_trend_align: float = 0.55        # quant align must still favor side
-    add_size_frac_min: float = 0.25      # min fraction of initial size
-    add_size_frac_max: float = 0.75
-    max_total_risk_mult: float = 2.2     # total size <= initial * this
-    scale_cooldown_sec: int = 900        # min seconds between adds
+    max_adds: int = 2                    # was 3 — fewer averages
+    min_adverse_pct: float = 0.6         # need clearer pullback
+    max_adverse_pct: float = 2.2         # no deep averaging into a trend break
+    min_trend_align: float = 0.62        # stronger trend confirmation
+    add_size_frac_min: float = 0.20
+    add_size_frac_max: float = 0.50      # smaller adds
+    max_total_risk_mult: float = 1.7     # was 2.2
+    scale_cooldown_sec: int = 1800       # 30m between adds
+    require_adx_for_add: float = 18.0    # ADX must still show trend
+    block_add_on_funding: bool = True
 
 
 class AIScaleStrategy(AIStrategy):
@@ -102,12 +104,38 @@ class AIScaleStrategy(AIStrategy):
                 align = float(cq.get("align_score") or 0)
             trend_ok = align >= float(getattr(self.config, "min_trend_align", 0.55))
             adds = int(self._add_counts.get(coin, 0))
+            adx_v = float(ind.get("adx") or 0)
+            fr = ind.get("funding_rate")
+            try:
+                fr = float(fr) if fr is not None else None
+            except (TypeError, ValueError):
+                fr = None
+            funding_ok = True
+            if getattr(self.config, "block_add_on_funding", True) and fr is not None:
+                lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+                if side == "long" and fr >= lim:
+                    funding_ok = False
+                if side == "short" and fr <= -lim:
+                    funding_ok = False
+            adx_need = float(getattr(self.config, "require_adx_for_add", 18) or 0)
+            adx_ok = adx_v >= adx_need if adx_need > 0 else True
+            # BTC impulse: no add against BTC on alts
+            btc_ok = True
+            impulse = (q.get("btc_impulse") if q else None)
+            if coin != "BTC" and impulse:
+                if impulse == "up" and side == "short":
+                    btc_ok = False
+                if impulse == "down" and side == "long":
+                    btc_ok = False
             can_add = (
                 bool(getattr(self.config, "scale_enabled", True))
-                and adverse >= float(getattr(self.config, "min_adverse_pct", 0.4))
-                and adverse <= float(getattr(self.config, "max_adverse_pct", 3.5))
+                and adverse >= float(getattr(self.config, "min_adverse_pct", 0.6))
+                and adverse <= float(getattr(self.config, "max_adverse_pct", 2.2))
                 and trend_ok
-                and adds < int(getattr(self.config, "max_adds", 3))
+                and adx_ok
+                and funding_ok
+                and btc_ok
+                and adds < int(getattr(self.config, "max_adds", 2))
             )
             row = dict(p)
             row.update({
