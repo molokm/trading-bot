@@ -4044,30 +4044,61 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
         except (TypeError, ValueError):
             entry = 0.0
 
-        bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
+        # 0) Live strategy memory wins (SCL / AI holding the coin)
+        bot_name = ""
+        try:
+            coin0 = (inst or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+            if ai_scale_bot and coin0 in (getattr(ai_scale_bot, "_positions", None) or {}):
+                bot_name = "AI Scale-In 1H"
+            elif ai_bot and coin0 in (getattr(ai_bot, "_positions", None) or {}):
+                bot_name = "AI Discretionary 1H"
+        except Exception:
+            pass
+
+        if not bot_name:
+            bot_name = _tag_position_bot(inst, pos_side, db_pos_map=db_pos_map)
         if not bot_name:
             bot_name = _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
 
-        # AI_ONLY: stale MAC/MOM/IMP claims must not win over AI / Scale-In
-        if AI_ONLY_MODE and bot_name in (
-            "MACD+Donchian Validation", "Validation", "Momentum", "Impulse 1D", "Impulse",
-        ):
-            if not (validation and getattr(validation, "_running", False) and "MAC" in bot_name):
-                if not (impulse and getattr(impulse, "_running", False) and "Impulse" in bot_name):
-                    if not (rotation and getattr(rotation, "_running", False) and bot_name == "Momentum"):
-                        print(f"[positions] ignore stale claim {inst} → {bot_name}", flush=True)
-                        bot_name = ""
+        # AI_ONLY / product mode: never show retired bots (IMP/MAC/MOM) as owner
+        _retired = {
+            "MACD+Donchian Validation", "Validation", "Momentum",
+            "Impulse 1D", "Impulse", "VWAP Mean Reversion",
+        }
+        if AI_ONLY_MODE and bot_name in _retired:
+            print(f"[positions] strip retired badge {inst} → was {bot_name}", flush=True)
+            bot_name = ""
+            # drop DB claim so it cannot reappear
+            try:
+                for dead in (
+                    IMP_BOT_ID, VAL_BOT_ID, ROT_BOT_ID,
+                    "impulse_strategy", "validation_strategy", "rotation_strategy",
+                    "momentum_strategy",
+                ):
+                    try:
+                        await release_open(db, dead, inst, side_n)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
+        # last_bot only for active AI family — never re-attach Impulse/Validation
         if not bot_name and inst:
             try:
                 last_bot = await db.last_bot_for_instrument(inst)
-                if last_bot and sz > 0 and entry > 0:
+                last_name = _db_bot_name(last_bot) if last_bot else ""
+                allowed = last_bot in (
+                    AI_BOT_ID, AI_SCALE_BOT_ID, "ai_strategy", "ai_scale_strategy",
+                ) or (last_name or "").startswith("AI ")
+                if last_bot and allowed and sz > 0 and entry > 0:
                     await claim_open(db, last_bot, inst, side_n, sz, entry)
                     db_pos_map[(inst, side_n)] = last_bot
                     db_pos_map[(inst, "net")] = last_bot
-                    bot_name = _db_bot_name(last_bot) or _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
+                    bot_name = last_name or _tag_position_bot(inst, side_n, db_pos_map=db_pos_map)
                     if bot_name:
                         print(f"[positions] reclaimed {inst} {side_n} → {last_bot}", flush=True)
+                elif last_bot and not allowed:
+                    print(f"[positions] skip last_bot={last_bot} (retired) for {inst}", flush=True)
             except Exception as e:
                 print(f"[positions] reclaim {inst}: {e}", flush=True)
 
@@ -4085,15 +4116,20 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                     if (f.get("instId") or "") != inst:
                         continue
                     cid = str(f.get("clOrdId") or "").lower()
-                    for pref, (bid, label) in prefix_map.items():
-                        if cid.startswith(pref):
-                            if sz > 0 and entry > 0:
-                                await claim_open(db, bid, inst, side_n, sz, entry)
-                                db_pos_map[(inst, side_n)] = bid
-                                db_pos_map[(inst, "net")] = bid
-                                bot_name = label
-                                print(f"[positions] reclaimed via clOrdId {cid[:20]} → {label}", flush=True)
-                            break
+                    # Longest / priority: ais before ai before others
+                    ordered = list(prefix_map.items())
+                    for pref, (bid, label) in ordered:
+                        if not cid.startswith(pref):
+                            continue
+                        if AI_ONLY_MODE and pref in ("imp", "val", "rot"):
+                            continue  # retired bots
+                        if sz > 0 and entry > 0:
+                            await claim_open(db, bid, inst, side_n, sz, entry)
+                            db_pos_map[(inst, side_n)] = bid
+                            db_pos_map[(inst, "net")] = bid
+                            bot_name = label
+                            print(f"[positions] reclaimed via clOrdId {cid[:20]} → {label}", flush=True)
+                        break
                     if bot_name:
                         break
             except Exception as e:
@@ -4152,11 +4188,11 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                     univ = list(getattr(getattr(rotation, "config", None), "symbols", None) or _RC)
                     if coin in univ:
                         candidates.append((ROT_BOT_ID, "Momentum", rotation))
-                if impulse and getattr(impulse, "_running", False):
+                if (not AI_ONLY_MODE) and impulse and getattr(impulse, "_running", False):
                     univ = list(getattr(getattr(impulse, "config", None), "symbols", None) or _RC)
                     if coin in univ:
                         candidates.append((IMP_BOT_ID, "Impulse 1D", impulse))
-                if validation and getattr(validation, "_running", False):
+                if (not AI_ONLY_MODE) and validation and getattr(validation, "_running", False):
                     univ = list(getattr(getattr(validation, "config", None), "symbols", None) or _RC)
                     if coin in univ:
                         candidates.append((VAL_BOT_ID, "MACD+Donchian Validation", validation))

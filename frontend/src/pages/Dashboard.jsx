@@ -511,6 +511,18 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return m
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
 
+  const resolveBotName = (p) => {
+    const posSideKey = (p.posSide || p.side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+    const key = `${p.instId || p.inst_id || ''}|${posSideKey}`
+    const fromMap = botMap[key] || ''
+    const raw = p.bot || ''
+    const retired = /impulse|validation|macd|momentum|vwap/i.test(String(raw))
+    // Live map (Scale-In / AI memory) beats stale exchange/DB label
+    if (fromMap) return fromMap
+    if (retired && AI_ONLY_MODE) return ''
+    return raw || ''
+  }
+
   const isOwnedBot = (bn) => {
     if (!bn) return false
     const n = String(bn).toLowerCase()
@@ -1086,7 +1098,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                   <tbody>
                     {positions.filter((p) => {
                       const posSideKey = (p.posSide || 'long').toLowerCase()
-                      const bn = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
+                      const bn = resolveBotName(p)
                       if (!bn || bn === 'Smart Money') return false
                       return true
                     }).map((p, i) => {
@@ -1094,7 +1106,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const roe = parseFloat(p.uplRatio || 0) * 100
                       const posId = `${p.instId}_${p.posSide}`
                       const posSideKey = (p.posSide || 'long').toLowerCase()
-                      const botName = p.bot || botMap[`${p.instId || ''}|${posSideKey}`] || ''
+                      const botName = resolveBotName(p)
                       const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : (botName === 'Impulse' || botName === 'Impulse 1D')
