@@ -215,6 +215,7 @@ export const api = {
   aiScaleStop: () =>
     request('/ai-scale/stop', { method: 'POST' }),
   aiAbCompare: () => request('/ai/ab-compare'),
+  positionsReclaim: (body) => request('/positions/reclaim', { method: 'POST', body: JSON.stringify(body || {}) }),
   aiAbStart: (body = {}) => request('/ai/ab-start', { method: 'POST', body: JSON.stringify(body || {}) }),
 
   aiStart: (config = {}) =>

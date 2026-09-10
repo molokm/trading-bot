@@ -509,7 +509,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
 
   const isOwnedBot = (bn) => {
     if (!bn) return false
@@ -533,6 +533,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addStatus(impulseStatus?.open_positions)
     addStatus(validationStatus?.open_positions)
     addStatus(aiStatus?.open_positions)
+    addStatus(aiScaleStatus?.open_positions)
     addStatus(smartMoneyStatus?.open_positions)
     return (positions || []).filter((p) => {
       const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
@@ -1098,6 +1099,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : (botName === 'Impulse' || botName === 'Impulse 1D')
                         ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
+                        : botName === 'AI Scale-In 1H' || botName === 'AI Scale-In'
+                        ? 'text-violet-400'
                         : botName === 'Validation' || botName === 'MACD+Donchian Validation'
                         ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
                         : botName === 'AI Discretionary 1H'

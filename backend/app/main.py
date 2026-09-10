@@ -3035,6 +3035,122 @@ async def vwap_rev_stop():
 
 
 
+
+@app.post("/api/positions/reclaim", dependencies=[Depends(require_admin)])
+async def positions_reclaim(data: dict = Body(default=None)):
+    """Force-bind an exchange position to a strategy (fixes wrong MAC/AI badge).
+
+    Body: { "symbol": "SOL", "side": "short", "to_bot": "ai_scale_strategy" }
+    to_bot: ai_scale_strategy | ai_strategy | impulse_strategy | ...
+    """
+    global ai_bot, ai_scale_bot, _positions_cache
+    data = data or {}
+    sym = (data.get("symbol") or data.get("coin") or "").upper().replace("-USDT-SWAP", "")
+    side = (data.get("side") or "long").lower()
+    if side not in ("long", "short"):
+        raise HTTPException(status_code=400, detail="side must be long|short")
+    to_bot = (data.get("to_bot") or "ai_scale_strategy").strip()
+    if not sym:
+        raise HTTPException(status_code=400, detail="symbol required")
+    inst = f"{sym}-USDT-SWAP"
+    from app.services.position_claim import claim_open, release_open, norm_side
+    side_n = norm_side(side) if "norm_side" in dir() else side
+
+    # Release claims from all known bots
+    known = [
+        "ai_strategy", "ai_scale_strategy", "impulse_strategy", "validation_strategy",
+        "rotation_strategy", "momentum_strategy", "smart_money", "vwap_rev_strategy",
+    ]
+    released = []
+    for bid in known:
+        if bid == to_bot:
+            continue
+        try:
+            await release_open(db, bid, inst, side)
+            released.append(bid)
+        except Exception:
+            pass
+
+    # Size/entry from exchange if possible
+    sz, entry = float(data.get("size") or 0), float(data.get("entry") or 0)
+    client = client_manager.get_client()
+    if client and (sz <= 0 or entry <= 0):
+        try:
+            resp = await client.get_positions("SWAP", inst_id=inst)
+            for p in (resp.get("data") or []):
+                if (p.get("instId") or "") != inst:
+                    continue
+                ps = (p.get("posSide") or "net").lower()
+                if side == "short" and ps not in ("short", "net"):
+                    continue
+                if side == "long" and ps not in ("long", "net"):
+                    continue
+                sz = abs(float(p.get("pos") or 0))
+                entry = float(p.get("avgPx") or 0)
+                break
+        except Exception as e:
+            print(f"[reclaim] positions: {e}", flush=True)
+    if sz <= 0 or entry <= 0:
+        raise HTTPException(status_code=400, detail="Could not resolve size/entry from exchange")
+
+    ok = await claim_open(db, to_bot, inst, side, sz, entry)
+
+    # Inject into running bot memory
+    injected = None
+    try:
+        if to_bot == "ai_scale_strategy" and ai_scale_bot:
+            from app.services.ai_strategy import AIPosition
+            from datetime import datetime, timezone
+            stop_pct, take_pct = 0.03, 0.06
+            if side == "long":
+                stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+            else:
+                stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+            # Drop from other AI memory
+            if ai_bot and sym in getattr(ai_bot, "_positions", {}):
+                ai_bot._positions.pop(sym, None)
+            ai_scale_bot._positions[sym] = AIPosition(
+                coin=sym, inst_id=inst, side=side, size=sz,
+                entry_price=entry, stop_price=stop, take_price=take,
+                leverage=float(getattr(ai_scale_bot.config, "max_leverage", 3) or 3),
+                opened_at=datetime.now(timezone.utc).isoformat(),
+                peak_price=entry, signal_id=0,
+            )
+            injected = "ai_scale"
+        elif to_bot == "ai_strategy" and ai_bot:
+            from app.services.ai_strategy import AIPosition
+            from datetime import datetime, timezone
+            stop_pct, take_pct = 0.03, 0.06
+            if side == "long":
+                stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+            else:
+                stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+            if ai_scale_bot and sym in getattr(ai_scale_bot, "_positions", {}):
+                ai_scale_bot._positions.pop(sym, None)
+            ai_bot._positions[sym] = AIPosition(
+                coin=sym, inst_id=inst, side=side, size=sz,
+                entry_price=entry, stop_price=stop, take_price=take,
+                leverage=float(getattr(ai_bot.config, "max_leverage", 3) or 3),
+                opened_at=datetime.now(timezone.utc).isoformat(),
+                peak_price=entry, signal_id=0,
+            )
+            injected = "ai"
+    except Exception as e:
+        print(f"[reclaim] inject: {e}", flush=True)
+
+    _positions_cache = None
+    return {
+        "ok": bool(ok),
+        "inst_id": inst,
+        "side": side,
+        "to_bot": to_bot,
+        "size": sz,
+        "entry": entry,
+        "released": released,
+        "injected": injected,
+    }
+
+
 @app.get("/api/health/positions-claims", dependencies=[Depends(require_admin)])
 async def health_positions_claims():
     """Compare OKX open SWAP positions vs DB strategy claims."""
