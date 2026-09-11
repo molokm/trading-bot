@@ -2343,7 +2343,12 @@ class AIStrategy:
                     # (execute=0) and the blob picked up misattributed OKX PnL
                     # despite zero real trades. With no closed trades recorded,
                     # lifetime PnL is meaningless — zero it out.
-                    if self._lifetime_trades == 0 and abs(self._lifetime_pnl) > 1e-9:
+                    # Only AI Discretionary had signal-only misattribution; never wipe Scale-In
+                    if (
+                        getattr(self, "BOT_ID", "") == "ai_strategy"
+                        and self._lifetime_trades == 0
+                        and abs(self._lifetime_pnl) > 1e-9
+                    ):
                         print(f"[AI] hydrate: clearing stale lifetime_pnl "
                               f"({self._lifetime_pnl:.2f}, trades=0)", flush=True)
                         self._lifetime_pnl = 0.0

@@ -2107,22 +2107,36 @@ async def ai_stop():
 @app.get("/api/ai-scale/status")
 async def ai_scale_status():
     global ai_scale_bot
-    if not ai_scale_bot:
-        return {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.0-scale",
-                "lifetime_pnl": 0, "total_pnl": 0}
-    try:
-        status = ai_scale_bot.get_status()
-    except Exception as e:
-        return {"running": bool(getattr(ai_scale_bot, "_running", False)), "error": str(e)}
-    internal = float(status.get("lifetime_pnl") or status.get("total_pnl") or 0)
-    status["lifetime_pnl_internal"] = internal
+    internal = 0.0
+    status = {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.1-strict"}
+    if ai_scale_bot:
+        try:
+            status = ai_scale_bot.get_status()
+        except Exception as e:
+            status = {"running": bool(getattr(ai_scale_bot, "_running", False)), "error": str(e)}
+        internal = float(status.get("lifetime_pnl") or status.get("total_pnl") or 0)
+        if abs(internal) < 1e-9:
+            internal = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0)
+    if abs(internal) < 1e-9 and db is not None:
+        try:
+            import json as _json
+            raw = await db.get_setting("ai_lifetime:ai_scale_strategy")
+            if raw:
+                data = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if isinstance(data, dict):
+                    internal = float(data.get("lifetime_pnl") or 0)
+        except Exception:
+            pass
+    status["lifetime_pnl_internal"] = round(internal, 2)
     status = await _apply_history_kpi(status, "AI Scale-In 1H")
-    # Prefer non-zero internal when exchange KPI is still 0 (untagged closes)
     hist = float(status.get("lifetime_pnl") or status.get("total_pnl") or 0)
-    if abs(hist) < 1e-6 and abs(internal) > 1e-6:
-        status["lifetime_pnl"] = round(internal, 2)
-        status["total_pnl"] = round(internal, 2)
+    # Prefer the larger absolute value between history and bot/settings lifetime
+    chosen = hist
+    if abs(internal) > abs(hist):
+        chosen = internal
         status["total_pnl_source"] = "bot_lifetime"
+    status["lifetime_pnl"] = round(chosen, 2)
+    status["total_pnl"] = round(chosen, 2)
     return status
 
 
@@ -7421,6 +7435,17 @@ async def _compute_pnl():
                     except Exception:
                         st = {}
                     scl_life = float(st.get("lifetime_pnl") or st.get("total_pnl") or 0)
+            if abs(scl_life) < 1e-9 and db is not None:
+                # Recover from persisted settings blob after restart
+                try:
+                    raw = await db.get_setting("ai_lifetime:ai_scale_strategy")
+                    if raw:
+                        import json as _json
+                        data = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                        if isinstance(data, dict):
+                            scl_life = float(data.get("lifetime_pnl") or 0)
+                except Exception as e:
+                    print(f"[pnl] Scale-In settings blob: {e}", flush=True)
             if abs(scl_ex) < 1e-6 and abs(scl_life) > 1e-6:
                 per_bot["AI Scale-In 1H"] = round(scl_life, 2)
                 total_realized = sum(float(v or 0) for v in per_bot.values())

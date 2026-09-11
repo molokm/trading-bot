@@ -267,8 +267,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
-        isLive ? Promise.resolve(null) : api.aiStatus().catch(() => null),
-        isLive ? Promise.resolve(null) : api.aiScaleStatus().catch(() => null),
+        api.aiStatus().catch(() => null),
+        api.aiScaleStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
@@ -428,9 +428,26 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const scalePnlResolved = (() => {
     const per = pnl?.per_bot || {}
     const fromPer = Number(per['AI Scale-In 1H'] ?? per['AI Scale-In'] ?? NaN)
-    const fromSt = Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
+    const fromSt = Number(
+      aiScaleStatus?.lifetime_pnl_internal
+      ?? aiScaleStatus?.lifetime_pnl
+      ?? aiScaleStatus?.total_pnl
+      ?? 0
+    )
+    // Prefer non-zero: exchange if tagged, else bot/status lifetime
     if (Number.isFinite(fromPer) && Math.abs(fromPer) > 0.005) return fromPer
-    return fromSt
+    if (Math.abs(fromSt) > 0.005) return fromSt
+    // Last resort: closed trades in tradeLog tagged Scale-In
+    let s = 0
+    for (const t of (tradeLog || [])) {
+      const b = String(t.bot || '')
+      if (!/Scale-In|ai_scale/i.test(b)) continue
+      const reason = String(t.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (t.pnl == null || t.pnl === '') continue
+      s += Number(t.pnl) || 0
+    }
+    return s
   })()
   const discPnlResolved = (() => {
     const per = pnl?.per_bot || {}
