@@ -6990,6 +6990,7 @@ async def get_pnl(request: Request = None):
 
 
 async def _compute_pnl():
+    global _exchange_sync_ts, _pnl_cache
     _mode = _account_mode()
     week_start_iso = None
 
@@ -7029,6 +7030,11 @@ async def _compute_pnl():
             await sync_exchange_close_trades()
         except Exception as e:
             print(f"[pnl] sync_exchange_close_trades: {e}", flush=True)
+        try:
+            if hasattr(db, "reclassify_exchange_bot_labels"):
+                await db.reclassify_exchange_bot_labels()
+        except Exception as e:
+            print(f"[pnl] reclassify labels: {e}", flush=True)
 
         epoch_ms = 0
         if epoch:
@@ -7089,6 +7095,12 @@ async def _compute_pnl():
                     continue
                 bot = (r.get("bot_label") or "").strip()
                 close_ts_ms = int(r.get("close_ts", 0) or 0)
+                # Authoritative retag from clOrdId (ais before ai)
+                cl = str(r.get("cl_ord_id") or "").strip().lower()
+                if cl.startswith("ais"):
+                    bot = "AI Scale-In 1H"
+                elif cl.startswith("ai"):
+                    bot = "AI Discretionary 1H"
 
                 # AI_ONLY: only Discretionary + Scale-In (skip empty/other labels)
                 if AI_ONLY_MODE and not _is_ai_family(bot):
@@ -7378,6 +7390,9 @@ async def _compute_pnl():
         if "AI Discretionary" in per_bot and "AI Discretionary 1H" not in per_bot:
             per_bot["AI Discretionary 1H"] = per_bot.pop("AI Discretionary")
         total_realized = sum(float(v or 0) for v in per_bot.values())
+        # Always expose both AI bots in per_bot for UI breakdown
+        per_bot.setdefault("AI Discretionary 1H", 0.0)
+        per_bot.setdefault("AI Scale-In 1H", 0.0)
     elif active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
     return {

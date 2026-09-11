@@ -428,12 +428,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlTotal = (() => {
     if (AI_ONLY_MODE) {
       const per = pnl?.per_bot || {}
-      // Sum ALL active AI bots (Discretionary + Scale-In), never one card only
-      const aiSum = Object.entries(per).reduce((s, [k, v]) => {
-        if (/^AI\b/i.test(String(k))) return s + Number(v || 0)
-        return s
-      }, 0)
-      if (Object.keys(per).some((k) => /^AI\b/i.test(String(k)))) return aiSum
+      const disc = Number(per['AI Discretionary 1H'] ?? per['AI Discretionary'] ?? 0)
+      const scl = Number(per['AI Scale-In 1H'] ?? per['AI Scale-In'] ?? 0)
+      const hasPer = ('AI Discretionary 1H' in per) || ('AI Scale-In 1H' in per)
+        || ('AI Discretionary' in per) || ('AI Scale-In' in per)
+      if (hasPer) return disc + scl
       if (pnl?.total != null) return Number(pnl.total)
       const a = Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
       const b = Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
@@ -543,6 +542,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const name = botNameMap[bid] || bid
       if (name === 'Unassigned' || name === 'Прочее / без стратегии') continue
       merged[name] = (merged[name] || 0) + Number(val || 0)
+    }
+    if (AI_ONLY_MODE) {
+      if (merged['AI Discretionary 1H'] == null) merged['AI Discretionary 1H'] = 0
+      if (merged['AI Scale-In 1H'] == null) merged['AI Scale-In 1H'] = 0
     }
     return Object.entries(merged)
       .map(([name, val]) => ({ name, val }))

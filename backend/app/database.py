@@ -589,7 +589,41 @@ class Database:
         sql += " GROUP BY inst_id, bot_label ORDER BY bot_label, inst_id"
         return await self._fetchall(sql, params)
 
-    async def get_exchange_pnl_timebucket(self, bot_label: str = None,
+    
+    async def reclassify_exchange_bot_labels(self) -> int:
+        """Fix bot_label from cl_ord_id (ais* → Scale-In, ai* → Discretionary)."""
+        n = 0
+        try:
+            if self._pg_mode:
+                r1 = await self._execute(
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Scale-In 1H'
+                       WHERE lower(coalesce(cl_ord_id,'')) LIKE 'ais%'
+                         AND bot_label IS DISTINCT FROM 'AI Scale-In 1H'"""
+                )
+                r2 = await self._execute(
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Discretionary 1H'
+                       WHERE lower(coalesce(cl_ord_id,'')) LIKE 'ai%'
+                         AND lower(coalesce(cl_ord_id,'')) NOT LIKE 'ais%'
+                         AND bot_label IS DISTINCT FROM 'AI Discretionary 1H'"""
+                )
+            else:
+                await self._execute(
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Scale-In 1H'
+                       WHERE lower(ifnull(cl_ord_id,'')) LIKE 'ais%'
+                         AND ifnull(bot_label,'') != 'AI Scale-In 1H'"""
+                )
+                await self._execute(
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Discretionary 1H'
+                       WHERE lower(ifnull(cl_ord_id,'')) LIKE 'ai%'
+                         AND lower(ifnull(cl_ord_id,'')) NOT LIKE 'ais%'
+                         AND ifnull(bot_label,'') != 'AI Discretionary 1H'"""
+                )
+            n = 1
+        except Exception as e:
+            print(f"[db] reclassify_exchange_bot_labels: {e}", flush=True)
+        return n
+
+async def get_exchange_pnl_timebucket(self, bot_label: str = None,
                                           account_mode: str = None,
                                           epoch_ms: int = 0) -> list[dict]:
         """Return close trades with close_ts for deterministic time-bucket aggregation.
@@ -597,7 +631,7 @@ class Database:
         Unlike get_exchange_pnl (pre-aggregated), this returns individual rows
         so the caller can bucket by 1d/7d/30d/week using close_ts."""
         sql = """
-            SELECT ord_id, inst_id, bot_label, pnl, fee, close_ts
+            SELECT ord_id, inst_id, bot_label, cl_ord_id, pnl, fee, close_ts
             FROM exchange_close_trades WHERE 1=1
         """
         params: tuple = ()
