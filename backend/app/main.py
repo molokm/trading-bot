@@ -6454,7 +6454,7 @@ async def sync_exchange_close_trades() -> int:
     for oid, info in close_by_ord.items():
         clord = info["cl_ord_id"].lower()
         bot_label = ""
-        for pfx, label in _CLORD_BOT_MAP.items():
+        for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
             if clord.startswith(pfx):
                 bot_label = label
                 break
@@ -6465,9 +6465,9 @@ async def sync_exchange_close_trades() -> int:
                 close_ts = int(info["ts"])
             except (TypeError, ValueError):
                 pass
-        # AI-only mode: untagged closes after epoch still belong to the only bot
+        # AI-only with two bots: never guess untagged → Discretionary (would steal SCL)
         if not bot_label and AI_ONLY_MODE:
-            bot_label = "AI Discretionary 1H"
+            bot_label = ""
         rows.append({
             "ord_id": oid,
             "inst_id": info["inst_id"],
@@ -7037,8 +7037,9 @@ async def _compute_pnl():
             except Exception:
                 pass
 
-        # Bot filter: AI_ONLY_MODE → only AI trades count toward total
-        bot_filter = "AI Discretionary 1H" if AI_ONLY_MODE else None
+        # AI_ONLY: load all labels, then keep AI Discretionary + Scale-In family
+        # (filtering only Discretionary dropped Scale-In closes from cards).
+        bot_filter = None
 
         # Primary source: deterministic DB rows (ord_id PK = no duplicates)
         rows = await db.get_exchange_pnl_timebucket(
@@ -7073,6 +7074,14 @@ async def _compute_pnl():
             except Exception:
                 week_start_iso = None
 
+            def _is_ai_family(label: str) -> bool:
+                b = (label or "").strip()
+                if not b:
+                    return False
+                if b in ("AI Discretionary 1H", "AI Scale-In 1H", "AI Discretionary", "AI Scale-In"):
+                    return True
+                return b.startswith("AI ")
+
             for r in rows:
                 try:
                     pnl = float(r.get("pnl", 0) or 0)
@@ -7080,6 +7089,10 @@ async def _compute_pnl():
                     continue
                 bot = (r.get("bot_label") or "").strip()
                 close_ts_ms = int(r.get("close_ts", 0) or 0)
+
+                # AI_ONLY: ignore Momentum/Impulse/Validation/etc. rows
+                if AI_ONLY_MODE and bot and not _is_ai_family(bot):
+                    continue
 
                 # Per-bot aggregation
                 if bot:
@@ -7125,10 +7138,11 @@ async def _compute_pnl():
                     if age_sec <= 2592000:
                         realized_30d += pnl
 
-            # AI_ONLY_MODE: total = AI only; account_total = all bots
+            # AI_ONLY_MODE: total = Discretionary + Scale-In; account_total = all
             if AI_ONLY_MODE:
-                ai_pnl = per_bot.get("AI Discretionary 1H", 0.0)
-                total_realized = ai_pnl
+                ai_pnl = float(per_bot.get("AI Discretionary 1H") or 0.0)
+                scl_pnl = float(per_bot.get("AI Scale-In 1H") or per_bot.get("AI Scale-In") or 0.0)
+                total_realized = ai_pnl + scl_pnl
                 account_total = sum(per_bot.values())
             else:
                 total_realized = sum(per_bot.values())
@@ -7348,9 +7362,17 @@ async def _compute_pnl():
     per_bot_all = {k: float(v) for k, v in per_bot.items()}
     active = _active_bot_labels()
     if AI_ONLY_MODE:
-        active = {"AI Discretionary 1H"}
-        per_bot = {k: v for k, v in per_bot.items() if k == "AI Discretionary 1H"}
-        total_realized = float(per_bot.get("AI Discretionary 1H") or 0.0)
+        active = {"AI Discretionary 1H", "AI Scale-In 1H"}
+        per_bot = {
+            k: v for k, v in per_bot.items()
+            if k in active or k in ("AI Discretionary", "AI Scale-In") or str(k).startswith("AI ")
+        }
+        # normalize short labels into canonical keys
+        if "AI Scale-In" in per_bot and "AI Scale-In 1H" not in per_bot:
+            per_bot["AI Scale-In 1H"] = per_bot.pop("AI Scale-In")
+        if "AI Discretionary" in per_bot and "AI Discretionary 1H" not in per_bot:
+            per_bot["AI Discretionary 1H"] = per_bot.pop("AI Discretionary")
+        total_realized = sum(float(v or 0) for v in per_bot.values())
     elif active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
     return {

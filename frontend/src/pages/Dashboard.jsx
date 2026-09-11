@@ -1436,7 +1436,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             running={!!aiStatus?.running}
             loading={!aiStatus}
             accent="text-[var(--accent)]"
-            pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? aiCardPnl ?? 0}
+            pnl={
+              (pnl?.per_bot && pnl.per_bot['AI Discretionary 1H'] != null)
+                ? Number(pnl.per_bot['AI Discretionary 1H'])
+                : (aiCardPnl ?? aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+            }
             trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
             winRate={aiStatus?.win_rate}
             openCount={(aiStatus?.open_positions || []).length}
@@ -1464,7 +1468,11 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             running={!!aiScaleStatus?.running}
             loading={!aiScaleStatus}
             accent="text-fuchsia-400"
-            pnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
+            pnl={
+              (pnl?.per_bot && (pnl.per_bot['AI Scale-In 1H'] != null || pnl.per_bot['AI Scale-In'] != null))
+                ? Number(pnl.per_bot['AI Scale-In 1H'] ?? pnl.per_bot['AI Scale-In'] ?? 0)
+                : (aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
+            }
             trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
             winRate={aiScaleStatus?.win_rate}
             openCount={(aiScaleStatus?.open_positions || []).length}
