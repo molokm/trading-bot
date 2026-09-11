@@ -328,7 +328,7 @@ async def debug_server_hits():
 
 @app.on_event("startup")
 async def startup():
-    global _STARTED_AT, _env_demo
+    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
     _STARTED_AT = _time.time()
     try:
         print("[startup] 0/7 auth secrets ...", flush=True)
@@ -337,7 +337,8 @@ async def startup():
         await db.init()
         await pnl_engine.ensure_epoch(db)
         print(f"[startup] pnl_epoch forced {PNL_EPOCH_ISO}", flush=True)
-        # One-shot: last ETH close mis-tagged as Discretionary → Scale-In
+        # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
+        # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
             marker = await db.get_setting("fix_last_eth_to_scale_v1")
             if not marker:
@@ -345,14 +346,13 @@ async def startup():
                 print(f"[startup] reassign last close → Scale-In: {fix}", flush=True)
                 if fix.get("ok"):
                     await db.set_setting("fix_last_eth_to_scale_v1", "1")
-                    global ai_bot, ai_scale_bot, _pnl_cache
-                    pnl_moved = float(fix.get("pnl") or 0)
-                    if ai_bot and abs(pnl_moved) > 1e-9:
-                        ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) - pnl_moved
-                    if ai_scale_bot and abs(pnl_moved) > 1e-9:
-                        ai_scale_bot._lifetime_pnl = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0) + pnl_moved
+                    await db.set_setting(
+                        "fix_last_eth_to_scale_pnl",
+                        str(float(fix.get("pnl") or 0)),
+                    )
                     try:
-                        _pnl_cache.clear()
+                        if "_pnl_cache" in globals() and isinstance(_pnl_cache, dict):
+                            _pnl_cache.clear()
                     except Exception:
                         pass
         except Exception as e:
@@ -732,7 +732,6 @@ async def startup():
         # AI runs independently: only needs OKX keys + AI_AUTO_START (default ON).
         # Not gated by BOTS_AUTO_START so we can disable the other bots while
         # keeping AI active for observation.
-        global ai_bot, ai_scale_bot, _positions_cache
         _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
         if _env_key and _env_secret and _env_pass and _ai_auto:
             _demo = _env_demo
@@ -810,6 +809,26 @@ async def startup():
             )
     except Exception as e:
         print(f"[startup]   AI Scale-In FAILED: {e}", flush=True)
+
+    # Apply pending ETH→Scale PnL memory fix (after bots exist)
+    try:
+        pending = await db.get_setting("fix_last_eth_to_scale_pnl")
+        if pending not in (None, "", "applied"):
+            pnl_moved = float(pending or 0)
+            if abs(pnl_moved) > 1e-9:
+                if ai_bot:
+                    ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) - pnl_moved
+                if ai_scale_bot:
+                    ai_scale_bot._lifetime_pnl = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0) + pnl_moved
+                print(f"[startup] applied Scale PnL memory shift {pnl_moved:+.2f}", flush=True)
+            await db.set_setting("fix_last_eth_to_scale_pnl", "applied")
+            try:
+                _pnl_cache.clear()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[startup] Scale PnL memory shift: {e}", flush=True)
+
 
 
 @app.on_event("shutdown")
