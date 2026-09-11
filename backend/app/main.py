@@ -337,6 +337,26 @@ async def startup():
         await db.init()
         await pnl_engine.ensure_epoch(db)
         print(f"[startup] pnl_epoch forced {PNL_EPOCH_ISO}", flush=True)
+        # One-shot: last ETH close mis-tagged as Discretionary → Scale-In
+        try:
+            marker = await db.get_setting("fix_last_eth_to_scale_v1")
+            if not marker:
+                fix = await db.reassign_latest_close_to_scale("ETH")
+                print(f"[startup] reassign last close → Scale-In: {fix}", flush=True)
+                if fix.get("ok"):
+                    await db.set_setting("fix_last_eth_to_scale_v1", "1")
+                    global ai_bot, ai_scale_bot, _pnl_cache
+                    pnl_moved = float(fix.get("pnl") or 0)
+                    if ai_bot and abs(pnl_moved) > 1e-9:
+                        ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) - pnl_moved
+                    if ai_scale_bot and abs(pnl_moved) > 1e-9:
+                        ai_scale_bot._lifetime_pnl = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0) + pnl_moved
+                    try:
+                        _pnl_cache.clear()
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[startup] reassign Scale-In: {e}", flush=True)
         await telegram.load_from_db(db)
         print(f"[TG] status={telegram.status} configured={telegram.configured}", flush=True)
         try:
@@ -1893,6 +1913,39 @@ async def ai_status():
     return await _apply_history_kpi(status, "AI Discretionary 1H")
 
 
+
+
+@app.post("/api/admin/reassign-last-to-scale", dependencies=[Depends(require_admin)])
+async def admin_reassign_last_to_scale(data: dict = None):
+    """Move latest close (default ETH) from Discretionary → AI Scale-In 1H."""
+    global ai_bot, ai_scale_bot, _pnl_cache
+    data = data or {}
+    hint = str(data.get("inst") or data.get("symbol") or "ETH").upper()
+    # Allow re-run: clear marker if force
+    if data.get("force"):
+        try:
+            await db.set_setting("fix_last_eth_to_scale_v1", "")
+        except Exception:
+            pass
+    fix = await db.reassign_latest_close_to_scale(hint)
+    pnl_moved = float(fix.get("pnl") or 0)
+    if fix.get("ok") and abs(pnl_moved) > 1e-9:
+        try:
+            if ai_bot:
+                ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) - pnl_moved
+            if ai_scale_bot:
+                ai_scale_bot._lifetime_pnl = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0) + pnl_moved
+        except Exception as e:
+            fix["memory_err"] = str(e)
+        try:
+            _pnl_cache.clear()
+        except Exception:
+            pass
+        try:
+            await db.set_setting("fix_last_eth_to_scale_v1", "1")
+        except Exception:
+            pass
+    return fix
 
 
 @app.post("/api/admin/reassign-trade", dependencies=[Depends(require_admin)])

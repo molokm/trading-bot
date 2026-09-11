@@ -1501,6 +1501,102 @@ class Database:
                 await self._execute("UPDATE trades SET bot_id = ? WHERE id = ?", (to_bot, rid))
         return {"moved": len(moved_ids), "pnl": pnl_sum, "ids": moved_ids}
 
+
+    async def reassign_latest_close_to_scale(self, inst_hint: str = "ETH") -> dict:
+        """Move the latest close (prefer inst_hint) from Discretionary → Scale-In.
+
+        Updates exchange_close_trades.bot_label + cl_ord_id, and trades.bot_id.
+        """
+        out = {"ok": False, "moved": 0, "pnl": 0.0, "ord_id": "", "inst_id": ""}
+        try:
+            rows = await self._fetchall(
+                """SELECT ord_id, inst_id, pnl, bot_label, cl_ord_id, close_ts
+                   FROM exchange_close_trades
+                   ORDER BY close_ts DESC LIMIT 20"""
+            ) or []
+        except Exception as e:
+            out["error"] = str(e)
+            return out
+        target = None
+        hint = (inst_hint or "").upper()
+        for r in rows:
+            inst = str((r.get("inst_id") if isinstance(r, dict) else r[1]) or "")
+            label = str((r.get("bot_label") if isinstance(r, dict) else r[3]) or "")
+            # Prefer ETH (or hint) currently on Discretionary / empty / wrong
+            if hint and hint not in inst.upper():
+                continue
+            if "Scale-In" in label:
+                continue  # already correct
+            target = r if isinstance(r, dict) else {
+                "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
+                "bot_label": r[3], "cl_ord_id": r[4], "close_ts": r[5],
+            }
+            break
+        if not target and rows:
+            # fallback: latest non-Scale close
+            for r in rows:
+                rr = r if isinstance(r, dict) else {
+                    "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
+                    "bot_label": r[3], "cl_ord_id": r[4], "close_ts": r[5],
+                }
+                if "Scale-In" in str(rr.get("bot_label") or ""):
+                    continue
+                target = rr
+                break
+        if not target:
+            out["error"] = "no matching close found"
+            return out
+        oid = str(target.get("ord_id") or "")
+        inst = str(target.get("inst_id") or "")
+        pnl = float(target.get("pnl") or 0)
+        cl = str(target.get("cl_ord_id") or "")
+        if not cl.lower().startswith("ais"):
+            cl = f"ais{oid}" if oid else f"ais{int(__import__('time').time()*1000)}"
+        try:
+            if self._pg_mode:
+                await self._execute(
+                    """UPDATE exchange_close_trades
+                       SET bot_label = $1, cl_ord_id = $2
+                       WHERE ord_id = $3""",
+                    ("AI Scale-In 1H", cl, oid),
+                )
+            else:
+                await self._execute(
+                    """UPDATE exchange_close_trades
+                       SET bot_label = ?, cl_ord_id = ?
+                       WHERE ord_id = ?""",
+                    ("AI Scale-In 1H", cl, oid),
+                )
+        except Exception as e:
+            out["error"] = f"exchange_close: {e}"
+            return out
+        # Move matching trades rows (ai_strategy → ai_scale_strategy)
+        moved_trades = 0
+        try:
+            if self._pg_mode:
+                await self._execute(
+                    """UPDATE trades SET bot_id = $1
+                       WHERE bot_id = $2 AND inst_id = $3
+                         AND (ord_id = $4 OR abs(COALESCE(pnl,0) - $5) < 0.05)""",
+                    ("ai_scale_strategy", "ai_strategy", inst, oid, pnl),
+                )
+            else:
+                await self._execute(
+                    """UPDATE trades SET bot_id = ?
+                       WHERE bot_id = ? AND inst_id = ?
+                         AND (ord_id = ? OR abs(COALESCE(pnl,0) - ?) < 0.05)""",
+                    ("ai_scale_strategy", "ai_strategy", inst, oid, pnl),
+                )
+            moved_trades = 1
+        except Exception as e:
+            out["trades_err"] = str(e)
+        out.update({
+            "ok": True, "moved": 1, "pnl": pnl, "ord_id": oid,
+            "inst_id": inst, "cl_ord_id": cl, "trades_touched": moved_trades,
+            "from_label": target.get("bot_label"), "to_label": "AI Scale-In 1H",
+        })
+        return out
+
     async def last_bot_for_instrument(self, inst_id: str) -> Optional[str]:
 
         """Ownership hint: positions claim, then trades, then signals."""
