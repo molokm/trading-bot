@@ -286,8 +286,16 @@ class TelegramNotifier:
     async def send_trade(self, text: str, parse_mode: str = "HTML", reply_to_message_id=None) -> int:
         """Awaitable trade notify; returns Telegram message_id."""
         if not self.configured:
+            print(
+                f"[TG] send_trade skipped status={self.status} "
+                f"token={'yes' if self.token else 'no'} chat={'yes' if self.chat_id else 'no'}",
+                flush=True,
+            )
             return 0
-        return await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
+        mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
+        if not mid:
+            print(f"[TG] send_trade returned 0 (check bot can message chat_id={self.chat_id})", flush=True)
+        return mid
 
     # ─── Mini App helpers ───
 
@@ -401,11 +409,16 @@ class TelegramNotifier:
 
     def open_msg(self, coin: str, side: str, price: float, stop: float,
                  size: float, leverage: float, bot_name: str = "",
-                 signal_id: int = 0) -> str:
+                 signal_id: int = 0, account_mode: str = "",
+                 account_key: str = "", **_kwargs) -> str:
+        mode = (account_mode or "").strip().lower()
+        mode_line = ""
+        if mode in ("demo", "live"):
+            mode_line = f"\nРежим: <b>{'DEMO' if mode == 'demo' else 'LIVE'}</b>"
         return (
             f"{self._arrow(side)} <b>ОТКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Бот: <b>{_esc(bot_name)}</b>\n"
+            f"Бот: <b>{_esc(bot_name)}</b>{mode_line}\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: <b>{self._side_label(side)}</b>\n"
             f"Вход: {_esc(price)}\n"
@@ -416,7 +429,7 @@ class TelegramNotifier:
 
     def close_msg(self, coin: str, side: str, entry: float, exit_px: float,
                   pnl: float, reason: str, bot_name: str = "",
-                  signal_id: int = 0) -> str:
+                  signal_id: int = 0, **_kwargs) -> str:
         icon = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
         return (
