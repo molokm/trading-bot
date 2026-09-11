@@ -6505,12 +6505,37 @@ async def sync_exchange_close_trades() -> int:
     # Tag and build DB rows
     rows = []
     for oid, info in close_by_ord.items():
-        clord = info["cl_ord_id"].lower()
+        clord = (info["cl_ord_id"] or "").lower()
         bot_label = ""
         for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
             if clord.startswith(pfx):
                 bot_label = label
                 break
+        # Close bills often omit clOrdId — recover from open bills (subType 3/4) same inst
+        if not bot_label:
+            inst = info.get("inst_id") or ""
+            best_cl = ""
+            for b in bills:
+                if (b.get("instId") or "") != inst:
+                    continue
+                if str(b.get("subType") or "") not in ("3", "4"):
+                    continue
+                cid = str(b.get("clOrdId") or "").strip().lower()
+                if not cid:
+                    continue
+                # Prefer latest open before this close ts
+                best_cl = cid
+                for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
+                    if cid.startswith(pfx):
+                        bot_label = label
+                        clord = cid
+                        info["cl_ord_id"] = cid
+                        break
+            if bot_label:
+                print(
+                    f"[exchange-sync] recovered label={bot_label} from entry clOrdId={best_cl} inst={inst}",
+                    flush=True,
+                )
         avg_px = (info["px_sum"] / info["px_n"]) if info["px_n"] > 0 else 0.0
         close_ts = 0
         if info["ts"]:
@@ -6518,7 +6543,7 @@ async def sync_exchange_close_trades() -> int:
                 close_ts = int(info["ts"])
             except (TypeError, ValueError):
                 pass
-        # AI-only with two bots: never guess untagged → Discretionary (would steal SCL)
+        # Never guess untagged → Discretionary (steals Scale-In)
         if not bot_label and AI_ONLY_MODE:
             bot_label = ""
         rows.append({

@@ -1573,6 +1573,40 @@ class AIStrategy:
                 )
             except Exception as e:
                 print(f"[AI] db close: {e}", flush=True)
+            # Authoritative PnL attribution: write exchange_close row with THIS bot label
+            # so Scale-In closes never appear under Discretionary (and vice versa).
+            try:
+                if hasattr(self.db, "upsert_exchange_close_trades"):
+                    oid = ""
+                    try:
+                        oid = str((fills[0].get("ordId") if fills else "") or "")
+                    except Exception:
+                        oid = ""
+                    if not oid:
+                        oid = f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
+                    cl = f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
+                    mode, key = self._account_mode_tag()
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid,
+                        "inst_id": pos.inst_id,
+                        "cl_ord_id": cl,
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(pos.size or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(__import__('time').time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": mode,
+                        "account_key": key,
+                    }])
+                    print(
+                        f"[{self.BOT_NAME}] exchange_close tagged pnl={pnl:+.2f} "
+                        f"label={self.BOT_NAME} cl={cl}",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[AI] exchange_close tag: {e}", flush=True)
         if self.notifier:
             try:
                 if not getattr(self.notifier, 'configured', True):

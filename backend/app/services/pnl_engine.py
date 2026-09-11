@@ -90,7 +90,10 @@ def _to_msk_date(ts_ms: int):
 
 
 def resolve_bot(row: dict, *, ai_only: bool) -> str:
-    """clOrdId → stored label → AI_ONLY fallback to Discretionary."""
+    """clOrdId (longest prefix) → stored bot_label. Never guess Discretionary.
+
+    Untagged closes must not steal Scale-In PnL. Attribute only with evidence.
+    """
     cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "")
     tagged = label_from_clord(cl)
     if tagged:
@@ -100,9 +103,10 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
         return stored
     if stored and not ai_only:
         return stored
-    if ai_only:
-        # Showcase account: only AI bots trade — untagged closes still count
-        return "AI Discretionary 1H"
+    # Explicit bot_id from DB trades fallback
+    bid = str(row.get("bot_id") or "")
+    if bid in _BOT_ID_MAP:
+        return _BOT_ID_MAP[bid]
     return ""
 
 
