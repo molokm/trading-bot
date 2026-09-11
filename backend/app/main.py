@@ -7024,6 +7024,8 @@ async def _compute_pnl():
     global _pnl_cache, _exchange_sync_ts
     _mode = _account_mode()
     try:
+        # Bust exchange sync TTL so PnL always sees fresh bills
+        _exchange_sync_ts = 0
         data = await pnl_engine.compute(
             db,
             account_mode=_mode,
