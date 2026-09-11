@@ -2682,10 +2682,15 @@ class AIStrategy:
         act = (decision.get("action") or "hold").lower()
         reason = str(decision.get("reason") or "")
         # Always show human RU status as primary reason for UI
-        if act == "hold":
+        # Always prefer live pulse for UI (avoids stale "Открыто: BTC шорт" when flat)
+        if act == "hold" or not reason:
             reason = pulse
         elif reason and not reason.startswith("Бот работает"):
-            reason = f"{pulse} | {reason}"
+            # Drop stale open-claims in reason if we have no positions
+            if not (getattr(self, "_positions", None) or {}):
+                reason = pulse
+            else:
+                reason = f"{pulse} | {reason}"
         else:
             reason = pulse or reason
         snap = snap or {}
@@ -2773,9 +2778,22 @@ class AIStrategy:
 
         lines = [f"Рынок: {reg_ru}, режим: {preset_ru}."]
 
-        # Positions from memory (truth for open state)
-        pos_map = getattr(self, "_positions", None) or {}
-        open_list = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+        # Only THIS bot's non-zero positions (never report Scale-In / foreign as ours)
+        def _owned_open_list():
+            pos_map = getattr(self, "_positions", None) or {}
+            items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+            out = []
+            for pos in items:
+                try:
+                    sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if abs(sz) <= 1e-12:
+                    continue
+                out.append(pos)
+            return out
+
+        open_list = _owned_open_list()
 
         if act == "hold":
             if open_list:
@@ -2784,11 +2802,11 @@ class AIStrategy:
                     coin, side_ru = _coin_side(pos)
                     parts.append(f"{coin} {side_ru}")
                 line = (
-                    f"Открыто: {', '.join(parts)}. "
-                    "Новых входов нет — удерживаю / жду условия выхода."
+                    f"Мои позиции: {', '.join(parts)}. "
+                    "Новых входов нет — управляю / жду условия выхода."
                 )
             else:
-                line = "Позиций нет."
+                line = "Позиций у этого бота нет."
                 if best_free:
                     b = best_free[1]
                     side = b.get("best_side") or "—"
@@ -2840,7 +2858,14 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] pulse text: {e}", flush=True)
             pos_map = getattr(self, "_positions", None) or {}
-            open_list = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+            open_list = []
+            for pos in (list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])):
+                try:
+                    sz = float(pos.get("size") if isinstance(pos, dict) else getattr(pos, "size", 0) or 0)
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if abs(sz) > 1e-12:
+                    open_list.append(pos)
             if open_list:
                 parts = []
                 for pos in open_list:
@@ -2853,10 +2878,9 @@ class AIStrategy:
                     side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side or "—")
                     parts.append(f"{coin} {side_ru}")
                 return (
-                    f"Рынок: данные обновляются. Открыто: {', '.join(parts)}. "
-                    "Удерживаю позицию."
+                    f"Рынок: данные обновляются. Мои позиции: {', '.join(parts)}."
                 )
-            return "Рынок: данные обновляются. Позиций нет."
+            return "Рынок: данные обновляются. Позиций у этого бота нет."
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
