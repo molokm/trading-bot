@@ -7090,8 +7090,8 @@ async def _compute_pnl():
                 bot = (r.get("bot_label") or "").strip()
                 close_ts_ms = int(r.get("close_ts", 0) or 0)
 
-                # AI_ONLY: ignore Momentum/Impulse/Validation/etc. rows
-                if AI_ONLY_MODE and bot and not _is_ai_family(bot):
+                # AI_ONLY: only Discretionary + Scale-In (skip empty/other labels)
+                if AI_ONLY_MODE and not _is_ai_family(bot):
                     continue
 
                 # Per-bot aggregation
@@ -7104,12 +7104,14 @@ async def _compute_pnl():
                 except (TypeError, ValueError):
                     pass
 
-                # Time-bucket aggregation from close_ts (ms; tolerate sec)
+                # Time-bucket aggregation from close_ts (calendar day in PnL TZ = MSK)
                 if close_ts_ms:
                     try:
                         ts_raw = int(close_ts_ms)
+                        if ts_raw <= 0:
+                            continue
                         # OKX uses ms; if value looks like seconds, scale up
-                        if ts_raw < 10_000_000_000:  # before ~2286 in seconds
+                        if ts_raw < 10_000_000_000:
                             ts_raw *= 1000
                         t_time = dt.fromtimestamp(ts_raw / 1000.0, tz=tz.utc)
                     except (ValueError, OSError, TypeError):
@@ -7119,18 +7121,21 @@ async def _compute_pnl():
                         _ptz = trade_attr.pnl_timezone()
                         _local_t = t_time.astimezone(_ptz)
                         _now_local = now.astimezone(_ptz)
-                        _ws_date = week_start.astimezone(_ptz).date() if getattr(week_start, "tzinfo", None) else week_start.date()
-                        # Calendar day / week by DATE in PnL TZ (Mon–Sun)
-                        if _local_t.date() == _now_local.date():
+                        today_d = _now_local.date()
+                        trade_d = _local_t.date()
+                        if getattr(week_start, "tzinfo", None):
+                            _ws_date = week_start.astimezone(_ptz).date()
+                        else:
+                            _ws_date = week_start.date()
+                        # Strict calendar day — NOT rolling 24h
+                        if trade_d == today_d:
                             realized_1d += pnl
-                        if _local_t.date() >= _ws_date:
+                        if trade_d >= _ws_date:
                             realized_week += pnl
-                    except Exception:
-                        age_sec = (now - t_time).total_seconds()
-                        if age_sec <= 86400:
-                            realized_1d += pnl
-                        if age_sec <= 604800:
-                            realized_week += pnl
+                    except Exception as e:
+                        print(f"[pnl] day-bucket skip: {e}", flush=True)
+                        # Do NOT fall back to rolling 24h — that inflated "today"
+                        pass
 
                     age_sec = (now - t_time).total_seconds()
                     if age_sec <= 604800:

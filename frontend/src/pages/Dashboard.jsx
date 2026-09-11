@@ -428,9 +428,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const pnlTotal = (() => {
     if (AI_ONLY_MODE) {
       const per = pnl?.per_bot || {}
-      if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
+      // Sum ALL active AI bots (Discretionary + Scale-In), never one card only
+      const aiSum = Object.entries(per).reduce((s, [k, v]) => {
+        if (/^AI\b/i.test(String(k))) return s + Number(v || 0)
+        return s
+      }, 0)
+      if (Object.keys(per).some((k) => /^AI\b/i.test(String(k)))) return aiSum
       if (pnl?.total != null) return Number(pnl.total)
-      return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+      const a = Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+      const b = Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
+      return a + b
     }
     // Server total is already active-only
     if (pnl && pnl.total != null && (pnl.active_bots || []).length) return Number(pnl.total)
@@ -442,13 +449,31 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return sumClosedSince(365 * 86400000)
   })()
   const pnlDay = (() => {
-    // Prefer API calendar today (MSK). Fallback: last 24h only if API missing.
+    // Calendar today only (MSK from API). Do NOT use rolling 24h — closes from
+    // yesterday evening incorrectly inflated "today".
     if (pnl && pnl['1d'] != null && pnl.source && pnl.source !== 'ai_status_seed') {
       return Number(pnl['1d'])
     }
-    if (pnl && Number(pnl['1d'] ?? 0) !== 0) return Number(pnl['1d'])
+    if (pnl && pnl['1d'] != null) return Number(pnl['1d'])
     if (!activeBotNames.length) return 0
-    return sumClosedSince(86400000)
+    // Fallback: trades with exit date === local calendar today (not last 24h)
+    const now = new Date()
+    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate()
+    let s = 0
+    for (const t of (tradeLog || [])) {
+      const reason = String(t.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (t.pnl == null || t.pnl === '') continue
+      if (!isActiveBotTrade(t)) continue
+      const ts = t.exit_time || t.time || t.timestamp || ''
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms)) continue
+      const dt = new Date(ms)
+      if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) {
+        s += Number(t.pnl) || 0
+      }
+    }
+    return s
   })()
   const pnlWeek = (() => {
     // Calendar week Mon 00:00 MSK → now. Must include "today".
