@@ -547,11 +547,23 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   const resolveBotName = (p) => {
     const posSideKey = (p.posSide || p.side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-    const key = `${p.instId || p.inst_id || ''}|${posSideKey}`
+    const inst = p.instId || p.inst_id || ''
+    const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
+    // Scale memory ALWAYS wins over Discretionary / stale API bot
+    const sclHas = (aiScaleStatus?.open_positions || []).some(op => {
+      const c = String(op.coin || op.inst_id || op.instId || '').toUpperCase().split('-')[0]
+      return c === coin
+    })
+    if (sclHas) return 'AI Scale-In 1H'
+
+    const key = `${inst}|${posSideKey}`
     const fromMap = botMap[key] || ''
     const raw = p.bot || ''
     const retired = /impulse|validation|macd|momentum|vwap/i.test(String(raw))
-    // Live map (Scale-In / AI memory) beats stale exchange/DB label
+    if (fromMap === 'AI Scale-In 1H') return fromMap
+    if (fromMap && fromMap !== 'AI Discretionary 1H') return fromMap
+    // Don't trust Discretionary from map if API already says Scale
+    if (String(raw).includes('Scale')) return 'AI Scale-In 1H'
     if (fromMap) return fromMap
     if (retired && AI_ONLY_MODE) return ''
     return raw || ''
@@ -715,6 +727,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             }
           }
         }
+      }
+      // Force Scale badge if Scale status holds this coin
+      {
+        const coin = (p.instId || p.inst_id || '').replace('-USDT-SWAP', '')
+        const sclHas = (aiScaleStatus?.open_positions || []).some(
+          op => String(op.coin || '').toUpperCase() === String(coin).toUpperCase()
+        )
+        if (sclHas) hint = 'AI Scale-In 1H'
       }
       if (hint === 'Smart Money') continue
       if (!hint) continue
@@ -1313,6 +1333,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
                     const botBadge = tr.bot === 'Momentum'
                       ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
+                      : (tr.bot === 'AI Scale-In 1H' || tr.bot === 'AI Scale-In')
+                      ? { label: 'SCL', cls: 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30' }
                       : (tr.bot === 'Impulse 1D' || tr.bot === 'Impulse')
                         ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
                         : tr.bot === 'MACD+Donchian Validation' || tr.bot === 'Validation'

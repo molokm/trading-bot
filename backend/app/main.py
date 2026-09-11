@@ -4445,6 +4445,49 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
             except Exception as e:
                 print(f"[positions] last-resort {inst}: {e}", flush=True)
 
+        # ── Exclusive ownership: Scale-In vs Discretionary ──
+        coin0 = (inst or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+        scale_has = False
+        disc_has = False
+        try:
+            scale_has = bool(
+                ai_scale_bot and coin0 in (getattr(ai_scale_bot, "_positions", None) or {})
+            )
+            disc_has = bool(
+                ai_bot and coin0 in (getattr(ai_bot, "_positions", None) or {})
+            )
+        except Exception:
+            pass
+        # Entry fill prefix wins when present
+        try:
+            if ai_scale_bot and hasattr(ai_scale_bot, "_entry_fill_owner"):
+                client = client_manager.get_client()
+                if client:
+                    owner = await ai_scale_bot._entry_fill_owner(client, inst)
+                    if owner == "ais":
+                        scale_has = True
+                        bot_name = "AI Scale-In 1H"
+                    elif owner == "ai" and not scale_has:
+                        bot_name = "AI Discretionary 1H"
+        except Exception:
+            pass
+        if scale_has:
+            bot_name = "AI Scale-In 1H"
+            # Drop phantom from Discretionary so cards/pulse stay clean
+            try:
+                if disc_has and ai_bot and getattr(ai_bot, "_positions", None) is not None:
+                    ai_bot._positions.pop(coin0, None)
+                    print(f"[positions] drop Discretionary phantom {coin0} (Scale owns)", flush=True)
+            except Exception:
+                pass
+            try:
+                await claim_open(db, AI_SCALE_BOT_ID, inst, side_n, sz, entry)
+                await release_open(db, AI_BOT_ID, inst, side_n)
+            except Exception as e:
+                print(f"[positions] scale claim: {e}", flush=True)
+        elif disc_has and bot_name in ("", "AI Discretionary 1H"):
+            bot_name = "AI Discretionary 1H"
+
         if bot_name and inst and sz > 0:
             await _inject_bot_memory(bot_name, inst, side_n, sz, entry)
 
