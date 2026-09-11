@@ -340,7 +340,7 @@ async def startup():
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
-            marker = await db.get_setting("fix_eth_long_414_to_scale_v3")
+            marker = await db.get_setting("fix_eth_long_414_to_scale_v4")
             if not marker:
                 # Specific trade: 11.09.26 ETH LONG close PnL ≈ -414.06 (was Discretionary)
                 fix = await db.reassign_latest_close_to_scale(
@@ -348,7 +348,30 @@ async def startup():
                 )
                 print(f"[startup] reassign ETH -414 → Scale-In: {fix}", flush=True)
                 if fix.get("ok"):
-                    await db.set_setting("fix_eth_long_414_to_scale_v3", "1")
+                    await db.set_setting("fix_eth_long_414_to_scale_v4", "1")
+                    # Persist override for paired pipeline forever
+                    try:
+                        import json as _json
+                        raw = await db.get_setting("pnl_bot_overrides")
+                        arr = _json.loads(raw) if raw else []
+                        if not isinstance(arr, list):
+                            arr = []
+                        rule = {
+                            "inst_id": "ETH-USDT-SWAP",
+                            "pnl_near": -414.06,
+                            "pos_side": "long",
+                            "exit_date": "2026-09-11",
+                            "to_bot": "AI Scale-In 1H",
+                        }
+                        arr = [r for r in arr if not (
+                            abs(float(r.get("pnl_near") or 0) - (-414.06)) < 1
+                            and "ETH" in str(r.get("inst_id") or "").upper()
+                        )]
+                        arr.append(rule)
+                        await db.set_setting("pnl_bot_overrides", _json.dumps(arr))
+                    except Exception as _oe:
+                        print(f"[startup] override persist: {_oe}", flush=True)
+
                     await db.set_setting(
                         "fix_last_eth_to_scale_pnl",
                         str(float(fix.get("pnl") or 0)),

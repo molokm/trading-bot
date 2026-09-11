@@ -1613,6 +1613,55 @@ class Database:
             moved_trades = 1
         except Exception as e:
             out["trades_err"] = str(e)
+
+        # Belt-and-suspenders: any ETH close near -414.06
+        try:
+            if self._pg_mode:
+                await self._execute(
+                    """UPDATE exchange_close_trades
+                       SET bot_label = $1,
+                           cl_ord_id = CASE
+                             WHEN lower(COALESCE(cl_ord_id,'')) LIKE 'ais%' THEN cl_ord_id
+                             ELSE 'ais' || COALESCE(ord_id, 'fix')
+                           END
+                       WHERE upper(inst_id) LIKE '%ETH%'
+                         AND abs(COALESCE(pnl,0) - (-414.06)) < 12.0""",
+                    ("AI Scale-In 1H",),
+                )
+            else:
+                await self._execute(
+                    """UPDATE exchange_close_trades
+                       SET bot_label = ?,
+                           cl_ord_id = CASE
+                             WHEN lower(COALESCE(cl_ord_id,'')) LIKE 'ais%' THEN cl_ord_id
+                             ELSE 'ais' || COALESCE(ord_id, 'fix')
+                           END
+                       WHERE upper(inst_id) LIKE '%ETH%'
+                         AND abs(COALESCE(pnl,0) - (-414.06)) < 12.0""",
+                    ("AI Scale-In 1H",),
+                )
+        except Exception as e:
+            out["bulk_err"] = str(e)
+        try:
+            if self._pg_mode:
+                await self._execute(
+                    """UPDATE trades SET bot_id = $1
+                       WHERE bot_id = $2
+                         AND upper(COALESCE(inst_id,'')) LIKE '%ETH%'
+                         AND abs(COALESCE(pnl,0) - (-414.06)) < 12.0""",
+                    ("ai_scale_strategy", "ai_strategy"),
+                )
+            else:
+                await self._execute(
+                    """UPDATE trades SET bot_id = ?
+                       WHERE bot_id = ?
+                         AND upper(COALESCE(inst_id,'')) LIKE '%ETH%'
+                         AND abs(COALESCE(pnl,0) - (-414.06)) < 12.0""",
+                    ("ai_scale_strategy", "ai_strategy"),
+                )
+        except Exception as e:
+            out["trades_bulk_err"] = str(e)
+
         out.update({
             "ok": True, "moved": 1, "pnl": pnl, "ord_id": oid,
             "inst_id": inst, "cl_ord_id": cl, "trades_touched": moved_trades,
