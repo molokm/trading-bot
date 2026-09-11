@@ -623,7 +623,7 @@ class Database:
             print(f"[db] reclassify_exchange_bot_labels: {e}", flush=True)
         return n
 
-async def get_exchange_pnl_timebucket(self, bot_label: str = None,
+    async def get_exchange_pnl_timebucket(self, bot_label: str = None,
                                           account_mode: str = None,
                                           epoch_ms: int = 0) -> list[dict]:
         """Return close trades with close_ts for deterministic time-bucket aggregation.
