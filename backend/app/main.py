@@ -340,12 +340,15 @@ async def startup():
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
-            marker = await db.get_setting("fix_last_eth_to_scale_v1")
+            marker = await db.get_setting("fix_eth_long_414_to_scale_v2")
             if not marker:
-                fix = await db.reassign_latest_close_to_scale("ETH")
-                print(f"[startup] reassign last close → Scale-In: {fix}", flush=True)
+                # Specific trade: 11.09.26 ETH LONG close PnL ≈ -414.06 (was Discretionary)
+                fix = await db.reassign_latest_close_to_scale(
+                    "ETH", pnl_near=-414.06, avg_px_near=2554.64,
+                )
+                print(f"[startup] reassign ETH -414 → Scale-In: {fix}", flush=True)
                 if fix.get("ok"):
-                    await db.set_setting("fix_last_eth_to_scale_v1", "1")
+                    await db.set_setting("fix_eth_long_414_to_scale_v2", "1")
                     await db.set_setting(
                         "fix_last_eth_to_scale_pnl",
                         str(float(fix.get("pnl") or 0)),
@@ -1946,7 +1949,17 @@ async def admin_reassign_last_to_scale(data: dict = None):
             await db.set_setting("fix_last_eth_to_scale_v1", "")
         except Exception:
             pass
-    fix = await db.reassign_latest_close_to_scale(hint)
+    pnl_near = data.get("pnl_near")
+    try:
+        pnl_near = float(pnl_near) if pnl_near is not None else -414.06
+    except (TypeError, ValueError):
+        pnl_near = -414.06
+    avg_px = data.get("avg_px_near")
+    try:
+        avg_px = float(avg_px) if avg_px is not None else 2554.64
+    except (TypeError, ValueError):
+        avg_px = 2554.64
+    fix = await db.reassign_latest_close_to_scale(hint, pnl_near=pnl_near, avg_px_near=avg_px)
     pnl_moved = float(fix.get("pnl") or 0)
     if fix.get("ok") and abs(pnl_moved) > 1e-9:
         try:

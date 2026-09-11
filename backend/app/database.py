@@ -1502,47 +1502,70 @@ class Database:
         return {"moved": len(moved_ids), "pnl": pnl_sum, "ids": moved_ids}
 
 
-    async def reassign_latest_close_to_scale(self, inst_hint: str = "ETH") -> dict:
-        """Move the latest close (prefer inst_hint) from Discretionary → Scale-In.
+    async def reassign_latest_close_to_scale(
+        self,
+        inst_hint: str = "ETH",
+        *,
+        pnl_near: float = None,
+        avg_px_near: float = None,
+    ) -> dict:
+        """Move matching close from Discretionary → Scale-In.
 
+        Prefer exact match: inst + pnl_near (e.g. ETH -414.06).
         Updates exchange_close_trades.bot_label + cl_ord_id, and trades.bot_id.
         """
         out = {"ok": False, "moved": 0, "pnl": 0.0, "ord_id": "", "inst_id": ""}
         try:
             rows = await self._fetchall(
-                """SELECT ord_id, inst_id, pnl, bot_label, cl_ord_id, close_ts
+                """SELECT ord_id, inst_id, pnl, bot_label, cl_ord_id, close_ts, avg_px
                    FROM exchange_close_trades
-                   ORDER BY close_ts DESC LIMIT 20"""
+                   ORDER BY close_ts DESC LIMIT 50"""
             ) or []
-        except Exception as e:
-            out["error"] = str(e)
-            return out
+        except Exception:
+            try:
+                rows = await self._fetchall(
+                    """SELECT ord_id, inst_id, pnl, bot_label, cl_ord_id, close_ts
+                       FROM exchange_close_trades
+                       ORDER BY close_ts DESC LIMIT 50"""
+                ) or []
+            except Exception as e:
+                out["error"] = str(e)
+                return out
         target = None
         hint = (inst_hint or "").upper()
+        candidates = []
         for r in rows:
-            inst = str((r.get("inst_id") if isinstance(r, dict) else r[1]) or "")
-            label = str((r.get("bot_label") if isinstance(r, dict) else r[3]) or "")
-            # Prefer ETH (or hint) currently on Discretionary / empty / wrong
+            rr = r if isinstance(r, dict) else {
+                "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
+                "bot_label": r[3], "cl_ord_id": r[4], "close_ts": r[5],
+                "avg_px": r[6] if len(r) > 6 else 0,
+            }
+            inst = str(rr.get("inst_id") or "")
+            label = str(rr.get("bot_label") or "")
             if hint and hint not in inst.upper():
                 continue
             if "Scale-In" in label:
-                continue  # already correct
-            target = r if isinstance(r, dict) else {
-                "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
-                "bot_label": r[3], "cl_ord_id": r[4], "close_ts": r[5],
-            }
-            break
-        if not target and rows:
-            # fallback: latest non-Scale close
-            for r in rows:
-                rr = r if isinstance(r, dict) else {
-                    "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
-                    "bot_label": r[3], "cl_ord_id": r[4], "close_ts": r[5],
-                }
-                if "Scale-In" in str(rr.get("bot_label") or ""):
-                    continue
-                target = rr
-                break
+                continue
+            candidates.append(rr)
+        # Score by pnl / avg_px proximity
+        if candidates and pnl_near is not None:
+            scored = sorted(
+                candidates,
+                key=lambda x: abs(float(x.get("pnl") or 0) - float(pnl_near)),
+            )
+            best = scored[0]
+            if abs(float(best.get("pnl") or 0) - float(pnl_near)) <= max(25.0, abs(float(pnl_near)) * 0.08):
+                target = best
+        if not target and candidates and avg_px_near is not None:
+            scored = sorted(
+                candidates,
+                key=lambda x: abs(float(x.get("avg_px") or 0) - float(avg_px_near)),
+            )
+            best = scored[0]
+            if abs(float(best.get("avg_px") or 0) - float(avg_px_near)) < 5.0:
+                target = best
+        if not target and candidates:
+            target = candidates[0]
         if not target:
             out["error"] = "no matching close found"
             return out
@@ -1577,14 +1600,14 @@ class Database:
                 await self._execute(
                     """UPDATE trades SET bot_id = $1
                        WHERE bot_id = $2 AND inst_id = $3
-                         AND (ord_id = $4 OR abs(COALESCE(pnl,0) - $5) < 0.05)""",
+                         AND (ord_id = $4 OR abs(COALESCE(pnl,0) - $5) < 15.0)""",
                     ("ai_scale_strategy", "ai_strategy", inst, oid, pnl),
                 )
             else:
                 await self._execute(
                     """UPDATE trades SET bot_id = ?
                        WHERE bot_id = ? AND inst_id = ?
-                         AND (ord_id = ? OR abs(COALESCE(pnl,0) - ?) < 0.05)""",
+                         AND (ord_id = ? OR abs(COALESCE(pnl,0) - ?) < 15.0)""",
                     ("ai_scale_strategy", "ai_strategy", inst, oid, pnl),
                 )
             moved_trades = 1
