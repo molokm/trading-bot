@@ -227,27 +227,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         // aiStatus triggers heavy PnL pipeline — load async without blocking UI
         api.aiStatus().catch(() => null).then(aiSt => {
           if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-          if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
-            const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
-            setPnl(prev => {
-              if (prev && prev.source && String(prev.source).startsWith('exchange')) return prev
-            return {
-              total: Number(prev?.total ?? 0),
-                '1d': Number(prev?.['1d'] ?? 0),
-                week: Number(prev?.week ?? 0),
-                '7d': Number(prev?.['7d'] ?? 0),
-                '30d': aiP,
-                unrealized: Number(prev?.unrealized ?? 0),
-                per_bot: {
-                  'AI Discretionary 1H': Number(prev?.per_bot?.['AI Discretionary 1H'] ?? 0),
-                  'AI Scale-In 1H': Number(prev?.per_bot?.['AI Scale-In 1H'] ?? 0),
-                  ...(prev?.per_bot || {}),
-                },
-                per_bot_all: prev?.per_bot_all || prev?.per_bot || {},
-                source: prev?.source || 'pending',
-              }
-            })
-          }
         })
       }
       
@@ -284,24 +263,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         if (pos2) setPositions(pos2.positions || [])
         if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
         if (aiScaleSt2 && !aiScaleSt2.detail) setAiScaleStatus(aiScaleSt2)
-        
-        if (aiSt2 && (aiSt2.total_pnl != null || aiSt2.lifetime_pnl != null)) {
-          const aiP = Number(aiSt2.lifetime_pnl ?? aiSt2.total_pnl ?? 0)
-          setPnl(prev => {
-            if (prev && prev.source && String(prev.source).startsWith('exchange')) return prev
-            return {
-              total: Number(prev?.total ?? 0),
-              '1d': Number(prev?.['1d'] ?? 0),
-              week: Number(prev?.week ?? 0),
-              '7d': Number(prev?.['7d'] ?? 0),
-              '30d': aiP,
-              unrealized: Number(prev?.unrealized ?? 0),
-              per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
-              per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
-              source: 'ai_status_seed',
-            }
-          })
-        }
       }
       
       if (tk) setTicker(tk)
@@ -332,23 +293,21 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        setPnl(prev => {
-          const nextTot = Math.abs(Number(pnlData.total ?? pnlData.strategy_realized ?? 0))
-          const prevTot = Math.abs(Number(prev?.total ?? prev?.strategy_realized ?? 0))
-          // Do not flash 0 total over a good value — but always take fresh 1d/week
-          if (prev && prevTot > 0.01 && nextTot < 0.01 && !pnlData.force_zero) {
-            return {
-              ...prev,
-              sticky: true,
-              sticky_ui: true,
-              '1d': pnlData['1d'] ?? prev['1d'],
-              week: pnlData.week ?? prev.week,
-              week_start: pnlData.week_start ?? prev.week_start,
-              '7d': pnlData['7d'] ?? prev['7d'],
+        // ONLY accept pnl_engine payloads — never bot-status seeds
+        const src = String(pnlData.source || '')
+        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
+        if (okSrc || pnlData.pnl_epoch) {
+          setPnl(prev => {
+            // Don't replace a non-zero engine total with an empty/error zero flash
+            const newTot = Math.abs(Number(pnlData.total ?? 0))
+            const oldTot = Math.abs(Number(prev?.total ?? 0))
+            const newSrc = String(pnlData.source || '')
+            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
+              return prev
             }
-          }
-          return pnlData
-        })
+            return { ...pnlData, account_mode: pnlData.account_mode || prev?.account_mode }
+          })
+        }
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
         setPnl({

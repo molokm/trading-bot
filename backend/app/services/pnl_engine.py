@@ -1,5 +1,12 @@
 """Single source of truth for dashboard / bot-card PnL.
 
+STABILITY LOCK — do not reintroduce:
+- lifetime_pnl / bot counters as dashboard source
+- frontend ai_status_seed overwriting /api/pnl
+- SQL filters that drop untagged or close_ts=0 rows before Python
+- attributing untagged closes only when AI_ONLY (resolve_bot fallback)
+
+
 Rules:
 1. Realized PnL from exchange_close_trades (OKX close bills), optionally
    supplemented from DB trades when exchange is empty after epoch.
@@ -179,7 +186,7 @@ def aggregate_rows(
         total = sum(per_bot.values())
         active = sorted(per_bot.keys())
 
-    return {
+    result = {
         "total": round(total, 2),
         "account_total": round(account_all, 2),
         "1d": round(realized_1d, 2),
@@ -212,6 +219,13 @@ def aggregate_rows(
         "pnl_epoch": PNL_EPOCH_ISO,
         "engine": "pnl_engine_v2",
     }
+    if ai_only:
+        _s = sum(float(result["per_bot"].get(k, 0) or 0) for k in AI_ONLY_LABELS)
+        if abs(_s - float(result["total"])) > 0.05:
+            result["total"] = round(_s, 2)
+            result["strategy_realized"] = round(_s, 2)
+    return result
+
 
 
 async def ensure_epoch(db) -> str:

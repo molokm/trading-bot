@@ -7060,6 +7060,18 @@ async def _compute_pnl():
         print(f"[pnl] unrealized: {e}", flush=True)
         data.setdefault("unrealized", 0.0)
     data["account_mode"] = _mode
+    # Invariant: per_bot sum must equal total for AI_ONLY
+    try:
+        if AI_ONLY_MODE:
+            pb = data.get("per_bot") or {}
+            s = float(pb.get("AI Discretionary 1H") or 0) + float(pb.get("AI Scale-In 1H") or 0)
+            tot = float(data.get("total") or 0)
+            if abs(s - tot) > 0.05:
+                print(f"[pnl] INVARIANT FIX per_bot sum {s:.2f} != total {tot:.2f}", flush=True)
+                data["total"] = round(s, 2)
+                data["strategy_realized"] = round(s, 2)
+    except Exception:
+        pass
     return data
 
 
@@ -7442,7 +7454,7 @@ _PAIRED_TTL = 20
 
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
-_PNL_TTL = 45  # seconds — reduce card flicker
+_PNL_TTL = 30  # seconds — reduce card flicker
   # seconds — single-flight shared by /api/pnl and /trades/paired
 
 
