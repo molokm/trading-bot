@@ -340,7 +340,7 @@ async def startup():
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
-            marker = await db.get_setting("fix_eth_long_414_to_scale_v2")
+            marker = await db.get_setting("fix_eth_long_414_to_scale_v3")
             if not marker:
                 # Specific trade: 11.09.26 ETH LONG close PnL ≈ -414.06 (was Discretionary)
                 fix = await db.reassign_latest_close_to_scale(
@@ -348,7 +348,7 @@ async def startup():
                 )
                 print(f"[startup] reassign ETH -414 → Scale-In: {fix}", flush=True)
                 if fix.get("ok"):
-                    await db.set_setting("fix_eth_long_414_to_scale_v2", "1")
+                    await db.set_setting("fix_eth_long_414_to_scale_v3", "1")
                     await db.set_setting(
                         "fix_last_eth_to_scale_pnl",
                         str(float(fix.get("pnl") or 0)),
@@ -813,7 +813,7 @@ async def startup():
     except Exception as e:
         print(f"[startup]   AI Scale-In FAILED: {e}", flush=True)
 
-    # Apply pending ETH→Scale PnL memory fix (after bots exist)
+    # Apply pending ETH→Scale PnL memory fix + strip trade_log (after bots exist)
     try:
         pending = await db.get_setting("fix_last_eth_to_scale_pnl")
         if pending not in (None, "", "applied"):
@@ -821,12 +821,36 @@ async def startup():
             if abs(pnl_moved) > 1e-9:
                 if ai_bot:
                     ai_bot._lifetime_pnl = float(getattr(ai_bot, "_lifetime_pnl", 0) or 0) - pnl_moved
+                    # Remove this close from Discretionary trade_log so UI tag does not stick
+                    try:
+                        log = list(getattr(ai_bot, "_trade_log", None) or [])
+                        keep = []
+                        moved = []
+                        for row in log:
+                            try:
+                                p = float(row.get("pnl") or 0)
+                            except (TypeError, ValueError):
+                                p = 0
+                            sym = str(row.get("symbol") or row.get("inst_id") or "")
+                            if "ETH" in sym.upper() and abs(p - pnl_moved) < 8.0:
+                                moved.append(row)
+                                continue
+                            keep.append(row)
+                        ai_bot._trade_log = keep
+                        if moved and ai_scale_bot:
+                            sc_log = list(getattr(ai_scale_bot, "_trade_log", None) or [])
+                            sc_log.extend(moved)
+                            ai_scale_bot._trade_log = sc_log[-200:]
+                            print(f"[startup] moved {len(moved)} ETH rows from AI log → Scale log", flush=True)
+                    except Exception as e:
+                        print(f"[startup] trade_log move: {e}", flush=True)
                 if ai_scale_bot:
                     ai_scale_bot._lifetime_pnl = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0) + pnl_moved
                 print(f"[startup] applied Scale PnL memory shift {pnl_moved:+.2f}", flush=True)
             await db.set_setting("fix_last_eth_to_scale_pnl", "applied")
             try:
                 _pnl_cache.clear()
+                _paired_cache.clear()
             except Exception:
                 pass
     except Exception as e:
@@ -3874,16 +3898,43 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
     """Tag a paired trade with bot name. Works for both open and closed trades."""
     inst_id = trade.get("inst_id", "") or trade.get("symbol", "")
     pos_side = trade.get("pos_side", "")
+
+    # Explicit label on row (exchange_close / overrides)
+    explicit = str(trade.get("bot") or trade.get("bot_label") or "").strip()
+    if explicit in (
+        "AI Scale-In 1H", "AI Discretionary 1H", "Momentum", "Impulse 1D",
+        "MACD+Donchian Validation", "Order Book Scalp", "Умные деньги",
+        "VWAP Mean Reversion",
+    ):
+        return explicit
+
+    # clOrdId longest prefix (ais before ai)
+    cl = str(trade.get("cl_ord_id") or trade.get("clOrdId") or "").lower()
+    if cl.startswith("ais"):
+        return "AI Scale-In 1H"
+    if cl.startswith("ai") and not cl.startswith("ais"):
+        return "AI Discretionary 1H"
+
+    # Hard override: known mis-tagged ETH Scale close (PnL ≈ -414)
+    try:
+        pnl = float(trade.get("pnl") if trade.get("pnl") is not None else 1e18)
+    except (TypeError, ValueError):
+        pnl = 1e18
+    if "ETH" in str(inst_id).upper() and abs(pnl - (-414.06)) < 8.0:
+        return "AI Scale-In 1H"
+
     # DB bot_id is authoritative when present
     by_id = _db_bot_name(trade.get("bot_id", "") or "")
     if by_id:
         return by_id
     if trade.get("reason") == "open":
         return _tag_position_bot(inst_id, pos_side, db_pos_map=db_pos_map)
-    # Prefer exact ordId match against in-memory close logs (most reliable)
+
+    # Prefer exact ordId match — Scale-In BEFORE Discretionary
     ord_id = str(trade.get("ord_id") or trade.get("close_ord_id") or "").strip()
     if ord_id:
         for bot_label, log in (
+            ("AI Scale-In 1H", getattr(ai_scale_bot, "_trade_log", None) if ai_scale_bot else None),
             ("Momentum", getattr(rotation, "_trade_log", None) if rotation else None),
             ("Impulse 1D", getattr(impulse, "_trade_log", None) if impulse else None),
             ("MACD+Donchian Validation", getattr(validation, "_trade_log", None) if validation else None),
@@ -3892,33 +3943,25 @@ def _tag_trade_bot(trade: dict, *, db_pos_map: dict | None = None) -> str:
         ):
             if not log:
                 continue
-            for t in log:
-                if str(t.get("ord_id", "") or "").strip() == ord_id:
+            for tlog in log:
+                if str(tlog.get("ord_id", "") or "").strip() == ord_id:
                     return bot_label
-    # For closed trades, check trade logs for matching entry+exit
+
     entry_time = trade.get("entry_time", "")
-    if rotation and rotation._trade_log:
-        for t in rotation._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "Momentum"
-    if impulse and impulse._trade_log:
-        for t in impulse._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "Impulse 1D"
-    if validation and validation._trade_log:
-        for t in validation._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "MACD+Donchian Validation"
-    if ai_bot and ai_bot._trade_log:
-        for t in ai_bot._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "AI Discretionary 1H"
-    if vwap_rev_bot and vwap_rev_bot._trade_log:
-        for t in vwap_rev_bot._trade_log:
-            if t.get("time", "") == entry_time and t.get("symbol", "") == inst_id:
-                return "VWAP Mean Reversion"
-    # Do NOT match by symbol+side alone — that wrongly attached Impulse SOL etc. to AI
-    # after redeploy adoption and corrupted strategy PnL.
+    for bot_label, bot in (
+        ("AI Scale-In 1H", ai_scale_bot),
+        ("Momentum", rotation),
+        ("Impulse 1D", impulse),
+        ("MACD+Donchian Validation", validation),
+        ("AI Discretionary 1H", ai_bot),
+        ("VWAP Mean Reversion", vwap_rev_bot),
+    ):
+        log = getattr(bot, "_trade_log", None) if bot else None
+        if not log:
+            continue
+        for tlog in log:
+            if tlog.get("time", "") == entry_time and (tlog.get("symbol", "") or tlog.get("inst_id", "")) == inst_id:
+                return bot_label
     return _db_bot_name(trade.get("bot_id", ""))
 
 
@@ -3945,7 +3988,7 @@ def _db_bot_name(bot_id: str) -> str:
         return "Умные деньги"
     if base in (
         "Momentum", "Impulse 1D", "MACD+Donchian Validation",
-        "AI Discretionary 1H", "Order Book Scalp", "Умные деньги",
+        "AI Discretionary 1H", "AI Scale-In 1H", "Order Book Scalp", "Умные деньги",
     ):
         return base
     return ""
