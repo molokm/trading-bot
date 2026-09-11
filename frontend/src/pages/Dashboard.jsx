@@ -1399,7 +1399,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             pnl={discPnlResolved}
             trades={discTradesResolved}
             winRate={aiStatus?.win_rate}
-            openCount={(aiStatus?.open_positions || []).length}
+            openCount={(() => {
+              const disc = aiStatus?.open_positions || []
+              const scl = aiScaleStatus?.open_positions || []
+              const sclCoins = new Set(scl.map(p => String(p.coin || '').toUpperCase()))
+              // If Scale-In also lists the same coin, Discretionary must not double-count
+              return disc.filter(p => !sclCoins.has(String(p.coin || '').toUpperCase())).length
+            })()}
             model={aiStatus?.model || aiStatus?.llm?.model}
             capital={aiStatus?.capital ?? aiStatus?.config?.capital}
             pulse={aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}

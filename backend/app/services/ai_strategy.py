@@ -1817,7 +1817,10 @@ class AIStrategy:
 
 
     async def _reconcile_positions_with_exchange(self, client) -> None:
-        """Drop memory positions that are no longer open on OKX (fixes stale Pos. N)."""
+        """Drop memory positions that are flat on OKX OR owned by another bot.
+
+        Prevents both Discretionary and Scale-In showing Pos.1 for one exchange position.
+        """
         if not client:
             return
         if not self._positions:
@@ -1827,8 +1830,13 @@ class AIStrategy:
         except Exception as e:
             print(f"[{self.BOT_NAME}] reconcile get_positions: {e}", flush=True)
             return
+        # OKX may return list or {"data": [...]}
+        if isinstance(result, dict):
+            raw_list = result.get("data") or []
+        else:
+            raw_list = result or []
         live: dict = {}
-        for raw in (result or []):
+        for raw in raw_list:
             try:
                 if not isinstance(raw, dict):
                     continue
@@ -1854,26 +1862,60 @@ class AIStrategy:
             except Exception:
                 continue
 
+        my_pfx = (self._clord_prefix() or "").lower()
         for coin, pos in list(self._positions.items()):
             info = live.get(coin)
+            inst = getattr(pos, "inst_id", None) or (info or {}).get("inst_id") or f"{coin}-USDT-SWAP"
+            side = getattr(pos, "side", "long")
+
             if not info:
                 print(
                     f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
-                    f"(was {getattr(pos, 'side', '?')} sz={getattr(pos, 'size', 0)})",
+                    f"(was {side} sz={getattr(pos, 'size', 0)})",
                     flush=True,
                 )
                 self._positions.pop(coin, None)
                 try:
                     if self.db:
-                        await release_open(
-                            self.db, self.BOT_ID,
-                            getattr(pos, "inst_id", f"{coin}-USDT-SWAP"),
-                            getattr(pos, "side", "long"),
-                        )
+                        await release_open(self.db, self.BOT_ID, inst, side)
                 except Exception as e:
                     print(f"[{self.BOT_NAME}] reconcile release: {e}", flush=True)
                 continue
-            # Optional: size drift from partial closes
+
+            # Ownership: clOrdId prefix must match this bot (ais ≠ ai)
+            try:
+                owner = await self._entry_fill_owner(client, inst)
+            except Exception:
+                owner = ""
+            if owner and my_pfx and owner != my_pfx:
+                print(
+                    f"[{self.BOT_NAME}] reconcile: drop {coin} — fill_owner={owner!r} mine={my_pfx!r}",
+                    flush=True,
+                )
+                self._positions.pop(coin, None)
+                try:
+                    if self.db:
+                        await release_open(self.db, self.BOT_ID, inst, side)
+                except Exception:
+                    pass
+                continue
+
+            # DB claim must be this bot (or empty). If another bot_id holds claim — drop.
+            try:
+                if self.db and hasattr(self.db, "find_position_any_side"):
+                    owned = await self.db.find_position_any_side(self.BOT_ID, inst, side)
+                    if not owned and hasattr(self.db, "get_position_owner"):
+                        other = await self.db.get_position_owner(inst, side)
+                        if other and other != self.BOT_ID:
+                            print(
+                                f"[{self.BOT_NAME}] reconcile: drop {coin} — DB owner={other}",
+                                flush=True,
+                            )
+                            self._positions.pop(coin, None)
+                            continue
+            except Exception:
+                pass
+
             try:
                 if abs(float(getattr(pos, "size", 0) or 0) - float(info["size"])) > 1e-8:
                     pos.size = float(info["size"])
@@ -2115,12 +2157,20 @@ class AIStrategy:
                     print(f"[AI] orphan sweep closed {len(closed)}: {closed}", flush=True)
         except Exception as e:
             print(f"[AI] orphan sweep: {e}", flush=True)
-        # Keep DB ownership fresh so UI never loses the badge after restart
+        # Refresh DB claim only for positions we still hold after ownership checks
         for coin, pos in list(self._positions.items()):
             _inst = getattr(pos, "inst_id", pos.get("inst_id") if isinstance(pos, dict) else "")
             _side = getattr(pos, "side", pos.get("side") if isinstance(pos, dict) else "")
             _sz = getattr(pos, "size", pos.get("size") if isinstance(pos, dict) else 0)
             _entry = getattr(pos, "entry_price", pos.get("entry_price") if isinstance(pos, dict) else 0)
+            try:
+                owner = await self._entry_fill_owner(client, _inst) if _inst else ""
+            except Exception:
+                owner = ""
+            my_pfx = (self._clord_prefix() or "").lower()
+            if owner and my_pfx and owner != my_pfx:
+                self._positions.pop(coin, None)
+                continue
             await claim_open(self.db, self.BOT_ID, _inst, _side, _sz, _entry)
         await self._fetch_indicators(client)
         try:
