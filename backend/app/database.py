@@ -1502,6 +1502,118 @@ class Database:
         return {"moved": len(moved_ids), "pnl": pnl_sum, "ids": moved_ids}
 
 
+
+    async def reassign_day_closes_to_scale(self, day: str = "2026-09-11") -> dict:
+        """Move all Discretionary exchange closes on calendar day → Scale-In.
+
+        day: YYYY-MM-DD (UTC/MSK close_ts both checked via epoch range ±1 day).
+        Also retags trades.bot_id for matching PnL rows.
+        """
+        out = {"ok": False, "updated_exchange": 0, "updated_trades": 0, "pnls": []}
+        try:
+            from datetime import datetime, timezone, timedelta
+            d0 = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            # MSK is UTC+3 — expand window to cover full local day
+            start_ms = int((d0 - timedelta(hours=3)).timestamp() * 1000)
+            end_ms = int((d0 + timedelta(hours=27)).timestamp() * 1000)
+        except Exception as e:
+            out["error"] = f"day parse: {e}"
+            return out
+        try:
+            rows = await self._fetchall(
+                """SELECT ord_id, inst_id, pnl, bot_label, close_ts
+                   FROM exchange_close_trades
+                   WHERE close_ts >= %s AND close_ts < %s"""
+                if self._pg_mode else
+                """SELECT ord_id, inst_id, pnl, bot_label, close_ts
+                   FROM exchange_close_trades
+                   WHERE close_ts >= ? AND close_ts < ?""",
+                (start_ms, end_ms),
+            ) or []
+        except Exception as e:
+            # SQLite/PG placeholder mismatch — try both styles via _fetchall convention
+            try:
+                if self._pg_mode:
+                    rows = await self._fetchall(
+                        """SELECT ord_id, inst_id, pnl, bot_label, close_ts
+                           FROM exchange_close_trades
+                           WHERE close_ts >= $1 AND close_ts < $2""",
+                        (start_ms, end_ms),
+                    ) or []
+                else:
+                    rows = await self._fetchall(
+                        """SELECT ord_id, inst_id, pnl, bot_label, close_ts
+                           FROM exchange_close_trades
+                           WHERE close_ts >= ? AND close_ts < ?""",
+                        (start_ms, end_ms),
+                    ) or []
+            except Exception as e2:
+                out["error"] = str(e2)
+                return out
+
+        total_pnl = 0.0
+        n = 0
+        for r in rows:
+            rr = r if isinstance(r, dict) else {
+                "ord_id": r[0], "inst_id": r[1], "pnl": r[2],
+                "bot_label": r[3], "close_ts": r[4],
+            }
+            label = str(rr.get("bot_label") or "")
+            if "Scale-In" in label:
+                continue
+            # Anything Discretionary or empty/unknown for this day → Scale
+            oid = str(rr.get("ord_id") or "")
+            pnl = float(rr.get("pnl") or 0)
+            cl = f"ais{oid}" if oid else f"ais{int(__import__('time').time()*1000)}"
+            try:
+                if self._pg_mode:
+                    await self._execute(
+                        """UPDATE exchange_close_trades
+                           SET bot_label = $1, cl_ord_id = $2
+                           WHERE ord_id = $3""",
+                        ("AI Scale-In 1H", cl, oid),
+                    )
+                else:
+                    await self._execute(
+                        """UPDATE exchange_close_trades
+                           SET bot_label = ?, cl_ord_id = ?
+                           WHERE ord_id = ?""",
+                        ("AI Scale-In 1H", cl, oid),
+                    )
+                n += 1
+                total_pnl += pnl
+                out["pnls"].append({"ord_id": oid, "pnl": pnl, "inst": rr.get("inst_id")})
+            except Exception as e:
+                out.setdefault("row_errs", []).append(str(e))
+
+        # Bulk trades: all Discretionary closes that day by timestamp if available
+        try:
+            day_like = f"{day}%"
+            if self._pg_mode:
+                await self._execute(
+                    """UPDATE trades SET bot_id = $1
+                       WHERE bot_id = $2
+                         AND COALESCE(pnl,0) != 0
+                         AND (timestamp LIKE $3 OR timestamp LIKE $4)""",
+                    ("ai_scale_strategy", "ai_strategy", day_like, day_like.replace("-", "")),
+                )
+            else:
+                await self._execute(
+                    """UPDATE trades SET bot_id = ?
+                       WHERE bot_id = ?
+                         AND COALESCE(pnl,0) != 0
+                         AND (timestamp LIKE ? OR timestamp LIKE ?)""",
+                    ("ai_scale_strategy", "ai_strategy", day_like, day.replace("-", "") + "%"),
+                )
+            out["updated_trades"] = 1
+        except Exception as e:
+            out["trades_err"] = str(e)
+
+        out["ok"] = True
+        out["updated_exchange"] = n
+        out["pnl_sum"] = round(total_pnl, 2)
+        return out
+
     async def reassign_latest_close_to_scale(
         self,
         inst_hint: str = "ETH",

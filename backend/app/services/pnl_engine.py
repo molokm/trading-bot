@@ -94,6 +94,21 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
 
     Untagged closes must not steal Scale-In PnL. Attribute only with evidence.
     """
+    # Hard: all 2026-09-11 closes → Scale-In (session owned by SCL per Telegram)
+    ts = str(row.get("close_ts") or row.get("exit_time") or row.get("time") or row.get("timestamp") or "")
+    try:
+        cts = int(row.get("close_ts") or 0)
+        if cts > 10_000_000_000:
+            from datetime import datetime, timezone
+            ts = datetime.fromtimestamp(cts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+        elif cts > 0:
+            from datetime import datetime, timezone
+            ts = datetime.fromtimestamp(cts, tz=timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    if "2026-09-11" in str(ts) or "11.09.26" in str(ts):
+        return "AI Scale-In 1H"
+
     # Hard: ETH ≈ -414 is Scale-In (ops correction 11.09.2026)
     try:
         pnl = float(row.get("pnl") or 0)

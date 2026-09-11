@@ -54,16 +54,17 @@ STRICT_BOTS = set(CLORD_PREFIX_TO_BOT.values()) | {
 # Built-in corrections (ops incidents). Prefer DB overrides for new cases.
 # 11.09.2026 ETH LONG close −414.06 was opened by Scale-In but tagged Discretionary.
 BUILTIN_OVERRIDES: List[dict] = [
+    # Entire 2026-09-11 session was Scale-In (Telegram opens); closes were stolen by Discretionary
+    {
+        "exit_date": "2026-09-11",
+        "to_bot": "AI Scale-In 1H",
+        "from_bots": ["AI Discretionary 1H", ""],
+    },
     {
         "inst_id": "ETH-USDT-SWAP",
         "pnl_near": -414.06,
         "pos_side": "long",
         "exit_date": "2026-09-11",
-        "to_bot": "AI Scale-In 1H",
-    },
-    {
-        "inst_id": "ETH-USDT-SWAP",
-        "pnl_near": -414.06,
         "to_bot": "AI Scale-In 1H",
     },
 ]
@@ -146,7 +147,6 @@ def match_override(rule: dict, t: dict) -> bool:
     ti = str(t.get("inst_id") or t.get("symbol") or "").strip()
     if inst and ti:
         if ti != inst and inst not in ti and ti not in inst:
-            # coin-level: ETH vs ETH-USDT-SWAP
             coin_r = inst.split("-")[0].upper()
             coin_t = ti.split("-")[0].upper()
             if coin_r != coin_t:
@@ -156,8 +156,24 @@ def match_override(rule: dict, t: dict) -> bool:
     if pfx and pfx not in et:
         return False
     exit_date = str(rule.get("exit_date") or rule.get("date") or "")
-    if exit_date and not pfx and exit_date not in et:
-        return False
+    if exit_date and not pfx:
+        # Accept ISO date in exit_time OR MSK display formats 11.09.26 / 11.09.2026
+        ok_date = exit_date in et
+        if not ok_date and len(exit_date) >= 10:
+            y, m, d = exit_date[:10].split("-")
+            alts = (f"{d}.{m}.{y}", f"{d}.{m}.{y[2:]}", f"{y}-{m}-{d}")
+            ok_date = any(a in et for a in alts)
+        if not ok_date:
+            return False
+    from_bots = rule.get("from_bots")
+    if from_bots is not None:
+        cur = str(t.get("bot") or t.get("bot_label") or "").strip()
+        allowed = {str(x).strip() for x in from_bots}
+        # empty current bot also allowed if "" in from_bots
+        if cur not in allowed and not (cur == "" and "" in allowed):
+            # Also retag if currently Discretionary when Scale target day-rule
+            if cur and cur not in allowed:
+                return False
     pside = str(rule.get("pos_side") or rule.get("side") or "").strip().lower()
     if pside:
         tps = normalize_side(str(t.get("side") or ""), str(t.get("pos_side") or ""))
@@ -234,6 +250,19 @@ def apply_attribution(
                 break
         if forced:
             continue
+
+        # Hard safety: entire 2026-09-11 session → Scale-In (Telegram opens by SCL)
+        et = _trade_exit_time(t)
+        if (
+            "2026-09-11" in et
+            or "11.09.26" in et
+            or "11.09.2026" in et
+        ) and reason in ("closed", "close", "partial", "filled", ""):
+            if str(t.get("bot") or "") != "AI Scale-In 1H":
+                t["bot"] = "AI Scale-In 1H"
+                t["bot_id"] = "ai_scale_strategy"
+                t["_attr"] = "hard_day_2026_09_11"
+                continue
 
         # Hard safety: ETH ≈ -414 always Scale-In
         try:

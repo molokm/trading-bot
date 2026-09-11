@@ -340,15 +340,17 @@ async def startup():
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
-            marker = await db.get_setting("fix_eth_long_414_to_scale_v4")
+            marker = await db.get_setting("fix_day_20260911_to_scale_v5")
             if not marker:
-                # Specific trade: 11.09.26 ETH LONG close PnL ≈ -414.06 (was Discretionary)
-                fix = await db.reassign_latest_close_to_scale(
-                    "ETH", pnl_near=-414.06, avg_px_near=2554.64,
-                )
-                print(f"[startup] reassign ETH -414 → Scale-In: {fix}", flush=True)
+                # All 2026-09-11 closes belonged to Scale-In (Telegram opens by SCL)
+                fix = await db.reassign_day_closes_to_scale("2026-09-11")
+                print(f"[startup] reassign day 2026-09-11 → Scale-In: {fix}", flush=True)
                 if fix.get("ok"):
-                    await db.set_setting("fix_eth_long_414_to_scale_v4", "1")
+                    await db.set_setting("fix_day_20260911_to_scale_v5", "1")
+                    await db.set_setting(
+                        "fix_last_eth_to_scale_pnl",
+                        str(float(fix.get("pnl_sum") or 0)),
+                    )
                     # Persist override for paired pipeline forever
                     try:
                         import json as _json
