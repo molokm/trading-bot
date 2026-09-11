@@ -1199,6 +1199,11 @@ class AIStrategy:
         for coin, p in self._positions.items():
             _side = getattr(p, "side", p.get("side") if isinstance(p, dict) else "?")
             _size = getattr(p, "size", p.get("size") if isinstance(p, dict) else 0)
+            try:
+                if abs(float(_size or 0)) <= 1e-12:
+                    continue
+            except (TypeError, ValueError):
+                continue
             _entry = getattr(p, "entry_price", p.get("entry_price") if isinstance(p, dict) else 0)
             _stop = getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0)
             _take = getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0)
@@ -1810,6 +1815,71 @@ class AIStrategy:
         return False
 
 
+
+    async def _reconcile_positions_with_exchange(self, client) -> None:
+        """Drop memory positions that are no longer open on OKX (fixes stale Pos. N)."""
+        if not client:
+            return
+        if not self._positions:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] reconcile get_positions: {e}", flush=True)
+            return
+        live: dict = {}
+        for raw in (result or []):
+            try:
+                if not isinstance(raw, dict):
+                    continue
+                inst = str(raw.get("instId") or "")
+                if not inst:
+                    continue
+                coin = inst.split("-")[0]
+                try:
+                    pos_raw = float(raw.get("pos") or 0)
+                except (TypeError, ValueError):
+                    pos_raw = 0.0
+                sz = abs(pos_raw)
+                if sz <= 1e-12:
+                    continue
+                side = str(raw.get("posSide") or "").lower()
+                if side in ("", "net"):
+                    side = "long" if pos_raw > 0 else "short"
+                if side in ("buy",):
+                    side = "long"
+                if side in ("sell",):
+                    side = "short"
+                live[coin] = {"side": side, "size": sz, "inst_id": inst}
+            except Exception:
+                continue
+
+        for coin, pos in list(self._positions.items()):
+            info = live.get(coin)
+            if not info:
+                print(
+                    f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
+                    f"(was {getattr(pos, 'side', '?')} sz={getattr(pos, 'size', 0)})",
+                    flush=True,
+                )
+                self._positions.pop(coin, None)
+                try:
+                    if self.db:
+                        await release_open(
+                            self.db, self.BOT_ID,
+                            getattr(pos, "inst_id", f"{coin}-USDT-SWAP"),
+                            getattr(pos, "side", "long"),
+                        )
+                except Exception as e:
+                    print(f"[{self.BOT_NAME}] reconcile release: {e}", flush=True)
+                continue
+            # Optional: size drift from partial closes
+            try:
+                if abs(float(getattr(pos, "size", 0) or 0) - float(info["size"])) > 1e-8:
+                    pos.size = float(info["size"])
+            except Exception:
+                pass
+
     async def _drop_foreign_positions(self, client) -> None:
         """If memory holds a position whose entry fill belongs to another bot — release."""
         if not self._positions or not client:
@@ -1835,6 +1905,7 @@ class AIStrategy:
         """Adopt exchange positions owned by this bot (DB) after restart."""
         if not client:
             return
+        await self._reconcile_positions_with_exchange(client)
         await self._drop_foreign_positions(client)
         if self._positions:
             return
@@ -2028,6 +2099,7 @@ class AIStrategy:
         if self._tick_count == 0:
             _demo = getattr(client, "demo", None)
             print(f"[AI] tick #0: OKX client ready, client.demo={_demo}, execute={self._execute_enabled()}, capital=${self._capital:.2f}", flush=True)
+        await self._reconcile_positions_with_exchange(client)
         if not self._positions:
             await self._restore_open_positions(client)
         # Once per process-ish: sweep unclaimed exchange positions
