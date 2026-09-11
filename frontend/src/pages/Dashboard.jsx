@@ -230,17 +230,21 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
           if (aiSt && (aiSt.total_pnl != null || aiSt.lifetime_pnl != null)) {
             const aiP = Number(aiSt.lifetime_pnl ?? aiSt.total_pnl ?? 0)
             setPnl(prev => {
-              if (prev && Number(prev.total) !== 0) return prev
-              return {
-                total: aiP,
+              if (prev && prev.source && String(prev.source).startsWith('exchange')) return prev
+            return {
+              total: Number(prev?.total ?? 0),
                 '1d': Number(prev?.['1d'] ?? 0),
                 week: Number(prev?.week ?? 0),
                 '7d': Number(prev?.['7d'] ?? 0),
                 '30d': aiP,
                 unrealized: Number(prev?.unrealized ?? 0),
-                per_bot: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot || {}) },
-                per_bot_all: { 'AI Discretionary 1H': aiP, ...(prev?.per_bot_all || {}) },
-                source: 'ai_status_seed',
+                per_bot: {
+                  'AI Discretionary 1H': Number(prev?.per_bot?.['AI Discretionary 1H'] ?? 0),
+                  'AI Scale-In 1H': Number(prev?.per_bot?.['AI Scale-In 1H'] ?? 0),
+                  ...(prev?.per_bot || {}),
+                },
+                per_bot_all: prev?.per_bot_all || prev?.per_bot || {},
+                source: prev?.source || 'pending',
               }
             })
           }
@@ -284,9 +288,9 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         if (aiSt2 && (aiSt2.total_pnl != null || aiSt2.lifetime_pnl != null)) {
           const aiP = Number(aiSt2.lifetime_pnl ?? aiSt2.total_pnl ?? 0)
           setPnl(prev => {
-            if (prev && Number(prev.total) !== 0) return prev
+            if (prev && prev.source && String(prev.source).startsWith('exchange')) return prev
             return {
-              total: aiP,
+              total: Number(prev?.total ?? 0),
               '1d': Number(prev?.['1d'] ?? 0),
               week: Number(prev?.week ?? 0),
               '7d': Number(prev?.['7d'] ?? 0),
@@ -425,114 +429,26 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     }
     return s
   }
-  const scalePnlResolved = (() => {
-    const per = pnl?.per_bot || {}
-    const fromPer = Number(per['AI Scale-In 1H'] ?? per['AI Scale-In'] ?? NaN)
-    const fromSt = Number(
-      aiScaleStatus?.lifetime_pnl_internal
-      ?? aiScaleStatus?.lifetime_pnl
-      ?? aiScaleStatus?.total_pnl
-      ?? 0
-    )
-    // Prefer non-zero: exchange if tagged, else bot/status lifetime
-    if (Number.isFinite(fromPer) && Math.abs(fromPer) > 0.005) return fromPer
-    if (Math.abs(fromSt) > 0.005) return fromSt
-    // Last resort: closed trades in tradeLog tagged Scale-In
-    let s = 0
-    for (const t of (tradeLog || [])) {
-      const b = String(t.bot || '')
-      if (!/Scale-In|ai_scale/i.test(b)) continue
-      const reason = String(t.reason || '').toLowerCase()
-      if (reason === 'open' || reason === 'add') continue
-      if (t.pnl == null || t.pnl === '') continue
-      s += Number(t.pnl) || 0
-    }
-    return s
-  })()
-  const discPnlResolved = (() => {
-    const per = pnl?.per_bot || {}
-    const fromPer = Number(per['AI Discretionary 1H'] ?? per['AI Discretionary'] ?? NaN)
-    const fromSt = Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-    if (Number.isFinite(fromPer) && Math.abs(fromPer) > 0.005) return fromPer
-    return fromSt
-  })()
+  // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
+  const discPnlResolved = Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0)
+  const scalePnlResolved = Number(pnl?.per_bot?.['AI Scale-In 1H'] ?? 0)
   const pnlTotal = (() => {
-    if (AI_ONLY_MODE) {
-      // Always sum both active AI bots (exchange per_bot or bot lifetime)
-      return Number(discPnlResolved || 0) + Number(scalePnlResolved || 0)
+    if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
+      return Number(pnl.total)
     }
-    // Server total is already active-only
-    if (pnl && pnl.total != null && (pnl.active_bots || []).length) return Number(pnl.total)
-    if (pnl && pnl.total != null && Number(pnl.total) !== 0) return Number(pnl.total)
-    const per = pnl?.per_bot || {}
-    const fromPer = Object.values(per).reduce((s, v) => s + Number(v || 0), 0)
-    if (fromPer !== 0) return fromPer
-    if (!activeBotNames.length) return 0
-    return sumClosedSince(365 * 86400000)
+    if (AI_ONLY_MODE) return discPnlResolved + scalePnlResolved
+    if (pnl && pnl.total != null) return Number(pnl.total)
+    return discPnlResolved + scalePnlResolved
   })()
   const pnlDay = (() => {
-    // Calendar today only (MSK from API). Do NOT use rolling 24h — closes from
-    // yesterday evening incorrectly inflated "today".
-    if (pnl && pnl['1d'] != null && pnl.source && pnl.source !== 'ai_status_seed') {
-      return Number(pnl['1d'])
-    }
+    // Calendar today MSK from engine only — never rolling 24h
     if (pnl && pnl['1d'] != null) return Number(pnl['1d'])
-    if (!activeBotNames.length) return 0
-    // Fallback: trades with exit date === local calendar today (not last 24h)
-    const now = new Date()
-    const y = now.getFullYear(), m = now.getMonth(), d = now.getDate()
-    let s = 0
-    for (const t of (tradeLog || [])) {
-      const reason = String(t.reason || '').toLowerCase()
-      if (reason === 'open' || reason === 'add') continue
-      if (t.pnl == null || t.pnl === '') continue
-      if (!isActiveBotTrade(t)) continue
-      const ts = t.exit_time || t.time || t.timestamp || ''
-      const ms = Date.parse(ts)
-      if (!Number.isFinite(ms)) continue
-      const dt = new Date(ms)
-      if (dt.getFullYear() === y && dt.getMonth() === m && dt.getDate() === d) {
-        s += Number(t.pnl) || 0
-      }
-    }
-    return s
+    return 0
   })()
   const pnlWeek = (() => {
-    // Calendar week Mon 00:00 MSK → now. Must include "today".
-    const apiWeek = pnl && pnl.week != null && pnl.source && pnl.source !== 'ai_status_seed'
-      ? Number(pnl.week) : null
-    const apiDay = pnl && pnl['1d'] != null && pnl.source && pnl.source !== 'ai_status_seed'
-      ? Number(pnl['1d']) : null
-    if (apiWeek != null) {
-      // If API week is 0 but today is not — trust Monday client sum / at least today
-      if (Math.abs(apiWeek) < 0.01 && apiDay != null && Math.abs(apiDay) > 0.01) {
-        // continue to client fallback below
-      } else {
-        return apiWeek
-      }
-    }
-    if (!activeBotNames.length) return 0
-    const now = new Date()
-    const day = (now.getDay() + 6) % 7 // Mon=0
-    const monday = new Date(now)
-    monday.setHours(0, 0, 0, 0)
-    monday.setDate(now.getDate() - day)
-    const cutoff = monday.getTime()
-    let s = 0
-    for (const t of (tradeLog || [])) {
-      const reason = String(t.reason || '').toLowerCase()
-      if (reason === 'open' || reason === 'add') continue
-      if (t.pnl == null || t.pnl === '') continue
-      if (!isActiveBotTrade(t)) continue
-      const ts = t.exit_time || t.time || t.timestamp || ''
-      const ms = Date.parse(ts)
-      if (!Number.isFinite(ms) || ms < cutoff) continue
-      s += Number(t.pnl) || 0
-    }
-    // At least include displayed day when log empty but day known
-    if (Math.abs(s) < 0.01 && apiDay != null && Math.abs(apiDay) > 0.01) return apiDay
-    if (Math.abs(s) < 0.01 && Math.abs(pnlDay) > 0.01) return pnlDay
-    return s
+    // Calendar week Mon–now MSK from engine only
+    if (pnl && pnl.week != null) return Number(pnl.week)
+    return 0
   })()
   const pnlMonth = (() => {
     if (pnl && pnl['30d'] != null && (pnl.active_bots || []).length) return Number(pnl['30d'])
@@ -560,20 +476,19 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
-    const merged = {}
+    const rows = []
+    if (AI_ONLY_MODE) {
+      rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
+      rows.push({ name: 'AI Scale-In 1H', val: Number(per['AI Scale-In 1H'] ?? 0) })
+      return rows
+    }
     for (const [bid, val] of Object.entries(per)) {
       const name = botNameMap[bid] || bid
       if (name === 'Unassigned' || name === 'Прочее / без стратегии') continue
-      merged[name] = (merged[name] || 0) + Number(val || 0)
+      rows.push({ name, val: Number(val || 0) })
     }
-    if (AI_ONLY_MODE) {
-      merged['AI Discretionary 1H'] = Number(discPnlResolved || 0)
-      merged['AI Scale-In 1H'] = Number(scalePnlResolved || 0)
-    }
-    return Object.entries(merged)
-      .map(([name, val]) => ({ name, val }))
-      .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl, discPnlResolved, scalePnlResolved])
+    return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
+  }, [pnl])
 
   // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
   const momentumCardPnl = useMemo(() => {
