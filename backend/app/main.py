@@ -6954,6 +6954,8 @@ async def pnl_summary():
         "source": full.get("source", ""),
         "sticky": full.get("sticky", False),
         "account_mode": full.get("account_mode"),
+        "trades_counted": full.get("trades_counted", 0),
+        "engine": full.get("engine"),
         "pnl_epoch": full.get("pnl_epoch"),
         "pnl_tz": full.get("pnl_tz") or full.get("timezone"),
         "timezone": full.get("timezone"),
@@ -6969,7 +6971,8 @@ def _active_bot_labels() -> set:
     try:
         if AI_ONLY_MODE:
             labels.add("AI Discretionary 1H")
-            labels.add("AI Scale-In 1H")
+            if _env_demo:
+                labels.add("AI Scale-In 1H")
             return labels
         if rotation and getattr(rotation, "_running", False):
             labels.add("Momentum")
@@ -7314,22 +7317,37 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     try:
         dash = await _compute_pnl()
         per = (dash or {}).get("per_bot") or {}
+        mode = str((dash or {}).get("account_mode") or _account_mode()).lower()
         val = float(per.get(bot_label) or 0)
         status["total_pnl"] = round(val, 2)
         status["lifetime_pnl"] = round(val, 2)
         status["total_pnl_source"] = "pnl_engine"
         status["kpi_from_history"] = True
         status["pnl_epoch"] = (dash or {}).get("pnl_epoch")
-        # trade counts still from bot_history if available
+        status["account_mode"] = mode
+        # Trade count: only from mode-matched history — never demo lifetime on live
         try:
             all_stats = await _bot_history_stats()
             stats = all_stats.get(bot_label) or {}
-            status["total_trades"] = stats.get("total_trades", status.get("total_trades", 0))
-            status["wins"] = stats.get("wins", status.get("wins", 0))
-            status["losses"] = stats.get("losses", status.get("losses", 0))
-            status["win_rate"] = stats.get("win_rate", status.get("win_rate", 0))
+            if mode == "live":
+                # Live starts clean unless exchange tagged live closes exist
+                tc = int((dash or {}).get("trades_counted") or 0)
+                # Approximate per-bot: if only Discretionary active on live, use trades_counted
+                status["total_trades"] = tc if bot_label == "AI Discretionary 1H" else 0
+                status["lifetime_trades"] = status["total_trades"]
+                status["wins"] = 0
+                status["losses"] = 0
+                status["win_rate"] = 0
+            else:
+                status["total_trades"] = stats.get("total_trades", status.get("total_trades", 0))
+                status["lifetime_trades"] = status["total_trades"]
+                status["wins"] = stats.get("wins", status.get("wins", 0))
+                status["losses"] = stats.get("losses", status.get("losses", 0))
+                status["win_rate"] = stats.get("win_rate", status.get("win_rate", 0))
         except Exception:
-            pass
+            if mode == "live":
+                status["total_trades"] = 0
+                status["lifetime_trades"] = 0
     except Exception as e:
         print(f"[kpi] {bot_label}: {e}", flush=True)
         status["kpi_from_history"] = False

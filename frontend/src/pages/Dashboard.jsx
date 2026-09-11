@@ -404,13 +404,21 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return s
   }
   // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
+  const wantPnlMode = demoMode ? 'demo' : 'live'
   const pnlModeOk = (() => {
     const m = String(pnl?.account_mode || '').toLowerCase()
-    if (!m) return true
-    return demoMode ? (m === 'demo') : (m === 'live')
+    // Live: require explicit live — missing mode = treat as not ready (show 0)
+    if (!demoMode) return m === 'live'
+    // Demo: demo or untagged legacy payload
+    return !m || m === 'demo'
   })()
   const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
   const scalePnlResolved = (pnlModeOk && demoMode) ? Number(pnl?.per_bot?.['AI Scale-In 1H'] ?? 0) : 0
+  const discTradesResolved = (() => {
+    if (!pnlModeOk) return 0
+    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
+    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
+  })()
   const pnlTotal = (() => {
     if (!pnlModeOk) return 0
     if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
@@ -458,8 +466,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const per = pnl?.per_bot || {}
     const rows = []
     if (AI_ONLY_MODE) {
+      if (!pnlModeOk) {
+        rows.push({ name: 'AI Discretionary 1H', val: 0 })
+        return rows
+      }
       rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
-      rows.push({ name: 'AI Scale-In 1H', val: Number(per['AI Scale-In 1H'] ?? 0) })
+      if (demoMode) {
+        rows.push({ name: 'AI Scale-In 1H', val: Number(per['AI Scale-In 1H'] ?? 0) })
+      }
       return rows
     }
     for (const [bid, val] of Object.entries(per)) {
@@ -1383,7 +1397,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             loading={!aiStatus}
             accent="text-[var(--accent)]"
             pnl={discPnlResolved}
-            trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
+            trades={discTradesResolved}
             winRate={aiStatus?.win_rate}
             openCount={(aiStatus?.open_positions || []).length}
             model={aiStatus?.model || aiStatus?.llm?.model}

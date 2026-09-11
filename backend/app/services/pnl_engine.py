@@ -237,10 +237,14 @@ async def ensure_epoch(db) -> str:
     return PNL_EPOCH_ISO
 
 
-async def _rows_from_db_trades(db, ai_only: bool = True) -> list[dict]:
-    """Secondary source: closed rows in trades table (bot_id + pnl) since epoch."""
+async def _rows_from_db_trades(db, ai_only: bool = True, account_mode: str = "demo") -> list[dict]:
+    """Secondary source: closed rows in trades table (bot_id + pnl) since epoch.
+
+    LIVE never uses this fallback for demo rows — account_mode must match.
+    """
     out = []
     ep = epoch_ms()
+    mode = (account_mode or "demo").lower()
     bot_ids = list(_BOT_ID_MAP.keys()) if ai_only else None
     try:
         if bot_ids and hasattr(db, "get_trades_multi_bot"):
@@ -279,6 +283,13 @@ async def _rows_from_db_trades(db, ai_only: bool = True) -> list[dict]:
         label = _BOT_ID_MAP.get(bid) or normalize_bot_label(bid)
         if ai_only and label not in AI_ONLY_LABELS:
             continue
+        row_mode = str(r.get("account_mode") or "demo").lower()
+        if mode == "live":
+            if row_mode != "live":
+                continue
+        else:
+            if row_mode not in ("", "demo"):
+                continue
         out.append({
             "ord_id": str(r.get("ord_id") or r.get("id") or f"db-{bid}-{ts_ms}"),
             "inst_id": r.get("inst_id") or "",
@@ -287,6 +298,7 @@ async def _rows_from_db_trades(db, ai_only: bool = True) -> list[dict]:
             "pnl": pnl,
             "fee": abs(float(r.get("fee") or 0)),
             "close_ts": ts_ms,
+            "account_mode": row_mode or mode,
         })
     return out
 
@@ -344,24 +356,23 @@ async def compute(
 
     out = aggregate_rows(rows, ai_only=ai_only)
 
-    # If exchange produced nothing, fall back to DB trade log
+    # DB fallback only when exchange empty — MUST match account_mode (live≠demo)
     if out["trades_counted"] == 0 or abs(out["total"]) < 1e-9:
-        db_rows = await _rows_from_db_trades(db, ai_only=ai_only)
+        db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode or "demo")
         if db_rows:
             out2 = aggregate_rows(db_rows, ai_only=ai_only)
             out2["source"] = "db_trades_fallback"
             out2["engine"] = "pnl_engine_v2"
             print(
-                f"[pnl_engine] FALLBACK db_trades total={out2['total']} "
+                f"[pnl_engine] FALLBACK db_trades mode={mode} total={out2['total']} "
                 f"per_bot={out2['per_bot']} n={out2['trades_counted']}",
                 flush=True,
             )
             out = out2
         else:
             print(
-                f"[pnl_engine] EMPTY exchange_rows={len(rows)} total=0 "
-                f"skip_pre={out.get('skipped_before_epoch')} "
-                f"skip_other={out.get('skipped_other_bot')}",
+                f"[pnl_engine] EMPTY mode={mode} exchange_rows={len(rows)} total=0 "
+                f"(no cross-mode fallback)",
                 flush=True,
             )
     else:
@@ -373,5 +384,14 @@ async def compute(
             flush=True,
         )
 
-    out["account_mode"] = account_mode
+    out["account_mode"] = (account_mode or "demo").lower()
+    # Guarantee keys for UI isolation
+    if (account_mode or "").lower() == "live" and ai_only:
+        # Scale-In is demo-only — zero on live response
+        pb = dict(out.get("per_bot") or {})
+        pb["AI Scale-In 1H"] = 0.0
+        out["per_bot"] = pb
+        out["total"] = round(float(pb.get("AI Discretionary 1H") or 0), 2)
+        out["strategy_realized"] = out["total"]
+        out["active_bots"] = ["AI Discretionary 1H"]
     return out
