@@ -329,8 +329,15 @@ function MiniAppPageInner
       for (const p of (rotation?.open_positions || [])) pushOpen(p)
       for (const p of (impulse?.open_positions || [])) pushOpen(p)
       for (const p of (validation?.open_positions || [])) pushOpen(p)
-      for (const p of (aiBot?.open_positions || [])) pushOpen(p)
-      for (const p of (aiScale?.open_positions || [])) pushOpen(p)
+      const sclCoins = new Set(
+        (aiScale?.open_positions || []).map(p => String(p.coin || p.inst_id || '').toUpperCase().split('-')[0])
+      )
+      for (const p of (aiScale?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Scale-In 1H' })
+      for (const p of (aiBot?.open_positions || [])) {
+        const c = String(p.coin || p.inst_id || '').toUpperCase().split('-')[0]
+        if (sclCoins.has(c)) continue // Scale owns — not Discretionary
+        pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
+      }
 
       const toRow = (tr, isOpen = false) => {
         const inst = tr.inst_id || tr.symbol || ''

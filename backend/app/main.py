@@ -4311,9 +4311,10 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
             try:
                 last_bot = await db.last_bot_for_instrument(inst)
                 last_name = _db_bot_name(last_bot) if last_bot else ""
+                from app.services.trade_attribution import is_scale_bot, is_discretionary_bot
                 allowed = last_bot in (
                     AI_BOT_ID, AI_SCALE_BOT_ID, "ai_strategy", "ai_scale_strategy",
-                ) or (last_name or "").startswith("AI ")
+                ) or is_scale_bot(last_name or last_bot or "") or is_discretionary_bot(last_name or last_bot or "")
                 if last_bot and allowed and sz > 0 and entry > 0:
                     await claim_open(db, last_bot, inst, side_n, sz, entry)
                     db_pos_map[(inst, side_n)] = last_bot

@@ -78,6 +78,30 @@ def pnl_timezone() -> ZoneInfo:
         return ZoneInfo("UTC")
 
 
+def is_scale_bot(label_or_id: str) -> bool:
+    s = (label_or_id or "").strip().lower()
+    return "scale" in s or s in ("ais", "ai_scale_strategy", "scl")
+
+
+def is_discretionary_bot(label_or_id: str) -> bool:
+    s = (label_or_id or "").strip().lower()
+    if is_scale_bot(s):
+        return False
+    return (
+        "discretionary" in s
+        or s in ("ai", "ai_strategy", "ai discretionary 1h", "ai discretionary")
+    )
+
+
+def prefer_owner_label(a: str, b: str) -> str:
+    """When two labels compete for same instrument, Scale-In wins over Discretionary."""
+    if is_scale_bot(a):
+        return a if a else "AI Scale-In 1H"
+    if is_scale_bot(b):
+        return b if b else "AI Scale-In 1H"
+    return a or b or ""
+
+
 def bot_from_clord(cl_ord_id: str) -> str:
     cid = (cl_ord_id or "").strip().lower()
     if not cid:

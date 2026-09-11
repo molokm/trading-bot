@@ -538,6 +538,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+    // Scale last — overwrites Discretionary if both claim same inst|side
     addPositions(aiScaleStatus?.open_positions, 'AI Scale-In 1H')
     addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')

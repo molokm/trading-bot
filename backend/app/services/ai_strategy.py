@@ -2000,6 +2000,15 @@ class AIStrategy:
                 entry = float(p.get("avgPx") or 0)
                 if sz <= 0 or entry <= 0 or coin in self._positions:
                     continue
+                try:
+                    if await self._other_ai_owns(inst_id, side):
+                        print(
+                            f"[{self.BOT_NAME}] skip restore {coin}: sibling owns claim",
+                            flush=True,
+                        )
+                        continue
+                except Exception:
+                    pass
                 # STRICT: only restore positions already claimed by THIS bot in DB.
                 # Never adopt orphans / Smart Money / other strategies — that falsely
                 # attaches e.g. SOL mirror/copy fills to AI after redeploy.
@@ -2315,6 +2324,21 @@ class AIStrategy:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="already_open")
                 return
+            try:
+                inst = f"{coin}-USDT-SWAP"
+                side = str(decision.get("side") or "long")
+                if await self._other_ai_owns(inst, side):
+                    self._record_exec(
+                        "open_skip", coin=coin, side=side,
+                        reason="sibling_bot_owns",
+                    )
+                    print(
+                        f"[{self.BOT_NAME}] skip open {coin}: sibling bot already owns position",
+                        flush=True,
+                    )
+                    return
+            except Exception as e:
+                print(f"[{self.BOT_NAME}] sibling check: {e}", flush=True)
             if len(self._positions) >= self.config.max_positions:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="max_positions")
