@@ -2108,8 +2108,22 @@ async def ai_stop():
 async def ai_scale_status():
     global ai_scale_bot
     if not ai_scale_bot:
-        return {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.0-scale"}
-    return ai_scale_bot.get_status()
+        return {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.0-scale",
+                "lifetime_pnl": 0, "total_pnl": 0}
+    try:
+        status = ai_scale_bot.get_status()
+    except Exception as e:
+        return {"running": bool(getattr(ai_scale_bot, "_running", False)), "error": str(e)}
+    internal = float(status.get("lifetime_pnl") or status.get("total_pnl") or 0)
+    status["lifetime_pnl_internal"] = internal
+    status = await _apply_history_kpi(status, "AI Scale-In 1H")
+    # Prefer non-zero internal when exchange KPI is still 0 (untagged closes)
+    hist = float(status.get("lifetime_pnl") or status.get("total_pnl") or 0)
+    if abs(hist) < 1e-6 and abs(internal) > 1e-6:
+        status["lifetime_pnl"] = round(internal, 2)
+        status["total_pnl"] = round(internal, 2)
+        status["total_pnl_source"] = "bot_lifetime"
+    return status
 
 
 @app.post("/api/ai-scale/start", dependencies=[Depends(require_admin)])
@@ -7393,6 +7407,26 @@ async def _compute_pnl():
         # Always expose both AI bots in per_bot for UI breakdown
         per_bot.setdefault("AI Discretionary 1H", 0.0)
         per_bot.setdefault("AI Scale-In 1H", 0.0)
+        # If exchange has no ais-tagged closes yet, use live Scale-In counter
+        # so summary matches the bot card (lifetime_pnl).
+        try:
+            scl_ex = float(per_bot.get("AI Scale-In 1H") or 0.0)
+            scl_life = 0.0
+            if ai_scale_bot is not None:
+                scl_life = float(getattr(ai_scale_bot, "_lifetime_pnl", 0) or 0)
+                if abs(scl_life) < 1e-9:
+                    st = {}
+                    try:
+                        st = ai_scale_bot.get_status() or {}
+                    except Exception:
+                        st = {}
+                    scl_life = float(st.get("lifetime_pnl") or st.get("total_pnl") or 0)
+            if abs(scl_ex) < 1e-6 and abs(scl_life) > 1e-6:
+                per_bot["AI Scale-In 1H"] = round(scl_life, 2)
+                total_realized = sum(float(v or 0) for v in per_bot.values())
+                print(f"[pnl] Scale-In supplemented from bot lifetime={scl_life:.2f}", flush=True)
+        except Exception as e:
+            print(f"[pnl] Scale-In supplement: {e}", flush=True)
     elif active:
         per_bot = {k: v for k, v in per_bot.items() if k in active}
     return {

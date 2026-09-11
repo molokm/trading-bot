@@ -425,18 +425,24 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     }
     return s
   }
+  const scalePnlResolved = (() => {
+    const per = pnl?.per_bot || {}
+    const fromPer = Number(per['AI Scale-In 1H'] ?? per['AI Scale-In'] ?? NaN)
+    const fromSt = Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
+    if (Number.isFinite(fromPer) && Math.abs(fromPer) > 0.005) return fromPer
+    return fromSt
+  })()
+  const discPnlResolved = (() => {
+    const per = pnl?.per_bot || {}
+    const fromPer = Number(per['AI Discretionary 1H'] ?? per['AI Discretionary'] ?? NaN)
+    const fromSt = Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+    if (Number.isFinite(fromPer) && Math.abs(fromPer) > 0.005) return fromPer
+    return fromSt
+  })()
   const pnlTotal = (() => {
     if (AI_ONLY_MODE) {
-      const per = pnl?.per_bot || {}
-      const disc = Number(per['AI Discretionary 1H'] ?? per['AI Discretionary'] ?? 0)
-      const scl = Number(per['AI Scale-In 1H'] ?? per['AI Scale-In'] ?? 0)
-      const hasPer = ('AI Discretionary 1H' in per) || ('AI Scale-In 1H' in per)
-        || ('AI Discretionary' in per) || ('AI Scale-In' in per)
-      if (hasPer) return disc + scl
-      if (pnl?.total != null) return Number(pnl.total)
-      const a = Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-      const b = Number(aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
-      return a + b
+      // Always sum both active AI bots (exchange per_bot or bot lifetime)
+      return Number(discPnlResolved || 0) + Number(scalePnlResolved || 0)
     }
     // Server total is already active-only
     if (pnl && pnl.total != null && (pnl.active_bots || []).length) return Number(pnl.total)
@@ -544,13 +550,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       merged[name] = (merged[name] || 0) + Number(val || 0)
     }
     if (AI_ONLY_MODE) {
-      if (merged['AI Discretionary 1H'] == null) merged['AI Discretionary 1H'] = 0
-      if (merged['AI Scale-In 1H'] == null) merged['AI Scale-In 1H'] = 0
+      merged['AI Discretionary 1H'] = Number(discPnlResolved || 0)
+      merged['AI Scale-In 1H'] = Number(scalePnlResolved || 0)
     }
     return Object.entries(merged)
       .map(([name, val]) => ({ name, val }))
       .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl])
+  }, [pnl, discPnlResolved, scalePnlResolved])
 
   // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
   const momentumCardPnl = useMemo(() => {
@@ -1464,11 +1470,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             running={!!aiStatus?.running}
             loading={!aiStatus}
             accent="text-[var(--accent)]"
-            pnl={
-              (pnl?.per_bot && pnl.per_bot['AI Discretionary 1H'] != null)
-                ? Number(pnl.per_bot['AI Discretionary 1H'])
-                : (aiCardPnl ?? aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-            }
+            pnl={discPnlResolved}
             trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
             winRate={aiStatus?.win_rate}
             openCount={(aiStatus?.open_positions || []).length}
@@ -1496,11 +1498,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             running={!!aiScaleStatus?.running}
             loading={!aiScaleStatus}
             accent="text-fuchsia-400"
-            pnl={
-              (pnl?.per_bot && (pnl.per_bot['AI Scale-In 1H'] != null || pnl.per_bot['AI Scale-In'] != null))
-                ? Number(pnl.per_bot['AI Scale-In 1H'] ?? pnl.per_bot['AI Scale-In'] ?? 0)
-                : (aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0)
-            }
+            pnl={scalePnlResolved}
             trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
             winRate={aiScaleStatus?.win_rate}
             openCount={(aiScaleStatus?.open_positions || []).length}
