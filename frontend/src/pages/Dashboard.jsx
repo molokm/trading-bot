@@ -354,7 +354,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const names = []
     if (AI_ONLY_MODE) {
       if (aiStatus?.running) names.push('AI Discretionary 1H')
-      if (aiScaleStatus?.running) names.push('AI Scale-In 1H')
+      if (demoMode && aiScaleStatus?.running) names.push('AI Scale-In 1H')
       return names
     }
     if (momentumStatus?.running) names.push('Momentum')
@@ -1383,6 +1383,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             }}
           />
 
+          {demoMode && (
           <DashBotPanel
             title="AI Scale-In 1H"
             version={aiScaleStatus?.version}
@@ -1415,6 +1416,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               try { await api.aiScaleStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
+          )}
 
 
         </div>

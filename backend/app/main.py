@@ -716,13 +716,12 @@ async def startup():
         _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
         if _env_key and _env_secret and _env_pass and _ai_auto:
             _demo = _env_demo
-            # On demo, always execute (AI_EXECUTE=0 on demo is meaningless).
-            # On live, respect AI_EXECUTE env with default off.
+            # Demo always execute. Live: default ON (AI_EXECUTE=0 = signals only).
             if _demo:
                 _exec = True
             else:
-                env_ex = os.getenv("AI_EXECUTE", "").strip().lower()
-                _exec = env_ex in ("1", "true", "yes", "on")
+                env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
+                _exec = env_ex not in ("0", "false", "no", "off")
             ai_cfg = AIConfig(
                 capital=float(os.getenv("AI_CAPITAL", "10000")),
                 max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
@@ -751,7 +750,10 @@ async def startup():
     try:
         print("[startup] AI Scale-In (SCL) auto-start ...", flush=True)
         _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
-        if _env_key and _env_secret and _env_pass and _scale_auto:
+        # Scale-In is DEMO-only — never auto-start in LIVE
+        if (not _env_demo):
+            print("[startup]   AI Scale-In skipped — LIVE mode (DEMO-only bot)", flush=True)
+        elif _env_key and _env_secret and _env_pass and _scale_auto:
             if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
                 print("[startup]   AI Scale-In already running", flush=True)
             else:
@@ -2111,8 +2113,21 @@ async def ai_stop():
 @app.get("/api/ai-scale/status")
 async def ai_scale_status():
     global ai_scale_bot
+    # Hidden/disabled on LIVE — frontend must not show the card
+    if not _env_demo:
+        return {
+            "running": False,
+            "strategy": "AI Scale-In 1H",
+            "version": "v1.1-strict",
+            "demo_only": True,
+            "available": False,
+            "lifetime_pnl": 0,
+            "total_pnl": 0,
+            "open_positions": [],
+            "account_mode": "live",
+        }
     internal = 0.0
-    status = {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.1-strict"}
+    status = {"running": False, "strategy": "AI Scale-In 1H", "version": "v1.1-strict", "demo_only": True, "available": True}
     if ai_scale_bot:
         try:
             status = ai_scale_bot.get_status()
@@ -3568,6 +3583,14 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
     try:
         await client_manager.init_client(key, secret, passphrase, demo)
         _env_demo = demo
+        # Scale-In is DEMO-only: stop when switching to LIVE
+        global ai_scale_bot
+        if (not demo) and ai_scale_bot and getattr(ai_scale_bot, "_running", False):
+            try:
+                ai_scale_bot.stop()
+                print("[mode] AI Scale-In stopped (LIVE — DEMO-only bot)", flush=True)
+            except Exception as e:
+                print(f"[mode] stop Scale-In: {e}", flush=True)
         # Keep showcase DEMO client intact for observers
         if demo:
             await _ensure_showcase()

@@ -324,15 +324,16 @@ async def compute(
     except Exception as e:
         print(f"[pnl_engine] load exchange rows: {e}", flush=True)
 
-    # Optional mode preference: keep rows matching mode OR empty mode
+    # Strict demo/live isolation — never mix modes on the dashboard
     mode = (account_mode or "").lower()
-    if mode and rows and any(r.get("account_mode") for r in rows):
-        filtered = [
+    if mode == "live":
+        rows = [r for r in rows if str(r.get("account_mode") or "").lower() == "live"]
+    elif mode == "demo":
+        # legacy rows without account_mode count as demo
+        rows = [
             r for r in rows
-            if (str(r.get("account_mode") or "").lower() in ("", mode))
+            if str(r.get("account_mode") or "").lower() in ("", "demo")
         ]
-        if filtered:
-            rows = filtered
 
     out = aggregate_rows(rows, ai_only=ai_only)
 
