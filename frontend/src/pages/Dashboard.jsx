@@ -668,10 +668,21 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (validationStatus?.open_positions || [])) {
       if (isOnExchange(p)) pushOpen(p, 'Validation')
     }
+    for (const p of (aiScaleStatus?.open_positions || [])) {
+      const m = (p.account_mode || '').toLowerCase()
+      if (m === 'demo' && !demoMode) continue
+      if (m === 'live' && demoMode) continue
+      if (isOnExchange(p)) pushOpen(p, 'AI Scale-In 1H')
+    }
+    const scaleCoins = new Set(
+      (aiScaleStatus?.open_positions || []).map(p => String(p.coin || '').toUpperCase())
+    )
     for (const p of (aiStatus?.open_positions || [])) {
       const m = (p.account_mode || '').toLowerCase()
       if (m === 'demo' && !demoMode) continue
       if (m === 'live' && demoMode) continue
+      // Scale-In owns the coin — do not also show under Discretionary
+      if (scaleCoins.has(String(p.coin || '').toUpperCase())) continue
       if (isOnExchange(p)) pushOpen(p, 'AI Discretionary 1H')
     }
     // Smart Money opens/trades live only on /smart-money — not on main dashboard
@@ -685,10 +696,22 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       let hint = p.bot || botMap[posKey] || ''
       if (!hint) {
         const coin = (p.instId || '').replace('-USDT-SWAP', '')
-        for (const op of (aiStatus?.open_positions || [])) {
+        for (const op of (aiScaleStatus?.open_positions || [])) {
           if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
-            hint = 'AI Discretionary 1H'
+            hint = 'AI Scale-In 1H'
             break
+          }
+        }
+        if (!hint) {
+          for (const op of (aiStatus?.open_positions || [])) {
+            if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
+              // Prefer Scale if it also lists this coin
+              const sclHas = (aiScaleStatus?.open_positions || []).some(
+                s => String(s.coin || '').toUpperCase() === coin.toUpperCase()
+              )
+              hint = sclHas ? 'AI Scale-In 1H' : 'AI Discretionary 1H'
+              break
+            }
           }
         }
       }
@@ -746,7 +769,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap, demoMode])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap, demoMode])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>

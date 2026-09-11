@@ -3868,7 +3868,12 @@ def _tag_position_bot(inst_id: str, pos_side: str, *, db_pos_map: dict | None = 
         return "Impulse 1D"
     if _match(validation):
         return "MACD+Donchian Validation"
+    if _match(ai_scale_bot):
+        return "AI Scale-In 1H"
     if _match(ai_bot):
+        # If Scale also holds coin, Scale wins
+        if _match(ai_scale_bot):
+            return "AI Scale-In 1H"
         return "AI Discretionary 1H"
 
     # Fallback: trade logs (same priority)
@@ -4214,7 +4219,22 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                         atr=entry * 0.015, atr_hourly=entry * 0.015, leverage=3.0,
                     )
                     print(f"[positions] injected {coin} → Validation", flush=True)
-            elif bot_label.startswith("AI") and ai_bot:
+            elif ("Scale-In" in bot_label or bot_label in ("AI Scale-In 1H", "SCL")) and ai_scale_bot:
+                pos_map = getattr(ai_scale_bot, "_positions", None)
+                if pos_map is not None and coin not in pos_map:
+                    try:
+                        from app.services.ai_strategy import AIPosition
+                        pos_map[coin] = AIPosition(
+                            coin=coin, inst_id=inst_id, side=side,
+                            size=sz, entry_price=entry, stop_price=stop,
+                            take_price=entry * (1.06 if side == "long" else 0.94),
+                            leverage=3.0, opened_at=now_iso,
+                        )
+                    except Exception:
+                        pass
+                    print(f"[positions] injected {coin} → Scale-In", flush=True)
+            elif bot_label in ("AI Discretionary 1H", "AI") and ai_bot:
+                # Never inject Scale-In positions into Discretionary (startswith "AI" was the bug)
                 pos_map = getattr(ai_bot, "_positions", None)
                 if pos_map is not None and coin not in pos_map:
                     try:
@@ -4226,7 +4246,7 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                         )
                     except Exception:
                         pass
-                    print(f"[positions] injected {coin} → AI", flush=True)
+                    print(f"[positions] injected {coin} → AI Discretionary", flush=True)
         except Exception as e:
             print(f"[positions] inject {bot_label}: {e}", flush=True)
 
