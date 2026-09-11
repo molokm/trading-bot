@@ -327,9 +327,16 @@ async def compute(
     # Strict demo/live isolation — never mix modes on the dashboard
     mode = (account_mode or "").lower()
     if mode == "live":
+        # LIVE: ONLY rows tagged live — never legacy/demo/empty
+        before = len(rows)
         rows = [r for r in rows if str(r.get("account_mode") or "").lower() == "live"]
+        print(
+            f"[pnl_engine] live filter {before}→{len(rows)} "
+            f"(excluded demo/legacy)",
+            flush=True,
+        )
     elif mode == "demo":
-        # legacy rows without account_mode count as demo
+        # DEMO: demo + untagged legacy (pre-isolation rows)
         rows = [
             r for r in rows
             if str(r.get("account_mode") or "").lower() in ("", "demo")

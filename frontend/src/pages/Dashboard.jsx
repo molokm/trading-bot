@@ -142,6 +142,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
+  // Drop PnL when switching Demo ↔ Live so cards never keep the other mode's total
+  useEffect(() => {
+    setPnl(null)
+  }, [demoMode])
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
   const [dataFreshAt, setDataFreshAt] = useState(null)
@@ -297,16 +301,27 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         const src = String(pnlData.source || '')
         const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
         if (okSrc || pnlData.pnl_epoch) {
-          setPnl(prev => {
-            // Don't replace a non-zero engine total with an empty/error zero flash
-            const newTot = Math.abs(Number(pnlData.total ?? 0))
-            const oldTot = Math.abs(Number(prev?.total ?? 0))
-            const newSrc = String(pnlData.source || '')
-            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
-              return prev
-            }
-            return { ...pnlData, account_mode: pnlData.account_mode || prev?.account_mode }
-          })
+          const wantMode = demoMode ? 'demo' : 'live'
+          const gotMode = String(pnlData.account_mode || '').toLowerCase()
+          // Ignore payload from the other account mode
+          if (gotMode && gotMode !== wantMode) {
+            console.warn('[pnl] ignore mismatched mode', gotMode, 'want', wantMode)
+          } else {
+            setPnl(prev => {
+              const newTot = Math.abs(Number(pnlData.total ?? 0))
+              const oldTot = Math.abs(Number(prev?.total ?? 0))
+              const newSrc = String(pnlData.source || '')
+              const prevMode = String(prev?.account_mode || '').toLowerCase()
+              // Zero on purpose when live has no closes — do not keep demo total
+              if (prevMode && prevMode !== wantMode) {
+                return { ...pnlData, account_mode: gotMode || wantMode }
+              }
+              if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
+                return prev
+              }
+              return { ...pnlData, account_mode: gotMode || wantMode }
+            })
+          }
         }
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
@@ -389,9 +404,15 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return s
   }
   // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
-  const discPnlResolved = Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0)
-  const scalePnlResolved = Number(pnl?.per_bot?.['AI Scale-In 1H'] ?? 0)
+  const pnlModeOk = (() => {
+    const m = String(pnl?.account_mode || '').toLowerCase()
+    if (!m) return true
+    return demoMode ? (m === 'demo') : (m === 'live')
+  })()
+  const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+  const scalePnlResolved = (pnlModeOk && demoMode) ? Number(pnl?.per_bot?.['AI Scale-In 1H'] ?? 0) : 0
   const pnlTotal = (() => {
+    if (!pnlModeOk) return 0
     if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
       return Number(pnl.total)
     }
@@ -400,12 +421,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return discPnlResolved + scalePnlResolved
   })()
   const pnlDay = (() => {
-    // Calendar today MSK from engine only — never rolling 24h
+    if (!pnlModeOk) return 0
     if (pnl && pnl['1d'] != null) return Number(pnl['1d'])
     return 0
   })()
   const pnlWeek = (() => {
-    // Calendar week Mon–now MSK from engine only
+    if (!pnlModeOk) return 0
     if (pnl && pnl.week != null) return Number(pnl.week)
     return 0
   })()
