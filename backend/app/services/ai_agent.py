@@ -5,7 +5,6 @@ Providers (env AI_LLM_PROVIDER):
   - groq   : free-tier friendly OpenAI-compatible API (GROQ_API_KEY)
   - openai : OpenAI or any compatible base URL (OPENAI_API_KEY, OPENAI_BASE_URL)
   - gemini : Google Gemini (GEMINI_API_KEY)
-  - bai    : api.b.ai — BAI_API_KEY + BAI_MODEL
 
 Always returns a validated dict decision; invalid/unsafe → hold.
 """
@@ -25,7 +24,7 @@ log = logging.getLogger("ai_agent")
 # ── provider rotation & cooldown ──────────────────────────────
 _llm_cooldowns: dict[str, float] = {}  # provider -> expiry timestamp (time.time())
 _last_provider_used: str | None = None  # last successfully used provider
-PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai", "bai"]
+PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai"]
 COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
 COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
 COOLDOWN_ON_NO_CREDIT = 3600  # 1h if provider has no balance
@@ -332,11 +331,11 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     """Ask LLM (or mock) for a decision given market snapshot."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
-        # Auto: Groq first (product default), then BAI, else mock
+        # Auto: Groq first, then openrouter, else mock (BAI removed)
         if os.getenv("GROQ_API_KEY", "").strip():
             provider = "groq"
-        elif os.getenv("BAI_API_KEY", "").strip():
-            provider = "bai"
+        elif os.getenv("OPENROUTER_API_KEY", "").strip():
+            provider = "openrouter"
         else:
             provider = "mock"
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
@@ -441,7 +440,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai,bai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
         if x.strip()
     ]
     chain = [primary]
@@ -467,8 +466,6 @@ def _provider_chain(primary: str) -> list[str]:
                 if "openrouter" not in out:
                     out.append("openrouter")
                 continue
-            out.append(p)
-        elif p == "bai" and os.getenv("BAI_API_KEY", "").strip():
             out.append(p)
         elif p == primary and p not in out:
             out.append(p)
@@ -529,15 +526,7 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             user=user_msg,
         )
     if provider == "bai":
-        # BAI often rejects response_format=json_object → 400; parse free text instead
-        return await _openai_compatible(
-            api_key=os.getenv("BAI_API_KEY", ""),
-            base_url=os.getenv("BAI_BASE_URL", "https://api.b.ai/v1"),
-            model=os.getenv("BAI_MODEL", "deepseek-v4-flash"),
-            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
-            user=user_msg,
-            json_mode=False,
-        )
+        raise RuntimeError("BAI provider removed — use groq/openrouter/gemini/openai")
     raise RuntimeError(f"unknown or unconfigured provider {provider}")
 
 

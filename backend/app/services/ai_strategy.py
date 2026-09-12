@@ -275,14 +275,14 @@ class AIStrategy:
     def _provider(self) -> str:
         """Pick the best available LLM provider with rotation.
 
-        Rotation order: bai → groq → openrouter → gemini → openai → bai …
+        Rotation order: groq → openrouter → gemini → openai
         When the current provider is rate-limited, automatically falls through
         to the next one that has an API key and is not on cooldown.
         """
         from .ai_agent import (
             is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
         )
-        # Preferred: config/env → groq → openrouter → gemini → openai → bai (last: often no credits)
+        # Preferred: config/env → groq → openrouter → gemini → openai (BAI removed)
         if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
             preferred = str(self.config.provider).strip().lower()
         else:
@@ -297,8 +297,6 @@ class AIStrategy:
                 preferred = "gemini"
             elif os.getenv("OPENAI_API_KEY", "").strip() and is_provider_available("openai"):
                 preferred = "openai"
-            elif os.getenv("BAI_API_KEY", "").strip() and is_provider_available("bai"):
-                preferred = "bai"
             else:
                 preferred = env or "mock"
         # If preferred is available, use it

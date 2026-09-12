@@ -2265,9 +2265,8 @@ async def ai_start(data: dict = None):
                 pass
 
         provider = data.get("provider") or (
-            "bai" if os.getenv("BAI_API_KEY", "").strip()
-            else ("groq" if os.getenv("GROQ_API_KEY", "").strip()
-                  else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip() else None))
+            "groq" if os.getenv("GROQ_API_KEY", "").strip()
+            else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip() else None)
         )
 
         cfg = AIConfig(
