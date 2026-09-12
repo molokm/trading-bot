@@ -2162,7 +2162,32 @@ async def ai_start(data: dict = None):
         global ai_bot
         data = data or {}
         if ai_bot and getattr(ai_bot, "_running", False):
-            return {"message": "AI already running", **ai_bot.get_status()}
+            # Apply execute/capital from request — "Start" while already running
+            # used to no-op and leave execute=false forever.
+            if "execute" in data:
+                try:
+                    ai_bot.set_execute(bool(data["execute"]))
+                except Exception as e:
+                    print(f"[AI] set_execute while running: {e}", flush=True)
+            elif not _env_demo:
+                # Live restart intent: default orders ON unless AI_EXECUTE=0
+                env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
+                if env_ex not in ("0", "false", "no", "off"):
+                    try:
+                        ai_bot.set_execute(True)
+                    except Exception:
+                        pass
+            if data.get("capital"):
+                try:
+                    cap = float(data["capital"])
+                    if cap > 0 and hasattr(ai_bot, "config"):
+                        ai_bot.config.capital = cap
+                        ai_bot._capital = cap
+                except Exception:
+                    pass
+            st = ai_bot.get_status()
+            print(f"[AI] already running — execute={st.get('execute')} capital={st.get('capital')}", flush=True)
+            return {"message": "AI already running (execute refreshed)", **st}
 
         # Use the runtime _env_demo (changed by /api/mode), NOT os.getenv which is always "true"
         _demo = _env_demo
