@@ -759,119 +759,47 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-        {!AI_ONLY_MODE && (
-        <>
         <BotCard
-          id="momentum"
-          name={t('dash.momentum_bot')}
-          stratId="momentum_rotation"
-          version={momentumStatus?.version}
-          icon={TrendingUp}
-          accentDim="bg-[var(--info-dim)]"
-          accentTxt="text-[var(--info)]"
-          statusMode={momRunning ? 'live' : 'stopped'}
-          statusLabel={momRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={momentumStatus?.config?.symbols || momLocal.symbols}
-          description={momentumStatus?.description || strategyDesc.momentum}
-          tags={momTags}
-          tagline={t('bots.tagline')}
-          backtest={MOM_BACKTEST}
-          pnl={momentumStatus?.total_pnl || 0}
-          trades={momentumStatus?.total_trades || 0}
-          winRate={momentumStatus?.win_rate}
-          sparklinePnl={momentumStatus?.total_pnl || 0}
-          startedAt={momRunning ? momStartedAt : null}
-          openPositions={momentumStatus?.open_positions || []}
-          managed={momentumStatus?.managed}
-          lastActivity={momentumStatus?.last_activity}
-          heartbeatMaxAge={momentumStatus?.heartbeat_max_age_sec}
+          id="ai"
+          name="AI Discretionary 1H"
+          stratId="ai_strategy"
+          version={aiStatus?.version}
+          icon={Brain}
+          accentDim="bg-[var(--accent-dim)]"
+          accentTxt="text-[var(--accent)]"
+          statusMode={aiRunning ? 'live' : 'stopped'}
+          statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
+          coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
+          description={
+            aiStatus?.pulse
+            || aiStatus?.description
+            || t('bots.ai_desc')
+            || 'AI Discretionary — LLM анализирует рынок и открывает/закрывает позиции.'
+          }
+          tags={[
+            aiStatus?.model || aiStatus?.llm?.model || 'LLM',
+            '1H',
+            aiStatus?.execute ? 'execute' : 'signals',
+          ]}
+          tagline={(aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']).join(' · ')}
+          pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+          trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
+          winRate={aiStatus?.win_rate}
+          sparklinePnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+          startedAt={aiRunning ? aiStartedAt : null}
+          openPositions={aiStatus?.open_positions || []}
+          managed={aiStatus?.running}
+          lastActivity={aiStatus?.last_activity}
+          heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 120) * 3}
           apiAlive={apiAlive}
-          onToggle={momToggle}
-          onEdit={() => { setEditingBot('momentum'); setSliderOpen(true) }}
+          onToggle={aiToggle}
           isGuest={isGuest}
-          loading={momLoading}
+          loading={aiLoading}
           t={t}
+          showCapital={!demoMode && !aiRunning}
+          capitalValue={aiCapital}
+          onCapitalChange={(v) => setAiCapital(v)}
         />
-
-        <BotCard
-          id="impulse"
-          name={t('docs.strat_impulse_title')}
-          stratId={impulseStatus?.strategy || 'impulse_1d'}
-          version={impulseStatus?.version}
-          icon={Zap}
-          accentDim="bg-[var(--profit-dim)]"
-          accentTxt="text-[var(--profit)]"
-          statusMode={impRunning ? 'live' : 'stopped'}
-          statusLabel={impRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={impulseStatus?.config?.symbols || impLocal.symbols}
-          description={impulseStatus?.description || strategyDesc.impulse}
-          tags={impTags}
-          tagline={t('bots.tagline_impulse')}
-          backtest={IMP_BACKTEST}
-          pnl={impulseStatus?.total_pnl || 0}
-          trades={impulseStatus?.total_trades || 0}
-          winRate={impulseStatus?.win_rate}
-          sparklinePnl={impulseStatus?.total_pnl || 0}
-          startedAt={impRunning ? impStartedAt : null}
-          openPositions={impulseStatus?.open_positions || []}
-          managed={impulseStatus?.managed}
-          lastActivity={impulseStatus?.last_activity}
-          heartbeatMaxAge={impulseStatus?.heartbeat_max_age_sec}
-          apiAlive={apiAlive}
-          onToggle={impToggle}
-          onReset={() => {
-            if (window.confirm('Сбросить историю сделок Impulse 1D?')) {
-              api.impulseReset().then(refreshStatus).catch(e => alert(e.message))
-            }
-          }}
-          onEdit={() => { setEditingBot('impulse'); setSliderOpen(true) }}
-          isGuest={isGuest}
-          loading={impLoading}
-          t={t}
-        />
-
-        {!isGuest && (
-          <BotCard
-            id="validation"
-            name={t('dash.validation_bot')}
-            stratId={valStatus?.strategy || 'macd_donchian_validation'}
-            version={valStatus?.version}
-            icon={FlaskConical}
-            accentDim="bg-[var(--warn-dim)]"
-            accentTxt="text-[var(--warn)]"
-            statusMode={valRunning ? 'live' : 'stopped'}
-            statusLabel={valRunning ? t('bots.status_running') : t('bots.status_stopped')}
-            coins={valStatus?.config?.symbols || valLocal.symbols}
-            description={valStatus?.description || t('bots.validation_desc')}
-            tags={valTags}
-            tagline={t('bots.tagline_validation')}
-            backtest={VAL_BACKTEST}
-            pnl={valStatus?.total_pnl || 0}
-            trades={valStatus?.total_trades || 0}
-            winRate={valStatus?.win_rate}
-            sparklinePnl={valStatus?.total_pnl || 0}
-            startedAt={valRunning ? valStartedAt : null}
-            openPositions={valStatus?.open_positions || []}
-            managed={valStatus?.managed}
-            lastActivity={valStatus?.last_activity}
-            heartbeatMaxAge={valStatus?.heartbeat_max_age_sec}
-            apiAlive={apiAlive}
-            onToggle={valToggle}
-            onReset={() => {
-              if (window.confirm(t('bots.validation_reset_confirm'))) {
-                api.validationReset().then(refreshStatus).catch(e => alert(e.message))
-              }
-            }}
-            onEdit={() => { setEditingBot('validation'); setSliderOpen(true) }}
-            isGuest={isGuest}
-            loading={valLoading}
-            t={t}
-          />
-        )}
-        </>
-        )}
-
-        {!isGuest && (
       </div>
 
       <SliderPanel
