@@ -182,12 +182,22 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
 
   const handleSaveLive = async () => {
     // Live keys are stored separately — showcase DEMO (env) is never overwritten
+    const k = (form.api_key || '').trim()
+    const s = (form.secret_key || '').trim()
+    const pw = (form.passphrase || '').trim()
+    if (!k || !s || !pw) {
+      setStatus({
+        ok: false,
+        message: 'Для Live заполните API Key, Secret Key и Passphrase — проверка без всех полей могла пройти по старым DEMO-ключам.',
+      })
+      return
+    }
     setTesting(true); setStatus(null)
     try {
       const r = await api.initCredentials({
-        apiKey: form.api_key,
-        secretKey: form.secret_key,
-        passphrase: form.passphrase,
+        apiKey: k,
+        secretKey: s,
+        passphrase: pw,
         demo: false,
       })
       setLiveConfigured(true)
@@ -207,12 +217,19 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   }
 
   const handleSave = async () => {
+    const k = (form.api_key || '').trim()
+    const s = (form.secret_key || '').trim()
+    const pw = (form.passphrase || '').trim()
+    if (!k || !s || !pw) {
+      setStatus({ ok: false, message: 'Заполните API Key, Secret Key и Passphrase.' })
+      return
+    }
     setTesting(true); setStatus(null)
     try {
       await api.initCredentials({
-        apiKey: form.api_key,
-        secretKey: form.secret_key,
-        passphrase: form.passphrase,
+        apiKey: k,
+        secretKey: s,
+        passphrase: pw,
         demo: form.demo,
       })
       setStatus({ ok: true, message: t('settings.keys_saved') })

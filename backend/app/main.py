@@ -1527,7 +1527,10 @@ async def me_credentials(request: Request, data: dict = None):
                 detail="Live OKX доступен только с активной подпиской. Используйте Demo или оформите Pro.",
             )
     if not (key and secret and passphrase):
-        raise HTTPException(status_code=400, detail="All credentials required")
+        raise HTTPException(
+            status_code=400,
+            detail="Не хватает API Key / Secret / Passphrase. Заполните все три поля.",
+        )
     # Test before saving.
     test = OKXClient(key, secret, passphrase, demo)
     try:
@@ -3658,13 +3661,27 @@ async def credentials_status():
 @app.post("/api/credentials/test", dependencies=[Depends(require_admin)])
 async def credentials_test(data: dict = Body(default=None)):
     data = data or {}
-    key = (data.get("apiKey") or data.get("api_key") or "").strip()
-    secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
-    passphrase = (data.get("passphrase") or "").strip()
+    key = (
+        data.get("apiKey") or data.get("api_key") or data.get("key") or ""
+    ).strip()
+    secret = (
+        data.get("secretKey") or data.get("secret_key") or data.get("secret") or ""
+    ).strip()
+    passphrase = (
+        data.get("passphrase") or data.get("passPhrase") or data.get("password") or ""
+    ).strip()
     demo = bool(data.get("demo", True))
+    # Any field filled → require all three (do not silently test env keys)
+    any_filled = bool(key or secret or passphrase)
+    if any_filled and not (key and secret and passphrase):
+        return {
+            "success": False,
+            "message": "Заполните все три поля: API Key, Secret Key и Passphrase",
+        }
     if not (key and secret and passphrase):
+        # Empty form: only then probe currently active owner creds
         k, s, p, is_demo = _active_owner_creds()
-        key, secret, passphrase = k, s, p
+        key, secret, passphrase = k or "", s or "", p or ""
         if data.get("demo") is None:
             demo = is_demo
     if not (key and secret and passphrase):
@@ -3689,13 +3706,29 @@ async def credentials_init(request: Request, data: dict = Body(default=None)):
     global _env_key, _env_secret, _env_pass, _env_demo
     global _demo_key, _demo_secret, _demo_pass
     data = data or {}
-    key = (data.get("apiKey") or data.get("api_key") or "").strip()
-    secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
-    passphrase = (data.get("passphrase") or "").strip()
+    key = (
+        data.get("apiKey") or data.get("api_key") or data.get("key") or ""
+    ).strip()
+    secret = (
+        data.get("secretKey") or data.get("secret_key") or data.get("secret") or ""
+    ).strip()
+    passphrase = (
+        data.get("passphrase") or data.get("passPhrase") or data.get("password") or ""
+    ).strip()
     demo = bool(data.get("demo", True))
 
-    if not key or not secret or not passphrase:
-        raise HTTPException(status_code=400, detail="All credentials required")
+    missing = []
+    if not key:
+        missing.append("API Key")
+    if not secret:
+        missing.append("Secret Key")
+    if not passphrase:
+        missing.append("Passphrase")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Не хватает: {', '.join(missing)}. Заполните все три поля перед сохранением.",
+        )
 
     # Real balance probe (init_client alone does not talk to OKX)
     probe = OKXClientManager.new_instance()
