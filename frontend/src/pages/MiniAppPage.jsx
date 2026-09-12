@@ -326,9 +326,7 @@ function MiniAppPageInner
         openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
       }
       for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
-      for (const p of (rotation?.open_positions || [])) pushOpen(p)
-      for (const p of (impulse?.open_positions || [])) pushOpen(p)
-      for (const p of (validation?.open_positions || [])) pushOpen(p)
+      // AI-only: retired bots ignored
       for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
 
       const toRow = (tr, isOpen = false) => {
@@ -374,7 +372,7 @@ function MiniAppPageInner
       }
       // Paired API empty (slow/timeout/empty) — fallback to bot recent_trades
       const botTrades = []
-      for (const bot of [aiBot, aiScale, rotation, impulse, validation]) {
+      for (const bot of [aiBot]) {
         for (const tr of (bot?.recent_trades || [])) {
           if (tr && typeof tr === 'object') {
             const reason = String(tr.reason || '').toLowerCase()
@@ -766,10 +764,7 @@ function MiniAppPageInner
 
   // Active-only PnL for mini summary cards
   const activeNames = []
-  if (rotation?.running) activeNames.push('Momentum')
-  if (impulse?.running) activeNames.push('Impulse 1D', 'Impulse')
-  if (validation?.running) activeNames.push('MACD+Donchian Validation', 'Validation')
-  if (aiBot?.running) activeNames.push('AI Discretionary 1H')
+        if (aiBot?.running) activeNames.push('AI Discretionary 1H')
   
   const tradeIsActive = (tr) => {
     if (!activeNames.length) return false
@@ -930,7 +925,7 @@ function MiniAppPageInner
 
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-3 space-y-3 pb-8" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
         {/* ═══ Data unavailable banner ═══ */}
-        {loaded && !portfolio && !rotation && !impulse && !validation && !aiBot && !aiScale && (
+        {loaded && !portfolio && !aiBot && (
           <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--warn-dim)] border border-[var(--warn)]">
             <span className="text-xs text-[var(--txt)]">{t('mini.data_error')}</span>
             <button
@@ -1017,7 +1012,7 @@ function MiniAppPageInner
                   <div className="flex gap-2 mt-3">
                     <button
                       className={`btn flex-1 ${rotation?.running ? 'btn-ghost' : 'btn-primary'}`}
-                      onClick={() => toggleBot('rotation')}
+                      onClick={() => /* retired */ null}
                       disabled={botAction !== null}
                     >
                       {botAction === 'rotation' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
@@ -1025,7 +1020,7 @@ function MiniAppPageInner
                     </button>
                     <button
                       className={`btn flex-1 ${impulse?.running ? 'btn-ghost' : 'btn-primary'}`}
-                      onClick={() => toggleBot('impulse')}
+                      onClick={() => /* retired */ null}
                       disabled={botAction !== null}
                     >
                       {botAction === 'impulse' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
@@ -1085,27 +1080,18 @@ function MiniAppPageInner
           </Card>
         </div>
 
-        {/* ═══ Strategies ═══ */}
+        {/* ═══ Strategies — AI only ═══ */}
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
-          <div className="grid grid-cols-2 gap-2">
-            {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
-            
-            {!aiBot?.running && (
-              <Card className="py-2.5 opacity-70">
-                <div className="text-2xs font-bold text-[var(--txt-muted)]">AI 1H</div>
-                <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
-              </Card>
-            )}
-            {!aiScale?.running && (
-              <Card className="py-2.5 opacity-70">
-                <div className="text-2xs font-bold text-[var(--txt-muted)]">SCL 1H</div>
-                <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
-              </Card>
-            )}
-            {!AI_ONLY_MODE && !!rotation?.running && botCard('Momentum', rotation, 'text-[var(--info)]', 'Momentum')}
-            {!AI_ONLY_MODE && !!impulse?.running && botCard('Impulse 1D', impulse, 'text-[var(--profit)]', 'Impulse')}
-            {!AI_ONLY_MODE && !!validation?.running && botCard('MACD+Donchian', validation, 'text-purple-400', 'Validation')}
+          <div className="grid grid-cols-1 gap-2">
+            {!!aiBot?.running
+              ? botCard('AI Discretionary 1H', aiBot, 'text-orange-400', 'AI 1H', true)
+              : (
+                <Card className="py-2.5 opacity-70">
+                  <div className="text-2xs font-bold text-[var(--txt-muted)]">AI Discretionary 1H</div>
+                  <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
+                </Card>
+              )}
           </div>
         </div>
 
@@ -1126,7 +1112,7 @@ function MiniAppPageInner
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="text-xs font-bold text-[var(--txt)] truncate">{p.instId}</span>
-                        {p.bot && (
+                        {(p.bot) && (
                           <span className="px-1 py-0.5 rounded bg-[var(--info-dim)] text-[var(--info)] text-2xs font-semibold">
                             {p.bot}
                           </span>
@@ -1182,8 +1168,8 @@ function MiniAppPageInner
                   const isOpen = tr.isOpen || reason === 'open'
                   const botShort = (tr.bot || '')
                     .replace('AI Discretionary 1H', 'AI')
-                    .replace('AI Scale-In 1H', 'SCL')
-                    .replace('AI Scale-In', 'SCL')
+                    .replace('AI Scale-In 1H', 'AI')
+                    .replace('AI Scale-In', 'AI')
                     .replace('MACD+Donchian Validation', 'Valid')
                     .replace('Impulse 1D', 'Impulse')
                     .replace('Momentum', 'Mom')

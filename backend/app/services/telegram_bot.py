@@ -192,7 +192,7 @@ class TelegramBotPoller:
                 "Живые сделки и PnL — в мини-апе и на дашборде.\n\n"
                 f"{telegram_metrics_block(html=True)}\n\n"
                 "Прошлые результаты не гарантируют будущую доходность.\n\n"
-                "Живой отчёт: /tracker"
+                "Отчёт: мини-ап и дашборд"
             ),
             "payment": (
                 "💳 <b>Оплата Pro</b>\n"
@@ -261,7 +261,7 @@ class TelegramBotPoller:
             f"{telegram_metrics_block(html=True)}\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
             "AI торгует на <b>вашем</b> счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe_pro · /info · /status · /about"
+            "Команды: /subscribe_pro · /info · /status · /about · /start"
         )
 
     def _about_text(self) -> str:
@@ -275,7 +275,7 @@ class TelegramBotPoller:
             "• <b>Защита:</b> лимит риска, стопы, умеренное плечо, контроль позиций\n"
             f"{telegram_metrics_block(html=True)}\n"
             "• <b>Прозрачность:</b> сделки и PnL — в мини-апе и на дашборде\n\n"
-            "Живой отчёт: /tracker\n\n"
+            "Отчёт: мини-ап и дашборд\n\n"
             "⚠️ Прошлые и текущие результаты не гарантируют будущей доходности. "
             "Торговля фьючерсами с плечом — высокий риск."
         )
