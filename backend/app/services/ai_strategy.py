@@ -19,7 +19,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
-from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans
+from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
 import json
 from .risk_guard import assert_can_open
@@ -177,9 +177,10 @@ class AIStrategy:
 
     def __init__(self, config: AIConfig = None, client_manager=None, db=None,
                  notifier: Optional[TelegramNotifier] = None,
-                 analysis=None):
+                 analysis=None, live_client_manager=None):
         self.config = config or AIConfig()
         self.client_manager = client_manager
+        self.live_client_manager = live_client_manager
         self.db = db
         self.notifier = notifier
         self.analysis = analysis or get_logger()
@@ -189,6 +190,19 @@ class AIStrategy:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._positions: dict[str, AIPosition] = {}
+        # ── LIVE mirror state (separate from the demo/primary account) ──
+        # The live account mirrors every primary open/close. It uses its own
+        # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
+        # and account_mode="live" for full DB isolation.
+        self._live_positions: dict[str, AIPosition] = {}
+        self._live_equity = 0.0
+        self._live_capital = 0.0
+        self._live_session_pnl = 0.0
+        self._live_lifetime_pnl = 0.0
+        self._live_lifetime_trades = 0
+        self._live_lifetime_wins = 0
+        self._live_lifetime_fees = 0.0
+        self._live_equity_ts = 0.0
         self._trade_log: list = []
         self._decision_log: list = []
         st = load_ai_state()
@@ -378,6 +392,51 @@ class AIStrategy:
         if not self.client_manager:
             return None
         return self.client_manager.get_client()
+
+    def _live_bot_id(self) -> str:
+        """Distinct bot_id for live mirror records (positions table has no account_mode)."""
+        return f"{self.BOT_ID}_live"
+
+    def _live_client(self):
+        """Live OKXClient when connected, else None. Never the demo client."""
+        if not self.live_client_manager:
+            return None
+        try:
+            c = self.live_client_manager.get_client()
+        except Exception:
+            return None
+        if c is None:
+            return None
+        # Defensive: if the live client was ever mis-initialized as demo, ignore it.
+        if getattr(c, "demo", False):
+            return None
+        if not getattr(c, "has_credentials", lambda: False)():
+            return None
+        return c
+
+    def _live_ready(self) -> bool:
+        return self._live_client() is not None
+
+    async def _ensure_live_equity(self) -> float:
+        """Best-effort live account equity (USDT totalEq). Cached ~30s."""
+        import time as _t
+        now = _t.time()
+        if self._live_equity > 0 and (now - float(self._live_equity_ts or 0)) < 30:
+            return self._live_equity
+        c = self._live_client()
+        if not c:
+            return self._live_equity
+        try:
+            r = await c.get_balance()
+            data = (r or {}).get("data") or []
+            if data:
+                total = float(data[0].get("totalEq") or 0)
+                if total > 0:
+                    self._live_equity = total
+                    self._live_equity_ts = now
+        except Exception as e:
+            print(f"[AI] live equity: {e}", flush=True)
+        return self._live_equity
 
     async def _run(self):
         try:
@@ -1280,16 +1339,18 @@ class AIStrategy:
         print(f"[AI] exec {event} {data}", flush=True)
 
     # ── sizing (anti-liq) ──────────────────────────────────────
-    def _size_order(self, coin: str, entry: float, stop_pct: float) -> tuple[float, float]:
+    def _size_order(self, coin: str, entry: float, stop_pct: float,
+                    equity: float = None) -> tuple[float, float]:
         """Return (contracts_size, leverage) with risk and margin caps."""
         cfg = self.config
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         stop_pct = max(0.015, min(0.05, abs(stop_pct)))
-        risk_usd = self._equity * cfg.risk_per_trade
+        eq = float(equity) if equity else self._equity
+        risk_usd = eq * cfg.risk_per_trade
         # notional such that stop_pct * notional ≈ risk_usd
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = self._equity * cfg.allocation_pct
+        max_margin = eq * cfg.allocation_pct
         # leverage chosen ≤ max, so margin = notional/lev ≤ max_margin
         lev = min(cfg.max_leverage, max(1.0, notional / max_margin if max_margin > 0 else 1.0))
         # if still over margin, cut notional
@@ -1485,6 +1546,11 @@ class AIStrategy:
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
         )
+        if self._live_ready():
+            try:
+                await self._open_live(coin, side, stop_pct, take_pct, reason)
+            except Exception as e:
+                print(f"[AI-LIVE] open_mirror: {e}", flush=True)
 
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
@@ -1659,6 +1725,326 @@ class AIStrategy:
             )
         except Exception:
             pass
+        if self._live_ready():
+            try:
+                await self._close_live(coin, reason)
+            except Exception as e:
+                print(f"[AI-LIVE] close_mirror: {e}", flush=True)
+
+    # ── LIVE mirror execution ──────────────────────────────────────────────────
+
+    async def _open_live(self, coin: str, side: str, stop_pct: float,
+                         take_pct: float, reason: str) -> bool:
+        """Mirror a primary (demo) open onto the connected LIVE account.
+        Called at the end of `_open` when the primary fill succeeded."""
+        lc = self._live_client()
+        if not lc:
+            return False
+        ind = self._latest_indicators.get(coin) or {}
+        entry = float(ind.get("close") or 0)
+        if entry <= 0:
+            print("[AI-LIVE] open_skip: no market price", flush=True)
+            return False
+        live_eq = await self._ensure_live_equity()
+        if live_eq <= 0:
+            print("[AI-LIVE] open_skip: no live equity", flush=True)
+            return False
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=live_eq)
+        if sz <= 0:
+            print(f"[AI-LIVE] open_skip {coin}: size=0 (equity=${live_eq:.2f})", flush=True)
+            return False
+        inst = f"{coin}-USDT-SWAP"
+        order_side = "buy" if side == "long" else "sell"
+        live_bid = self._live_bot_id()
+        for ps in (side, "net", None):
+            try:
+                await lc.set_leverage(inst, lev, mgn_mode="cross",
+                                      pos_side=ps if ps else "net")
+            except Exception:
+                pass
+        try:
+            resp = await self._place(lc, inst, order_side, sz, side)
+        except Exception as e:
+            print(f"[AI-LIVE] open_error {coin}: {e}", flush=True)
+            return False
+        if resp.get("error"):
+            msg = str(resp.get("message") or resp)
+            if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
+                try:
+                    resp = await lc.place_order(
+                        inst_id=inst, side=order_side, ord_type="market",
+                        sz=self._fmt_sz(coin, sz), td_mode="cross",
+                        pos_side=None,
+                        cl_ord_id=f"ai{int(time.time() * 1000)}",
+                    )
+                except Exception as e2:
+                    print(f"[AI-LIVE] open_error net-retry {coin}: {e2}", flush=True)
+                    return False
+            if resp.get("error"):
+                print(f"[AI-LIVE] open_error {coin}: {resp.get('message')}", flush=True)
+                return False
+        fills = resp.get("data") or []
+        fill_px, fee, _ = extract_fill_avg(fills, entry)
+        if (not fill_px or fill_px <= 0) and fills:
+            ord_id = fills[0].get("ordId") or fills[0].get("ord_id")
+            if ord_id:
+                for _ in range(4):
+                    await asyncio.sleep(0.35)
+                    try:
+                        o = await lc.get_order(inst, ord_id=ord_id)
+                        rows = o.get("data") or []
+                        if rows:
+                            fill_px, fee, _ = extract_fill_avg(rows, entry)
+                            if fill_px and fill_px > 0:
+                                break
+                    except Exception:
+                        pass
+        if not fill_px or fill_px <= 0:
+            fill_px = entry
+        if side == "long":
+            stop = fill_px * (1 - stop_pct)
+            take = fill_px * (1 + take_pct)
+        else:
+            stop = fill_px * (1 + stop_pct)
+            take = fill_px * (1 - take_pct)
+        signal_id = 0
+        try:
+            if self.db:
+                signal_id = int(await self.db.save_signal(
+                    bot_id=live_bid,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    side=order_side, price=fill_px, size=sz,
+                    ord_type="market", status="filled",
+                ) or 0)
+        except Exception:
+            signal_id = 0
+        if not signal_id:
+            signal_id = int(time.time()) % 1_000_000_000
+        pos = AIPosition(
+            coin=coin, inst_id=inst, side=side, size=sz,
+            entry_price=fill_px, stop_price=stop, take_price=take,
+            leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
+            peak_price=fill_px, signal_id=int(signal_id or 0),
+        )
+        ok_claim = await claim_open(self.db, live_bid, inst, side, sz, fill_px)
+        if not ok_claim:
+            print(f"[AI-LIVE] CRITICAL: claim failed — flattening {coin}", flush=True)
+            try:
+                from .position_claim import flatten_position
+                await flatten_position(lc, inst, side, sz)
+            except Exception as e:
+                print(f"[AI-LIVE] flatten on claim-fail: {e}", flush=True)
+            return False
+        self._live_positions[coin] = pos
+        self._live_equity -= fee_cost(fee)
+        self._live_equity_ts = 0.0
+        self._live_trade_log_append(pos, "open", fill_px, sz, -fee_cost(fee))
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=live_bid, side=order_side, sz=sz, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=inst, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
+                    state="filled", signal_id=pos.signal_id,
+                    account_mode="live", account_key="live",
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] db open: {e}", flush=True)
+        if self.notifier and getattr(self.notifier, 'configured', True):
+            try:
+                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
+                    coin=coin, side=side, price=round(fill_px, 4),
+                    stop=round(stop, 4), size=sz, leverage=lev,
+                    bot_name=self.BOT_NAME + " (LIVE)",
+                    signal_id=pos.signal_id,
+                    account_mode="live", account_key="live",
+                ))
+                if _tg_mid:
+                    pos.tg_message_id = int(_tg_mid)
+            except Exception as e:
+                print(f"[AI-LIVE] TG open: {e}", flush=True)
+        print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
+              f"lev={lev} (mirror)", flush=True)
+        self._persist_live()
+        return True
+
+    async def _close_live(self, coin: str, reason: str) -> bool:
+        """Mirror a primary (demo) close onto the connected LIVE account."""
+        lc = self._live_client()
+        pos = self._live_positions.get(coin)
+        if not lc or not pos:
+            self._live_positions.pop(coin, None)
+            return False
+        live_bid = self._live_bot_id()
+        close_side = "sell" if pos.side == "long" else "buy"
+        try:
+            resp = await self._place(lc, pos.inst_id, close_side,
+                                     pos.size, pos.side)
+        except Exception as e:
+            print(f"[AI-LIVE] close_error {coin}: {e}", flush=True)
+            return False
+        if resp.get("error"):
+            print(f"[AI-LIVE] close_error {coin}: {resp.get('message')}", flush=True)
+            return False
+        fills = resp.get("data") or []
+        mark = float(
+            (self._latest_indicators.get(coin) or {}).get("close") or 0
+        ) or pos.entry_price
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        if not fill_px or abs(fill_px - pos.entry_price) < 1e-12:
+            try:
+                oid = ((fills[0].get("ordId") if fills else None)
+                       or (resp.get("data") or [{}])[0].get("ordId"))
+                if oid and hasattr(lc, "get_order"):
+                    od = await lc.get_order(pos.inst_id, oid)
+                    rows = od.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+            except Exception:
+                pass
+        if not fill_px:
+            fill_px = mark
+        fee_c = fee_cost(fee)
+        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
+                         CT_VAL.get(coin, 0.01))
+        self._live_equity += pnl
+        self._live_session_pnl += pnl
+        self._live_lifetime_pnl += pnl
+        self._live_lifetime_trades += 1
+        if pnl > 0:
+            self._live_lifetime_wins += 1
+        self._live_lifetime_fees += fee_c
+        self._live_equity_ts = 0.0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        self._live_trade_log_append(
+            pos, "close", fill_px, pos.size, pnl,
+            extra={"exit_price": fill_px, "fee": round(fee_c, 6)},
+        )
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=live_bid, side=close_side, sz=pos.size, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=pos.inst_id, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="filled", signal_id=signal_id or None,
+                    account_mode="live", account_key="live",
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] db close: {e}", flush=True)
+            try:
+                if hasattr(self.db, "upsert_exchange_close_trades"):
+                    oid = str((fills[0].get("ordId") if fills else "") or "")
+                    if not oid:
+                        oid = f"ai{int(time.time() * 1000)}"
+                    cl = f"ai{int(time.time() * 1000)}"
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid, "inst_id": pos.inst_id, "cl_ord_id": cl,
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(pos.size or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(time.time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": "live", "account_key": "live",
+                    }])
+            except Exception as e:
+                print(f"[AI-LIVE] exchange_close tag: {e}", flush=True)
+        try:
+            await release_open(self.db, live_bid, pos.inst_id, pos.side)
+        except Exception:
+            pass
+        if self.notifier and getattr(self.notifier, 'configured', True):
+            try:
+                _txt = self.notifier.close_msg(
+                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
+                    exit_px=round(fill_px, 4), pnl=round(pnl, 2),
+                    reason=reason,
+                    bot_name=self.BOT_NAME + " (LIVE)",
+                    signal_id=signal_id,
+                )
+                await self.notifier.send_trade(
+                    _txt,
+                    reply_to_message_id=getattr(pos, "tg_message_id", 0) or None,
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] TG close: {e}", flush=True)
+        self._live_positions.pop(coin, None)
+        self._persist_live()
+        print(f"[AI-LIVE] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        return True
+
+    def _live_trade_log_append(self, pos: AIPosition, action: str,
+                               px: float, sz: float, pnl: float,
+                               extra: dict = None):
+        """Append a live mirror entry to the unified _trade_log."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "account_mode": "live",
+            "time": now_iso,
+            "side": "buy" if (action == "open" and pos.side == "long")
+                    or (action == "close" and pos.side == "short") else "sell",
+            "symbol": pos.inst_id,
+            "size": sz,
+            "pnl": round(pnl, 2),
+            "entry_price": pos.entry_price,
+            "reason": action,
+            "pos_side": pos.side,
+            "coin": pos.coin,
+            "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+        }
+        if extra:
+            entry.update(extra)
+        self._trade_log.append(entry)
+
+    async def _manage_live_orphans(self, client):
+        """Safety net: close live positions whose coin is not in the primary
+        book (i.e. the demo close was never mirrored, or live position was
+        opened outside the bot). Only fires when orphan_close_enabled."""
+        lc = self._live_client()
+        if not lc:
+            return
+        if not orphan_close_enabled():
+            return
+        coins = list(self._live_positions.keys())
+        for coin in coins:
+            if coin not in self._positions:
+                pos = self._live_positions.get(coin)
+                if pos and pos.size > 0:
+                    print(f"[AI-LIVE] orphan_detected {coin} — closing", flush=True)
+                    try:
+                        from .position_claim import flatten_position
+                        await flatten_position(lc, pos.inst_id, pos.side, pos.size)
+                    except Exception as e:
+                        print(f"[AI-LIVE] orphan flatten: {e}", flush=True)
+                    self._live_positions.pop(coin, None)
+        self._persist_live()
+
+    def _persist_live(self):
+        """Save live open positions snapshot (separate key from primary)."""
+        if not self.db:
+            return
+        try:
+            loop = self._loop or asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._persist_live_async())
+        except Exception:
+            pass
+
+    async def _persist_live_async(self):
+        if not self.db:
+            return
+        try:
+            live_bid = self._live_bot_id()
+            key = f"open_positions:{live_bid}"
+            val = json.dumps({c: asdict(p) for c, p in self._live_positions.items()})
+            await self.db.execute("INSERT INTO settings (key, value) VALUES ($1, $2) "
+                                  "ON CONFLICT (key) DO UPDATE SET value = $2", key, val)
+        except Exception as e:
+            print(f"[AI-LIVE] persist: {e}", flush=True)
 
     def _unrealized_pct(self, pos, px: float) -> float:
         if not px or not pos.entry_price:
@@ -2222,6 +2608,11 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
+        if self._live_ready():
+            try:
+                await self._manage_live_orphans(client)
+            except Exception as e:
+                print(f"[AI-LIVE] orphan_manage: {e}", flush=True)
         try:
             self._refresh_adaptive()
         except Exception:
@@ -2693,6 +3084,105 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] auto-correct SOL misattr: {e}", flush=True)
 
+        # ── LIVE mirror hydration ────────────────────────────────────────────
+        # Reload live lifetime stats + open positions from DB after deploy.
+        live_bid = self._live_bot_id()
+        try:
+            raw = await self.db.get_setting(f"ai_lifetime:{live_bid}")
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if isinstance(data, dict):
+                    self._live_lifetime_trades = int(data.get("lifetime_trades") or 0)
+                    self._live_lifetime_wins = int(data.get("lifetime_wins") or 0)
+                    self._live_lifetime_pnl = float(data.get("lifetime_pnl") or 0)
+                    self._live_lifetime_fees = float(data.get("lifetime_fees") or 0)
+                    print(f"[AI-LIVE] hydrate settings: trades={self._live_lifetime_trades} "
+                          f"pnl={self._live_lifetime_pnl:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate settings: {e}", flush=True)
+        # trades aggregate from DB
+        try:
+            summary = await self.db.get_trades_summary(live_bid)
+            total = int(summary.get("total") or 0)
+            wins = int(summary.get("wins") or 0)
+            pnl = float(summary.get("total_pnl") or 0)
+            if total > self._live_lifetime_trades or (
+                self._live_lifetime_trades == 0 and (total > 0 or abs(pnl) > 1e-9)
+            ):
+                self._live_lifetime_trades = total
+                self._live_lifetime_wins = wins
+                self._live_lifetime_pnl = pnl
+                print(f"[AI-LIVE] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}",
+                      flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate trades: {e}", flush=True)
+        # Live equity from exchange
+        try:
+            await self._ensure_live_equity()
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate equity: {e}", flush=True)
+        # Restore live open positions from snapshot + exchange
+        try:
+            lc = self._live_client()
+            if lc:
+                raw_pos = await self.db.get_setting(f"open_positions:{live_bid}")
+                stored: dict = {}
+                if raw_pos:
+                    stored = json.loads(raw_pos) if isinstance(raw_pos, str) else (raw_pos or {})
+                    if not isinstance(stored, dict):
+                        stored = {}
+                all_pos = await lc.get_positions()
+                ex_pos: dict[str, dict] = {}
+                for p in (all_pos or []):
+                    c = (p.get("instId") or "").replace("-USDT-SWAP", "")
+                    sz = float(p.get("pos") or 0)
+                    if c and sz > 0:
+                        ex_pos[c] = p
+                used = set()
+                # adopt confirmed live positions from exchange
+                for coin, ex in ex_pos.items():
+                    pos_side = (ex.get("posSide") or "net").lower()
+                    side = "short" if pos_side == "short" else "long"
+                    sz = float(ex.get("pos") or 0)
+                    entry = float(ex.get("avgPx") or 0)
+                    if not side or sz <= 0 or coin in self._live_positions:
+                        continue
+                    old = stored.get(coin) or {}
+                    sr = old.get("signal_id")
+                    try:
+                        sr = int(sr)
+                    except Exception:
+                        sr = 0
+                    import math as _m
+                    unc = float(ex.get("upl") or 0)
+                    peak = float(old.get("peak_price") or entry or 0)
+                    if not peak or _m.isnan(peak):
+                        peak = entry
+                    take = float(old.get("take_price") or 0)
+                    if not take or _m.isnan(take):
+                        take = 0
+                    pos = AIPosition(
+                        coin=coin, inst_id=f"{coin}-USDT-SWAP", side=side, size=sz,
+                        entry_price=entry, stop_price=float(old.get("stop_price") or 0),
+                        take_price=take, leverage=float(old.get("leverage") or 0),
+                        opened_at=old.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+                        peak_price=peak, unrealized_pnl=unc,
+                        tg_message_id=int(old.get("tg_message_id") or 0),
+                        signal_id=sr or 0,
+                    )
+                    self._live_positions[coin] = pos
+                    used.add(coin)
+                    print(f"[AI-LIVE] hydrate adopt {coin}: sz={sz} entry={entry} "
+                          f"pnl={unc:+.2f}", flush=True)
+                # report live exchange positions we cannot restore
+                for coin in ex_pos:
+                    if coin not in used and coin not in self._live_positions:
+                        sz = float((ex_pos[coin] or {}).get("pos") or 0)
+                        if sz > 0:
+                            print(f"[AI-LIVE] hydrate exchange孤儿 {coin}: sz={sz}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate positions: {e}", flush=True)
+
         print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
               f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)
 
@@ -2746,6 +3236,19 @@ class AIStrategy:
             await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", blob)
         except Exception as e:
             print(f"[AI] persist settings: {e}", flush=True)
+        # ── LIVE mirror lifetime persist ─────────────────────────────────────
+        try:
+            live_bid = self._live_bot_id()
+            live_blob = json.dumps({
+                "lifetime_pnl": self._live_lifetime_pnl,
+                "lifetime_trades": self._live_lifetime_trades,
+                "lifetime_wins": self._live_lifetime_wins,
+                "lifetime_fees": self._live_lifetime_fees,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await self.db.set_setting(f"ai_lifetime:{live_bid}", live_blob)
+        except Exception as e:
+            print(f"[AI-LIVE] persist settings: {e}", flush=True)
 
     async def _db_snapshot(self):
         try:
@@ -3076,5 +3579,30 @@ class AIStrategy:
                 "llm_rate_limit_until": self._llm_rate_limit_until,
                 "last_provider_used": self._last_provider_used,
                 "provider_status": self._get_provider_status(),
+            },
+            "live": {
+                "connected": self._live_ready(),
+                "equity": round(self._live_equity, 2) if self._live_ready() else 0,
+                "total_pnl": round(self._live_lifetime_pnl, 2),
+                "session_pnl": round(self._live_session_pnl, 2),
+                "lifetime_trades": self._live_lifetime_trades,
+                "lifetime_fees": round(self._live_lifetime_fees, 2),
+                "win_rate": (
+                    round(100.0 * self._live_lifetime_wins / self._live_lifetime_trades, 1)
+                    if self._live_lifetime_trades else None
+                ),
+                "open_positions": [
+                    {
+                        "coin": p.coin,
+                        "symbol": p.inst_id,
+                        "side": p.side,
+                        "size": p.size,
+                        "entry_price": p.entry_price,
+                        "stop_price": p.stop_price,
+                        "take_price": p.take_price,
+                        "leverage": p.leverage,
+                    }
+                    for p in self._live_positions.values()
+                ],
             },
         }

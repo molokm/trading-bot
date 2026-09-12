@@ -162,6 +162,8 @@ if STATIC_DIR.exists():
 client_manager = OKXClientManager.get_instance()
 # Permanent showcase DEMO client — observers always read this, independent of admin LIVE mode.
 showcase_manager = OKXClientManager.new_instance()
+# Live mirror — opt-in LIVE account (trades alongside demo when connected).
+live_manager = OKXClientManager.new_instance()
 
 
 _env_key = os.getenv("OKX_API_KEY", "")
@@ -481,13 +483,34 @@ async def startup():
                 True,
             )
             print("[startup] showcase DEMO ready", flush=True)
-        # Active trading client: LIVE keys if mode=live, else same showcase
-        if not _env_demo and _live_key and _live_secret and _live_pass:
-            await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
-            print("[startup] owner LIVE client ready", flush=True)
-        elif _env_key and _env_secret and _env_pass:
+        # Primary client = ALWAYS demo (all other strategies run on showcase).
+        # Live mirror is a separate client_manager for the AI bot only.
+        if _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, True)
             _env_demo = True
+        # Live mirror client — init with LIVE keys if available (env or DB)
+        _lm_key = _live_key
+        _lm_secret = _live_secret
+        _lm_pass = _live_pass
+        if not (_lm_key and _lm_secret and _lm_pass):
+            # Fallback to DB-persisted live mirror creds
+            try:
+                _lm_key = _lm_key or (await db.get_setting("live_mirror_key") or "")
+                _lm_secret = _lm_secret or (await db.get_setting("live_mirror_secret") or "")
+                _lm_pass = _lm_pass or (await db.get_setting("live_mirror_pass") or "")
+            except Exception:
+                pass
+        if _lm_key and _lm_secret and _lm_pass:
+            try:
+                await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
+                lc_check = live_manager.get_client() if live_manager else None
+                if lc_check and not getattr(lc_check, "demo", True):
+                    print("[startup] live mirror client ready", flush=True)
+                else:
+                    live_manager = OKXClientManager.new_instance()
+                    print("[startup] live mirror init rejected (demo=true), cleared", flush=True)
+            except Exception as e:
+                print(f"[startup] live mirror init: {e}", flush=True)
         
         # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
         try:
@@ -810,7 +833,7 @@ async def startup():
                 execute=_exec,
             )
             ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
-                               notifier=telegram)
+                               notifier=telegram, live_client_manager=live_manager)
             ai_bot.start()
             _positions_cache = None
             try:
@@ -2411,6 +2434,154 @@ async def ai_scale_stop():
     if ai_scale_bot:
         ai_scale_bot.stop()
     return {"message": "AI Scale-In stopped", "running": False}
+
+
+# ── LIVE mirror connect / disconnect / status ────────────────────────────────
+
+@app.get("/api/live/status")
+async def live_status():
+    """Public — returns live mirror connection state + stats (no secrets)."""
+    global ai_bot, live_manager
+    lc = None
+    try:
+        lc = live_manager.get_client() if live_manager else None
+    except Exception:
+        lc = None
+    connected = lc is not None and getattr(lc, "has_credentials", lambda: False)()
+    live_data = {}
+    if ai_bot and hasattr(ai_bot, "get_status"):
+        try:
+            st = ai_bot.get_status()
+            live_data = st.get("live") or {}
+        except Exception:
+            pass
+    return {
+        "connected": connected,
+        "demo": False,
+        "equity": live_data.get("equity", 0),
+        "total_pnl": live_data.get("total_pnl", 0),
+        "session_pnl": live_data.get("session_pnl", 0),
+        "lifetime_trades": live_data.get("lifetime_trades", 0),
+        "lifetime_fees": live_data.get("lifetime_fees", 0),
+        "win_rate": live_data.get("win_rate"),
+        "open_positions": live_data.get("open_positions", []),
+    }
+
+
+@app.post("/api/live/connect", dependencies=[Depends(require_admin)])
+async def live_connect(data: dict = None):
+    """Connect the LIVE mirror. Body: {key, secret, passphrase}."""
+    global ai_bot, live_manager, _live_key, _live_secret, _live_pass
+    data = data or {}
+    key = (data.get("key") or "").strip()
+    secret = (data.get("secret") or "").strip()
+    passphrase = (data.get("passphrase") or "").strip()
+    # Also accept shorthand field names from settings page
+    if not key:
+        key = (data.get("apiKey") or data.get("api_key") or "").strip()
+    if not secret:
+        secret = (data.get("secretKey") or data.get("secret_key") or "").strip()
+    if not passphrase:
+        passphrase = (data.get("passphrase") or "").strip()
+    if not key or not secret or not passphrase:
+        raise HTTPException(status_code=400, detail="key, secret, passphrase required")
+    # Confirmation phrase required for safety
+    confirm = (data.get("confirm") or "").strip()
+    if confirm != "LIVE":
+        raise HTTPException(status_code=400,
+                            detail="Подтвердите подключение фразой LIVE (confirm: \"LIVE\")")
+    # Init live mirror client
+    try:
+        await live_manager.init_client(key, secret, passphrase, False)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"OKX auth failed: {e}")
+    lc = live_manager.get_client() if live_manager else None
+    if not lc or not getattr(lc, "has_credentials", lambda: False)():
+        raise HTTPException(status_code=400, detail="Live client init failed")
+    if getattr(lc, "demo", True):
+        raise HTTPException(status_code=400, detail="Клиент в Demo — проверьте ключи")
+    # Verify balance
+    try:
+        portfolio = await lc.get_balance()
+        total_eq = float((portfolio or {}).get("data", [{}])[0].get("totalEq") or 0)
+        if total_eq < 10:
+            raise HTTPException(status_code=400,
+                                detail=f"Недостаточно средств: ${total_eq:.2f} (мин $10)")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[LIVE] balance check: {e}", flush=True)
+    # Persist creds to DB so restart restores live mirror
+    _live_key = key
+    _live_secret = secret
+    _live_pass = passphrase
+    if db:
+        try:
+            await db.set_setting("live_mirror_key", key)
+            await db.set_setting("live_mirror_secret", secret)
+            await db.set_setting("live_mirror_pass", passphrase)
+        except Exception as e:
+            print(f"[LIVE] persist creds: {e}", flush=True)
+    # Pass live manager to running AI bot
+    if ai_bot:
+        try:
+            ai_bot.live_client_manager = live_manager
+            # Trigger live equity fetch
+            loop = asyncio.get_event_loop()
+            loop.create_task(ai_bot._ensure_live_equity())
+        except Exception as e:
+            print(f"[LIVE] bind to ai_bot: {e}", flush=True)
+    print("[LIVE] mirror CONNECTED", flush=True)
+    return {"message": "LIVE mirror подключён", "connected": True}
+
+
+@app.post("/api/live/disconnect", dependencies=[Depends(require_admin)])
+async def live_disconnect():
+    """Disconnect the LIVE mirror — stops mirroring but preserves credentials."""
+    global ai_bot, live_manager
+    # Clear the live manager
+    try:
+        live_manager = OKXClientManager.new_instance()
+    except Exception:
+        pass
+    if ai_bot:
+        try:
+            ai_bot.live_client_manager = None
+            ai_bot._live_positions.clear()
+            ai_bot._live_equity = 0.0
+            ai_bot._live_equity_ts = 0.0
+        except Exception as e:
+            print(f"[LIVE] unbind: {e}", flush=True)
+    print("[LIVE] mirror DISCONNECTED", flush=True)
+    return {"message": "LIVE mirror отключён", "connected": False}
+
+
+@app.get("/api/live/trades")
+async def live_trades():
+    """Public — recent LIVE mirror trades."""
+    if not db:
+        return {"trades": []}
+    try:
+        live_bid = "ai_strategy_live"
+        rows = await db.get_trades(bot_id=live_bid, limit=40)
+        trades = []
+        for r in reversed(rows or []):
+            trades.append({
+                "time": r.get("timestamp") or r.get("created_at") or "",
+                "side": r.get("side"),
+                "symbol": r.get("inst_id"),
+                "size": r.get("sz") or r.get("size"),
+                "pnl": r.get("pnl"),
+                "entry_price": r.get("px"),
+                "state": r.get("state"),
+                "reason": r.get("state") or "db",
+                "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                "account_mode": "live",
+            })
+        return {"trades": trades}
+    except Exception as e:
+        print(f"[LIVE] trades: {e}", flush=True)
+        return {"trades": []}
 
 
 
