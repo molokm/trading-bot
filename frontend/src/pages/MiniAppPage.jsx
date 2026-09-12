@@ -316,6 +316,15 @@ function MiniAppPageInner
   // hidden while its instrument+side is still open on OKX/bots (no real close).
   const displayTrades = useMemo(() => {
     try {
+      const wantMode = demoMode ? 'demo' : 'live'
+      const matchesMode = (tr) => {
+        if (!tr || typeof tr !== 'object') return false
+        const m = String(tr.account_mode || tr.mode || '').trim().toLowerCase()
+        // LIVE: only explicit live rows (never untagged legacy / demo)
+        if (wantMode === 'live') return m === 'live'
+        // DEMO: demo or untagged legacy
+        return !m || m === 'demo'
+      }
       const openKeys = new Set()
       const pushOpen = (p) => {
         if (!p || typeof p !== 'object') return
@@ -348,6 +357,7 @@ function MiniAppPageInner
       const closedRaw = []
       for (const tr of (Array.isArray(trades) ? trades : [])) {
         if (!tr || typeof tr !== 'object') continue
+        if (!matchesMode(tr)) continue
         const inst = tr.inst_id || tr.symbol || ''
         const reason = String(tr.reason || '').toLowerCase()
         if (reason === 'open' || reason === 'add') continue
@@ -370,11 +380,11 @@ function MiniAppPageInner
         out.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
         return out.slice(0, 40)
       }
-      // Paired API empty (slow/timeout/empty) — fallback to bot recent_trades
+      // Paired API empty — fallback to bot recent_trades ONLY if mode matches
       const botTrades = []
       for (const bot of [aiBot]) {
         for (const tr of (bot?.recent_trades || [])) {
-          if (tr && typeof tr === 'object') {
+          if (tr && typeof tr === 'object' && matchesMode(tr)) {
             const reason = String(tr.reason || '').toLowerCase()
             if (reason !== 'open' && reason !== 'add') {
               botTrades.push({ ...tr, bot: tr.bot || bot?.strategy || '' })
@@ -388,7 +398,7 @@ function MiniAppPageInner
       console.error('[mini] displayTrades', e)
       return []
     }
-  }, [trades, positions, rotation, impulse, validation, aiBot, aiScale])
+  }, [trades, positions, aiBot, demoMode])
 
   useEffect(() => {
     if (!showLogs) return
@@ -592,7 +602,14 @@ function MiniAppPageInner
             if (Array.isArray(v)) list = v
             else if (Array.isArray(v?.trades)) list = v.trades
             else if (Array.isArray(v?.data)) list = v.data
-            setTrades(list.filter(Boolean))
+            // Prefer rows matching current mode; LIVE drops untagged/demo
+            const want = (demoMode ? 'demo' : 'live')
+            const filtered = (list || []).filter(Boolean).filter((tr) => {
+              const m = String(tr?.account_mode || tr?.mode || '').trim().toLowerCase()
+              if (want === 'live') return m === 'live'
+              return !m || m === 'demo'
+            })
+            setTrades(filtered)
             break
           }
           case 'pnl': setPnlData(v); break
@@ -692,6 +709,10 @@ function MiniAppPageInner
       if (!ok) return
     }
     setModeSwitching(true)
+    // Drop previous mode data immediately — avoid DEMO rows under LIVE label
+    setTrades([])
+    setPositions([])
+    setPnl(null)
     try {
       if (role === 'user') {
         await withTimeout(api.meSetMode(wantDemo, wantDemo ? undefined : 'LIVE'), 20000)

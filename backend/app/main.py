@@ -7850,6 +7850,28 @@ async def get_paired_trades(limit: int = 500, begin: str = None, end: str = None
             }
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end, mode=_mode)
         trades = resp.get("trades", [])
+        # Strict isolation: every row must carry the active mode
+        _tagged = []
+        for _tr in trades:
+            if not isinstance(_tr, dict):
+                continue
+            _m = str(_tr.get("account_mode") or _tr.get("mode") or "").strip().lower()
+            if _mode == "live":
+                if _m != "live":
+                    if not _m:
+                        _tr = {**_tr, "account_mode": "live"}
+                    else:
+                        continue  # drop demo under live
+                else:
+                    _tr = {**_tr, "account_mode": "live"}
+            else:
+                if _m == "live":
+                    continue
+                _tr = {**_tr, "account_mode": "demo"}
+            _tagged.append(_tr)
+        trades = _tagged
+        resp = {**resp, "trades": trades, "account_mode": _mode}
+
         if trades:
             _paired_cache = {
                 "ts": _time.time(),
