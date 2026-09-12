@@ -337,6 +337,37 @@ async def startup():
         await db.init()
         await pnl_engine.ensure_epoch(db)
         print(f"[startup] pnl_epoch forced {PNL_EPOCH_ISO}", flush=True)
+        # One-shot: zero mixed PnL from retired bots (Scale/Momentum/…)
+        try:
+            marker = await db.get_setting("pnl_clean_slate_20260912")
+            if not marker:
+                from datetime import datetime as _dt, timezone as _tz
+                epoch = PNL_EPOCH_ISO
+                bot_ids = [AI_BOT_ID, AI_SCALE_BOT_ID, "ai_scale_strategy", "ai_strategy"]
+                try:
+                    await db.wipe_strategy_trading_data(bot_ids)
+                except Exception as we:
+                    print(f"[startup] wipe_strategy_trading_data: {we}", flush=True)
+                await db.set_setting("pnl_epoch", epoch)
+                await db.set_setting("trading_stats_reset_marker", "manual")
+                for key in (
+                    f"ai_lifetime:{AI_BOT_ID}",
+                    "fix_last_eth_to_scale_pnl",
+                    "pnl_bot_overrides",
+                ):
+                    try:
+                        await db.set_setting(key, "")
+                    except Exception:
+                        pass
+                await db.set_setting("pnl_clean_slate_20260912", "1")
+                try:
+                    _pnl_cache.clear()
+                    _positions_cache = None
+                except Exception:
+                    pass
+                print(f"[startup] PnL CLEAN SLATE from {epoch}", flush=True)
+        except Exception as e:
+            print(f"[startup] PnL clean slate: {e}", flush=True)
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
@@ -782,6 +813,14 @@ async def startup():
                                notifier=telegram)
             ai_bot.start()
             _positions_cache = None
+            try:
+                # Always align memory counters with clean epoch (mixed history gone)
+                if hasattr(ai_bot, "reset_lifetime_pnl"):
+                    # Only zero if clean-slate marker is set (once) — still reset
+                    # counters so cards match /api/pnl=0 until new closes
+                    ai_bot.reset_lifetime_pnl()
+            except Exception as e:
+                print(f"[startup] AI PnL memory reset: {e}", flush=True)
             print(
                 f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
                 flush=True,

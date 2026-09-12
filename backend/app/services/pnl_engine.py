@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
-PNL_EPOCH_ISO = "2026-09-01T00:00:00+00:00"
+PNL_EPOCH_ISO = "2026-09-12T00:00:00+00:00"  # clean slate after multi-bot mix
 PNL_TZ = ZoneInfo("Europe/Moscow")
 
 _CLORD_MAP = (
@@ -257,7 +257,7 @@ def aggregate_rows(
 async def ensure_epoch(db) -> str:
     try:
         await db.set_setting("pnl_epoch", PNL_EPOCH_ISO)
-        await db.set_setting("pnl_epoch_marker", "manual_2026_09_01")
+        await db.set_setting("pnl_epoch_marker", "manual_2026_09_12_clean")
     except Exception as e:
         print(f"[pnl_engine] ensure_epoch: {e}", flush=True)
     return PNL_EPOCH_ISO

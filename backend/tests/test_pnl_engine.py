@@ -33,5 +33,5 @@ def test_pre_epoch_skipped():
     assert r["skipped_before_epoch"] >= 1
 
 def test_epoch_constant():
-    assert PNL_EPOCH_ISO.startswith("2026-09-01")
+    assert PNL_EPOCH_ISO.startswith("2026-09-12")
     assert epoch_ms() > 0
