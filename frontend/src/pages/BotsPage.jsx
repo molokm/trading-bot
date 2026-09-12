@@ -2,7 +2,8 @@ const AI_ONLY_MODE = true
 import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
 import { Brain, 
   Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
-  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot
+  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot,
+  Link, Unlink, AlertTriangle, Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
 import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
@@ -293,6 +294,119 @@ function PerfTile({ label, value, tone = 'neutral' }) {
   )
 }
 
+function LiveMirrorCard({
+  connected, liveStatus, loading,
+  liveKey, setLiveKey, liveSecret, setLiveSecret, livePass, setLivePass,
+  onConnect, onDisconnect, isGuest, t,
+}) {
+  const [showForm, setShowForm] = useState(false)
+  if (isGuest) return null
+  const livePnl = Number(liveStatus?.total_pnl ?? 0)
+  const liveTrades = liveStatus?.lifetime_trades ?? 0
+  const liveWinRate = liveStatus?.win_rate
+  const liveEquity = Number(liveStatus?.equity ?? 0)
+  const liveOpen = liveStatus?.open_positions || []
+
+  if (!connected) {
+    return (
+      <div className="panel flex flex-col border-dashed border-[var(--warn)]/40 bg-[var(--warn)]/5">
+        <div className="px-4 py-3 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2">
+            <WifiOff size={14} className="text-[var(--warn)]" />
+            <span className="text-sm font-bold text-[var(--txt)]">LIVE Mirror</span>
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--warn)]/15 text-[var(--warn)] font-semibold">OFF</span>
+          </div>
+          <div className="text-2xs text-[var(--txt-muted)] mt-1">Подключите LIVE-аккаунт для зеркальной торговли</div>
+        </div>
+        <div className="p-4 space-y-3">
+          {!showForm ? (
+            <button className="btn btn-primary btn-sm w-full" onClick={() => setShowForm(true)}>
+              <Link size={12} /> Подключить LIVE
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <input type="text" placeholder="API Key" value={liveKey}
+                onChange={e => setLiveKey(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <input type="password" placeholder="Secret Key" value={liveSecret}
+                onChange={e => setLiveSecret(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <input type="password" placeholder="Passphrase" value={livePass}
+                onChange={e => setLivePass(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <div className="flex gap-1.5">
+                <button className="btn btn-ghost btn-sm flex-1" onClick={() => { setShowForm(false); setLiveKey(''); setLiveSecret(''); setLivePass('') }}>
+                  Отмена
+                </button>
+                <button className="btn btn-primary btn-sm flex-1"
+                  onClick={onConnect} disabled={loading || !liveKey || !liveSecret || !livePass}>
+                  {loading ? <Loader /> : <><Link size={11} /> Подключить</>}
+                </button>
+              </div>
+              <div className="flex items-start gap-1.5 mt-1">
+                <AlertTriangle size={11} className="text-[var(--warn)] flex-shrink-0 mt-0.5" />
+                <span className="text-2xs text-[var(--txt-muted)] leading-snug">
+                  Бот будет торговать на DEMO и LIVE одновременно. Закрытие/стоп на LIVE — зеркальное с DEMO.
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="panel flex flex-col border-[var(--profit)]/30 bg-[var(--profit)]/5">
+      <div className="px-4 py-3 border-b border-[var(--border)]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wifi size={14} className="text-[var(--profit)]" />
+            <span className="text-sm font-bold text-[var(--txt)]">LIVE Mirror</span>
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/15 text-[var(--profit)] font-semibold">ON</span>
+          </div>
+          {!isGuest && (
+            <button className="btn btn-ghost btn-sm text-[var(--loss)]" onClick={onDisconnect} disabled={loading}>
+              {loading ? <Loader /> : <><Unlink size={11} /> Отключить</>}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="p-4 space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <PerfTile label="Equity" value={`$${liveEquity.toFixed(0)}`} tone="neutral" />
+          <PerfTile label="PnL" value={`${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}`} tone={livePnl >= 0 ? 'profit' : 'loss'} />
+          <PerfTile label="Сделок" value={liveTrades} />
+          <PerfTile label="WR" value={liveWinRate != null ? `${liveWinRate}%` : '—'} />
+        </div>
+        {liveOpen.length > 0 && (
+          <div className="space-y-1">
+            <div className="text-2xs text-[var(--txt-muted)] font-medium">{t('dash.open_positions')} (LIVE)</div>
+            {liveOpen.map((p, i) => {
+              const isLong = p.side !== 'short'
+              return (
+                <div key={i} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                    <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry_price).toFixed(4)}</span>
+                    <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_sl')} {Number(p.stop_price).toFixed(4)}</span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function BotCard({
   id, name, stratId, version, icon: Icon, accentDim, accentTxt,
   statusMode, statusLabel, coins, description, tags = [],
@@ -486,6 +600,11 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
   const [valLoading, setValLoading] = useState(false)
   const [aiStatus, setAiStatus] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [liveLoading, setLiveLoading] = useState(false)
+  const [liveKey, setLiveKey] = useState('')
+  const [liveSecret, setLiveSecret] = useState('')
+  const [livePass, setLivePass] = useState('')
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
   const [aiScaleLoading, setAiScaleLoading] = useState(false)
   const [aiScaleCapital, setAiScaleCapital] = useState(5000)
@@ -523,12 +642,13 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
 
   const refreshStatus = useCallback(async () => {
     // Skip disabled bots in AI_ONLY_MODE to reduce API calls by 75%
-    const [m, i, v, a, asc] = await Promise.all([
+    const [m, i, v, a, asc, ls] = await Promise.all([
       AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
       AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
       AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
       api.aiStatus().catch(() => null),
       Promise.resolve(null),
+      api.liveStatus().catch(() => null),
     ])
     if (m) {
       setMomentumStatus(m)
@@ -562,6 +682,9 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
     }
     if (asc) {
       setAiScaleStatus(asc)
+    }
+    if (ls) {
+      setLiveStatus(ls)
     }
     try {
       const ab = await api.aiAbCompare().catch(() => null)
@@ -676,6 +799,25 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setAiScaleLoading(false)
+  }
+
+  const liveConnect = async () => {
+    setLiveLoading(true)
+    try {
+      await api.liveConnect({ key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE' })
+      setLiveKey(''); setLiveSecret(''); setLivePass('')
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setLiveLoading(false)
+  }
+
+  const liveDisconnect = async () => {
+    setLiveLoading(true)
+    try {
+      await api.liveDisconnect()
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setLiveLoading(false)
   }
 
   const handleSave = (botData) => {
@@ -799,6 +941,20 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
           showCapital={!demoMode && !aiRunning}
           capitalValue={aiCapital}
           onCapitalChange={(v) => setAiCapital(v)}
+        />
+
+        {/* ─── LIVE Mirror Card ─── */}
+        <LiveMirrorCard
+          connected={!!liveStatus?.connected}
+          liveStatus={liveStatus}
+          loading={liveLoading}
+          liveKey={liveKey} setLiveKey={setLiveKey}
+          liveSecret={liveSecret} setLiveSecret={setLiveSecret}
+          livePass={livePass} setLivePass={setLivePass}
+          onConnect={liveConnect}
+          onDisconnect={liveDisconnect}
+          isGuest={isGuest}
+          t={t}
         />
       </div>
 

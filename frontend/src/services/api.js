@@ -231,6 +231,14 @@ export const api = {
     request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
   aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),
 
+  // ── LIVE mirror ──
+  liveStatus: () => request('/live/status'),
+  liveConnect: (body = {}) =>
+    request('/live/connect', { method: 'POST', body: JSON.stringify(body || {}) }),
+  liveDisconnect: () =>
+    request('/live/disconnect', { method: 'POST' }),
+  liveTrades: () => request('/live/trades'),
+
   // ── Order Book Scalp ──
   scalpStatus: () => request('/scalp/status'),
   scalpBook: (coin = 'BTC', levels = 12) =>

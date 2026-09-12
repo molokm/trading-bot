@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
-  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert
+  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert, Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, EnhancedMetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader, Skeleton, SkeletonMetricCard } from '../components/ui'
@@ -136,6 +136,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
+  const [liveStatus, setLiveStatus] = useState(null)
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
   const [smartMoneyStatus, setSmartMoneyStatus] = useState(null)
   const [vwapRevStatus, setVwapRevStatus] = useState(null)
@@ -250,6 +251,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         smartMoneySt,
         vwapRevSt,
         priceTickers,
+        liveSt,
       ] = await Promise.all([
         isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
         isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
@@ -262,6 +264,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+        api.liveStatus().catch(() => null),
       ])
       
       // Demo mode: update portfolio/positions from second batch
@@ -278,6 +281,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (valStatus) setValidationStatus(valStatus)
       setSmartMoneyStatus(smartMoneySt)
       setVwapRevStatus(vwapRevSt)
+      if (liveSt) setLiveStatus(liveSt)
 
       if (priceTickers?.tickers) {
         const byCoin = {}
@@ -1446,6 +1450,68 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
+
+          {/* ─── LIVE Mirror Panel ─── */}
+          {liveStatus?.connected && (
+            <div className="panel !border-[var(--profit)]/30 !bg-[var(--profit)]/5">
+              <div className="px-3 py-2 border-b border-[var(--border)] flex items-center gap-2">
+                <Wifi size={13} className="text-[var(--profit)]" />
+                <span className="text-xs font-bold text-[var(--txt)]">LIVE Mirror</span>
+                <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/15 text-[var(--profit)] font-semibold">ON</span>
+              </div>
+              <div className="p-3 space-y-2 text-2xs">
+                <div className="grid grid-cols-4 gap-1.5">
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">PnL</div>
+                    <div className={`mono font-semibold ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{Number(liveStatus?.total_pnl ?? 0).toFixed(2)}
+                    </div>
+                  </div>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">Сделок</div>
+                    <div className="mono font-semibold">{liveStatus?.lifetime_trades ?? 0}</div>
+                  </div>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">WR</div>
+                    <div className="mono font-semibold">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                  </div>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">Equity</div>
+                    <div className="mono font-semibold">${Number(liveStatus?.equity ?? 0).toFixed(0)}</div>
+                  </div>
+                </div>
+                {(liveStatus?.open_positions || []).length > 0 && (
+                  <div className="space-y-1 mt-1">
+                    <div className="text-2xs text-[var(--txt-muted)] font-medium">LIVE позиции</div>
+                    {liveStatus.open_positions.map((p, i) => {
+                      const isLong = p.side !== 'short'
+                      return (
+                        <div key={i} className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--bg)]">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                            <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry_price).toFixed(4)}</span>
+                            <span className="mono text-[0.6rem] text-[var(--txt-muted)]">SL {Number(p.stop_price).toFixed(4)}</span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {!liveStatus?.connected && liveStatus && (
+            <div className="panel border-dashed border-[var(--border)] bg-transparent">
+              <div className="px-3 py-2 flex items-center gap-2">
+                <WifiOff size={13} className="text-[var(--txt-muted)]" />
+                <span className="text-xs text-[var(--txt-muted)]">LIVE Mirror отключён</span>
+              </div>
+            </div>
+          )}
 
 
         </div>
