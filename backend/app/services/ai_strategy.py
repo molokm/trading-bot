@@ -282,11 +282,8 @@ class AIStrategy:
         from .ai_agent import (
             is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
         )
-        # Preferred provider: BAI first, then config, then env, then groq
-        # But skip providers that are on cooldown (no API key or exhausted).
-        if os.getenv("BAI_API_KEY", "").strip() and is_provider_available("bai"):
-            preferred = "bai"
-        elif self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
+        # Preferred: config/env → groq → openrouter → gemini → openai → bai (last: often no credits)
+        if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
             preferred = str(self.config.provider).strip().lower()
         else:
             env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
@@ -296,6 +293,12 @@ class AIStrategy:
                 preferred = "groq"
             elif os.getenv("OPENROUTER_API_KEY", "").strip() and is_provider_available("openrouter"):
                 preferred = "openrouter"
+            elif os.getenv("GEMINI_API_KEY", "").strip() and is_provider_available("gemini"):
+                preferred = "gemini"
+            elif os.getenv("OPENAI_API_KEY", "").strip() and is_provider_available("openai"):
+                preferred = "openai"
+            elif os.getenv("BAI_API_KEY", "").strip() and is_provider_available("bai"):
+                preferred = "bai"
             else:
                 preferred = env or "mock"
         # If preferred is available, use it
@@ -2292,6 +2295,56 @@ class AIStrategy:
             )
         except Exception as e:
             print(f"[AI] analysis log: {e}", flush=True)
+
+        # Quant auto-open: if LLM holds / fails but quant has a clear free setup
+        # (align >= effective thresholds), open without waiting forever on LLM.
+        action = decision.get("action")
+        reason_l = str(decision.get("reason") or "").lower()
+        llm_weak = (
+            (action or "hold") == "hold"
+            or "llm_error" in reason_l
+            or reason_l.startswith("fallback")
+            or "mock:" in reason_l
+            or "via_mock" in reason_l
+            or float(decision.get("confidence") or 0) < float(self._effective_min_confidence())
+        )
+        if llm_weak and not (self._positions or {}):
+            try:
+                q = self._build_quant() or {}
+                min_al = float(self._effective_min_align())
+                min_cf = float(self._effective_min_confidence())
+                best = None
+                for coin_q, cq in (q.get("coins") or {}).items():
+                    if cq.get("block_open"):
+                        continue
+                    side = str(cq.get("best_side") or "")
+                    al = float(cq.get("align_score") or 0)
+                    if side not in ("long", "short"):
+                        continue
+                    if al < max(min_al, 0.75):
+                        continue
+                    if al < min_cf and al < 0.85:
+                        continue  # need strong quant if below conf gate
+                    if best is None or al > best[2]:
+                        best = (coin_q, side, al)
+                if best:
+                    coin_q, side, al = best
+                    decision = {
+                        "action": "open",
+                        "symbol": coin_q,
+                        "side": side,
+                        "size_pct_equity": float(getattr(self.config, "risk_per_trade", 0.02) or 0.02),
+                        "stop_pct": 0.03,
+                        "take_pct": 0.06,
+                        "confidence": round(min(0.92, max(al, min_cf)), 3),
+                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} (LLM was {action}/{reason_l[:40]})",
+                    }
+                    self._last_decision = self._enrich_decision(decision, snap)
+                    self._decision_log.append(self._last_decision)
+                    self._decision_log = self._decision_log[-200:]
+                    print(f"[AI] quant_auto override → {decision}", flush=True)
+            except Exception as e:
+                print(f"[AI] quant_auto: {e}", flush=True)
 
         action = decision.get("action")
         coin = decision.get("symbol")

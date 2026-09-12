@@ -28,6 +28,7 @@ _last_provider_used: str | None = None  # last successfully used provider
 PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai", "bai"]
 COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
 COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
+COOLDOWN_ON_NO_CREDIT = 3600  # 1h if provider has no balance
 
 def is_provider_available(name: str) -> bool:
     """Check if a provider is not on cooldown."""
