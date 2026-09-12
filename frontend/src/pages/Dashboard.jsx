@@ -193,89 +193,44 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return () => { if (uptimeRef.current) clearInterval(uptimeRef.current) }
   }, [momentumStatus?.started_at])
 
+  // Reload on connect AND on Demo↔Live switch (mode change invalidates server cache)
   useEffect(() => {
-    loadData()
+    loadData({ fastOnly: false })
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
-      loadData()
-    }, 20000)
+      loadData({ fastOnly: false })
+    }, 30000) // was 20s — less load on Render free tier
     return () => clearInterval(interval)
-  }, [connected])
+  }, [connected, demoMode])
 
-  // Skip polling while the tab is hidden — frees the (throttled) server
-  // instance and avoids piling up requests in the background.
   useEffect(() => {
-    const onVis = () => { if (!document.hidden) loadData() }
+    const onVis = () => { if (!document.hidden) loadData({ fastOnly: true }) }
+    const onMode = () => { loadData({ fastOnly: false }) }
     document.addEventListener('visibilitychange', onVis)
-    return () => document.removeEventListener('visibilitychange', onVis)
-  }, [connected])
+    window.addEventListener('trading-mode-changed', onMode)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('trading-mode-changed', onMode)
+    }
+  }, [connected, demoMode])
 
-  async function loadData() {
+  async function loadData(opts = {}) {
     if (!connected) { setLoading(false); return }
-    if (document.hidden) return
-    
-    // 🚀 PRIORITY 1: Live account critical data (portfolio, positions, AI status)
-    // Load these first for instant UX when live account is connected
+    if (document.hidden && !opts.force) return
+    const fastOnly = !!opts.fastOnly
     const isLive = !demoMode
-    try {
-      if (isLive) {
-        // Live: portfolio + positions are fast (cached OKX calls) — show UI immediately
-        const [pf, pos] = await Promise.all([
-          api.getPortfolio().catch(() => null),
-          api.getPositions('SWAP').catch(() => null),
-        ])
-        if (pf) setPortfolio(pf)
-        if (pos) setPositions(pos.positions || [])
-        setLoading(false)
 
-        // aiStatus triggers heavy PnL pipeline — load async without blocking UI
-        api.aiStatus().catch(() => null).then(aiSt => {
-          if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-        })
-      }
-      
-      // 🔄 PRIORITY 2: Secondary data (tickers, other bots) - load in background
-      const [
-        pf2,
-        pos2,
-        tk,
-        momStatus,
-        impStatus,
-        valStatus,
-        aiSt2,
-        aiScaleSt2,
-        smartMoneySt,
-        vwapRevSt,
-        priceTickers,
-      ] = await Promise.all([
-        isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
-        isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
-        api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+    // ── FAST: portfolio + positions + AI status (paint UI ASAP) ──
+    try {
+      const [pf, pos, aiSt, priceTickers] = await Promise.all([
+        api.getPortfolio().catch(() => null),
+        api.getPositions('SWAP').catch(() => null),
         api.aiStatus().catch(() => null),
-        Promise.resolve(null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
-      
-      // Demo mode: update portfolio/positions from second batch
-      if (!isLive) {
-        if (pf2) setPortfolio(pf2)
-        if (pos2) setPositions(pos2.positions || [])
-        if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
-        if (aiScaleSt2 && !aiScaleSt2.detail) setAiScaleStatus(aiScaleSt2)
-      }
-      
-      if (tk) setTicker(tk)
-      if (momStatus) setMomentumStatus(momStatus)
-      if (impStatus) setImpulseStatus(impStatus)
-      if (valStatus) setValidationStatus(valStatus)
-      setSmartMoneyStatus(smartMoneySt)
-      setVwapRevStatus(vwapRevSt)
-
+      if (pf) setPortfolio(pf)
+      if (pos) setPositions(pos.positions || [])
+      if (aiSt && !aiSt.detail) setAiStatus(aiSt)
       if (priceTickers?.tickers) {
         const byCoin = {}
         priceTickers.tickers.forEach(tp => {
@@ -285,554 +240,25 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         setTickers(byCoin)
       }
       setLoading(false)
-    } catch { setLoading(false) }
-    // Slow tier — expensive OKX-bills pipelines; served from the server-side
-    // 30s cache, so updates arrive a little after the fast tier.
+    } catch {
+      setLoading(false)
+    }
+    if (fastOnly) return
+
+    // ── SLOW: trades + PnL (server-cached; never block first paint) ──
     try {
-      const [momTrades, trades, pnlData] = await Promise.all([
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        api.getPairedTrades(200).catch(() => null),
+      const [trades, pnlData] = await Promise.all([
+        api.getPairedTrades(50).catch(() => null),  // was 200 — heavy
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
-      if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        // ONLY accept pnl_engine payloads — never bot-status seeds
-        const src = String(pnlData.source || '')
-        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
-        if (okSrc || pnlData.pnl_epoch) {
-          const wantMode = demoMode ? 'demo' : 'live'
-          const gotMode = String(pnlData.account_mode || '').toLowerCase()
-          // Ignore payload from the other account mode
-          if (gotMode && gotMode !== wantMode) {
-            console.warn('[pnl] ignore mismatched mode', gotMode, 'want', wantMode)
-          } else {
-            setPnl(prev => {
-              const newTot = Math.abs(Number(pnlData.total ?? 0))
-              const oldTot = Math.abs(Number(prev?.total ?? 0))
-              const newSrc = String(pnlData.source || '')
-              const prevMode = String(prev?.account_mode || '').toLowerCase()
-              // Zero on purpose when live has no closes — do not keep demo total
-              if (prevMode && prevMode !== wantMode) {
-                return { ...pnlData, account_mode: gotMode || wantMode }
-              }
-              if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
-                return prev
-              }
-              return { ...pnlData, account_mode: gotMode || wantMode }
-            })
-          }
-        }
-      } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
-        const sd = health.sm_diag
-        setPnl({
-          total: Number(sd.pnl_total ?? 0),
-          '1d': Number(sd.pnl_1d ?? 0),
-          week: Number(sd.pnl_week ?? 0),
-          '7d': Number(sd.pnl_week ?? 0),
-          '30d': Number(sd.pnl_total ?? 0),
-          unrealized: Number(sd.pnl_unrealized ?? 0),
-          per_bot: sd.pnl_per_bot || {},
-          per_bot_all: sd.pnl_per_bot || {},
-          source: sd.pnl_source || 'health_fallback',
-        })
-      }
-      setDataFreshAt(Date.now())
-    } catch {}
-  }
-
-  // Derived values (declared early — before any useMemo that depends on them)
-  const change24hPct = (tk) => {
-    if (!tk || !tk.last || !tk.open24h || parseFloat(tk.open24h) <= 0) return 0
-    return ((parseFloat(tk.last) - parseFloat(tk.open24h)) / parseFloat(tk.open24h)) * 100
-  }
-  const btcChange = ticker ? change24hPct(ticker).toFixed(2) : '0.00'
-  const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
-  // Prefer sum of live OKX position rows (same source as the positions table).
-  // /api/pnl.unrealized is a slower cached path and can disagree with the table.
-  const unrealizedFromPositions = positions.reduce(
-    (s, p) => s + (parseFloat(p.upl) || 0), 0
-  )
-  const unrealizedPnl = positions.length > 0
-    ? unrealizedFromPositions
-    : (pnl?.unrealized || 0)
-  const fundingPnl = Number(pnl?.funding ?? 0)
-  // economic mixes account funding with strategy realized — show both explicitly
-  const strategyRealized = Number(pnl?.strategy_realized ?? pnl?.total ?? 0)
-  const economicPnl = Number(
-    pnl?.economic_approx
-    ?? (strategyRealized + unrealizedPnl + fundingPnl)
-  )
-  const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
-  // Active strategy labels (only running bots contribute to dashboard PnL)
-  const activeBotNames = (() => {
-    const names = []
-    if (AI_ONLY_MODE) {
-      if (aiStatus?.running) names.push('AI Discretionary 1H')
-      return names
-    }
-    if (momentumStatus?.running) names.push('Momentum')
-    if (impulseStatus?.running) names.push('Impulse 1D', 'Impulse')
-    if (validationStatus?.running) names.push('MACD+Donchian Validation', 'Validation')
-    if (aiStatus?.running) names.push('AI Discretionary 1H')
-    if (smartMoneyStatus?.running) names.push('Умные деньги', 'Smart Money')
-    if (vwapRevStatus?.running) names.push('VWAP Mean Reversion')
-    return names
-  })()
-  const isActiveBotTrade = (t) => {
-    if (!activeBotNames.length) return true // none running → show nothing filtered below
-    const b = String(t.bot || t.bot_name || '').trim()
-    if (!b) return false
-    return activeBotNames.some(n => b === n || b.includes(n) || n.includes(b))
-  }
-  // Realized windows: prefer /api/pnl (server already filters active); fallback tradeLog
-  const sumClosedSince = (msBack) => {
-    const cutoff = Date.now() - msBack
-    let s = 0
-    for (const t of (tradeLog || [])) {
-      const reason = String(t.reason || '').toLowerCase()
-      if (reason === 'open' || reason === 'add') continue
-      if (t.pnl == null || t.pnl === '') continue
-      if (!isActiveBotTrade(t)) continue
-      const ts = t.exit_time || t.time || t.timestamp || ''
-      if (!ts) continue
-      const ms = Date.parse(ts)
-      if (!Number.isFinite(ms) || ms < cutoff) continue
-      s += Number(t.pnl) || 0
-    }
-    return s
-  }
-  // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
-  const wantPnlMode = demoMode ? 'demo' : 'live'
-  const pnlModeOk = (() => {
-    const m = String(pnl?.account_mode || '').toLowerCase()
-    // Live: require explicit live — missing mode = treat as not ready (show 0)
-    if (!demoMode) return m === 'live'
-    // Demo: demo or untagged legacy payload
-    return !m || m === 'demo'
-  })()
-  const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
-  const scalePnlResolved = 0
-  const discTradesResolved = (() => {
-    if (!pnlModeOk) return 0
-    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
-    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
-  })()
-  const pnlTotal = (() => {
-    if (!pnlModeOk) return 0
-    if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
-      return Number(pnl.total)
-    }
-    if (AI_ONLY_MODE) return discPnlResolved
-    if (pnl && pnl.total != null) return Number(pnl.total)
-    return discPnlResolved + scalePnlResolved
-  })()
-  const pnlDay = (() => {
-    if (!pnlModeOk) return 0
-    if (pnl && pnl['1d'] != null) return Number(pnl['1d'])
-    return 0
-  })()
-  const pnlWeek = (() => {
-    if (!pnlModeOk) return 0
-    if (pnl && pnl.week != null) return Number(pnl.week)
-    return 0
-  })()
-  const pnlMonth = (() => {
-    if (pnl && pnl['30d'] != null && (pnl.active_bots || []).length) return Number(pnl['30d'])
-    if (pnl && Number(pnl['30d'] ?? 0) !== 0) return Number(pnl['30d'])
-    if (!activeBotNames.length) return 0
-    return sumClosedSince(30 * 86400000)
-  })()
-
-  // Per-strategy realized PnL breakdown (from /api/pnl per_bot)
-  const botNameMap = {
-    rotation_strategy: 'Momentum',
-    momentum_strategy: 'Momentum',
-    Momentum: 'Momentum',
-    impulse_strategy: 'Impulse 1D',
-    'Impulse 1D': 'Impulse 1D',
-    validation_strategy: 'MACD+Donchian Validation',
-    'MACD+Donchian Validation': 'MACD+Donchian Validation',
-    ai_strategy: 'AI Discretionary 1H',
-    'AI Discretionary 1H': 'AI Discretionary 1H',
-    ai_scale_strategy: 'AI Scale-In 1H',
-    'AI Scale-In 1H': 'AI Scale-In 1H',
-    orderbook_scalp: 'Order Book Scalp',
-    smart_money: 'Умные деньги',
-    'Умные деньги': 'Умные деньги',
-  }
-  const pnlByBot = useMemo(() => {
-    const per = pnl?.per_bot || {}
-    const rows = []
-    if (AI_ONLY_MODE) {
-      if (!pnlModeOk) {
-        rows.push({ name: 'AI Discretionary 1H', val: 0 })
-        return rows
-      }
-      rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
-      return rows
-    }
-    for (const [bid, val] of Object.entries(per)) {
-      const name = botNameMap[bid] || bid
-      if (name === 'Unassigned' || name === 'Прочее / без стратегии') continue
-      rows.push({ name, val: Number(val || 0) })
-    }
-    return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl])
-
-  // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
-  const momentumCardPnl = useMemo(() => {
-    const per = pnl?.per_bot || {}
-    if (per.Momentum != null) return Number(per.Momentum)
-    if (per.rotation_strategy != null) return Number(per.rotation_strategy)
-    if (per.momentum_strategy != null) return Number(per.momentum_strategy)
-    return Number(momentumStatus?.total_pnl ?? 0)
-  }, [pnl, momentumStatus?.total_pnl])
-  const impulseCardPnl = useMemo(() => {
-    const per = pnl?.per_bot || {}
-    if (per['Impulse 1D'] != null) return Number(per['Impulse 1D'])
-    if (per.impulse_strategy != null) return Number(per.impulse_strategy)
-    return Number(impulseStatus?.total_pnl ?? 0)
-  }, [pnl, impulseStatus?.total_pnl])
-  const validationCardPnl = useMemo(() => {
-    const per = pnl?.per_bot || {}
-    if (per['MACD+Donchian Validation'] != null) return Number(per['MACD+Donchian Validation'])
-    if (per.validation_strategy != null) return Number(per.validation_strategy)
-    return Number(validationStatus?.total_pnl ?? 0)
-  }, [pnl, validationStatus?.total_pnl])
-
-  const aiCardPnl = useMemo(() => {
-    const per = pnl?.per_bot || {}
-    if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
-    if (per.ai_strategy != null) return Number(per.ai_strategy)
-    return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
-
-    // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
-  // Local momentumTrades previously injected phantom closes not on OKX / History.
-  const allTrades = useMemo(() => {
-    const combined = [...tradeLog]
-    combined.sort((a, b) => {
-      const ta = a.exit_time || a.entry_time || ''
-      const tb = b.exit_time || b.entry_time || ''
-      return tb.localeCompare(ta)
-    })
-    return combined
-  }, [tradeLog])
-
-  // Map instId|side → bot name for badge resolution on exchange positions
-  const botMap = useMemo(() => {
-    const m = {}
-    const addPositions = (list, name) => {
-      for (const p of (list || [])) {
-        const inst = p.inst_id || p.instId || ''
-        const sideKey = (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
-        m[`${inst}|${sideKey}`] = name
-      }
-    }
-    addPositions(momentumStatus?.open_positions, 'Momentum')
-    addPositions(impulseStatus?.open_positions, 'Impulse 1D')
-    addPositions(validationStatus?.open_positions, 'Validation')
-    addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
-    // Scale last — overwrites Discretionary if both claim same inst|side
-    addPositions(aiScaleStatus?.open_positions, 'AI Discretionary 1H')
-    addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
-    addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
-    return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
-
-  const resolveBotName = (p) => {
-    const posSideKey = (p.posSide || p.side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-    const inst = p.instId || p.inst_id || ''
-    const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
-    // Scale memory ALWAYS wins over Discretionary / stale API bot
-    const key = `${inst}|${posSideKey}`
-    let fromMap = botMap[key] || ''
-    let raw = p.bot || ''
-    if (String(fromMap).includes('Scale') || String(raw).includes('Scale')) {
-      return 'AI Discretionary 1H'
-    }
-    const retired = /impulse|validation|macd|momentum|vwap/i.test(String(raw))
-    if (fromMap) return fromMap
-    if (retired && AI_ONLY_MODE) return ''
-    return raw || ''
-  }
-
-  const isOwnedBot = (bn) => {
-    if (!bn) return false
-    const n = String(bn).toLowerCase()
-    return n.includes('momentum') || n.includes('impulse') || n.includes('validation')
-      || n.includes('macd') || n.includes('ai') || n.includes('умн') || n.includes('smart')
-      || n.includes('vwap') || n.includes('scalp')
-  }
-
-  // Exchange positions with no strategy owner (manual / lost bot state)
-  const orphanPositions = useMemo(() => {
-    const managedKeys = new Set(Object.keys(botMap || {}))
-    const addStatus = (arr) => {
-      for (const op of (arr || [])) {
-        const inst = op.inst_id || op.instId || (op.coin ? `${op.coin}-USDT-SWAP` : '')
-        const side = (op.side || op.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-        if (inst) managedKeys.add(`${inst}|${side}`)
-      }
-    }
-    addStatus(momentumStatus?.open_positions)
-    addStatus(impulseStatus?.open_positions)
-    addStatus(validationStatus?.open_positions)
-    addStatus(aiStatus?.open_positions)
-    addStatus(aiScaleStatus?.open_positions)
-    addStatus(smartMoneyStatus?.open_positions)
-    return (positions || []).filter((p) => {
-      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
-      if (!posSz) return false
-      const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-      const key = `${p.instId || ''}|${posSideKey}`
-      const bn = p.bot || botMap[key] || ''
-      if (isOwnedBot(bn)) return false
-      if (managedKeys.has(key)) return false
-      return true
-    })
-  }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions])
-
-  // Active trades — open from bots + OKX positions; closed from paired log only
-  const activeTrades = useMemo(() => {
-    const rows = []
-    const openKeys = new Set() // inst|side to avoid double rows
-
-    const pushOpen = (p, botHint) => {
-      const inst = p.inst_id || p.instId || p.symbol || ''
-      const coin = (p.coin || inst.replace('-USDT-SWAP', '') || '').replace('-USDT-SWAP', '')
-      const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
-      const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
-      const sideKey = isLong ? 'long' : 'short'
-      const key = `${inst}|${sideKey}`
-      if (openKeys.has(key)) return
-      openKeys.add(key)
-      const entry = parseFloat(p.entry_price ?? p.entry ?? p.avgPx ?? 0) || 0
-      const mark = parseFloat(p.mark_px ?? p.markPx ?? p.last ?? 0) || 0
-      const size = parseFloat(p.size_original ?? p.size ?? p.pos ?? 0) || 0
-      const sizeRem = parseFloat(p.size_remaining ?? p.size ?? p.pos ?? size) || size
-      rows.push({
-        type: 'open',
-        time: p.opened_at || p.time || p.cTime || '',
-        symbol: coin || p.symbol,
-        inst_id: inst,
-        side: isLong ? 'buy' : 'sell',
-        pos_side: sideKey,
-        entry: entry || null,
-        stop: p.stop_price ?? p.stop ?? null,
-        tp1: p.tp1 ?? null,
-        tp2: p.tp2 ?? null,
-        be: p.be_price ?? (entry ? (isLong ? entry * 0.999 : entry * 1.001) : null),
-        mark: mark || null,
-        size: size,
-        size_remaining: sizeRem,
-        stage: p.stage || (p.breakeven ? 'trailing' : (p.partial_done ? 'partial' : 'initial')),
-        pos_mode: p.pos_mode,
-        breakeven: !!p.breakeven,
-        partial_done: !!p.partial_done,
-        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : (parseFloat(p.upl) || null),
-        pnl: null,
-        reason: 'open',
-        bot: botHint || p.bot || '',
-      })
-    }
-
-    // Exchange keys for CURRENT mode only (API positions are mode-scoped)
-    const exchangeKeys = new Set()
-    for (const p of (positions || [])) {
-      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
-      if (!posSz) continue
-      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
-      const inst = p.instId || p.inst_id || ''
-      if (inst) exchangeKeys.add(`${inst}|${posSide}`)
-      const coin = (inst || '').replace('-USDT-SWAP', '')
-      if (coin) exchangeKeys.add(`${coin}|${posSide}`)
-    }
-
-    const isOnExchange = (p) => {
-      if (!exchangeKeys.size) return false
-      const coin = (p.coin || p.symbol || '').toUpperCase()
-      const inst = (p.inst_id || p.instId || (coin ? `${coin}-USDT-SWAP` : '')).toUpperCase()
-      const side = (p.side || p.pos_side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
-      if (coin && exchangeKeys.has(`${coin}|${side}`)) return true
-      if (inst && exchangeKeys.has(`${inst}|${side}`)) return true
-      return false
-    }
-
-    // 1a. Bot-owned opens — only if still open on THIS mode's exchange account
-    for (const p of (momentumStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Momentum')
-    }
-    for (const p of (impulseStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Impulse 1D')
-    }
-    for (const p of (validationStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Validation')
-    }
-    for (const p of (aiStatus?.open_positions || [])) {
-      const m = (p.account_mode || '').toLowerCase()
-      if (m === 'demo' && !demoMode) continue
-      if (m === 'live' && demoMode) continue
-      if (isOnExchange(p)) pushOpen(p, 'AI Discretionary 1H')
-    }
-    // Smart Money opens/trades live only on /smart-money — not on main dashboard
-
-    // 1b. Exchange positions not yet in bot memory (prevents missing open row)
-    for (const p of (positions || [])) {
-      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
-      if (!posSz) continue
-      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
-      const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
-      let hint = p.bot || botMap[posKey] || ''
-      if (!hint) {
-        const coin = (p.instId || '').replace('-USDT-SWAP', '')
-        for (const op of (aiScaleStatus?.open_positions || [])) {
-          if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
-            hint = 'AI Scale-In 1H'
-            break
-          }
-        }
-        if (!hint) {
-          for (const op of (aiStatus?.open_positions || [])) {
-            if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
-              // Prefer Scale if it also lists this coin
-              const sclHas = (aiScaleStatus?.open_positions || []).some(
-                s => String(s.coin || '').toUpperCase() === coin.toUpperCase()
-              )
-              hint = sclHas ? 'AI Scale-In 1H' : 'AI Discretionary 1H'
-              break
-            }
-          }
+        const src = String(pnlData.source || pnlData.engine || '')
+        if (src.includes('exchange_close') || src.includes('pnl_engine') || pnlData.engine) {
+          setPnl(pnlData)
         }
       }
-      // Force Scale badge if Scale status holds this coin
-      {
-        const coin = (p.instId || p.inst_id || '').replace('-USDT-SWAP', '')
-        const sclHas = (aiScaleStatus?.open_positions || []).some(
-          op => String(op.coin || '').toUpperCase() === String(coin).toUpperCase()
-        )
-        if (sclHas) hint = 'AI Scale-In 1H'
-      }
-      if (hint === 'Smart Money') continue
-      if (!hint) continue
-      pushOpen({
-        ...p,
-        inst_id: p.instId || p.inst_id,
-        side: posSide,
-        entry_price: parseFloat(p.avgPx || p.avg_px || 0),
-        mark_px: parseFloat(p.markPx || p.last || 0),
-        size: posSz,
-        size_remaining: posSz,
-        upl: p.upl,
-        bot: hint,
-      }, hint)
-    }
-
-    // 2. Closed — paired log only; skip opens still on exchange and partials
-    for (const tr of allTrades) {
-      // Never mix DEMO/LIVE cards
-      const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
-      if (trMode === 'demo' && !demoMode) continue
-      if (trMode === 'live' && demoMode) continue
-      if (tr.bot === 'Smart Money') continue
-      const r = (tr.reason || '').toLowerCase()
-      if (r === 'open' || r === 'add') continue
-      if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
-      const inst = tr.inst_id || tr.symbol || ''
-      // Hide phantom "closed" while the SAME instrument+side is still open on
-      // OKX/bots (a false close of the still-open position). Side-aware so real
-      // historical closes of the other direction are still shown.
-      if (inst) {
-        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
-        if (openKeys.has(`${inst}|${sideKey}`)) continue
-      }
-      rows.push({
-        type: 'closed',
-        time: tr.exit_time || tr.entry_time || tr.time || '',
-        symbol: (inst || '').replace('-USDT-SWAP', ''),
-        inst_id: inst,
-        side: tr.side,
-        entry: tr.entry_px ?? tr.entry,
-        exit: tr.exit_px ?? tr.exit_price,
-        pnl: parseFloat(tr.pnl || 0),
-        reason: r,
-        stage: null,
-        bot: tr.bot,
-      })
-    }
-
-    rows.sort((a, b) => {
-      if (a.type === 'open' && b.type !== 'open') return -1
-      if (a.type !== 'open' && b.type === 'open') return 1
-      return (b.time || '').localeCompare(a.time || '')
-    })
-    return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap, demoMode])
-
-  // Keep allTrades for summary stats (closed only)
-  const closedTrades = useMemo(() =>
-    allTrades.filter(t => {
-      const r = (t.reason || '').toLowerCase()
-      if (r === 'open' || r === 'tp1') return false
-      const trMode = (t.account_mode || t.mode || '').toLowerCase()
-      if (trMode === 'demo' && !demoMode) return false
-      if (trMode === 'live' && demoMode) return false
-      return true
-    })
-  , [allTrades, demoMode])
-
-  // Filtered active trades
-  const filteredTrades = useMemo(() => {
-    return activeTrades.filter(t => {
-      if (filterPair !== 'Все') {
-        const pair = (t.inst_id || t.symbol || '').toUpperCase()
-        if (!pair.includes(filterPair)) return false
-      }
-      const pnlVal = parseFloat(t.pnl || 0)
-      if (filterResult === 'win' && pnlVal < 0) return false
-      if (filterResult === 'loss' && pnlVal >= 0) return false
-      if (filterReason !== 'all') {
-        if (t.type === 'open') {
-          if (filterReason !== 'open') return false
-        } else {
-          if ((t.reason || '').toLowerCase() !== filterReason) return false
-        }
-      }
-      return true
-    })
-  }, [activeTrades, filterPair, filterResult, filterReason])
-
-  // Sparkline data for golden-zone MetricCards (stable random 10-point trends)
-  const sparkData = useMemo(() =>
-    Array.from({ length: 10 }, () =>
-      Array.from({ length: 10 }, () => Math.random() * 100)
-    )
-  , [])
-
-  // Summary stats for visible trades (closed only for PnL counts)
-  const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5)
-    const withPnl = visible.filter(t => t.pnl != null)
-    const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
-    const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
-    const losses = withPnl.filter(t => parseFloat(t.pnl || 0) < 0).length
-    return { totalPnl, wins, losses, count: visible.length }
-  }, [filteredTrades, activeTrades])
-
-  // Synthetic BTC sparkline (visual only) — btcChange is now declared above
-  const btcSparkData = useMemo(() => {
-    const isUp = parseFloat(btcChange) >= 0
-    return Array.from({ length: 10 }, (_, i) =>
-      isUp ? 50 - i * 2 + Math.random() * 4 : 50 + i * 2 + Math.random() * 4
-    )
-  }, [btcChange])
-
-  const formatUptime = (s) => {
-    const h = Math.floor(s / 3600)
-    const m = Math.floor((s % 3600) / 60)
-    const sec = s % 60
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+    } catch { /* ignore slow-tier errors */ }
   }
 
   const handleClosePosition = async (p) => {

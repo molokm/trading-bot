@@ -129,11 +129,18 @@ function AppLayout() {
       if (!ok) return
     }
     setModeBusy(true)
+    // Optimistic UI — switch label immediately, data catches up
+    setDemoMode(!!toDemo)
     try {
       const r = await api.setMode(!!toDemo, toDemo ? undefined : 'LIVE')
       setDemoMode(!!r.demo)
       setConnected(true)
+      try {
+        window.dispatchEvent(new CustomEvent('trading-mode-changed', { detail: { demo: !!r.demo } }))
+      } catch { /* ignore */ }
     } catch (e) {
+      // revert on failure
+      setDemoMode(!toDemo)
       alert(e.message || 'Не удалось переключить режим')
     } finally {
       setModeBusy(false)

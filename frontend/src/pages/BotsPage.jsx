@@ -573,9 +573,9 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
 
   useEffect(() => {
     refreshStatus()
-    const id = setInterval(refreshStatus, 20000)
+    const id = setInterval(refreshStatus, 30000)
     return () => clearInterval(id)
-  }, [connected, refreshStatus])
+  }, [connected, demoMode, refreshStatus])
 
   const momToggle = async () => {
     setMomLoading(true)

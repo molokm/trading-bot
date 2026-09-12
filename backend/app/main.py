@@ -3793,6 +3793,31 @@ async def set_trading_mode(request: Request, data: dict = Body(default=None)):
     except Exception:
         pass
     _invalidate_account_caches()
+    # Pre-warm portfolio/positions for the NEW mode so first paint is not cold
+    try:
+        async def _warm_mode():
+            try:
+                await asyncio.sleep(0.05)
+                client = client_manager.get_client() if client_manager else None
+                if client:
+                    try:
+                        await client.get_balance()
+                    except Exception:
+                        pass
+                    try:
+                        await client.get_positions("SWAP")
+                    except Exception:
+                        pass
+                try:
+                    await sync_exchange_close_trades()
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[mode] warm: {e}", flush=True)
+        asyncio.create_task(_warm_mode())
+    except Exception:
+        pass
+
     # Apply mode-specific AI settings: DEMO = workspace, LIVE = promoted snapshot
     try:
         import json as _json
