@@ -37,7 +37,7 @@ import bt_okx
 SCALE = 100
 
 # ── Defaults mirroring RotationConfig v4, tuned 2026-08 ─────────────────────
-# Tuned config: risk=0.20, alloc=0.5, stricter volume surge (vol_mult=2.2),
+# Tuned config: risk=0.20, alloc=0.5, vol filter vol_mult=2.0 (improved vs 2.2 on same window),
 # adx_min=25, looser corr filter (0.85), wider stop (4.5 ATR) + wider trailing
 # (3 ATR), min_hold=11.
 # Validated on OKX native 1D, 10 coins, 2023-05..2026-08:
@@ -48,23 +48,25 @@ EMA_FAST = 20
 EMA_SLOW = 50
 ATR_PERIOD = 14
 ADX_MIN = 25.0
-MIN_ROC = 4.5
+MIN_ROC = 3.5
 SMA_LONG = 200
 SMA_REGIME = 50
 MIN_HOLD_DAYS = 11
 MAX_LEVERAGE = 2.0
 RISK_PER_TRADE = 0.20
-ALLOCATION_PCT = 0.5
+ALLOCATION_PCT = 0.45
 ATR_STOP_MULT = 4.5
 TRAIL_ATR_MULT = 3.0
 BREAKEVEN_PCT = 0.05
-PARTIAL_TP_PCT = 0.08
-PARTIAL_TP_RATIO = 0.5
+PARTIAL_TP_PCT = 0.06
+PARTIAL_TP_RATIO = 0.25
+PARTIAL_TP2_PCT = 0.12
+PARTIAL_TP2_RATIO = 0.3
 ROI_TABLE = [(17, 0.00), (8, 0.092), (3, 0.237), (0, 0.376)]
 RSI_PERIOD = 14
 RSI_LONG_MAX = 82.0
 RSI_SHORT_MIN = 21.0
-VOL_MULT = 2.2
+VOL_MULT = 2.0
 CORR_THRESHOLD = 0.85
 ALLOW_SHORT = True
 COMMISSION = 0.001
@@ -109,7 +111,9 @@ class MomentumRotationV4(bt.Strategy):
         ("risk_per_trade", RISK_PER_TRADE), ("allocation_pct", ALLOCATION_PCT),
         ("atr_stop_mult", ATR_STOP_MULT), ("trail_atr_mult", TRAIL_ATR_MULT),
         ("breakeven_pct", BREAKEVEN_PCT), ("partial_tp_pct", PARTIAL_TP_PCT),
-        ("partial_tp_ratio", PARTIAL_TP_RATIO), ("rsi_period", RSI_PERIOD),
+        ("partial_tp_ratio", PARTIAL_TP_RATIO),
+        ("partial_tp2_pct", PARTIAL_TP2_PCT), ("partial_tp2_ratio", PARTIAL_TP2_RATIO),
+        ("rsi_period", RSI_PERIOD),
         ("rsi_long_max", RSI_LONG_MAX), ("rsi_short_min", RSI_SHORT_MIN),
         ("vol_mult", VOL_MULT), ("corr_threshold", CORR_THRESHOLD),
         ("allow_short", ALLOW_SHORT), ("verbose", False),
@@ -218,8 +222,13 @@ class MomentumRotationV4(bt.Strategy):
                     if not pos["be"] and row_c >= pos["entry"] * (1 + self.p.breakeven_pct):
                         pos["stop"] = max(pos["stop"], pos["entry"] * 0.999)
                         pos["be"] = True
-                    if not pos["partial"] and row_h >= pos["entry"] * (1 + self.p.partial_tp_pct):
+                    # staged partials: stage0 -> TP1, stage1 -> TP2 (if enabled)
+                    if pos["partial_stage"] == 0 and row_h >= pos["entry"] * (1 + self.p.partial_tp_pct):
                         exit_raw, reason = pos["entry"] * (1 + self.p.partial_tp_pct), "partial_tp"
+                        hit = True
+                    elif (pos["partial_stage"] == 1 and self.p.partial_tp2_pct > 0
+                          and row_h >= pos["entry"] * (1 + self.p.partial_tp2_pct)):
+                        exit_raw, reason = pos["entry"] * (1 + self.p.partial_tp2_pct), "partial_tp2"
                         hit = True
             else:
                 if row_h >= pos["stop"]:
@@ -233,18 +242,31 @@ class MomentumRotationV4(bt.Strategy):
                     if not pos["be"] and row_c <= pos["entry"] * (1 - self.p.breakeven_pct):
                         pos["stop"] = min(pos["stop"], pos["entry"] * 1.001)
                         pos["be"] = True
-                    if not pos["partial"] and row_l <= pos["entry"] * (1 - self.p.partial_tp_pct):
+                    if pos["partial_stage"] == 0 and row_l <= pos["entry"] * (1 - self.p.partial_tp_pct):
                         exit_raw, reason = pos["entry"] * (1 - self.p.partial_tp_pct), "partial_tp"
                         hit = True
+                    elif (pos["partial_stage"] == 1 and self.p.partial_tp2_pct > 0
+                          and row_l <= pos["entry"] * (1 - self.p.partial_tp2_pct)):
+                        exit_raw, reason = pos["entry"] * (1 - self.p.partial_tp2_pct), "partial_tp2"
+                        hit = True
 
-            if hit and reason == "partial_tp" and not pos["partial"]:
-                # close PARTIAL_TP_RATIO, keep the rest trailing
-                close_size = pos["size"] * self.p.partial_tp_ratio
-                if close_size > 0:
-                    self._close(j, close_size, reason, exit_raw)
-                    pos["size"] -= close_size
-                    pos["partial"] = True
-                hit = False
+            if hit and reason in ("partial_tp", "partial_tp2"):
+                if reason == "partial_tp" and pos["partial_stage"] == 0:
+                    ratio = self.p.partial_tp_ratio
+                    close_size = pos["size"] * ratio
+                    if close_size > 0:
+                        self._close(j, close_size, reason, exit_raw)
+                        pos["size"] -= close_size
+                        pos["partial_stage"] = 1
+                    hit = False
+                elif reason == "partial_tp2" and pos["partial_stage"] == 1:
+                    ratio = self.p.partial_tp2_ratio
+                    close_size = pos["size"] * ratio
+                    if close_size > 0:
+                        self._close(j, close_size, reason, exit_raw)
+                        pos["size"] -= close_size
+                        pos["partial_stage"] = 2
+                    hit = False
 
             # dynamic ROI exit
             if not hit:
@@ -366,7 +388,7 @@ class MomentumRotationV4(bt.Strategy):
 
             self.book[j] = {
                 "side": t["side"], "size": size, "entry": price, "stop": stop,
-                "peak": price, "be": False, "partial": False,
+                "peak": price, "be": False, "partial_stage": 0,
                 "entry_i": i, "atr": atr_val, "rets": t["rets"],
             }
             if t["side"] == "long":

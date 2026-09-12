@@ -33,9 +33,10 @@ export default function LoginPage({ onLogin }) {
     setError('')
     try {
       const res = await api.login(password)
-      localStorage.setItem('auth_token', res.token)
-      localStorage.setItem('auth_role', res.role)
-      onLogin?.(res.token, res.role)
+      if (res.token) localStorage.setItem('auth_token', res.token)
+      else localStorage.removeItem('auth_token')
+      localStorage.setItem('auth_role', res.role || 'admin')
+      onLogin?.(res.token || '', res.role || 'admin')
       navigate('/')
     } catch (e) {
       setError(e.message)
@@ -47,9 +48,10 @@ export default function LoginPage({ onLogin }) {
     setLoading(true)
     try {
       const res = await api.guest()
-      localStorage.setItem('auth_token', res.token)
-      localStorage.setItem('auth_role', res.role)
-      onLogin?.(res.token, res.role)
+      if (res.token) localStorage.setItem('auth_token', res.token)
+      else localStorage.removeItem('auth_token')
+      localStorage.setItem('auth_role', res.role || 'guest')
+      onLogin?.(res.token || '', res.role || 'guest')
       navigate('/')
     } catch (e) {
       setError(e.message)

@@ -1,16 +1,56 @@
 const BASE = '/api';
 
+/** Global client backoff after 429/502/503 — stops hammering Render free tier */
+let apiBackoffUntil = 0;
+let apiBackoffMs = 0;
+
 function getToken() {
+  // Prefer httpOnly cookie (credentials: include). Bearer from localStorage is legacy.
+  // When COOKIE_ONLY_AUTH=1 server omits token body — localStorage stays empty (more XSS-safe).
   return localStorage.getItem('auth_token') || '';
 }
 
+function noteApiFailure(status) {
+  if (status === 429 || status === 503 || status === 502) {
+    apiBackoffMs = Math.min(120000, Math.max(5000, (apiBackoffMs || 3000) * 2));
+    apiBackoffUntil = Date.now() + apiBackoffMs;
+  }
+}
+
+function noteApiSuccess() {
+  apiBackoffMs = 0;
+  apiBackoffUntil = 0;
+}
+
 async function request(path, options = {}) {
+  if (Date.now() < apiBackoffUntil) {
+    const wait = Math.ceil((apiBackoffUntil - Date.now()) / 1000);
+    const e = new Error(`Сервер перегружен / лимит запросов. Подождите ~${wait}с`);
+    e.status = 429;
+    e.backoff = true;
+    throw e;
+  }
   const url = `${BASE}${path}`;
   const token = getToken();
-  const headers = { 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
   if (token) headers['Authorization'] = `Bearer ${token}`;
-  const config = { headers, ...options };
-  const resp = await fetch(url, config);
+  const config = {
+    credentials: 'include',
+    ...options,
+    headers: { ...headers, ...(options.headers || {}) },
+  };
+  let resp;
+  try {
+    resp = await fetch(url, config);
+  } catch (netErr) {
+    noteApiFailure(503);
+    throw netErr;
+  }
+  if (resp.status === 429 || resp.status === 503 || resp.status === 502) {
+    noteApiFailure(resp.status);
+  } else if (resp.ok) {
+    noteApiSuccess();
+  }
   if (resp.status === 401) {
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_role');
@@ -22,7 +62,13 @@ async function request(path, options = {}) {
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ detail: resp.statusText }));
-    const e = new Error(err.detail || 'Request failed');
+    let detail = err.detail || err.message || resp.statusText || 'Request failed';
+    if (Array.isArray(detail)) {
+      detail = detail.map((x) => x.msg || JSON.stringify(x)).join('; ');
+    } else if (typeof detail === 'object') {
+      detail = JSON.stringify(detail);
+    }
+    const e = new Error(detail);
     e.status = resp.status;
     throw e;
   }
@@ -43,6 +89,22 @@ export const api = {
   authStatus: () => request('/auth/status'),
 
   health: () => request('/health'),
+  positionsClaimsHealth: () => request('/health/positions-claims'),
+
+  riskStatus: () => request('/risk/status'),
+  riskKill: (enabled) =>
+    request('/risk/kill', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  getMode: () => request('/mode'),
+  setMode: (demo, confirm) =>
+    request('/mode', {
+      method: 'POST',
+      body: JSON.stringify({
+        demo: !!demo,
+        confirm: demo ? undefined : (confirm || 'LIVE'),
+      }),
+    }),
+  getAudit: (limit = 50) => request(`/audit?limit=${limit}`),
+  reportSummary: () => request('/reports/summary'),
 
   // ── Public equity tracker (no auth) ──
   getTracker: () => request('/tracker'),
@@ -96,7 +158,9 @@ export const api = {
     return request(url)
   },
 
+  pnlReconcile: () => request('/pnl/reconcile'),
   getPnl: () => request('/pnl'),
+  getPnlSummary: () => request('/pnl/summary'),
 
   // ── Momentum Strategy ──
   momentumStatus: () => request('/momentum/status'),
@@ -143,6 +207,94 @@ export const api = {
   validationTrades: (limit = 50) =>
     request(`/validation/trades?limit=${limit}`),
 
+  // ── AI Discretionary ──
+  aiStatus: () => request('/ai/status'),
+  aiScaleStatus: () => request('/ai-scale/status'),
+  aiScaleStart: (config = {}) =>
+    request('/ai-scale/start', { method: 'POST', body: JSON.stringify(config || {}) }),
+  aiScaleStop: () =>
+    request('/ai-scale/stop', { method: 'POST' }),
+  aiAbCompare: () => request('/ai/ab-compare'),
+  positionsReclaim: (body) => request('/positions/reclaim', { method: 'POST', body: JSON.stringify(body || {}) }),
+  aiAbStart: (body = {}) => request('/ai/ab-start', { method: 'POST', body: JSON.stringify(body || {}) }),
+
+  aiStart: (config = {}) =>
+    request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
+  aiStop: () =>
+    request('/ai/stop', { method: 'POST' }),
+  aiGetConfig: () => request('/ai/config'),
+  aiSaveConfig: (config) =>
+    request('/ai/config', { method: 'PUT', body: JSON.stringify(config || {}) }),
+  aiPromoteConfig: () =>
+    request('/ai/config/promote', { method: 'POST', body: JSON.stringify({}) }),
+  aiDecide: () =>
+    request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
+  aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),
+
+  // ── LIVE mirror ──
+  liveStatus: () => request('/live/status'),
+  liveConnect: (body = {}) =>
+    request('/live/connect', { method: 'POST', body: JSON.stringify(body || {}) }),
+  liveDisconnect: () =>
+    request('/live/disconnect', { method: 'POST' }),
+  liveTrades: () => request('/live/trades'),
+
+  // ── Order Book Scalp ──
+  scalpStatus: () => request('/scalp/status'),
+  scalpBook: (coin = 'BTC', levels = 12) =>
+    request(`/scalp/book?coin=${encodeURIComponent(coin)}&levels=${levels}`),
+  scalpStart: (config = {}) =>
+    request('/scalp/start', { method: 'POST', body: JSON.stringify(config) }),
+  scalpStop: () =>
+    request('/scalp/stop', { method: 'POST' }),
+
+  // ── VWAP Mean Reversion ──
+  vwapRevStatus: () => request('/vwap_rev/status'),
+  vwapRevStart: (config = {}) =>
+    request('/vwap_rev/start', { method: 'POST', body: JSON.stringify(config) }),
+  vwapRevStop: () =>
+    request('/vwap_rev/stop', { method: 'POST' }),
+
+  // ── Smart Money Tracker ──
+  smartMoneyStatus: () => request('/smart-money/status'),
+  smartMoneyDiscover: (page = 1, limit = 20, opts = {}) => {
+    const q = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+      sort: opts.sort || 'roi',
+      min_roi: String(opts.min_roi ?? 0),
+      verified_only: opts.verified_only ? 'true' : 'false',
+      sources: opts.sources || 'okx,hyperliquid,social',
+    })
+    return request(`/smart-money/discover?${q}`)
+  },
+  smartMoneyTrader: (code) => request(`/smart-money/trader/${code}`),
+  smartMoneyTracked: () => request('/smart-money/tracked'),
+  smartMoneyTrack: (code) =>
+    request('/smart-money/track', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyUntrack: (code) =>
+    request('/smart-money/untrack', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyCopy: (code, amt) =>
+    request('/smart-money/copy', { method: 'POST', body: JSON.stringify({ unique_code: code, copy_amt: amt }) }),
+  smartMoneyStopCopy: (code) =>
+    request('/smart-money/stop-copy', { method: 'POST', body: JSON.stringify({ unique_code: code }) }),
+  smartMoneyMyCopies: () => request('/smart-money/my-copies'),
+  smartMoneyStart: (config = {}) =>
+    request('/smart-money/start', { method: 'POST', body: JSON.stringify(config) }),
+  smartMoneyStop: () =>
+    request('/smart-money/stop', { method: 'POST' }),
+  smartMoneyUpdateConfig: (config = {}) =>
+    request('/smart-money/config', { method: 'POST', body: JSON.stringify(config) }),
+  smartMoneyPnl: () => request('/smart-money/pnl'),
+  smartMoneyTrades: (limit = 100) => request(`/smart-money/trades?limit=${limit}`),
+  smartMoneyMirrorStatus: () => request('/smart-money/mirror/status'),
+  smartMoneyMirrorStart: (body) =>
+    request('/smart-money/mirror/start', { method: 'POST', body: JSON.stringify(body || {}) }),
+  smartMoneyMirrorStop: (body) =>
+    request('/smart-money/mirror/stop', { method: 'POST', body: JSON.stringify(body || {}) }),
+  smartMoneyTraderHistory: (code, limit = 50) =>
+    request(`/smart-money/trader/${code}/history?limit=${limit}`),
+
   // ── Chart ──
   chartTrades: (instId) => request(`/chart/trades?inst_id=${instId}`),
 
@@ -179,6 +331,15 @@ export const api = {
   subsDeactivate: (payload) =>
     request('/subs/deactivate', { method: 'POST', body: JSON.stringify(payload || {}) }),
 
+  // ── Admin users & accounts ──
+  adminUsers: () => request('/admin/users'),
+  adminUserPlan: (payload) =>
+    request('/admin/users/plan', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  adminUserMode: (payload) =>
+    request('/admin/users/mode', { method: 'POST', body: JSON.stringify(payload || {}) }),
+  adminClearCreds: (payload) =>
+    request('/admin/users/clear-credentials', { method: 'POST', body: JSON.stringify(payload || {}) }),
+
   // ── Multi-tenant /api/me/* (mini-app user accounts) ──
   me: () => request('/me'),
   meCredentials: (creds) =>
@@ -201,6 +362,12 @@ export const api = {
   meImpulseStop: () => request('/me/impulse/stop', { method: 'POST' }),
   meTrades: (limit = 30) => request(`/me/trades?limit=${limit}`),
   mePnl: () => request('/me/pnl'),
+  meMode: () => request('/me/mode'),
+  meSetMode: (demo, confirm) =>
+    request('/me/mode', {
+      method: 'POST',
+      body: JSON.stringify({ demo, confirm: confirm || (demo ? undefined : 'LIVE') }),
+    }),
 
   telegramAuth: (initData) =>
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),

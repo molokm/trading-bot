@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye
+  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye,
+  Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -25,6 +26,7 @@ function miniLog(tag, ...args) {
 }
 
 window.__MINI_APP__ = true
+const AI_ONLY_MODE = true
 
 /* ═══════ Number formatting ═══════ */
 function fmt(n, digits = 2) {
@@ -126,7 +128,7 @@ function ProPreview({ t, onBack }) {
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <div className="p-3 space-y-3">
+      <div className="flex-1 min-h-0 p-3 space-y-3 pb-10 overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
         {/* Back */}
         <button onClick={onBack} className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] active:opacity-70">
           <ArrowUpRight size={14} className="rotate-180" /> {t('mini.back')}
@@ -182,8 +184,12 @@ function ProPreview({ t, onBack }) {
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="flex gap-2">
-            {demoBotCard(demo.bots[0], 'text-[var(--info)]')}
-            {demoBotCard(demo.bots[1], 'text-[var(--profit)]')}
+            {(demo.bots || []).filter(b => b && b.running).map((b, i) => (
+              <div key={b.name || i} className="contents">{demoBotCard(b, i === 0 ? 'text-[var(--info)]' : 'text-[var(--profit)]')}</div>
+            ))}
+            {!(demo.bots || []).some(b => b && b.running) && (
+              <div className="col-span-2 text-2xs text-[var(--txt-muted)]">Нет активных ботов</div>
+            )}
           </div>
         </div>
 
@@ -242,7 +248,34 @@ function ProPreview({ t, onBack }) {
 }
 
 /* ═══════ Main page ═══════ */
-export default function MiniAppPage() {
+class MiniAppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { error: null }
+  }
+  static getDerivedStateFromError(error) {
+    return { error }
+  }
+  componentDidCatch(err, info) {
+    console.error('[mini] crash', err, info)
+    try { miniLog('crash', String(err?.message || err), String(info?.componentStack || '').slice(0, 300)) } catch {}
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="min-h-screen flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-center">
+          <div className="text-sm font-semibold text-[var(--loss)]">Ошибка Mini App</div>
+          <pre className="text-2xs text-[var(--txt-muted)] whitespace-pre-wrap break-words max-w-full">{String(this.state.error?.message || this.state.error)}</pre>
+          <button className="btn btn-primary" onClick={() => window.location.reload()}>Перезагрузить</button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function MiniAppPageInner
+() {
   const { t } = useTranslation()
   const [authing, setAuthing] = useState(true)
   const [authError, setAuthError] = useState('')
@@ -255,7 +288,16 @@ export default function MiniAppPage() {
   const [portfolio, setPortfolio] = useState(null)
   const [rotation, setRotation] = useState(null)
   const [impulse, setImpulse] = useState(null)
+  const [validation, setValidation] = useState(null)
+  const [aiBot, setAiBot] = useState(null)
+  const [aiScale, setAiScale] = useState(null)
+  const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [liveKey, setLiveKey] = useState('')
+  const [liveSecret, setLiveSecret] = useState('')
+  const [livePass, setLivePass] = useState('')
+  const [liveConnecting, setLiveConnecting] = useState(false)
   const [trades, setTrades] = useState([])
 
   const [tg, setTg] = useState(null)
@@ -272,6 +314,79 @@ export default function MiniAppPage() {
   const [credsSaving, setCredsSaving] = useState(false)
   const [credsStatus, setCredsStatus] = useState(null)
   const [botAction, setBotAction] = useState(null)
+
+  // Same source as the web Dashboard: /trades/paired (OKX-backed). Open rows
+  // live in the Positions card above (real OKX positions), so here we keep only
+  // closed trades with the same phantom-close suppression — a "closed" row is
+  // hidden while its instrument+side is still open on OKX/bots (no real close).
+  const displayTrades = useMemo(() => {
+    try {
+      const openKeys = new Set()
+      const pushOpen = (p) => {
+        if (!p || typeof p !== 'object') return
+        const inst = p.inst_id || p.instId || p.symbol || ''
+        if (!inst) return
+        const sideRaw = String(p.side || p.posSide || p.pos_side || 'long').toLowerCase()
+        const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
+        openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
+      }
+      for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
+      for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
+
+      const toRow = (tr, isOpen = false) => {
+        const inst = tr.inst_id || tr.symbol || ''
+        return {
+          ...tr,
+          coin: tr.coin || String(inst || '').replace('-USDT-SWAP', ''),
+          symbol: tr.symbol || inst,
+          isOpen,
+          entry: tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0,
+          exit: tr.exit_px ?? tr.exit_price,
+          size: tr.size ?? tr.sz ?? '',
+          time: tr.time || tr.exit_time || tr.entry_time || '',
+          pnl: tr.pnl,
+          bot: tr.bot || '',
+        }
+      }
+      const out = []
+      const closedRaw = []
+      for (const tr of (Array.isArray(trades) ? trades : [])) {
+        if (!tr || typeof tr !== 'object') continue
+        const inst = tr.inst_id || tr.symbol || ''
+        const reason = String(tr.reason || '').toLowerCase()
+        if (reason === 'open' || reason === 'add') continue
+        closedRaw.push(tr)
+        if (inst) {
+          const sideKey = String(tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+          if (openKeys.has(`${inst}|${sideKey}`) && (tr.pnl == null || tr.pnl === '')) continue
+        }
+        out.push(toRow(tr, false))
+      }
+      if (out.length === 0 && closedRaw.length > 0) {
+        return closedRaw.slice(0, 40).map(tr => toRow(tr, false))
+      }
+      if (out.length > 0) {
+        out.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+        return out.slice(0, 40)
+      }
+      const botTrades = []
+      for (const bot of [aiBot]) {
+        for (const tr of (bot?.recent_trades || [])) {
+          if (tr && typeof tr === 'object') {
+            const reason = String(tr.reason || '').toLowerCase()
+            if (reason !== 'open' && reason !== 'add') {
+              botTrades.push({ ...tr, bot: tr.bot || bot?.strategy || '' })
+            }
+          }
+        }
+      }
+      botTrades.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+      return botTrades.slice(0, 30).map(tr => toRow(tr, false))
+    } catch (e) {
+      console.error('[mini] displayTrades', e)
+      return []
+    }
+  }, [trades, positions, aiBot])
 
   useEffect(() => {
     if (!showLogs) return
@@ -439,30 +554,67 @@ export default function MiniAppPage() {
     const callers = {
       health: () => api.health(),
       portfolio: () => isUser ? api.mePortfolio() : api.getPortfolio(),
-      rotation: () => isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus(),
-      impulse: () => isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus(),
+      rotation: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.rotation) : api.rotationStatus()),
+      impulse: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.impulse) : Promise.resolve(null)),
+      validation: () => AI_ONLY_MODE ? null : Promise.resolve(null),
+      ai: () => api.aiStatus(),
+      aiScale: () => Promise.resolve(null),
+      pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
-      trades: () => isUser ? api.meTrades(20) : api.getAllTrades(20),
+      trades: () => api.getPairedTrades(80),
+      live: () => api.liveStatus().catch(() => null),
     }
-    const names = Object.keys(callers)
-    const results = await Promise.all(names.map(async (name) => {
+    const timeouts = { pnl: 25000, trades: 25000, positions: 20000 }
+    // Progressive loading: update state as each promise resolves, so the
+    // Telegram Mini App shows data immediately rather than waiting for all.
+    const results = await Promise.allSettled(Object.entries(callers).map(async ([name, fn]) => {
       try {
-        const v = await withTimeout(callers[name](), 12000)
+        const v = await withTimeout(fn(), timeouts[name] || 15000)
         const len = (JSON.stringify(v) || '').length
         miniLog('load', name, 'OK len=' + len)
+        // Update state immediately per promise
+        switch (name) {
+          case 'health': setConnected(v?.connected); setDemoMode(v?.demo); break
+          case 'portfolio': setPortfolio(v); break
+          case 'rotation': setRotation(v); break
+          case 'impulse': setImpulse(v); break
+          case 'validation': setValidation(v); break
+          case 'ai': setAiBot(v); break
+          case 'aiScale': setAiScale(v); break
+          case 'positions': {
+            const pos = Array.isArray(v) ? v : (v?.positions || v?.data || [])
+            setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
+            break
+          }
+          case 'trades': {
+            let list = []
+            if (Array.isArray(v)) list = v
+            else if (Array.isArray(v?.trades)) list = v.trades
+            else if (Array.isArray(v?.data)) list = v.data
+            setTrades(list || [])
+            break
+          }
+          case 'pnl': setPnlData(v); break
+          case 'live': setLiveStatus(v); break
+        }
         return [name, v]
       } catch (e) {
         miniLog('load', name, 'ERROR', e.message || String(e))
         return [name, null]
       }
     }))
-    const map = Object.fromEntries(results)
-    if (map.health) { setConnected(map.health.connected); setDemoMode(map.health.demo) }
-    if (map.portfolio) setPortfolio(map.portfolio)
-    if (map.rotation) setRotation(map.rotation)
-    if (map.impulse) setImpulse(map.impulse)
-    if (map.positions) setPositions(map.positions.positions || [])
-    if (map.trades) setTrades(map.trades.trades || [])
+    const map = Object.fromEntries(
+      results.map((r, i) => [Object.keys(callers)[i], r.status === 'fulfilled' ? r.value : null])
+    )
+    // Fallback for PnL if pnl endpoint failed
+    if (!map.pnl) {
+      const aiP = Number(map.ai?.lifetime_pnl ?? map.ai?.total_pnl ?? 0)
+      setPnlData({
+        total: aiP, '1d': 0, week: 0, unrealized: 0,
+        per_bot: aiP ? { 'AI Discretionary 1H': aiP } : {},
+        source: 'mini_ai_seed',
+      })
+    }
     if (isUser) {
       try {
         const m = await withTimeout(api.me(), 10000)
@@ -490,7 +642,7 @@ export default function MiniAppPage() {
   /* ── Auto-refresh every 30s ── */
   useEffect(() => {
     if (authing || authError) return
-    const id = setInterval(load, 30000)
+    const id = setInterval(load, 45000)
     return () => clearInterval(id)
   }, [authing, authError, load])
 
@@ -533,45 +685,131 @@ export default function MiniAppPage() {
 
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
 
+  /* ── LIVE Mirror connect/disconnect ── */
+  const liveConnect = async () => {
+    if (!liveKey || !liveSecret || !livePass) return
+    setLiveConnecting(true)
+    try {
+      await withTimeout(api.liveConnect({
+        key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE'
+      }), 20000)
+      setLiveKey(''); setLiveSecret(''); setLivePass('')
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+    setLiveConnecting(false)
+  }
+  const liveDisconnect = async () => {
+    try {
+      await withTimeout(api.liveDisconnect(), 15000)
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+  }
 
-  /* ── Bot status card ── */
-  const botCard = (name, s, iconColor) => {
-    const running = s?.running
-    const pnl = s?.total_pnl ?? 0
+
+  /* ── Compact strategy card (full width, with optional status text) ── */
+  const botCard = (name, s, iconColor, shortLabel, wide = false) => {
+    if (!s) return null
+    const running = !!s?.running
+    const pnl = Number(
+      (s?.total_pnl_source === 'okx_history' ? s?.total_pnl : null)
+      ?? s?.total_pnl
+      ?? s?.lifetime_pnl
+      ?? 0
+    )
+    const nPos = Array.isArray(s?.open_positions) ? s.open_positions.length
+      : (Array.isArray(s?.positions) ? s.positions.length : 0)
+    const tradesN = Number(s?.total_trades ?? 0) || 0
+    // Status text: prefer last decision pulse/reason (AI), else description
+    let statusText = ''
+    const ld = s?.last_decision || {}
+    if (ld?.pulse) statusText = String(ld.pulse)
+    else if (ld?.reason) statusText = String(ld.reason)
+    else if (s?.pulse) statusText = String(s.pulse)
+    else if (s?.description) statusText = String(s.description)
+    // Health indicator for AI (alive/stale/error)
+    const h = s?.health || {}
+    let statusTone = 'text-[var(--txt-muted)]'
+    if (h?.last_llm_error) statusTone = 'text-[var(--warn)]'
+    if (h?.consecutive_fails > 0 || h?.last_tick_error) statusTone = 'text-[var(--loss)]'
+    if (running && !h?.last_llm_error && !h?.last_tick_error && !h?.consecutive_fails) {
+      statusTone = 'text-[var(--profit)]'
+    }
     return (
-      <Card className="flex-1 min-w-0">
-        <div className="flex items-center justify-between mb-1">
-          <div className="flex items-center gap-1.5">
-            <Bot size={14} className={iconColor} />
-            <span className="text-xs font-bold text-[var(--txt)] truncate">{name}</span>
+      <Card className={`min-w-0 py-2.5 ${wide ? 'col-span-2' : ''}`}>
+        <div className="flex items-center justify-between gap-1 mb-1">
+          <div className="flex items-center gap-1 min-w-0">
+            <Bot size={12} className={`${iconColor} flex-shrink-0`} />
+            <span className="text-2xs font-bold text-[var(--txt)] truncate">{shortLabel || name}</span>
           </div>
-          <span className={`flex items-center gap-1 text-2xs font-semibold px-1.5 py-0.5 rounded-md ${
-            running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${running ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--txt-muted)]'}`} />
-            {running ? t('mini.running') : t('mini.stopped')}
-          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--txt-muted)]'}`} title={running ? t('mini.running') : t('mini.stopped')} />
         </div>
-        <div className="flex items-end justify-between">
-          <div>
-            <div className="text-xs text-[var(--txt-secondary)]">{t('mini.pnl')}</div>
-            <div className={`text-base font-bold mono ${pnlClass(pnl)}`}>{pnlSign(pnl)}</div>
+        <div className={`text-base font-bold mono ${pnlClass(pnl)}`}>{pnlSign(pnl)}</div>
+        <div className="flex justify-between mt-1 text-2xs text-[var(--txt-muted)]">
+          <span>{running ? t('mini.running') : t('mini.stopped')}</span>
+          <span>{tradesN}t · {nPos}pos</span>
+        </div>
+        {statusText && (
+          <div className={`mt-1.5 text-2xs leading-relaxed ${statusTone} break-words whitespace-pre-wrap max-h-16 overflow-hidden`}>
+            {statusText.slice(0, 220)}
           </div>
-          <div className="text-right">
-            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.balance')}</div>
-            <div className="text-xs font-semibold mono text-[var(--txt)]">{fmt(s?.equity ?? 0)}</div>
-          </div>
-        </div>
-        <div className="flex gap-3 mt-2 pt-2 border-t border-[var(--border)] text-2xs text-[var(--txt-muted)]">
-          <span>Трейды: <b className="text-[var(--txt)]">{s?.total_trades ?? 0}</b></span>
-          <span>WinRate: <b className="text-[var(--txt)]">{fmt(s?.win_rate ?? 0, 0)}%</b></span>
-          <span>Позиции: <b className="text-[var(--txt)]">{(s?.open_positions || s?.positions || []).length}</b></span>
-        </div>
+        )}
       </Card>
     )
   }
 
+
+  // Active-only PnL for mini summary cards
+  const activeNames = []
+        if (aiBot?.running) activeNames.push('AI Discretionary 1H')
+  
+  const tradeIsActive = (tr) => {
+    if (!activeNames.length) return false
+    const b = String(tr?.bot || '')
+    return activeNames.some(n => b === n || b.includes(n))
+  }
+  const sumTradesSince = (msBack) => {
+    const cut = Date.now() - msBack
+    let s = 0
+    for (const tr of (trades || [])) {
+      if (!tr || tr.pnl == null || tr.pnl === '') continue
+      const reason = String(tr.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (!tradeIsActive(tr)) continue
+      const ts = tr.exit_time || tr.time || ''
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms) || ms < cut) continue
+      s += Number(tr.pnl) || 0
+    }
+    return s
+  }
+  const miniDay = (() => {
+    const v = Number(pnlData?.['1d'] ?? 0)
+    if (v !== 0) return v
+    return sumTradesSince(86400000)
+  })()
+  const miniTotal = (() => {
+    const v = Number(pnlData?.total ?? 0)
+    if (v !== 0) return v
+    const per = pnlData?.per_bot || {}
+    const fromPer = Object.values(per).reduce((s, x) => s + Number(x || 0), 0)
+    if (fromPer !== 0) return fromPer
+    const aiP = Number(aiBot?.lifetime_pnl ?? aiBot?.total_pnl ?? 0)
+    if (aiP !== 0 && aiBot?.running) return aiP
+    return sumTradesSince(365 * 86400000)
+  })()
+  const miniUpl = Number(
+    pnlData?.unrealized
+    ?? (positions || []).reduce((s, p) => s + (Number(p?.upl) || 0), 0)
+  )
+
   if (authing) {
+
     return (
       <div className="h-screen flex flex-col items-center justify-center gap-3 bg-[var(--bg)] text-[var(--txt-secondary)]">
         <Loader2 size={28} className="animate-spin text-[var(--info)]" />
@@ -623,22 +861,37 @@ export default function MiniAppPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[var(--bg)] text-[var(--txt)]" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
+    <div
+      className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden"
+      style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
       {/* ═══ Header ═══ */}
-      <div className="sticky top-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)] border-b border-[var(--border)]">
+      <div className="flex-shrink-0 z-10 flex items-center justify-between px-4 py-3 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center">
-            <Zap size={14} className="text-white" />
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[var(--info)] via-[#6b5ce7] to-[#4a3fd1] flex items-center justify-center shadow-lg">
+            <Zap size={16} className="text-white" />
           </div>
-          <span className="text-sm font-bold text-[var(--txt)]">COPIX</span>
-          <span className={`ml-1 flex items-center gap-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${
+          <div className="flex flex-col">
+            <span className="text-sm font-bold text-[var(--txt)] leading-none">COPIX</span>
+            <span className="text-[0.6rem] text-[var(--txt-muted)] leading-none mt-0.5">AI Trading Terminal</span>
+          </div>
+          <span className={`ml-1 flex items-center gap-1 px-2 py-1 rounded-lg text-2xs font-bold ${
             connected ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'
           }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)]' : 'bg-[var(--loss)]'}`} />
-            {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse' : 'bg-[var(--loss)]'}`} />
+            {connected ? 'ON' : 'OFF'}
           </span>
+          <span className="px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--info-dim)] text-[var(--info)]">
+            DEMO
+          </span>
+          {liveStatus?.connected && (
+            <span className="flex items-center gap-1 px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--profit-dim)] text-[var(--profit)]">
+              <Wifi size={10} />
+              LIVE
+            </span>
+          )}
           {role === 'user' && me?.plan && (
-            <span className={`ml-1 px-1.5 py-0.5 rounded-md text-2xs font-bold ${
+            <span className={`ml-1 px-2 py-1 rounded-lg text-2xs font-bold ${
               me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
             }`}>
               {me?.plan === 'pro' ? '💎 PRO' : 'FREE'}
@@ -646,7 +899,7 @@ export default function MiniAppPage() {
           )}
         </div>
         <button
-          className="btn-icon"
+          className="btn-icon hover:bg-[var(--surface-raised)] transition-colors"
           onClick={load}
           disabled={loading}
           title={t('mini.reload')}
@@ -655,9 +908,9 @@ export default function MiniAppPage() {
         </button>
       </div>
 
-      <div className="p-3 space-y-3">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain p-3 space-y-3 pb-8" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
         {/* ═══ Data unavailable banner ═══ */}
-        {loaded && !portfolio && !rotation && !impulse && (
+        {loaded && !portfolio && !aiBot && (
           <div className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-[var(--warn-dim)] border border-[var(--warn)]">
             <span className="text-xs text-[var(--txt)]">{t('mini.data_error')}</span>
             <button
@@ -744,7 +997,7 @@ export default function MiniAppPage() {
                   <div className="flex gap-2 mt-3">
                     <button
                       className={`btn flex-1 ${rotation?.running ? 'btn-ghost' : 'btn-primary'}`}
-                      onClick={() => toggleBot('rotation')}
+                      onClick={() => /* retired */ null}
                       disabled={botAction !== null}
                     >
                       {botAction === 'rotation' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
@@ -752,7 +1005,7 @@ export default function MiniAppPage() {
                     </button>
                     <button
                       className={`btn flex-1 ${impulse?.running ? 'btn-ghost' : 'btn-primary'}`}
-                      onClick={() => toggleBot('impulse')}
+                      onClick={() => /* retired */ null}
                       disabled={botAction !== null}
                     >
                       {botAction === 'impulse' ? <Loader2 size={14} className="animate-spin" /> : <Bot size={14} />}
@@ -790,14 +1043,133 @@ export default function MiniAppPage() {
           )}
         </Card>
 
-        {/* ═══ Bots ═══ */}
+        {/* ═══ Today summary ═══ */}
+        <div className="grid grid-cols-3 gap-2">
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.today')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(miniDay)}`}>
+              {pnlSign(miniDay)}
+            </div>
+          </Card>
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.total_pnl')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(miniTotal)}`}>
+              {pnlSign(miniTotal)}
+            </div>
+          </Card>
+          <Card className="py-2 text-center">
+            <div className="text-2xs text-[var(--txt-muted)]">{t('mini.unrealized')}</div>
+            <div className={`text-sm font-bold mono ${pnlClass(miniUpl)}`}>
+              {pnlSign(miniUpl)}
+            </div>
+          </Card>
+        </div>
+
+        {/* ═══ Strategies — AI only ═══ */}
         <div>
           <SectionTitle>{t('mini.bots')}</SectionTitle>
-          <div className="flex gap-2">
-            {botCard('Momentum', rotation, 'text-[var(--info)]')}
-            {botCard('Impulse 1D', impulse, 'text-[var(--profit)]')}
+          <div className="grid grid-cols-1 gap-2">
+            {!!aiBot?.running
+              ? botCard('AI Discretionary 1H', aiBot, 'text-orange-400', 'AI 1H', true)
+              : (
+                <Card className="py-2.5 opacity-70">
+                  <div className="text-2xs font-bold text-[var(--txt-muted)]">AI Discretionary 1H</div>
+                  <div className="text-2xs text-[var(--txt-muted)] mt-1">Остановлен</div>
+                </Card>
+              )}
           </div>
         </div>
+
+        {/* ═══ LIVE Mirror (admin only) ═══ */}
+        {isAdmin && liveStatus?.connected && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE Mirror
+              </span>
+            </SectionTitle>
+            <Card className="border-[var(--profit)]/30">
+              <div className="grid grid-cols-4 gap-1.5 mb-2">
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                  <div className={`text-xs font-bold mono ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{fmt(liveStatus?.total_pnl ?? 0)}
+                  </div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Сделок</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.lifetime_trades ?? 0}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">WR</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
+                  <div className="text-xs font-bold mono">${fmt(liveStatus?.equity ?? 0, 0)}</div>
+                </div>
+              </div>
+              <button onClick={liveDisconnect} className="w-full btn btn-ghost text-2xs text-[var(--loss)]">
+                <WifiOff size={12} /> Отключить LIVE
+              </button>
+            </Card>
+          </div>
+        )}
+        {isAdmin && !liveStatus?.connected && liveStatus && (
+          <Card className="border-dashed border-[var(--border)]">
+            <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] mb-2">
+              <WifiOff size={12} /> LIVE Mirror отключён
+            </div>
+            <div className="space-y-1.5">
+              <input className="w-full input mono text-2xs" placeholder="API Key"
+                value={liveKey} onChange={e => setLiveKey(e.target.value)} />
+              <input className="w-full input mono text-2xs" type="password" placeholder="Secret Key"
+                value={liveSecret} onChange={e => setLiveSecret(e.target.value)} />
+              <input className="w-full input mono text-2xs" type="password" placeholder="Passphrase"
+                value={livePass} onChange={e => setLivePass(e.target.value)} />
+              <button className="w-full btn btn-primary text-2xs" onClick={liveConnect}
+                disabled={liveConnecting || !liveKey || !liveSecret || !livePass}>
+                {liveConnecting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
+                Подключить LIVE
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {/* ═══ LIVE positions ═══ */}
+        {liveStatus?.open_positions?.length > 0 && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE позиции
+              </span>
+            </SectionTitle>
+            <div className="space-y-1.5">
+              {liveStatus.open_positions.map((p, i) => {
+                const isLong = p.side !== 'short'
+                return (
+                  <Card key={i} className="py-2 border-[var(--profit)]/20">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-xs font-bold text-[var(--txt)] truncate">{p.coin}</span>
+                        <span className={`text-2xs font-bold px-1 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          {isLong ? 'LONG' : 'SHORT'}
+                        </span>
+                      </div>
+                      <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] font-semibold">LIVE</span>
+                    </div>
+                    <div className="flex items-center justify-between text-2xs text-[var(--txt-muted)] mono">
+                      <span>вх {fmt(p.entry_price, 4)}</span>
+                      <span>SL {fmt(p.stop_price, 4)}</span>
+                    </div>
+                  </Card>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ═══ Positions ═══ */}
         <div>
@@ -807,16 +1179,16 @@ export default function MiniAppPage() {
               {t('mini.no_positions')}
             </Card>
           ) : (
-            <div className="space-y-1.5">
-              {positions.map((p, i) => {
-                const upl = Number(p.upl || 0)
-                const side = (p.posSide || 'net').toLowerCase()
+            <div className="space-y-1.5 max-h-[min(50vh,22rem)] overflow-y-auto overscroll-y-contain pr-1" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
+              {(Array.isArray(positions) ? positions : []).filter(Boolean).map((p, i) => {
+                const upl = Number(p?.upl || 0)
+                const side = String(p?.posSide || p?.pos_side || 'net').toLowerCase()
                 return (
                   <Card key={i} className="py-2.5">
                     <div className="flex items-center justify-between mb-1">
                       <div className="flex items-center gap-1.5 min-w-0">
                         <span className="text-xs font-bold text-[var(--txt)] truncate">{p.instId}</span>
-                        {p.bot && (
+                        {(p.bot) && (
                           <span className="px-1 py-0.5 rounded bg-[var(--info-dim)] text-[var(--info)] text-2xs font-semibold">
                             {p.bot}
                           </span>
@@ -859,38 +1231,53 @@ export default function MiniAppPage() {
         {/* ═══ Last trades ═══ */}
         <div>
           <SectionTitle>{t('mini.last_trades')}</SectionTitle>
-          {trades.length === 0 ? (
+          {displayTrades.length === 0 ? (
             <Card className="text-center py-4 text-xs text-[var(--txt-muted)]">
               {t('mini.no_trades')}
             </Card>
           ) : (
             <Card className="p-0 overflow-hidden">
-              <div className="divide-y divide-[var(--border)]">
-                {trades.slice(0, 8).map((tr, i) => {
+              <div className="divide-y divide-[var(--border)] max-h-72 overflow-y-auto overscroll-contain">
+                {displayTrades.slice(0, 30).map((tr, i) => {
                   const pnl = Number(tr.pnl || 0)
                   const reason = tr.reason || ''
-                  const isOpen = reason === 'open'
+                  const isOpen = tr.isOpen || reason === 'open'
+                  const botShort = (tr.bot || '')
+                    .replace('AI Discretionary 1H', 'AI')
+                    .replace('AI Scale-In 1H', 'AI')
+                    .replace('AI Scale-In', 'AI')
+                    .replace('MACD+Donchian Validation', 'Valid')
+                    .replace('Impulse 1D', 'Impulse')
+                    .replace('Momentum', 'Mom')
                   return (
-                    <div key={i} className="flex items-center justify-between px-3 py-2">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5">
+                    <div key={i} className="flex items-center justify-between px-3 py-2 gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
                           <span className="text-xs font-bold text-[var(--txt)] truncate">
                             {tr.coin || tr.symbol || '—'}
                           </span>
+                          {botShort && (
+                            <span className="px-1 py-0.5 rounded bg-[var(--surface-overlay)] text-2xs text-[var(--txt-secondary)] font-semibold">
+                              {botShort}
+                            </span>
+                          )}
+                          {String(tr.account_mode || '').toLowerCase() === 'live' && (
+                            <span className="px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] text-2xs font-bold">LIVE</span>
+                          )}
                           <span className={`text-2xs font-semibold ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
-                            {isOpen ? t('mini.open') : reason}
+                            {isOpen ? t('mini.open') : (reason && reason !== 'closed' ? reason : '')}
                           </span>
                         </div>
                         <div className="text-2xs text-[var(--txt-muted)]">
                           {fmtTime(tr.time)}
-                          {tr.exit_price ? ` • ${t('mini.entry')} ${fmt(tr.entry_price ?? tr.entry)} → ${t('mini.exit')} ${fmt(tr.exit_price)}` : ''}
+                          {tr.exit ? ` • ${t('mini.entry')} ${fmt(tr.entry)} → ${t('mini.exit')} ${fmt(tr.exit)}` : ''}
                         </div>
                       </div>
                       <div className="text-right">
                         <div className={`text-sm font-bold mono ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
-                          {isOpen ? fmt(tr.entry_price ?? tr.entry) : pnlSign(pnl)}
+                          {isOpen ? fmt(tr.entry) : pnlSign(pnl)}
                         </div>
-                        <div className="text-2xs text-[var(--txt-muted)]">{fmt(tr.size)}</div>
+                        <div className="text-2xs text-[var(--txt-muted)]">{tr.size ? fmt(tr.size) : '—'}</div>
                       </div>
                     </div>
                   )
@@ -902,7 +1289,7 @@ export default function MiniAppPage() {
 
         {/* ═══ Footer ═══ */}
         <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
-          COPIX • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+          COPIX • {connected ? (liveStatus?.connected ? 'DEMO + LIVE' : 'DEMO') : 'OFFLINE'}
         </div>
 
         {/* ═══ Diagnostics panel (admin only) ═══ */}
@@ -947,5 +1334,14 @@ export default function MiniAppPage() {
         )}
       </div>
     </div>
+  )
+}
+
+
+export default function MiniAppPage(props) {
+  return (
+    <MiniAppErrorBoundary>
+      <MiniAppPageInner {...props} />
+    </MiniAppErrorBoundary>
   )
 }

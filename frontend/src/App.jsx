@@ -1,22 +1,21 @@
 import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
+  LayoutDashboard, Bot, BarChart3, ScrollText, Settings, Users,
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
+import { api } from './services/api'
 import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
-const BacktestPage = lazy(() => import('./pages/BacktestPage'))
 const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const AdminPage = lazy(() => import('./pages/AdminPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
-const TrackerPage = lazy(() => import('./pages/TrackerPage'))
-import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -85,6 +84,7 @@ function AppLayout() {
   const [health, setHealth] = useState({ status: 'checking' })
   const [latencyMs, setLatencyMs] = useState(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
+  const [modeBusy, setModeBusy] = useState(false)
 
   const isGuest = auth?.role === 'guest'
   const isAdmin = auth?.role === 'admin'
@@ -97,7 +97,10 @@ function AppLayout() {
         setLatencyMs(Math.round(performance.now() - t0))
         setHealth(h)
         setConnected(h.connected)
-        setDemoMode(h.demo)
+        // Guests always observe showcase DEMO; admin/user follow server mode
+        const role = localStorage.getItem('auth_role')
+        if (role === 'guest') setDemoMode(true)
+        else setDemoMode(!!h.demo)
       } catch {
         setLatencyMs(null)
         setHealth({ status: 'error' })
@@ -105,7 +108,10 @@ function AppLayout() {
       }
     }
     check()
-    const interval = setInterval(check, 15000)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      check()
+    }, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -116,13 +122,42 @@ function AppLayout() {
     setAuth(null)
   }
 
+  const switchTradingMode = async (toDemo) => {
+    if (!isAdmin) return
+    if (!toDemo) {
+      const ok = window.confirm('Перейти в LIVE (реальный счёт OKX)? Как на бирже: демо и лайв разделены.')
+      if (!ok) return
+    }
+    setModeBusy(true)
+    // Optimistic UI — switch label immediately, data catches up
+    setDemoMode(!!toDemo)
+    try {
+      const r = await api.setMode(!!toDemo, toDemo ? undefined : 'LIVE')
+      setDemoMode(!!r.demo)
+      setConnected(true)
+      try {
+        window.dispatchEvent(new CustomEvent('trading-mode-changed', { detail: { demo: !!r.demo } }))
+      } catch { /* ignore */ }
+    } catch (e) {
+      // revert on failure
+      setDemoMode(!toDemo)
+      alert(e.message || 'Не удалось переключить режим')
+    } finally {
+      setModeBusy(false)
+    }
+  }
+
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
-    { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
+    // AI-only mode: Smart Money hidden
+    // { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
+    ...(isAdmin ? [
+      { to: '/admin', icon: Users, label: 'Админка' },
+      { to: '/settings', icon: Settings, label: t('nav.settings') },
+    ] : []),
   ]
 
   return (
@@ -159,11 +194,36 @@ function AppLayout() {
         {/* Right: Status + Controls */}
         <div className="flex items-center gap-2">
           {/* Connection Status */}
-          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
-            <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
-            </span>
+          <div data-tour="status" className="flex items-center gap-2 px-1.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <span className={`w-1.5 h-1.5 rounded-full ml-1 ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
+            {!connected ? (
+              <span className="text-2xs font-semibold text-[var(--loss)] pr-2">OFFLINE</span>
+            ) : isAdmin ? (
+              <div className="flex items-center rounded-md overflow-hidden border border-[var(--border)] text-2xs font-bold">
+                <button
+                  type="button"
+                  disabled={modeBusy}
+                  onClick={() => switchTradingMode(true)}
+                  className={`px-2.5 py-1 transition-colors ${demoMode ? 'bg-[var(--warn)] text-black' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+                  title="Демо-торговля (витрина OKX Demo)"
+                >
+                  Demo
+                </button>
+                <button
+                  type="button"
+                  disabled={modeBusy}
+                  onClick={() => switchTradingMode(false)}
+                  className={`px-2.5 py-1 transition-colors ${!demoMode ? 'bg-[var(--loss)] text-white' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
+                  title="Реальная торговля (Live OKX)"
+                >
+                  Live
+                </button>
+              </div>
+            ) : (
+              <span className={`text-2xs font-semibold pr-2 ${demoMode ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
+                {demoMode ? 'DEMO' : 'LIVE'}
+              </span>
+            )}
             {health?.version ? (
               <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title="Build / git commit">
                 {String(health.version).slice(0, 7)}
@@ -174,6 +234,16 @@ function AppLayout() {
                 {latencyMs}ms
               </span>
             ) : null}
+            {health?.bots && (
+              <span className="hidden sm:flex items-center gap-1 ml-0.5" title={t('nav.bots_status_tip')}>
+                {['rotation', 'impulse', 'validation'].map(k => (
+                  <span
+                    key={k}
+                    className={`w-1.5 h-1.5 rounded-full ${health.bots[k] ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)] opacity-40'}`}
+                  />
+                ))}
+              </span>
+            )}
           </div>
 
           {/* User role */}
@@ -220,15 +290,31 @@ function AppLayout() {
         </div>
       )}
 
+      {connected && demoMode && (
+        <div data-tour="demo-trading-banner" className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-1.5 bg-[var(--warn-dim)] border-b border-[var(--warn)]/30 text-2xs text-[var(--warn)]">
+          <span className="font-semibold">Демо-торговля · виртуальные средства</span>
+          {isAdmin && (
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm text-2xs"
+              disabled={modeBusy}
+              onClick={() => switchTradingMode(false)}
+            >
+              Выйти в Live
+            </button>
+          )}
+        </div>
+      )}
+
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 overflow-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
+      <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
-          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
-          <Route path="/backtest" element={<BacktestPage connected={connected} />} />
+          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
+          <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
           <Route path="/docs" element={<DocsPage />} />
         </Routes>
@@ -266,6 +352,21 @@ export default function App() {
     return token ? { token, role } : null
   })
 
+  // Bootstrap session from httpOnly cookie when localStorage empty (after deploy)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const s = await api.authStatus()
+        if (cancelled || !s?.authenticated) return
+        const role = s.role === 'admin' ? 'admin' : (s.role || 'guest')
+        localStorage.setItem('auth_role', role)
+        setAuth((prev) => prev || { token: localStorage.getItem('auth_token') || 'cookie', role })
+      } catch { /* not logged in */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   return (
     <ThemeProvider>
       <TranslationProvider>
@@ -274,7 +375,6 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route path="/tracker" element={<TrackerPage />} />
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>
