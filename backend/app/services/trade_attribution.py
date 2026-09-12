@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 CLORD_PREFIX_TO_BOT = {
     "rot": "Momentum",
     "imp": "Impulse 1D",
-    "ais": "AI Scale-In 1H",
+    "ais": "AI Discretionary 1H",  # Scale-In retired
     "ai": "AI Discretionary 1H",
     "val": "MACD+Donchian Validation",
     "scl": "Order Book Scalp",
@@ -35,7 +35,7 @@ BOT_ID_TO_LABEL = {
     "impulse_strategy": "Impulse 1D",
     "validation_strategy": "MACD+Donchian Validation",
     "ai_strategy": "AI Discretionary 1H",
-    "ai_scale_strategy": "AI Scale-In 1H",
+    "ai_scale_strategy": "AI Discretionary 1H",  # retired
     "smart_money": "Умные деньги",
     "smart_money_mirror": "Умные деньги",
 }
@@ -45,29 +45,13 @@ STRICT_BOTS = set(CLORD_PREFIX_TO_BOT.values()) | {
     "Impulse 1D",
     "MACD+Donchian Validation",
     "AI Discretionary 1H",
-    "AI Scale-In 1H",
     "Order Book Scalp",
     "VWAP Mean Reversion",
     "Умные деньги",
 }
 
-# Built-in corrections (ops incidents). Prefer DB overrides for new cases.
-# 11.09.2026 ETH LONG close −414.06 was opened by Scale-In but tagged Discretionary.
-BUILTIN_OVERRIDES: List[dict] = [
-    # Entire 2026-09-11 session was Scale-In (Telegram opens); closes were stolen by Discretionary
-    {
-        "exit_date": "2026-09-11",
-        "to_bot": "AI Scale-In 1H",
-        "from_bots": ["AI Discretionary 1H", ""],
-    },
-    {
-        "inst_id": "ETH-USDT-SWAP",
-        "pnl_near": -414.06,
-        "pos_side": "long",
-        "exit_date": "2026-09-11",
-        "to_bot": "AI Scale-In 1H",
-    },
-]
+# Scale-In retired — no forced overrides to Scale
+BUILTIN_OVERRIDES: List[dict] = []
 
 
 def pnl_timezone() -> ZoneInfo:
@@ -79,27 +63,21 @@ def pnl_timezone() -> ZoneInfo:
 
 
 def is_scale_bot(label_or_id: str) -> bool:
-    s = (label_or_id or "").strip().lower()
-    return "scale" in s or s in ("ais", "ai_scale_strategy", "scl")
+    """Scale-In retired — always False for ownership logic."""
+    return False
 
 
 def is_discretionary_bot(label_or_id: str) -> bool:
     s = (label_or_id or "").strip().lower()
-    if is_scale_bot(s):
-        return False
     return (
         "discretionary" in s
-        or s in ("ai", "ai_strategy", "ai discretionary 1h", "ai discretionary")
+        or "scale" in s  # legacy Scale-In treated as AI
+        or s in ("ai", "ai_strategy", "ai discretionary 1h", "ai discretionary", "ais", "ai_scale_strategy")
     )
 
 
 def prefer_owner_label(a: str, b: str) -> str:
-    """When two labels compete for same instrument, Scale-In wins over Discretionary."""
-    if is_scale_bot(a):
-        return a if a else "AI Scale-In 1H"
-    if is_scale_bot(b):
-        return b if b else "AI Scale-In 1H"
-    return a or b or ""
+    return a or b or "AI Discretionary 1H"
 
 
 def bot_from_clord(cl_ord_id: str) -> str:
@@ -260,7 +238,7 @@ def apply_attribution(
                     prev = t.get("bot")
                     t["bot"] = to_bot
                     if "Scale" in to_bot:
-                        t["bot_id"] = "ai_scale_strategy"
+                        t["bot_id"] = "ai_strategy"
                     elif "Discretionary" in to_bot:
                         t["bot_id"] = "ai_strategy"
                     t["_attr"] = "forced"
@@ -282,9 +260,9 @@ def apply_attribution(
             or "11.09.26" in et
             or "11.09.2026" in et
         ) and reason in ("closed", "close", "partial", "filled", ""):
-            if str(t.get("bot") or "") != "AI Scale-In 1H":
-                t["bot"] = "AI Scale-In 1H"
-                t["bot_id"] = "ai_scale_strategy"
+            if str(t.get("bot") or "") != "AI Discretionary 1H":
+                t["bot"] = "AI Discretionary 1H"
+                t["bot_id"] = "ai_strategy"
                 t["_attr"] = "hard_day_2026_09_11"
                 continue
 
@@ -294,8 +272,8 @@ def apply_attribution(
         except (TypeError, ValueError):
             pnl = 1e18
         if "ETH" in inst.upper() and abs(pnl - (-414.06)) < 12.0:
-            t["bot"] = "AI Scale-In 1H"
-            t["bot_id"] = "ai_scale_strategy"
+            t["bot"] = "AI Discretionary 1H"
+            t["bot_id"] = "ai_strategy"
             t["_attr"] = "hard_eth_414"
             continue
 

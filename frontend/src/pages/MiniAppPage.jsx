@@ -329,15 +329,7 @@ function MiniAppPageInner
       for (const p of (rotation?.open_positions || [])) pushOpen(p)
       for (const p of (impulse?.open_positions || [])) pushOpen(p)
       for (const p of (validation?.open_positions || [])) pushOpen(p)
-      const sclCoins = new Set(
-        (aiScale?.open_positions || []).map(p => String(p.coin || p.inst_id || '').toUpperCase().split('-')[0])
-      )
-      for (const p of (aiScale?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Scale-In 1H' })
-      for (const p of (aiBot?.open_positions || [])) {
-        const c = String(p.coin || p.inst_id || '').toUpperCase().split('-')[0]
-        if (sclCoins.has(c)) continue // Scale owns — not Discretionary
-        pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
-      }
+      for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
 
       const toRow = (tr, isOpen = false) => {
         const inst = tr.inst_id || tr.symbol || ''
@@ -570,7 +562,7 @@ function MiniAppPageInner
       impulse: () => AI_ONLY_MODE ? null : (isUser ? api.meStatus().then(s => s.impulse) : api.impulseStatus()),
       validation: () => AI_ONLY_MODE ? null : api.validationStatus(),
       ai: () => api.aiStatus(),
-      aiScale: () => api.aiScaleStatus(),
+      aiScale: () => Promise.resolve(null),
       pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(80),
@@ -778,7 +770,7 @@ function MiniAppPageInner
   if (impulse?.running) activeNames.push('Impulse 1D', 'Impulse')
   if (validation?.running) activeNames.push('MACD+Donchian Validation', 'Validation')
   if (aiBot?.running) activeNames.push('AI Discretionary 1H')
-  if (aiScale?.running) activeNames.push('AI Scale-In 1H', 'AI Scale-In')
+  
   const tradeIsActive = (tr) => {
     if (!activeNames.length) return false
     const b = String(tr?.bot || '')
@@ -1098,7 +1090,7 @@ function MiniAppPageInner
           <SectionTitle>{t('mini.bots')}</SectionTitle>
           <div className="grid grid-cols-2 gap-2">
             {!!aiBot?.running && botCard('AI Discretionary', aiBot, 'text-orange-400', 'AI 1H')}
-            {!!aiScale?.running && botCard('AI Scale-In', aiScale, 'text-fuchsia-400', 'SCL 1H')}
+            
             {!aiBot?.running && (
               <Card className="py-2.5 opacity-70">
                 <div className="text-2xs font-bold text-[var(--txt-muted)]">AI 1H</div>

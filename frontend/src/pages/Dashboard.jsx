@@ -255,7 +255,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
         api.aiStatus().catch(() => null),
-        api.aiScaleStatus().catch(() => null),
+        Promise.resolve(null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
         AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
@@ -369,7 +369,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const names = []
     if (AI_ONLY_MODE) {
       if (aiStatus?.running) names.push('AI Discretionary 1H')
-      if (demoMode && aiScaleStatus?.running) names.push('AI Scale-In 1H')
       return names
     }
     if (momentumStatus?.running) names.push('Momentum')
@@ -413,7 +412,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     return !m || m === 'demo'
   })()
   const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
-  const scalePnlResolved = (pnlModeOk && demoMode) ? Number(pnl?.per_bot?.['AI Scale-In 1H'] ?? 0) : 0
+  const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
     if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
@@ -424,7 +423,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
       return Number(pnl.total)
     }
-    if (AI_ONLY_MODE) return discPnlResolved + scalePnlResolved
+    if (AI_ONLY_MODE) return discPnlResolved
     if (pnl && pnl.total != null) return Number(pnl.total)
     return discPnlResolved + scalePnlResolved
   })()
@@ -471,9 +470,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         return rows
       }
       rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
-      if (demoMode) {
-        rows.push({ name: 'AI Scale-In 1H', val: Number(per['AI Scale-In 1H'] ?? 0) })
-      }
       return rows
     }
     for (const [bid, val] of Object.entries(per)) {
@@ -539,7 +535,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
     // Scale last — overwrites Discretionary if both claim same inst|side
-    addPositions(aiScaleStatus?.open_positions, 'AI Scale-In 1H')
+    addPositions(aiScaleStatus?.open_positions, 'AI Discretionary 1H')
     addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
@@ -550,20 +546,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const inst = p.instId || p.inst_id || ''
     const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
     // Scale memory ALWAYS wins over Discretionary / stale API bot
-    const sclHas = (aiScaleStatus?.open_positions || []).some(op => {
-      const c = String(op.coin || op.inst_id || op.instId || '').toUpperCase().split('-')[0]
-      return c === coin
-    })
-    if (sclHas) return 'AI Scale-In 1H'
-
     const key = `${inst}|${posSideKey}`
-    const fromMap = botMap[key] || ''
-    const raw = p.bot || ''
+    let fromMap = botMap[key] || ''
+    let raw = p.bot || ''
+    if (String(fromMap).includes('Scale') || String(raw).includes('Scale')) {
+      return 'AI Discretionary 1H'
+    }
     const retired = /impulse|validation|macd|momentum|vwap/i.test(String(raw))
-    if (fromMap === 'AI Scale-In 1H') return fromMap
-    if (fromMap && fromMap !== 'AI Discretionary 1H') return fromMap
-    // Don't trust Discretionary from map if API already says Scale
-    if (String(raw).includes('Scale')) return 'AI Scale-In 1H'
     if (fromMap) return fromMap
     if (retired && AI_ONLY_MODE) return ''
     return raw || ''
@@ -681,21 +670,10 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     for (const p of (validationStatus?.open_positions || [])) {
       if (isOnExchange(p)) pushOpen(p, 'Validation')
     }
-    for (const p of (aiScaleStatus?.open_positions || [])) {
-      const m = (p.account_mode || '').toLowerCase()
-      if (m === 'demo' && !demoMode) continue
-      if (m === 'live' && demoMode) continue
-      if (isOnExchange(p)) pushOpen(p, 'AI Scale-In 1H')
-    }
-    const scaleCoins = new Set(
-      (aiScaleStatus?.open_positions || []).map(p => String(p.coin || '').toUpperCase())
-    )
     for (const p of (aiStatus?.open_positions || [])) {
       const m = (p.account_mode || '').toLowerCase()
       if (m === 'demo' && !demoMode) continue
       if (m === 'live' && demoMode) continue
-      // Scale-In owns the coin — do not also show under Discretionary
-      if (scaleCoins.has(String(p.coin || '').toUpperCase())) continue
       if (isOnExchange(p)) pushOpen(p, 'AI Discretionary 1H')
     }
     // Smart Money opens/trades live only on /smart-money — not on main dashboard
@@ -1445,13 +1423,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             pnl={discPnlResolved}
             trades={discTradesResolved}
             winRate={aiStatus?.win_rate}
-            openCount={(() => {
-              const disc = aiStatus?.open_positions || []
-              const scl = aiScaleStatus?.open_positions || []
-              const sclCoins = new Set(scl.map(p => String(p.coin || '').toUpperCase()))
-              // If Scale-In also lists the same coin, Discretionary must not double-count
-              return disc.filter(p => !sclCoins.has(String(p.coin || '').toUpperCase())).length
-            })()}
+            openCount={(aiStatus?.open_positions || []).length}
             model={aiStatus?.model || aiStatus?.llm?.model}
             capital={aiStatus?.capital ?? aiStatus?.config?.capital}
             pulse={aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
@@ -1469,41 +1441,6 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
               try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
-
-          {demoMode && (
-          <DashBotPanel
-            title="AI Scale-In 1H"
-            version={aiScaleStatus?.version}
-            running={!!aiScaleStatus?.running}
-            loading={!aiScaleStatus}
-            accent="text-fuchsia-400"
-            pnl={scalePnlResolved}
-            trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
-            winRate={aiScaleStatus?.win_rate}
-            openCount={(aiScaleStatus?.open_positions || []).length}
-            model={aiScaleStatus?.model || aiScaleStatus?.llm?.model}
-            capital={aiScaleStatus?.capital ?? aiScaleStatus?.config?.capital}
-            pulse={aiScaleStatus?.pulse || aiScaleStatus?.description}
-            tagline={
-              `Scale-in ≤${aiScaleStatus?.scale_in?.max_adds ?? 2}` +
-              (aiScaleStatus?.config?.symbols
-                ? ` · ${(aiScaleStatus.config.symbols || []).join(' · ')}`
-                : ' · BTC · ETH · SOL · XRP')
-            }
-            isGuest={isGuest}
-            t={t}
-            startLabel={`${t('dash.start')} Scale-In`}
-            onStart={async () => {
-              try {
-                await api.aiScaleStart({ capital: 5000, execute: true, max_adds: 2 })
-                loadData()
-              } catch (e) { alert(e.message) }
-            }}
-            onStop={async () => {
-              try { await api.aiScaleStop(); loadData() } catch (e) { alert(e.message) }
-            }}
-          />
-          )}
 
 
         </div>

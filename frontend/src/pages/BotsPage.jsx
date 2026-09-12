@@ -528,7 +528,7 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
       AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
       AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
       api.aiStatus().catch(() => null),
-      api.aiScaleStatus().catch(() => null),
+      Promise.resolve(null),
     ])
     if (m) {
       setMomentumStatus(m)
@@ -872,122 +872,6 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
         )}
 
         {!isGuest && (
-          <BotCard
-            id="ai"
-            name={t('bots.ai_name')}
-            stratId={aiStatus?.strategy || 'ai_discretionary_1h'}
-            version={aiStatus?.version || 'v0.4'}
-            icon={Bot}
-            accentDim="bg-violet-500/15"
-            accentTxt="text-violet-400"
-            statusMode={aiRunning ? 'live' : 'stopped'}
-            statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
-            coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
-            description={aiStatus?.pulse || aiStatus?.description || t('bots.ai_desc')}
-            tags={[
-              t('bots.tag_tf_1h'),
-              'BTC · ETH · SOL · XRP',
-              t('bots.tag_ai_llm'),
-              t('bots.tag_leverage', { x: aiStatus?.config?.max_leverage || 3 }),
-              t('bots.tag_positions', { n: aiStatus?.config?.max_positions || 1 }),
-              ...((aiStatus?.execute || aiStatus?.llm?.execute) ? [t('bots.tag_demo_exec')] : []),
-            ]}
-            tagline={t('bots.ai_tagline')}
-            backtest={null}
-            pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
-            trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
-            winRate={aiStatus?.win_rate}
-            sparklinePnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
-            startedAt={aiRunning ? aiStartedAt : null}
-            openPositions={aiStatus?.open_positions || []}
-            managed={aiStatus?.running}
-            lastActivity={aiStatus?.last_activity}
-            heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 120) * 3}
-            apiAlive={apiAlive}
-            onToggle={aiToggle}
-            isGuest={isGuest}
-            loading={aiLoading}
-            t={t}
-            showCapital={!demoMode && !aiRunning}
-            capitalValue={aiCapital}
-            onCapitalChange={(v) => setAiCapital(v)}
-          />
-        )}
-
-        
-        {/* Demo A/B compare */}
-        {demoMode && abCompare && (
-          <div className="panel col-span-full px-4 py-3 mb-2 border border-violet-500/30 bg-violet-500/5 rounded-[var(--radius-lg)]">
-            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-              <div className="text-sm font-semibold text-violet-300">Demo A/B · Discretionary vs Scale-In</div>
-              {!isGuest && (
-                <button
-                  type="button"
-                  disabled={abLoading}
-                  onClick={abStartBoth}
-                  className="text-xs px-3 py-1.5 rounded-lg bg-violet-600/80 hover:bg-violet-500 text-white disabled:opacity-50"
-                >
-                  {abLoading ? '…' : 'Старт A/B (оба)'}
-                </button>
-              )}
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-              {[abCompare.a, abCompare.b].filter(Boolean).map((s) => (
-                <div key={s.label} className="rounded-lg border border-[var(--border)] p-3 bg-[var(--bg-elevated)]">
-                  <div className="font-medium mb-1">{s.label} {s.running ? '· live' : '· stop'}</div>
-                  <div>PnL: <span className={Number(s.pnl) >= 0 ? 'text-emerald-400' : 'text-rose-400'}>${Number(s.pnl || 0).toFixed(2)}</span></div>
-                  <div>Сделок: {s.trades ?? 0} · WR: {s.win_rate != null ? `${s.win_rate}%` : '—'}</div>
-                  <div>Открыто: {s.open ?? 0} · session: ${Number(s.session_pnl || 0).toFixed(2)}</div>
-                </div>
-              ))}
-            </div>
-            <div className="mt-2 text-[11px] text-[var(--text-muted)]">
-              {abCompare.winner ? `Лидер: ${abCompare.winner}. ` : ''}{abCompare.note}
-              {' '}Рекомендуется: A=BTC/ETH, B=SOL/XRP, ≥5 сделок каждый, горизонт ~7 дней.
-            </div>
-          </div>
-        )}
-
-{/* AI Scale-In — DCA by AI when trend holds */}
-        <BotCard
-          id="ai-scale"
-          name="AI Scale-In 1H"
-          stratId="ai_scale_1h"
-          version={aiScaleStatus?.version || 'v1.0'}
-          icon={Brain}
-          accentDim="from-violet-500/20"
-          accentTxt="text-violet-400"
-          statusMode={aiScaleStatus?.running ? 'live' : 'idle'}
-          statusLabel={aiScaleStatus?.running ? 'Running' : 'Stopped'}
-          coins={aiScaleStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
-          description={
-            aiScaleStatus?.description
-            || 'Вход по AI-сигналу. Если цена против, но тренд по индикаторам держится — AI докупает частями. Выход тоже через AI/индикаторы.'
-          }
-          tags={[
-            'Scale-In',
-            'AI sizing',
-            `adds≤${aiScaleStatus?.scale_in?.max_adds || 3}`,
-          ]}
-          pnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
-          trades={aiScaleStatus?.lifetime_trades ?? aiScaleStatus?.total_trades ?? 0}
-          winRate={aiScaleStatus?.win_rate}
-          sparklinePnl={aiScaleStatus?.lifetime_pnl ?? aiScaleStatus?.total_pnl ?? 0}
-          startedAt={aiScaleStatus?.running && aiScaleStatus?.started_at ? Date.parse(aiScaleStatus.started_at) : null}
-          openPositions={aiScaleStatus?.open_positions || []}
-          managed={aiScaleStatus?.running}
-          lastActivity={aiScaleStatus?.last_activity}
-          heartbeatMaxAge={(aiScaleStatus?.config?.poll_interval_sec || 120) * 3}
-          apiAlive={apiAlive}
-          onToggle={aiScaleToggle}
-          isGuest={isGuest}
-          loading={aiScaleLoading}
-          t={t}
-          showCapital={!!demoMode && !aiScaleStatus?.running}
-          capitalValue={aiScaleCapital}
-          onCapitalChange={(v) => setAiScaleCapital(v)}
-        />
-
       </div>
 
       <SliderPanel

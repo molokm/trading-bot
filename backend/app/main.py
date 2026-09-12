@@ -340,7 +340,7 @@ async def startup():
         # One-shot: last ETH close mis-tagged as Discretionary → Scale-In (DB only;
         # in-memory KPI adjusted after bots start — avoid global before declaration)
         try:
-            marker = await db.get_setting("fix_day_20260911_to_scale_v5")
+            marker = "1"  # Scale-In retired
             if not marker:
                 # All 2026-09-11 closes belonged to Scale-In (Telegram opens by SCL)
                 fix = await db.reassign_day_closes_to_scale("2026-09-11")
@@ -795,8 +795,8 @@ async def startup():
 
     # AI Scale-In (SCL) — independent auto-start after deploy/restart (default ON)
     try:
-        print("[startup] AI Scale-In (SCL) auto-start ...", flush=True)
-        _scale_auto = os.getenv("AI_SCALE_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+        print("[startup] AI Scale-In (SCL) — RETIRED, skip auto-start", flush=True)
+        _scale_auto = False  # permanently disabled — product is AI Discretionary only
         # Scale-In is DEMO-only — never auto-start in LIVE
         if (not _env_demo):
             print("[startup]   AI Scale-In skipped — LIVE mode (DEMO-only bot)", flush=True)
@@ -2295,6 +2295,10 @@ async def ai_scale_status():
 
 @app.post("/api/ai-scale/start", dependencies=[Depends(require_admin)])
 async def ai_scale_start(data: dict = None):
+    """Retired."""
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"ok": False, "error": "AI Scale-In retired"}, status_code=410)
+
     global ai_scale_bot
     data = data or {}
     if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
@@ -4272,9 +4276,9 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
         bot_name = ""
         try:
             coin0 = (inst or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
-            if ai_scale_bot and coin0 in (getattr(ai_scale_bot, "_positions", None) or {}):
-                bot_name = "AI Scale-In 1H"
-            elif ai_bot and coin0 in (getattr(ai_bot, "_positions", None) or {}):
+            if ai_bot and coin0 in (getattr(ai_bot, "_positions", None) or {}):
+                bot_name = "AI Discretionary 1H"
+            elif ai_scale_bot and coin0 in (getattr(ai_scale_bot, "_positions", None) or {}):
                 bot_name = "AI Discretionary 1H"
         except Exception:
             pass
@@ -4471,22 +4475,21 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                         bot_name = "AI Discretionary 1H"
         except Exception:
             pass
-        if scale_has:
-            bot_name = "AI Scale-In 1H"
-            # Drop phantom from Discretionary so cards/pulse stay clean
-            try:
-                if disc_has and ai_bot and getattr(ai_bot, "_positions", None) is not None:
-                    ai_bot._positions.pop(coin0, None)
-                    print(f"[positions] drop Discretionary phantom {coin0} (Scale owns)", flush=True)
-            except Exception:
-                pass
-            try:
-                await claim_open(db, AI_SCALE_BOT_ID, inst, side_n, sz, entry)
-                await release_open(db, AI_BOT_ID, inst, side_n)
-            except Exception as e:
-                print(f"[positions] scale claim: {e}", flush=True)
-        elif disc_has and bot_name in ("", "AI Discretionary 1H"):
-            bot_name = "AI Discretionary 1H"
+        # Single AI bot: any AI-family open → Discretionary
+        if scale_has or disc_has or bot_name in ("AI Scale-In 1H", "AI Discretionary 1H", ""):
+            if scale_has or disc_has or bot_name.startswith("AI"):
+                bot_name = "AI Discretionary 1H"
+                try:
+                    if ai_scale_bot and getattr(ai_scale_bot, "_positions", None) and coin0 in ai_scale_bot._positions:
+                        ai_scale_bot._positions.pop(coin0, None)
+                except Exception:
+                    pass
+                try:
+                    if sz > 0 and entry > 0:
+                        await claim_open(db, AI_BOT_ID, inst, side_n, sz, entry)
+                        await release_open(db, AI_SCALE_BOT_ID, inst, side_n)
+                except Exception as e:
+                    print(f"[positions] AI claim: {e}", flush=True)
 
         if bot_name and inst and sz > 0:
             await _inject_bot_memory(bot_name, inst, side_n, sz, entry)
@@ -7213,8 +7216,6 @@ def _active_bot_labels() -> set:
     try:
         if AI_ONLY_MODE:
             labels.add("AI Discretionary 1H")
-            if _env_demo:
-                labels.add("AI Scale-In 1H")
             return labels
         if rotation and getattr(rotation, "_running", False):
             labels.add("Momentum")

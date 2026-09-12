@@ -25,7 +25,8 @@ PNL_EPOCH_ISO = "2026-09-01T00:00:00+00:00"
 PNL_TZ = ZoneInfo("Europe/Moscow")
 
 _CLORD_MAP = (
-    ("ais", "AI Scale-In 1H"),
+    # ais legacy Scale-In fills fold into the single remaining AI bot
+    ("ais", "AI Discretionary 1H"),
     ("ai", "AI Discretionary 1H"),
     ("rot", "Momentum"),
     ("momentum", "Momentum"),
@@ -33,11 +34,11 @@ _CLORD_MAP = (
     ("val", "MACD+Donchian Validation"),
 )
 
-AI_ONLY_LABELS = ("AI Discretionary 1H", "AI Scale-In 1H")
+AI_ONLY_LABELS = ("AI Discretionary 1H",)
 
 _BOT_ID_MAP = {
     "ai_strategy": "AI Discretionary 1H",
-    "ai_scale_strategy": "AI Scale-In 1H",
+    "ai_scale_strategy": "AI Discretionary 1H",  # retired — fold into AI
     "ai_discretionary": "AI Discretionary 1H",
 }
 
@@ -63,9 +64,7 @@ def normalize_bot_label(raw: str) -> str:
     if s in AI_ONLY_LABELS:
         return s
     low = s.lower()
-    if "scale" in low:
-        return "AI Scale-In 1H"
-    if "discretionary" in low or s in ("AI", "ai_strategy"):
+    if "scale" in low or "discretionary" in low or s in ("AI", "ai_strategy", "AI Scale-In 1H"):
         return "AI Discretionary 1H"
     if s in _BOT_ID_MAP:
         return _BOT_ID_MAP[s]
@@ -107,7 +106,7 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
     except Exception:
         pass
     if "2026-09-11" in str(ts) or "11.09.26" in str(ts):
-        return "AI Scale-In 1H"
+        return "AI Discretionary 1H"
 
     # Hard: ETH ≈ -414 is Scale-In (ops correction 11.09.2026)
     try:
@@ -116,7 +115,7 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
         pnl = 0.0
     inst = str(row.get("inst_id") or row.get("symbol") or "")
     if "ETH" in inst.upper() and abs(pnl - (-414.06)) < 12.0:
-        return "AI Scale-In 1H"
+        return "AI Discretionary 1H"
 
     cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "")
     tagged = label_from_clord(cl)
@@ -413,12 +412,6 @@ async def compute(
 
     out["account_mode"] = (account_mode or "demo").lower()
     # Guarantee keys for UI isolation
-    if (account_mode or "").lower() == "live" and ai_only:
-        # Scale-In is demo-only — zero on live response
-        pb = dict(out.get("per_bot") or {})
-        pb["AI Scale-In 1H"] = 0.0
-        out["per_bot"] = pb
-        out["total"] = round(float(pb.get("AI Discretionary 1H") or 0), 2)
-        out["strategy_realized"] = out["total"]
+    if ai_only:
         out["active_bots"] = ["AI Discretionary 1H"]
     return out
