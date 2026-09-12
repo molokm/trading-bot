@@ -251,13 +251,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
         isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.aiStatus().catch(() => null),
         Promise.resolve(null),
-        AI_ONLY_MODE ? Promise.resolve(null) : api.smartMoneyStatus().catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : api.vwapRevStatus().catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
       ])
       
@@ -290,7 +290,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     // 30s cache, so updates arrive a little after the fast tier.
     try {
       const [momTrades, trades, pnlData] = await Promise.all([
-        AI_ONLY_MODE ? Promise.resolve(null) : api.momentumTrades(30).catch(() => null),
+        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.getPairedTrades(200).catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])

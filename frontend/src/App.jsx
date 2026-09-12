@@ -10,15 +10,12 @@ import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
-const BacktestPage = lazy(() => import('./pages/BacktestPage'))
 const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const AdminPage = lazy(() => import('./pages/AdminPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
-const SmartMoneyPage = lazy(() => import('./pages/SmartMoneyPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
-const TrackerPage = lazy(() => import('./pages/TrackerPage'))
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -148,7 +145,6 @@ function AppLayout() {
     { to: '/bots', icon: Bot, label: t('nav.bots') },
     // AI-only mode: Smart Money hidden
     // { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
-    { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
     ...(isAdmin ? [
@@ -309,8 +305,6 @@ function AppLayout() {
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
           <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
-          <Route path="/smart-money" element={<SmartMoneyPage connected={connected} isGuest={isGuest} />} />
-          <Route path="/backtest" element={<BacktestPage connected={connected} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/admin" element={<AdminPage />} />
@@ -374,7 +368,6 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route path="/tracker" element={<TrackerPage />} />
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>

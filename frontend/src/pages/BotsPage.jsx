@@ -524,9 +524,9 @@ export default function BotsPage({ connected, isGuest, demoMode = true }) {
   const refreshStatus = useCallback(async () => {
     // Skip disabled bots in AI_ONLY_MODE to reduce API calls by 75%
     const [m, i, v, a, asc] = await Promise.all([
-      AI_ONLY_MODE ? Promise.resolve(null) : api.momentumStatus().catch(() => null),
-      AI_ONLY_MODE ? Promise.resolve(null) : api.impulseStatus().catch(() => null),
-      AI_ONLY_MODE ? Promise.resolve(null) : api.validationStatus().catch(() => null),
+      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
       api.aiStatus().catch(() => null),
       Promise.resolve(null),
     ])

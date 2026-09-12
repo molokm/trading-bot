@@ -186,7 +186,7 @@ _imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false
 _val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
 # Product mode: only AI Discretionary is active (no multi-bot PnL/claim collisions)
-AI_ONLY_MODE = os.getenv("AI_ONLY_MODE", "1").strip().lower() not in ("0", "false", "no", "off")
+AI_ONLY_MODE = True  # single-bot product: AI Discretionary only
 if AI_ONLY_MODE:
     _mom_auto = False
     _imp_auto = False
@@ -460,7 +460,8 @@ async def startup():
         
         # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
         try:
-            from app.services.smart_money_mirror import get_mirror
+            get_mirror = lambda *a, **k: None  # retired
+            # from app.services.smart_money_mirror import get_mirror
             m = get_mirror(client_manager=client_manager, notifier=None, db=db)
             await m.hydrate_from_db()
             print(f"[startup] SM mirror targets={len(getattr(m, '_targets', {}) or {})}", flush=True)
@@ -2745,7 +2746,8 @@ async def smart_money_status():
         st = sm_tracker.get_status()
     # Merge mirror opens so dashboard never treats SM BTC as orphan
     try:
-        from app.services.smart_money_mirror import get_mirror
+        get_mirror = lambda *a, **k: None  # retired
+            # from app.services.smart_money_mirror import get_mirror
         m = get_mirror(client_manager=client_manager, notifier=None, db=db)
         mop = m.open_positions_list() if hasattr(m, "open_positions_list") else []
         cur = list(st.get("open_positions") or [])
@@ -3069,7 +3071,8 @@ async def smart_money_trades(limit: int = 100):
 
 @app.get("/api/smart-money/mirror/status")
 async def smart_money_mirror_status():
-    from app.services.smart_money_mirror import get_mirror
+    get_mirror = lambda *a, **k: None  # retired
+            # from app.services.smart_money_mirror import get_mirror
     m = get_mirror(client_manager=client_manager, notifier=None, db=db)
     return m.get_status()
 
@@ -3089,7 +3092,8 @@ async def smart_money_mirror_start(data: dict = None):
 
 @app.post("/api/smart-money/mirror/stop", dependencies=[Depends(require_admin)])
 async def smart_money_mirror_stop(data: dict = None):
-    from app.services.smart_money_mirror import get_mirror
+    get_mirror = lambda *a, **k: None  # retired
+            # from app.services.smart_money_mirror import get_mirror
     data = data or {}
     address = data.get("address") or data.get("unique_code") or ""
     m = get_mirror(client_manager=client_manager, notifier=None, db=db)
@@ -3140,7 +3144,8 @@ async def smart_money_start(data: dict = None):
             print(f"[sm/start] db persist: {e}", flush=True)
         # Restore mirror + claims for open SM positions (e.g. BTC)
         try:
-            from app.services.smart_money_mirror import get_mirror
+            get_mirror = lambda *a, **k: None  # retired
+            # from app.services.smart_money_mirror import get_mirror
             m = get_mirror(client_manager=client_manager, notifier=None, db=db)
             await m.hydrate_from_db()
         except Exception as e:
