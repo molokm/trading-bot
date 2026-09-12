@@ -1,2 +1,4 @@
-"""RETIRED."""
+
+"""RETIRED stub."""
 BOT_CARDS = []
+BACKTEST_SUMMARY = {}
