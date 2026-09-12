@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye
+  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye,
+  Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -284,7 +285,6 @@ function MiniAppPageInner
   const [loaded, setLoaded] = useState(false)
   const [connected, setConnected] = useState(false)
   const [demoMode, setDemoMode] = useState(true)
-  const [modeSwitching, setModeSwitching] = useState(false)
   const [portfolio, setPortfolio] = useState(null)
   const [rotation, setRotation] = useState(null)
   const [impulse, setImpulse] = useState(null)
@@ -293,6 +293,11 @@ function MiniAppPageInner
   const [aiScale, setAiScale] = useState(null)
   const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [liveKey, setLiveKey] = useState('')
+  const [liveSecret, setLiveSecret] = useState('')
+  const [livePass, setLivePass] = useState('')
+  const [liveConnecting, setLiveConnecting] = useState(false)
   const [trades, setTrades] = useState([])
 
   const [tg, setTg] = useState(null)
@@ -316,15 +321,6 @@ function MiniAppPageInner
   // hidden while its instrument+side is still open on OKX/bots (no real close).
   const displayTrades = useMemo(() => {
     try {
-      const wantMode = demoMode ? 'demo' : 'live'
-      const matchesMode = (tr) => {
-        if (!tr || typeof tr !== 'object') return false
-        const m = String(tr.account_mode || tr.mode || '').trim().toLowerCase()
-        // LIVE: only explicit live rows (never untagged legacy / demo)
-        if (wantMode === 'live') return m === 'live'
-        // DEMO: demo or untagged legacy
-        return !m || m === 'demo'
-      }
       const openKeys = new Set()
       const pushOpen = (p) => {
         if (!p || typeof p !== 'object') return
@@ -335,7 +331,6 @@ function MiniAppPageInner
         openKeys.add(`${inst}|${isLong ? 'long' : 'short'}`)
       }
       for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
-      // AI-only: retired bots ignored
       for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
 
       const toRow = (tr, isOpen = false) => {
@@ -357,34 +352,27 @@ function MiniAppPageInner
       const closedRaw = []
       for (const tr of (Array.isArray(trades) ? trades : [])) {
         if (!tr || typeof tr !== 'object') continue
-        if (!matchesMode(tr)) continue
         const inst = tr.inst_id || tr.symbol || ''
         const reason = String(tr.reason || '').toLowerCase()
         if (reason === 'open' || reason === 'add') continue
         closedRaw.push(tr)
         if (inst) {
           const sideKey = String(tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
-          // Soft suppress only if same inst+side still open AND trade has no pnl yet
           if (openKeys.has(`${inst}|${sideKey}`) && (tr.pnl == null || tr.pnl === '')) continue
         }
         out.push(toRow(tr, false))
       }
-      // If filter ate everything but we have closed rows — show them
       if (out.length === 0 && closedRaw.length > 0) {
         return closedRaw.slice(0, 40).map(tr => toRow(tr, false))
       }
-      // Paired API has data — show ONLY those rows (same source as web app),
-      // no merge with bot recent_trades (they duplicate the same close with a
-      // slightly different price/pnl/reason, e.g. ind_exit vs OKX close).
       if (out.length > 0) {
         out.sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
         return out.slice(0, 40)
       }
-      // Paired API empty — fallback to bot recent_trades ONLY if mode matches
       const botTrades = []
       for (const bot of [aiBot]) {
         for (const tr of (bot?.recent_trades || [])) {
-          if (tr && typeof tr === 'object' && matchesMode(tr)) {
+          if (tr && typeof tr === 'object') {
             const reason = String(tr.reason || '').toLowerCase()
             if (reason !== 'open' && reason !== 'add') {
               botTrades.push({ ...tr, bot: tr.bot || bot?.strategy || '' })
@@ -398,7 +386,7 @@ function MiniAppPageInner
       console.error('[mini] displayTrades', e)
       return []
     }
-  }, [trades, positions, aiBot, demoMode])
+  }, [trades, positions, aiBot])
 
   useEffect(() => {
     if (!showLogs) return
@@ -574,6 +562,7 @@ function MiniAppPageInner
       pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(80),
+      live: () => api.liveStatus().catch(() => null),
     }
     const timeouts = { pnl: 25000, trades: 25000, positions: 20000 }
     // Progressive loading: update state as each promise resolves, so the
@@ -602,17 +591,11 @@ function MiniAppPageInner
             if (Array.isArray(v)) list = v
             else if (Array.isArray(v?.trades)) list = v.trades
             else if (Array.isArray(v?.data)) list = v.data
-            // Prefer rows matching current mode; LIVE drops untagged/demo
-            const want = (demoMode ? 'demo' : 'live')
-            const filtered = (list || []).filter(Boolean).filter((tr) => {
-              const m = String(tr?.account_mode || tr?.mode || '').trim().toLowerCase()
-              if (want === 'live') return m === 'live'
-              return !m || m === 'demo'
-            })
-            setTrades(filtered)
+            setTrades(list || [])
             break
           }
           case 'pnl': setPnlData(v); break
+          case 'live': setLiveStatus(v); break
         }
         return [name, v]
       } catch (e) {
@@ -700,35 +683,33 @@ function MiniAppPageInner
     setBotAction(null)
   }
 
-  const switchTradingMode = async (wantDemo) => {
-    if (modeSwitching || wantDemo === demoMode) return
-    if (!wantDemo) {
-      const ok = window.confirm(
-        'Переключить на LIVE? Будут показаны данные реального счёта (если ключи подключены).'
-      )
-      if (!ok) return
-    }
-    setModeSwitching(true)
-    // Drop previous mode data immediately — avoid DEMO rows under LIVE label
-    setTrades([])
-    setPositions([])
-    setPnl(null)
-    try {
-      if (role === 'user') {
-        await withTimeout(api.meSetMode(wantDemo, wantDemo ? undefined : 'LIVE'), 20000)
-      } else {
-        // admin / owner showcase toggle
-        await withTimeout(api.setMode(wantDemo, wantDemo ? undefined : 'LIVE'), 20000)
-      }
-      setDemoMode(!!wantDemo)
-      await load()
-    } catch (e) {
-      alert(e.message || 'Не удалось сменить режим')
-    }
-    setModeSwitching(false)
-  }
-
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
+
+  /* ── LIVE Mirror connect/disconnect ── */
+  const liveConnect = async () => {
+    if (!liveKey || !liveSecret || !livePass) return
+    setLiveConnecting(true)
+    try {
+      await withTimeout(api.liveConnect({
+        key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE'
+      }), 20000)
+      setLiveKey(''); setLiveSecret(''); setLivePass('')
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+    setLiveConnecting(false)
+  }
+  const liveDisconnect = async () => {
+    try {
+      await withTimeout(api.liveDisconnect(), 15000)
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+  }
 
 
   /* ── Compact strategy card (full width, with optional status text) ── */
@@ -900,32 +881,15 @@ function MiniAppPageInner
             <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse' : 'bg-[var(--loss)]'}`} />
             {connected ? 'ON' : 'OFF'}
           </span>
-          <div className="flex items-center gap-1 rounded-lg border border-[var(--border)] p-0.5 bg-[var(--surface)]">
-            <button
-              type="button"
-              disabled={!connected || modeSwitching}
-              onClick={() => switchTradingMode(true)}
-              className={`px-2 py-1 rounded-md text-2xs font-bold transition-colors ${
-                demoMode
-                  ? 'bg-[var(--info)] text-white'
-                  : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'
-              }`}
-            >
-              DEMO
-            </button>
-            <button
-              type="button"
-              disabled={!connected || modeSwitching}
-              onClick={() => switchTradingMode(false)}
-              className={`px-2 py-1 rounded-md text-2xs font-bold transition-colors ${
-                !demoMode
-                  ? 'bg-[var(--loss)] text-white'
-                  : 'text-[var(--txt-muted)] hover:text-[var(--txt)]'
-              }`}
-            >
-              {modeSwitching ? '…' : 'LIVE'}
-            </button>
-          </div>
+          <span className="px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--info-dim)] text-[var(--info)]">
+            DEMO
+          </span>
+          {liveStatus?.connected && (
+            <span className="flex items-center gap-1 px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--profit-dim)] text-[var(--profit)]">
+              <Wifi size={10} />
+              LIVE
+            </span>
+          )}
           {role === 'user' && me?.plan && (
             <span className={`ml-1 px-2 py-1 rounded-lg text-2xs font-bold ${
               me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
@@ -1116,6 +1080,97 @@ function MiniAppPageInner
           </div>
         </div>
 
+        {/* ═══ LIVE Mirror (admin only) ═══ */}
+        {isAdmin && liveStatus?.connected && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE Mirror
+              </span>
+            </SectionTitle>
+            <Card className="border-[var(--profit)]/30">
+              <div className="grid grid-cols-4 gap-1.5 mb-2">
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                  <div className={`text-xs font-bold mono ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{fmt(liveStatus?.total_pnl ?? 0)}
+                  </div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Сделок</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.lifetime_trades ?? 0}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">WR</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
+                  <div className="text-xs font-bold mono">${fmt(liveStatus?.equity ?? 0, 0)}</div>
+                </div>
+              </div>
+              <button onClick={liveDisconnect} className="w-full btn btn-ghost text-2xs text-[var(--loss)]">
+                <WifiOff size={12} /> Отключить LIVE
+              </button>
+            </Card>
+          </div>
+        )}
+        {isAdmin && !liveStatus?.connected && liveStatus && (
+          <Card className="border-dashed border-[var(--border)]">
+            <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] mb-2">
+              <WifiOff size={12} /> LIVE Mirror отключён
+            </div>
+            <div className="space-y-1.5">
+              <input className="w-full input mono text-2xs" placeholder="API Key"
+                value={liveKey} onChange={e => setLiveKey(e.target.value)} />
+              <input className="w-full input mono text-2xs" type="password" placeholder="Secret Key"
+                value={liveSecret} onChange={e => setLiveSecret(e.target.value)} />
+              <input className="w-full input mono text-2xs" type="password" placeholder="Passphrase"
+                value={livePass} onChange={e => setLivePass(e.target.value)} />
+              <button className="w-full btn btn-primary text-2xs" onClick={liveConnect}
+                disabled={liveConnecting || !liveKey || !liveSecret || !livePass}>
+                {liveConnecting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
+                Подключить LIVE
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {/* ═══ LIVE positions ═══ */}
+        {liveStatus?.open_positions?.length > 0 && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE позиции
+              </span>
+            </SectionTitle>
+            <div className="space-y-1.5">
+              {liveStatus.open_positions.map((p, i) => {
+                const isLong = p.side !== 'short'
+                return (
+                  <Card key={i} className="py-2 border-[var(--profit)]/20">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-xs font-bold text-[var(--txt)] truncate">{p.coin}</span>
+                        <span className={`text-2xs font-bold px-1 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          {isLong ? 'LONG' : 'SHORT'}
+                        </span>
+                      </div>
+                      <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] font-semibold">LIVE</span>
+                    </div>
+                    <div className="flex items-center justify-between text-2xs text-[var(--txt-muted)] mono">
+                      <span>вх {fmt(p.entry_price, 4)}</span>
+                      <span>SL {fmt(p.stop_price, 4)}</span>
+                    </div>
+                  </Card>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {/* ═══ Positions ═══ */}
         <div>
           <SectionTitle>{t('mini.positions')}</SectionTitle>
@@ -1206,6 +1261,9 @@ function MiniAppPageInner
                               {botShort}
                             </span>
                           )}
+                          {String(tr.account_mode || '').toLowerCase() === 'live' && (
+                            <span className="px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] text-2xs font-bold">LIVE</span>
+                          )}
                           <span className={`text-2xs font-semibold ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
                             {isOpen ? t('mini.open') : (reason && reason !== 'closed' ? reason : '')}
                           </span>
@@ -1231,7 +1289,7 @@ function MiniAppPageInner
 
         {/* ═══ Footer ═══ */}
         <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
-          COPIX • {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
+          COPIX • {connected ? (liveStatus?.connected ? 'DEMO + LIVE' : 'DEMO') : 'OFFLINE'}
         </div>
 
         {/* ═══ Diagnostics panel (admin only) ═══ */}

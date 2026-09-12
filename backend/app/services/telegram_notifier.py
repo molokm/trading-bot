@@ -429,13 +429,18 @@ class TelegramNotifier:
 
     def close_msg(self, coin: str, side: str, entry: float, exit_px: float,
                   pnl: float, reason: str, bot_name: str = "",
-                  signal_id: int = 0, **_kwargs) -> str:
+                  signal_id: int = 0, account_mode: str = "",
+                  account_key: str = "", **_kwargs) -> str:
+        mode = (account_mode or "").strip().lower()
+        mode_line = ""
+        if mode in ("demo", "live"):
+            mode_line = f"\nРежим: <b>{'DEMO' if mode == 'demo' else 'LIVE'}</b>"
         icon = "✅" if pnl >= 0 else "❌"
         sign = "+" if pnl >= 0 else ""
         return (
             f"{icon} <b>ЗАКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Бот: <b>{_esc(bot_name)}</b>\n"
+            f"Бот: <b>{_esc(bot_name)}</b>{mode_line}\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: {self._side_label(side)}\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
@@ -445,12 +450,17 @@ class TelegramNotifier:
 
     def partial_msg(self, coin: str, side: str, entry: float, exit_px: float,
                     pnl: float, closed_sz: float, remaining_sz: float,
-                    bot_name: str = "", signal_id: int = 0) -> str:
+                    bot_name: str = "", signal_id: int = 0,
+                    account_mode: str = "", account_key: str = "", **_kwargs) -> str:
+        mode = (account_mode or "").strip().lower()
+        mode_line = ""
+        if mode in ("demo", "live"):
+            mode_line = f"\nРежим: <b>{'DEMO' if mode == 'demo' else 'LIVE'}</b>"
         sign = "+" if pnl >= 0 else ""
         return (
             f"📌 <b>ЧАСТИЧНЫЙ ТЕЙК</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Бот: <b>{_esc(bot_name)}</b>\n"
+            f"Бот: <b>{_esc(bot_name)}</b>{mode_line}\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Закрыто: {_esc(closed_sz)} (осталось {_esc(remaining_sz)})\n"
             f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
@@ -458,11 +468,16 @@ class TelegramNotifier:
         )
 
     def add_msg(self, coin: str, side: str, price: float, size: float,
-                total: float, bot_name: str = "", signal_id: int = 0) -> str:
+                total: float, bot_name: str = "", signal_id: int = 0,
+                account_mode: str = "", account_key: str = "", **_kwargs) -> str:
+        mode = (account_mode or "").strip().lower()
+        mode_line = ""
+        if mode in ("demo", "live"):
+            mode_line = f"\nРежим: <b>{'DEMO' if mode == 'demo' else 'LIVE'}</b>"
         return (
             f"⬆️ <b>ДОКУПКА (PYRAMID)</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Бот: <b>{_esc(bot_name)}</b>\n"
+            f"Бот: <b>{_esc(bot_name)}</b>{mode_line}\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
             f"Направление: {self._side_label(side)}\n"
             f"Цена: {_esc(price)}\n"

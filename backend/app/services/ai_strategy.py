@@ -1691,6 +1691,8 @@ class AIStrategy:
                     coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
                     exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
                     bot_name=self.BOT_NAME, signal_id=signal_id,
+                    account_mode=self._account_mode_tag()[0],
+                    account_key=self._account_mode_tag()[1],
                 )
                 await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
             except Exception as e:
@@ -1965,6 +1967,7 @@ class AIStrategy:
                     reason=reason,
                     bot_name=self.BOT_NAME + " (LIVE)",
                     signal_id=signal_id,
+                    account_mode="live", account_key="live",
                 )
                 await self.notifier.send_trade(
                     _txt,
