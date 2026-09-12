@@ -239,6 +239,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         })
         setTickers(byCoin)
       }
+      setDataFreshAt(Date.now())
       setLoading(false)
     } catch {
       setLoading(false)
