@@ -493,14 +493,19 @@ async def startup():
         _lm_key = _live_key
         _lm_secret = _live_secret
         _lm_pass = _live_pass
+        _lm_source = "encrypted_env"
         if not (_lm_key and _lm_secret and _lm_pass):
-            # Fallback to DB-persisted live mirror creds
+            # Fallback to DB-persisted live mirror creds (plain text from live_connect)
+            _lm_source = "db_live_mirror"
             try:
                 _lm_key = _lm_key or (await db.get_setting("live_mirror_key") or "")
                 _lm_secret = _lm_secret or (await db.get_setting("live_mirror_secret") or "")
                 _lm_pass = _lm_pass or (await db.get_setting("live_mirror_pass") or "")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[startup] live mirror DB fallback error: {e}", flush=True)
+        if not (_lm_key and _lm_secret and _lm_pass):
+            _lm_source = "none"
+        print(f"[startup] live mirror creds: source={_lm_source} key={'yes' if _lm_key else 'no'}", flush=True)
         if _lm_key and _lm_secret and _lm_pass:
             try:
                 await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
@@ -512,6 +517,8 @@ async def startup():
                     print("[startup] live mirror init rejected (demo=true), cleared", flush=True)
             except Exception as e:
                 print(f"[startup] live mirror init: {e}", flush=True)
+        else:
+            print("[startup] live mirror: no creds found — mirror disabled", flush=True)
         
         # Restore Smart Money tracker + mirrors from DB (survive Render /tmp wipe)
         try:
@@ -2541,7 +2548,8 @@ async def live_connect(data: dict = None):
             loop.create_task(ai_bot._ensure_live_equity())
         except Exception as e:
             print(f"[LIVE] bind to ai_bot: {e}", flush=True)
-    print("[LIVE] mirror CONNECTED", flush=True)
+    _lc_ok = ai_bot.live_client_manager is live_manager if ai_bot else False
+    print(f"[LIVE] mirror CONNECTED — ai_bot.live_client_manager=live_manager:{_lc_ok} live_ready={ai_bot._live_ready() if ai_bot else 'no_bot'}", flush=True)
     return {"message": "LIVE mirror подключён", "connected": True}
 
 
