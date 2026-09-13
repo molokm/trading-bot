@@ -2321,7 +2321,8 @@ async def ai_start(data: dict = None):
         if data.get("symbols"):
             cfg.symbols = list(data["symbols"])
 
-        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram)
+        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram,
+                            live_client_manager=live_manager)
         ai_bot.start()
 
         global _positions_cache
