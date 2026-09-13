@@ -443,19 +443,45 @@ class AIStrategy:
         """Best-effort live account equity (USDT totalEq). Cached ~30s."""
         import time as _t
         now = _t.time()
-        if self._live_equity > 0 and (now - float(self._live_equity_ts or 0)) < 30:
+        if (now - float(self._live_equity_ts or 0)) < 30 and self._live_equity_ts:
             return self._live_equity
         c = self._live_client()
         if not c:
             return self._live_equity
         try:
             r = await c.get_balance()
+            if (r or {}).get("error") or str((r or {}).get("code") or "0") not in ("0", "0.0", ""):
+                # OKX error payload — keep last known
+                print(f"[AI] live equity OKX: {r}", flush=True)
+                return self._live_equity
             data = (r or {}).get("data") or []
+            total = 0.0
             if data:
-                total = float(data[0].get("totalEq") or 0)
-                if total > 0:
-                    self._live_equity = total
-                    self._live_equity_ts = now
+                acct = data[0] if isinstance(data[0], dict) else {}
+                for k in ("totalEq", "adjEq", "isoEq"):
+                    try:
+                        v = float(acct.get(k) or 0)
+                        if v > total:
+                            total = v
+                    except (TypeError, ValueError):
+                        pass
+                # Fallback: sum per-ccy equity in details (USDT / USD)
+                if total <= 0:
+                    for d in (acct.get("details") or []):
+                        ccy = str(d.get("ccy") or "").upper()
+                        if ccy not in ("USDT", "USD", "USDC"):
+                            continue
+                        for k in ("eq", "cashBal", "availBal", "availEq"):
+                            try:
+                                v = float(d.get(k) or 0)
+                                if v > 0:
+                                    total += v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+            self._live_equity = float(total)
+            self._live_equity_ts = now
+            print(f"[AI] live equity refreshed: ${self._live_equity:.2f}", flush=True)
         except Exception as e:
             print(f"[AI] live equity: {e}", flush=True)
         return self._live_equity
@@ -485,6 +511,13 @@ class AIStrategy:
                 except Exception:
                     pass
             self._tick_count += 1
+                # Refresh live equity every few ticks so UI is not stuck at $0
+                if self._live_client() and (self._tick_count % 3 == 1):
+                    try:
+                        await self._ensure_live_equity()
+                    except Exception:
+                        pass
+
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
             import time as _t
@@ -3635,7 +3668,7 @@ class AIStrategy:
             },
             "live": {
                 "connected": self._live_ready(),
-                "equity": round(self._live_equity, 2) if self._live_ready() else 0,
+                "equity": round(float(self._live_equity or 0), 2),
                 "total_pnl": round(self._live_lifetime_pnl, 2),
                 "session_pnl": round(self._live_session_pnl, 2),
                 "lifetime_trades": self._live_lifetime_trades,
