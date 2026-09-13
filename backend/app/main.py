@@ -73,7 +73,7 @@ from app.services.auth import (
     check_rate_limit, record_attempt, guest_rate_limited, record_guest,
     get_blacklist, set_blacklist,
 )
-from app.services.strategy_manager import StrategyManager, PerUserClientManager
+from app.services.strategy_manager import StrategyManager, PerUserClientManager, set_hydrate_deps
 from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
 from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
 from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
@@ -225,6 +225,7 @@ equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
+set_hydrate_deps(_user_okx_client, lambda: RotationConfig())
 ai_bot = None
 ai_scale_bot = None
 scalp_bot = None  # Order Book Scalp instance (retired)
@@ -900,6 +901,15 @@ async def startup():
             )
     except Exception as e:
         print(f"[startup]   AI Scale-In FAILED: {e}", flush=True)
+
+    # ── Auto-restart user bots (Pro + OKX keys) after deploy ──
+    try:
+        await strategy_mgr.hydrate_user_bots(
+            db=db,
+            notifier_fn=lambda uid: _user_notifier(uid),
+        )
+    except Exception as e:
+        print(f"[startup] user bots hydrate: {e}", flush=True)
 
     # Apply pending ETH→Scale PnL memory fix + strip trade_log (after bots exist)
     try:
