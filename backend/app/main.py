@@ -2546,6 +2546,50 @@ async def live_connect(data: dict = None):
             # Trigger live equity fetch
             loop = asyncio.get_event_loop()
             loop.create_task(ai_bot._ensure_live_equity())
+            # Re-hydrate live positions from exchange after manual connect
+            async def _rehydrate_live():
+                await asyncio.sleep(1)
+                try:
+                    lc = ai_bot._live_client()
+                    if not lc:
+                        return
+                    live_bid = ai_bot._live_bot_id()
+                    raw_pos = await db.get_setting(f"open_positions:{live_bid}") if db else None
+                    stored = {}
+                    if raw_pos:
+                        stored = json.loads(raw_pos) if isinstance(raw_pos, str) else (raw_pos or {})
+                        if not isinstance(stored, dict):
+                            stored = {}
+                    all_pos = await lc.get_positions()
+                    for p in ((all_pos.get("data") or []) if isinstance(all_pos, dict) else (all_pos or [])):
+                        c = (p.get("instId") or "").replace("-USDT-SWAP", "")
+                        pos_side = (p.get("posSide") or "net").lower()
+                        side = "short" if pos_side == "short" else "long"
+                        sz = float(p.get("pos") or 0)
+                        entry = float(p.get("avgPx") or 0)
+                        if sz <= 0 or entry <= 0 or c in ai_bot._live_positions:
+                            continue
+                        import math as _m
+                        unc = float(p.get("upl") or 0)
+                        old = stored.get(c) or {}
+                        peak = float(old.get("peak_price") or entry or 0)
+                        if not peak or _m.isnan(peak):
+                            peak = entry
+                        from app.services.ai_strategy import AIPosition
+                        pos = AIPosition(
+                            coin=c, inst_id=f"{c}-USDT-SWAP", side=side, size=sz,
+                            entry_price=entry, stop_price=float(old.get("stop_price") or 0),
+                            take_price=float(old.get("take_price") or 0),
+                            leverage=float(old.get("leverage") or 0),
+                            opened_at=old.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+                            peak_price=peak, unrealized_pnl=unc,
+                        )
+                        ai_bot._live_positions[c] = pos
+                        print(f"[LIVE] hydrate adopt {c}: sz={sz} entry={entry} pnl={unc:+.2f}", flush=True)
+                    ai_bot._persist_live()
+                except Exception as e:
+                    print(f"[LIVE] hydrate positions: {e}", flush=True)
+            loop.create_task(_rehydrate_live())
         except Exception as e:
             print(f"[LIVE] bind to ai_bot: {e}", flush=True)
     _lc_ok = ai_bot.live_client_manager is live_manager if ai_bot else False
