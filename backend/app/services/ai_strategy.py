@@ -2048,6 +2048,28 @@ class AIStrategy:
                     self._live_positions.pop(coin, None)
         self._persist_live()
 
+    async def _clone_missing_to_live(self):
+        """After hydrate: clone demo positions that are missing from live."""
+        if not self._live_ready():
+            return
+        for coin, demo_pos in self._positions.items():
+            if coin in self._live_positions:
+                continue
+            if demo_pos.size <= 0:
+                continue
+            entry = demo_pos.entry_price
+            stop_pct = abs(demo_pos.stop_price - entry) / entry if entry > 0 and demo_pos.stop_price > 0 else 0.03
+            take_pct = abs(demo_pos.take_price - entry) / entry if entry > 0 and demo_pos.take_price > 0 else 0.06
+            print(f"[AI-LIVE] clone_missing {coin}: {demo_pos.side} sz={demo_pos.size} "
+                  f"entry={entry:.4f}", flush=True)
+            try:
+                await self._open_live(
+                    coin, demo_pos.side, stop_pct, take_pct,
+                    reason="clone_missing_from_demo",
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
+
     def _persist_live(self):
         """Save live open positions snapshot (separate key from primary)."""
         if not self.db:
@@ -3207,6 +3229,11 @@ class AIStrategy:
                             print(f"[AI-LIVE] hydrate exchange孤儿 {coin}: sz={sz}", flush=True)
         except Exception as e:
             print(f"[AI-LIVE] hydrate positions: {e}", flush=True)
+        # Clone demo positions that are missing from live
+        try:
+            await self._clone_missing_to_live()
+        except Exception as e:
+            print(f"[AI-LIVE] clone_missing: {e}", flush=True)
 
         print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
               f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)

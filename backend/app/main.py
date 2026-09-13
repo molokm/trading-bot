@@ -2613,6 +2613,8 @@ async def live_connect(data: dict = None):
                         ai_bot._live_positions[c] = pos
                         print(f"[LIVE] hydrate adopt {c}: sz={sz} entry={entry} pnl={unc:+.2f}", flush=True)
                     ai_bot._persist_live()
+                    # Clone demo positions missing from live
+                    await ai_bot._clone_missing_to_live()
                 except Exception as e:
                     print(f"[LIVE] hydrate positions: {e}", flush=True)
             loop.create_task(_rehydrate_live())
