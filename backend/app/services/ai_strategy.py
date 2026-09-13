@@ -3557,6 +3557,7 @@ class AIStrategy:
                     "stop_price": getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0),
                     "take_price": getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0),
                     "leverage": getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0),
+                    "account_mode": "demo",
                 }
                 for p in self._positions.values()
             ],
@@ -3626,6 +3627,7 @@ class AIStrategy:
                         "stop_price": p.stop_price,
                         "take_price": p.take_price,
                         "leverage": p.leverage,
+                        "account_mode": "live",
                     }
                     for p in self._live_positions.values()
                 ],

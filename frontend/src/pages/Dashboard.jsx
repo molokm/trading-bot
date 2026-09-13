@@ -372,6 +372,40 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     pnl?.economic_approx
     ?? (strategyRealized + unrealizedPnl + fundingPnl)
   )
+  // Merge demo + live positions into one display list
+  const displayPositions = useMemo(() => {
+    const result = []
+    for (const p of (positions || [])) {
+      result.push({ ...p, account_mode: 'demo' })
+    }
+    const demoKeys = new Set()
+    for (const p of (positions || [])) {
+      const inst = (p.instId || '').replace('-USDT-SWAP', '').toUpperCase()
+      const side = (p.posSide || 'long').toLowerCase()
+      demoKeys.add(`${inst}|${side}`)
+    }
+    for (const lp of (liveStatus?.open_positions || [])) {
+      const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
+      const side = (lp.side || 'long').toLowerCase()
+      if (demoKeys.has(`${coin}|${side}`)) continue
+      const sz = parseFloat(lp.size || 0)
+      if (!sz) continue
+      result.push({
+        instId: lp.symbol || `${coin}-USDT-SWAP`,
+        posSide: side,
+        pos: String(sz),
+        avgPx: String(lp.entry_price || 0),
+        markPx: '',
+        upl: '',
+        uplRatio: '',
+        mgnRatio: '',
+        lever: lp.leverage ? String(lp.leverage) : '',
+        account_mode: 'live',
+        coin,
+      })
+    }
+    return result
+  }, [positions, liveStatus?.open_positions])
   const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
@@ -614,7 +648,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
       const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
       const sideKey = isLong ? 'long' : 'short'
-      const key = `${inst}|${sideKey}`
+      const mode = (p.account_mode || '').toLowerCase() || (demoMode ? 'demo' : 'live')
+      const key = `${inst}|${sideKey}|${mode}`
       if (openKeys.has(key)) return
       openKeys.add(key)
       const entry = parseFloat(p.entry_price ?? p.entry ?? p.avgPx ?? 0) || 0
@@ -644,6 +679,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         pnl: null,
         reason: 'open',
         bot: botHint || p.bot || '',
+        account_mode: mode,
       })
     }
 
@@ -680,10 +716,14 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       if (isOnExchange(p)) pushOpen(p, 'Validation')
     }
     for (const p of (aiStatus?.open_positions || [])) {
-      const m = (p.account_mode || '').toLowerCase()
-      if (m === 'demo' && !demoMode) continue
-      if (m === 'live' && demoMode) continue
-      if (isOnExchange(p)) pushOpen(p, 'AI Discretionary 1H')
+      pushOpen(p, 'AI Discretionary 1H')
+    }
+    for (const p of (liveStatus?.open_positions || [])) {
+      const alreadyInAi = (aiStatus?.open_positions || []).some(
+        op => (op.coin || op.inst_id || '').toUpperCase() === (p.coin || p.inst_id || '').toUpperCase()
+          && (op.side || op.pos_side || '').toLowerCase() === (p.side || p.pos_side || '').toLowerCase()
+      )
+      if (!alreadyInAi) pushOpen(p, 'AI Discretionary 1H')
     }
     // Smart Money opens/trades live only on /smart-money — not on main dashboard
 
@@ -735,15 +775,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         size_remaining: posSz,
         upl: p.upl,
         bot: hint,
+        account_mode: 'demo',
       }, hint)
     }
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
     for (const tr of allTrades) {
-      // Never mix DEMO/LIVE cards
-      const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
-      if (trMode === 'demo' && !demoMode) continue
-      if (trMode === 'live' && demoMode) continue
       if (tr.bot === 'Smart Money') continue
       const r = (tr.reason || '').toLowerCase()
       if (r === 'open' || r === 'add') continue
@@ -754,7 +791,8 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       // historical closes of the other direction are still shown.
       if (inst) {
         const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
-        if (openKeys.has(`${inst}|${sideKey}`)) continue
+        const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
+        if (openKeys.has(`${inst}|${sideKey}|${trMode}`)) continue
       }
       rows.push({
         type: 'closed',
@@ -768,6 +806,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         reason: r,
         stage: null,
         bot: tr.bot,
+        account_mode: (tr.account_mode || tr.mode || '').toLowerCase() || (demoMode ? 'demo' : 'live'),
       })
     }
 
@@ -777,19 +816,16 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, positions, allTrades, botMap, demoMode])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, liveStatus?.open_positions, positions, allTrades, botMap, demoMode])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
     allTrades.filter(t => {
       const r = (t.reason || '').toLowerCase()
       if (r === 'open' || r === 'tp1') return false
-      const trMode = (t.account_mode || t.mode || '').toLowerCase()
-      if (trMode === 'demo' && !demoMode) return false
-      if (trMode === 'live' && demoMode) return false
       return true
     })
-  , [allTrades, demoMode])
+  , [allTrades])
 
   // Filtered active trades
   const filteredTrades = useMemo(() => {
@@ -1128,12 +1164,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
               {t('dash.open_positions')}
-              <span className="ml-auto text-[var(--txt-muted)]">{positions.length}</span>
+              <span className="ml-auto text-[var(--txt-muted)]">{displayPositions.length}</span>
             </div>
             <div className="flex-1 overflow-auto">
               {loading ? (
                 <div className="flex items-center justify-center py-12"><Loader /></div>
-              ) : positions.length === 0 ? (
+              ) : displayPositions.length === 0 ? (
                 <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
                 <table className="data-table">
@@ -1151,6 +1187,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     <tr>
                       <th>{t('dash.pair')}</th>
                       <th>Bot</th>
+                      <th className="text-center">Mode</th>
                       <th className="text-right">{t('dash.size')}</th>
                       <th className="text-right">{t('dash.entry')}</th>
                       <th className="text-right">{t('dash.mark')}</th>
@@ -1160,7 +1197,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {positions.filter((p) => {
+                    {displayPositions.filter((p) => {
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const bn = resolveBotName(p)
                       if (!bn || bn === 'Smart Money') return false
@@ -1171,6 +1208,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                       const posId = `${p.instId}_${p.posSide}`
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const botName = resolveBotName(p)
+                      const accountMode = (p.account_mode || '').toLowerCase()
                       const botBadge = botName === 'Momentum'
                         ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
                         : (botName === 'Impulse' || botName === 'Impulse 1D')
@@ -1219,6 +1257,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                             </div>
                           </td>
                           <td><span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span></td>
+                          <td className="text-center">
+                            {accountMode === 'live'
+                              ? <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                              : <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                            }
+                          </td>
                           <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
                           <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
                           <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
@@ -1348,6 +1392,12 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
                           {tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}
                           {botBadge && (
                             <span className={`ml-1 text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
+                          )}
+                          {(tr.account_mode || '').toLowerCase() === 'live' && (
+                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                          )}
+                          {(tr.account_mode || '').toLowerCase() === 'demo' && (
+                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                           )}
                         </td>
                         <td>

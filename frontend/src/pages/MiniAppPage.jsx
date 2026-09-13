@@ -334,6 +334,7 @@ function MiniAppPageInner
       }
       for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
       for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
+      for (const p of (liveStatus?.open_positions || [])) pushOpen({ ...p, bot: 'AI Discretionary 1H' })
 
       const toRow = (tr, isOpen = false) => {
         const inst = tr.inst_id || tr.symbol || ''
@@ -1283,6 +1284,9 @@ function MiniAppPageInner
                           )}
                           {String(tr.account_mode || '').toLowerCase() === 'live' && (
                             <span className="px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] text-2xs font-bold">LIVE</span>
+                          )}
+                          {String(tr.account_mode || '').toLowerCase() === 'demo' && (
+                            <span className="px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 text-2xs font-bold">DEMO</span>
                           )}
                           <span className={`text-2xs font-semibold ${isOpen ? 'text-[var(--info)]' : pnlClass(pnl)}`}>
                             {isOpen ? t('mini.open') : (reason && reason !== 'closed' ? reason : '')}
