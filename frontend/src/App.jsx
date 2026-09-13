@@ -80,11 +80,9 @@ function AppLayout() {
   const { theme, toggle } = useTheme()
   const { t, lang, setLang } = useTranslation()
   const [connected, setConnected] = useState(false)
-  const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
   const [latencyMs, setLatencyMs] = useState(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
-  const [modeBusy, setModeBusy] = useState(false)
 
   const isGuest = auth?.role === 'guest'
   const isAdmin = auth?.role === 'admin'
@@ -97,10 +95,6 @@ function AppLayout() {
         setLatencyMs(Math.round(performance.now() - t0))
         setHealth(h)
         setConnected(h.connected)
-        // Guests always observe showcase DEMO; admin/user follow server mode
-        const role = localStorage.getItem('auth_role')
-        if (role === 'guest') setDemoMode(true)
-        else setDemoMode(!!h.demo)
       } catch {
         setLatencyMs(null)
         setHealth({ status: 'error' })
@@ -122,36 +116,9 @@ function AppLayout() {
     setAuth(null)
   }
 
-  const switchTradingMode = async (toDemo) => {
-    if (!isAdmin) return
-    if (!toDemo) {
-      const ok = window.confirm('Перейти в LIVE (реальный счёт OKX)? Как на бирже: демо и лайв разделены.')
-      if (!ok) return
-    }
-    setModeBusy(true)
-    // Optimistic UI — switch label immediately, data catches up
-    setDemoMode(!!toDemo)
-    try {
-      const r = await api.setMode(!!toDemo, toDemo ? undefined : 'LIVE')
-      setDemoMode(!!r.demo)
-      setConnected(true)
-      try {
-        window.dispatchEvent(new CustomEvent('trading-mode-changed', { detail: { demo: !!r.demo } }))
-      } catch { /* ignore */ }
-    } catch (e) {
-      // revert on failure
-      setDemoMode(!toDemo)
-      alert(e.message || 'Не удалось переключить режим')
-    } finally {
-      setModeBusy(false)
-    }
-  }
-
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
-    // AI-only mode: Smart Money hidden
-    // { to: '/smart-money', icon: Shield, label: t('nav.smartMoney') },
     { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
     ...(isAdmin ? [
@@ -196,33 +163,8 @@ function AppLayout() {
           {/* Connection Status */}
           <div data-tour="status" className="flex items-center gap-2 px-1.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
             <span className={`w-1.5 h-1.5 rounded-full ml-1 ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
-            {!connected ? (
+            {!connected && (
               <span className="text-2xs font-semibold text-[var(--loss)] pr-2">OFFLINE</span>
-            ) : isAdmin ? (
-              <div className="flex items-center rounded-md overflow-hidden border border-[var(--border)] text-2xs font-bold">
-                <button
-                  type="button"
-                  disabled={modeBusy}
-                  onClick={() => switchTradingMode(true)}
-                  className={`px-2.5 py-1 transition-colors ${demoMode ? 'bg-[var(--warn)] text-black' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-                  title="Демо-торговля (витрина OKX Demo)"
-                >
-                  Demo
-                </button>
-                <button
-                  type="button"
-                  disabled={modeBusy}
-                  onClick={() => switchTradingMode(false)}
-                  className={`px-2.5 py-1 transition-colors ${!demoMode ? 'bg-[var(--loss)] text-white' : 'bg-transparent text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-                  title="Реальная торговля (Live OKX)"
-                >
-                  Live
-                </button>
-              </div>
-            ) : (
-              <span className={`text-2xs font-semibold pr-2 ${demoMode ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
-                {demoMode ? 'DEMO' : 'LIVE'}
-              </span>
             )}
             {health?.version ? (
               <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title="Build / git commit">
@@ -290,32 +232,16 @@ function AppLayout() {
         </div>
       )}
 
-      {connected && demoMode && (
-        <div data-tour="demo-trading-banner" className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-1.5 bg-[var(--warn-dim)] border-b border-[var(--warn)]/30 text-2xs text-[var(--warn)]">
-          <span className="font-semibold">Демо-торговля · виртуальные средства</span>
-          {isAdmin && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm text-2xs"
-              disabled={modeBusy}
-              onClick={() => switchTradingMode(false)}
-            >
-              Выйти в Live
-            </button>
-          )}
-        </div>
-      )}
-
       {/* ═══ MAIN CONTENT ═══ */}
       <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
-          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
-          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
+          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
+          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
           <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/admin" element={<AdminPage />} />
-          <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
+          <Route path="/settings" element={<SettingsPage onConnected={setConnected} />} />
           <Route path="/docs" element={<DocsPage />} />
         </Routes>
         </Suspense>

@@ -4,7 +4,7 @@ import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-export default function SettingsPage({ onConnected, onDemoMode }) {
+export default function SettingsPage({ onConnected }) {
   const { t } = useTranslation()
   const [form, setForm] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
   const [backendConfig, setBackendConfig] = useState(null)
@@ -16,11 +16,9 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [risk, setRisk] = useState(null)
   const [riskBusy, setRiskBusy] = useState(false)
   const [audit, setAudit] = useState([])
-  const [modeBusy, setModeBusy] = useState(false)
   const [aiCfgMsg, setAiCfgMsg] = useState('')
   const [aiCfgBusy, setAiCfgBusy] = useState(false)
   const [liveConfigured, setLiveConfigured] = useState(false)
-  const [showcaseConfigured, setShowcaseConfigured] = useState(true)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
@@ -41,7 +39,6 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         if (h.has_credentials) {
           setStatus({ ok: true, message: t('settings.connected_env') })
           onConnected?.(true)
-          onDemoMode?.(h.env_demo)
         }
       }
     }).catch(() => {})
@@ -59,37 +56,13 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     api.getMode?.().then(m => {
       if (!m) return
       setLiveConfigured(!!m.live_configured)
-      setShowcaseConfigured(m.showcase_configured !== false)
       setForm(f => ({ ...f, demo: !!m.demo }))
-      onDemoMode?.(!!m.demo)
     }).catch(() => {})
     api.credentialsStatus?.().then(s => {
       if (!s) return
       setLiveConfigured(!!s.live_configured)
-      setShowcaseConfigured(!!s.showcase_configured)
     }).catch(() => {})
   }, [])
-
-  const switchMode = async (demo) => {
-    if (!demo) {
-      const ok = window.confirm(t('settings.live_confirm_prompt'))
-      if (!ok) return
-    }
-    setModeBusy(true)
-    try {
-      const r = await api.setMode(demo, demo ? undefined : 'LIVE')
-      onDemoMode?.(r.demo)
-      onConnected?.(true)
-      setForm(f => ({ ...f, demo: r.demo }))
-      if (r.live_configured != null) setLiveConfigured(!!r.live_configured)
-      setRisk(rs => rs ? { ...rs, okx_demo: r.demo } : rs)
-      const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
-      setAudit(items)
-    } catch (e) {
-      alert(e.message || 'Mode switch failed')
-    }
-    setModeBusy(false)
-  }
 
 
   const toggleKill = async (enabled) => {
@@ -163,7 +136,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       const t4 = setTimeout(() => {
         setTestSteps([])
         setStatus({ ok: true, message: t('settings.connect_success') })
-        onConnected?.(true); onDemoMode?.(form.demo)
+        onConnected?.(true)
         setTesting(false)
       }, 1200)
       timersRef.current.push(t3, t4)
@@ -206,7 +179,6 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         message: r?.message || 'Live-ключи сохранены отдельно. DEMO-витрина не затронута — переключайтесь DEMO↔LIVE.',
       })
       onConnected?.(true)
-      onDemoMode?.(false)
       setForm(f => ({ ...f, demo: false, api_key: '', secret_key: '', passphrase: '' }))
       const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
       setAudit(items)
@@ -233,7 +205,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         demo: form.demo,
       })
       setStatus({ ok: true, message: t('settings.keys_saved') })
-      onConnected?.(true); onDemoMode?.(form.demo)
+      onConnected?.(true)
     } catch (err) { setStatus({ ok: false, message: err.message }) }
     setTesting(false)
   }
@@ -711,56 +683,6 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
             </div>
           </div>
 
-          {/* Danger Zone */}
-          <div className="panel border-[var(--loss)]/30">
-         
-        {/* Trading mode DEMO / LIVE — как на OKX */}
-        <div className="panel p-4 space-y-3">
-          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
-            <Wifi size={13} className="text-[var(--info)]" /> Режим торговли (как на OKX)
-          </div>
-          <p className="text-2xs text-[var(--txt-muted)] leading-relaxed">
-            Demo и Live — разные среды (как Demo Trading / Live на OKX). Наблюдатели всегда в Demo.
-            Переключатель меняет только ваш контекст.
-          </p>
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <div className="inline-flex rounded-lg overflow-hidden border border-[var(--border)] text-xs font-bold">
-              <button
-                type="button"
-                disabled={modeBusy}
-                onClick={() => switchMode(true)}
-                className={`px-4 py-2 transition-colors ${form.demo !== false ? 'bg-[var(--warn)] text-black' : 'bg-[var(--bg)] text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-              >
-                Demo trading
-              </button>
-              <button
-                type="button"
-                disabled={modeBusy || !liveConfigured}
-                onClick={() => switchMode(false)}
-                className={`px-4 py-2 transition-colors ${form.demo === false ? 'bg-[var(--loss)] text-white' : 'bg-[var(--bg)] text-[var(--txt-muted)] hover:text-[var(--txt)]'}`}
-                title={!liveConfigured ? 'Сначала сохраните Live API-ключи' : 'Реальная торговля'}
-              >
-                Live trading
-              </button>
-            </div>
-            <div className="text-2xs text-[var(--txt-muted)]">
-              Demo: {showcaseConfigured ? 'витрина OKX готова' : 'нет env-ключей'}
-              {' · '}
-              Live: {liveConfigured ? 'ключи сохранены' : 'не подключены'}
-            </div>
-          </div>
-          {form.demo !== false && (
-            <div className="text-2xs px-3 py-2 rounded-md bg-[var(--warn-dim)] text-[var(--warn)] border border-[var(--warn)]/30">
-              Сейчас: <strong>Demo trading</strong> — виртуальные средства. Чтобы торговать реально, нажмите Live trading.
-            </div>
-          )}
-          {form.demo === false && (
-            <div className="text-2xs px-3 py-2 rounded-md bg-[var(--loss-dim)] text-[var(--loss)] border border-[var(--loss)]/30">
-              Сейчас: <strong>Live trading</strong> — реальный счёт. Вернуться в Demo — без влияния на Live-позиции.
-            </div>
-          )}
-        </div>
-
         {/* Audit log */}
         <div className="panel p-4 space-y-3">
           <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
@@ -834,7 +756,8 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
           </div>
         </div>
 
-<div className="panel-header border-b-[var(--loss)]/20">
+        <div className="panel border-[var(--loss)]/30">
+          <div className="panel-header border-b-[var(--loss)]/20">
               <AlertTriangle size={13} className="text-[var(--loss)]" /> {t('settings.danger_zone')}
             </div>
             <div className="p-4 flex items-start justify-between gap-4">
@@ -848,12 +771,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               >
                 <Trash2 size={12} />
                 {dangerConfirm ? t('settings.confirm_delete') : t('settings.delete')}
-              </button>
-            </div>
-          </div>
-        </div>
+</button>
+             </div>
+           </div>
+         </div>
 
-        {/* Security Info */}
+         {/* Security Info */}
         <div className="space-y-3">
           <div className="panel">
             <div className="panel-header"><Shield size={13} className="text-[var(--warn)]" /> {t('settings.security')}</div>

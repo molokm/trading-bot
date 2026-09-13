@@ -825,13 +825,19 @@ async def startup():
 
     try:
         print("[startup] AI Discretionary auto-start ...", flush=True)
-        # AI runs independently: only needs OKX keys + AI_AUTO_START (default ON).
-        # Not gated by BOTS_AUTO_START so we can disable the other bots while
-        # keeping AI active for observation.
-        _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
-        if _env_key and _env_secret and _env_pass and _ai_auto:
+        # Restore from DB: only auto-start if bot was running before redeploy.
+        # Missing setting (fresh DB / pre-migration) = default ON, so the first
+        # deploy after this change doesn't unexpectedly stop a running bot.
+        _ai_was_running = True
+        try:
+            _db_val = await db.get_setting("ai_bot_running")
+            if _db_val is not None and str(_db_val).strip() != "":
+                _ai_was_running = str(_db_val).strip() == "1"
+        except Exception:
+            pass
+        print(f"[startup] AI auto-start: db_state={'running' if _ai_was_running else 'stopped'}", flush=True)
+        if _env_key and _env_secret and _env_pass and _ai_was_running:
             _demo = _env_demo
-            # Demo always execute. Live: default ON (AI_EXECUTE=0 = signals only).
             if _demo:
                 _exec = True
             else:
@@ -849,21 +855,14 @@ async def startup():
                                notifier=telegram, live_client_manager=live_manager)
             ai_bot.start()
             _positions_cache = None
-            try:
-                # Always align memory counters with clean epoch (mixed history gone)
-                if hasattr(ai_bot, "reset_lifetime_pnl"):
-                    # Only zero if clean-slate marker is set (once) — still reset
-                    # counters so cards match /api/pnl=0 until new closes
-                    ai_bot.reset_lifetime_pnl()
-            except Exception as e:
-                print(f"[startup] AI PnL memory reset: {e}", flush=True)
             print(
-                f"[startup]   AI Discretionary RUNNING execute={_exec} capital={ai_cfg.capital}",
+                f"[startup]   AI Discretionary RUNNING (restored) execute={_exec} capital={ai_cfg.capital}",
                 flush=True,
             )
         else:
+            reason = "no OKX keys" if not (_env_key and _env_secret and _env_pass) else "was stopped before redeploy"
             print(
-                "[startup]   AI Discretionary skipped (AI_AUTO_START=0 or no OKX keys)",
+                f"[startup]   AI Discretionary skipped ({reason})",
                 flush=True,
             )
     except Exception as e:
@@ -993,6 +992,15 @@ async def shutdown():
         await impulse.stop()
     if validation and validation._running:
         await validation.stop()
+    # Persist AI running state BEFORE stopping, so a redeploy restores the
+    # exact pre-redeploy state (running -> auto-starts, stopped -> stays off).
+    try:
+        if ai_bot is not None and db is not None:
+            _ai_running_now = bool(getattr(ai_bot, "_running", False))
+            await db.set_setting("ai_bot_running", "1" if _ai_running_now else "0")
+            print(f"[shutdown] AI running state persisted: {_ai_running_now}", flush=True)
+    except Exception as e:
+        print(f"[shutdown] AI state persist failed: {e}", flush=True)
     if ai_bot and getattr(ai_bot, "_running", False):
         try:
             ai_bot.stop()
@@ -2350,6 +2358,12 @@ async def ai_start(data: dict = None):
         global _positions_cache
         _positions_cache = None
 
+        if db:
+            try:
+                await db.set_setting("ai_bot_running", "1")
+            except Exception:
+                pass
+
         mode_str = "DEMO" if _demo else "LIVE"
         print(f"[AI] Started in {mode_str} mode, capital=${capital:.2f}, execute={_exec}, provider={provider}", flush=True)
 
@@ -2369,6 +2383,11 @@ async def ai_stop():
     global ai_bot
     if ai_bot:
         ai_bot.stop()
+    if db:
+        try:
+            await db.set_setting("ai_bot_running", "0")
+        except Exception:
+            pass
     return {"message": "AI stopped", "running": False}
 
 

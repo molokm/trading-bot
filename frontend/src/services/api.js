@@ -95,14 +95,6 @@ export const api = {
   riskKill: (enabled) =>
     request('/risk/kill', { method: 'POST', body: JSON.stringify({ enabled }) }),
   getMode: () => request('/mode'),
-  setMode: (demo, confirm) =>
-    request('/mode', {
-      method: 'POST',
-      body: JSON.stringify({
-        demo: !!demo,
-        confirm: demo ? undefined : (confirm || 'LIVE'),
-      }),
-    }),
   getAudit: (limit = 50) => request(`/audit?limit=${limit}`),
   reportSummary: () => request('/reports/summary'),
 
@@ -230,14 +222,6 @@ export const api = {
   aiDecide: () =>
     request('/ai/decide', { method: 'POST', body: JSON.stringify({}) }),
   aiLogs: (limit = 200) => request(`/ai/logs?limit=${limit}`),
-
-  // ── LIVE mirror ──
-  liveStatus: () => request('/live/status'),
-  liveConnect: (body = {}) =>
-    request('/live/connect', { method: 'POST', body: JSON.stringify(body || {}) }),
-  liveDisconnect: () =>
-    request('/live/disconnect', { method: 'POST' }),
-  liveTrades: () => request('/live/trades'),
 
   // ── Order Book Scalp ──
   scalpStatus: () => request('/scalp/status'),
