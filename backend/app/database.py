@@ -496,6 +496,7 @@ class Database:
             conn = await self._pg_connect()
             try:
                 await conn.execute(sql, *params)
+                await conn.commit()
             finally:
                 await conn.close()
         else:
@@ -507,6 +508,7 @@ class Database:
             conn = await self._pg_connect()
             try:
                 val = await conn.fetchval(sql, *params)
+                await conn.commit()
                 return val
             finally:
                 await conn.close()
@@ -544,6 +546,7 @@ class Database:
                         t.get("account_mode") or "demo",
                         t.get("account_key") or "showcase",
                     ))
+                await conn.commit()
                 return len(trades)
             finally:
                 await conn.close()

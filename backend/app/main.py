@@ -497,9 +497,15 @@ async def startup():
             # Fallback to DB-persisted live mirror creds (plain text from live_connect)
             _lm_source = "db_live_mirror"
             try:
-                _lm_key = _lm_key or (await db.get_setting("live_mirror_key") or "")
-                _lm_secret = _lm_secret or (await db.get_setting("live_mirror_secret") or "")
-                _lm_pass = _lm_pass or (await db.get_setting("live_mirror_pass") or "")
+                _db_key = await db.get_setting("live_mirror_key")
+                _db_secret = await db.get_setting("live_mirror_secret")
+                _db_pass = await db.get_setting("live_mirror_pass")
+                print(f"[startup] live mirror DB lookup: key={'set' if _db_key else 'missing'} "
+                      f"secret={'set' if _db_secret else 'missing'} pass={'set' if _db_pass else 'missing'}",
+                      flush=True)
+                _lm_key = _lm_key or (_db_key or "")
+                _lm_secret = _lm_secret or (_db_secret or "")
+                _lm_pass = _lm_pass or (_db_pass or "")
             except Exception as e:
                 print(f"[startup] live mirror DB fallback error: {e}", flush=True)
         if not (_lm_key and _lm_secret and _lm_pass):
@@ -2321,6 +2327,22 @@ async def ai_start(data: dict = None):
         if data.get("symbols"):
             cfg.symbols = list(data["symbols"])
 
+        # Ensure live_manager has creds if it was initialized empty
+        if live_manager and not live_manager.get_client():
+            try:
+                _lk = (await db.get_setting("live_mirror_key") or "")
+                _ls = (await db.get_setting("live_mirror_secret") or "")
+                _lp = (await db.get_setting("live_mirror_pass") or "")
+                if _lk and _ls and _lp:
+                    await live_manager.init_client(_lk, _ls, _lp, False)
+                    _lc = live_manager.get_client()
+                    if _lc and not getattr(_lc, "demo", True):
+                        print("[AI/start] live mirror client restored from DB", flush=True)
+                    else:
+                        print("[AI/start] live mirror init rejected (demo=true), skipping", flush=True)
+            except Exception as e:
+                print(f"[AI/start] live mirror DB restore: {e}", flush=True)
+
         ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram,
                             live_client_manager=live_manager)
         ai_bot.start()
@@ -2538,6 +2560,9 @@ async def live_connect(data: dict = None):
             await db.set_setting("live_mirror_key", key)
             await db.set_setting("live_mirror_secret", secret)
             await db.set_setting("live_mirror_pass", passphrase)
+            # Also save encrypted version for _load_live_creds_from_db()
+            await _save_live_creds(key, secret, passphrase)
+            print("[LIVE] creds persisted to DB (plaintext + encrypted)", flush=True)
         except Exception as e:
             print(f"[LIVE] persist creds: {e}", flush=True)
     # Pass live manager to running AI bot
