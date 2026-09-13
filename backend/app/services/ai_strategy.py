@@ -3158,7 +3158,7 @@ class AIStrategy:
                         stored = {}
                 all_pos = await lc.get_positions()
                 ex_pos: dict[str, dict] = {}
-                for p in (all_pos or []):
+                for p in ((all_pos.get("data") or []) if isinstance(all_pos, dict) else (all_pos or [])):
                     c = (p.get("instId") or "").replace("-USDT-SWAP", "")
                     sz = float(p.get("pos") or 0)
                     if c and sz > 0:
