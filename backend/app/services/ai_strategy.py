@@ -511,12 +511,12 @@ class AIStrategy:
                 except Exception:
                     pass
             self._tick_count += 1
-                # Refresh live equity every few ticks so UI is not stuck at $0
-                if self._live_client() and (self._tick_count % 3 == 1):
-                    try:
-                        await self._ensure_live_equity()
-                    except Exception:
-                        pass
+            # Refresh live equity every few ticks so UI is not stuck at $0
+            if self._live_client() and (self._tick_count % 3 == 1):
+                try:
+                    await self._ensure_live_equity()
+                except Exception:
+                    pass
 
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))

@@ -2487,6 +2487,8 @@ async def live_status():
         lc = live_manager.get_client() if live_manager else None
     except Exception:
         lc = None
+    if lc is not None and getattr(lc, "demo", False):
+        lc = None
     connected = lc is not None and getattr(lc, "has_credentials", lambda: False)()
     live_data = {}
     if ai_bot and hasattr(ai_bot, "get_status"):
@@ -2495,10 +2497,48 @@ async def live_status():
             live_data = st.get("live") or {}
         except Exception:
             pass
+    equity = float(live_data.get("equity") or 0)
+    # Always try a fresh OKX balance when mirror client is up (fixes UI stuck at $0)
+    if connected and lc is not None:
+        try:
+            portfolio = await lc.get_balance()
+            data = (portfolio or {}).get("data") or []
+            if data:
+                acct = data[0] if isinstance(data[0], dict) else {}
+                total = 0.0
+                for k in ("totalEq", "adjEq", "isoEq"):
+                    try:
+                        total = max(total, float(acct.get(k) or 0))
+                    except (TypeError, ValueError):
+                        pass
+                if total <= 0:
+                    for d in (acct.get("details") or []):
+                        ccy = str(d.get("ccy") or "").upper()
+                        if ccy not in ("USDT", "USD", "USDC"):
+                            continue
+                        for k in ("eq", "cashBal", "availBal", "availEq"):
+                            try:
+                                v = float(d.get(k) or 0)
+                                if v > 0:
+                                    total += v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                if total > 0 or equity <= 0:
+                    equity = total
+                if ai_bot is not None:
+                    try:
+                        ai_bot._live_equity = float(equity)
+                        import time as _t
+                        ai_bot._live_equity_ts = _t.time()
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[LIVE] status equity: {e}", flush=True)
     return {
         "connected": connected,
         "demo": False,
-        "equity": live_data.get("equity", 0),
+        "equity": round(float(equity or 0), 2),
         "total_pnl": live_data.get("total_pnl", 0),
         "session_pnl": live_data.get("session_pnl", 0),
         "lifetime_trades": live_data.get("lifetime_trades", 0),
