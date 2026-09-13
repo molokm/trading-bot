@@ -415,7 +415,29 @@ class AIStrategy:
         return c
 
     def _live_ready(self) -> bool:
-        return self._live_client() is not None
+        r = self._live_client() is not None
+        if not r:
+            lcm = self.live_client_manager
+            c = None
+            reason = "no_live_client_manager"
+            if not lcm:
+                reason = "live_client_manager=None"
+            else:
+                try:
+                    c = lcm.get_client()
+                except Exception as e:
+                    reason = f"get_client_exc:{e}"
+                if c is None and reason == "no_live_client_manager":
+                    reason = "client=None"
+                elif c is not None:
+                    if getattr(c, "demo", False):
+                        reason = "client.demo=True"
+                    elif not getattr(c, "has_credentials", lambda: False)():
+                        reason = "no_credentials"
+                    else:
+                        reason = "ok"  # shouldn't reach here if r is False
+            print(f"[AI-LIVE] _live_ready=False reason={reason}", flush=True)
+        return r
 
     async def _ensure_live_equity(self) -> float:
         """Best-effort live account equity (USDT totalEq). Cached ~30s."""
