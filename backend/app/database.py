@@ -537,7 +537,7 @@ class Database:
                             sz=EXCLUDED.sz, avg_px=EXCLUDED.avg_px, close_ts=EXCLUDED.close_ts,
                             sub_type=EXCLUDED.sub_type, synced_at=EXCLUDED.synced_at
                             -- account_mode/account_key KEEP original (demo vs live isolation)
-                    """, (
+                    """, *(
                         t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
                         t["pnl"], t["fee"], t["sz"], t["avg_px"],
                         t["close_ts"], t["sub_type"], now,
