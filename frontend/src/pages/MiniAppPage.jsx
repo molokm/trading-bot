@@ -298,6 +298,7 @@ function MiniAppPageInner
   const [liveSecret, setLiveSecret] = useState('')
   const [livePass, setLivePass] = useState('')
   const [liveConnecting, setLiveConnecting] = useState(false)
+  const [liveFormOpen, setLiveFormOpen] = useState(false)
   const [trades, setTrades] = useState([])
 
   const [tg, setTg] = useState(null)
@@ -313,6 +314,7 @@ function MiniAppPageInner
   const [creds, setCreds] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
   const [credsSaving, setCredsSaving] = useState(false)
   const [credsStatus, setCredsStatus] = useState(null)
+  const [credsOpen, setCredsOpen] = useState(false)
   const [botAction, setBotAction] = useState(null)
 
   // Same source as the web Dashboard: /trades/paired (OKX-backed). Open rows
@@ -928,53 +930,63 @@ function MiniAppPageInner
           <>
             {me && !me.creds_configured && (
               <Card className="border-[var(--warn)]/40">
-                <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--warn)] mb-2">
-                  <Shield size={13} /> {t('mini.connect_title')}
-                </div>
-                <p className="text-2xs text-[var(--txt-muted)] mb-3">{t('mini.connect_tip')}</p>
-                <div className="space-y-2">
-                  <input
-                    className="w-full input mono text-2xs"
-                    placeholder="API Key"
-                    value={creds.api_key}
-                    onChange={e => setCreds({ ...creds, api_key: e.target.value })}
-                  />
-                  <input
-                    className="w-full input mono text-2xs"
-                    type="password"
-                    placeholder="Secret Key"
-                    value={creds.secret_key}
-                    onChange={e => setCreds({ ...creds, secret_key: e.target.value })}
-                  />
-                  <input
-                    className="w-full input mono text-2xs"
-                    type="password"
-                    placeholder="Passphrase"
-                    value={creds.passphrase}
-                    onChange={e => setCreds({ ...creds, passphrase: e.target.value })}
-                  />
-                  <div className="flex items-center gap-2 text-2xs text-[var(--txt-secondary)]">
-                    <input
-                      type="checkbox"
-                      checked={creds.demo}
-                      onChange={e => setCreds({ ...creds, demo: e.target.checked })}
-                    />
-                    {t('mini.demo_mode')}
+                <button
+                  onClick={() => setCredsOpen(v => !v)}
+                  className="w-full flex items-center justify-between gap-2 active:opacity-70"
+                >
+                  <div className="flex items-center gap-1.5 text-2xs font-bold uppercase tracking-wider text-[var(--warn)]">
+                    <Shield size={13} /> {t('mini.connect_title')}
                   </div>
-                  <button
-                    className="w-full btn btn-primary"
-                    onClick={saveCreds}
-                    disabled={credsSaving}
-                  >
-                    {credsSaving ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
-                    {t('mini.connect_btn')}
-                  </button>
-                  {credsStatus && (
-                    <div className={`text-2xs ${credsStatus.ok ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {credsStatus.message}
+                  <span className="text-2xs text-[var(--txt-muted)]">{credsOpen ? '▾' : '▸'}</span>
+                </button>
+                {!credsOpen && (
+                  <p className="text-2xs text-[var(--txt-muted)] mt-1">{t('mini.connect_tip')}</p>
+                )}
+                {credsOpen && (
+                  <div className="space-y-2 mt-2">
+                    <input
+                      className="w-full input mono text-2xs"
+                      placeholder="API Key"
+                      value={creds.api_key}
+                      onChange={e => setCreds({ ...creds, api_key: e.target.value })}
+                    />
+                    <input
+                      className="w-full input mono text-2xs"
+                      type="password"
+                      placeholder="Secret Key"
+                      value={creds.secret_key}
+                      onChange={e => setCreds({ ...creds, secret_key: e.target.value })}
+                    />
+                    <input
+                      className="w-full input mono text-2xs"
+                      type="password"
+                      placeholder="Passphrase"
+                      value={creds.passphrase}
+                      onChange={e => setCreds({ ...creds, passphrase: e.target.value })}
+                    />
+                    <div className="flex items-center gap-2 text-2xs text-[var(--txt-secondary)]">
+                      <input
+                        type="checkbox"
+                        checked={creds.demo}
+                        onChange={e => setCreds({ ...creds, demo: e.target.checked })}
+                      />
+                      {t('mini.demo_mode')}
                     </div>
-                  )}
-                </div>
+                    <button
+                      className="w-full btn btn-primary"
+                      onClick={saveCreds}
+                      disabled={credsSaving}
+                    >
+                      {credsSaving ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
+                      {t('mini.connect_btn')}
+                    </button>
+                    {credsStatus && (
+                      <div className={`text-2xs ${credsStatus.ok ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {credsStatus.message}
+                      </div>
+                    )}
+                  </div>
+                )}
               </Card>
             )}
 
@@ -1118,22 +1130,30 @@ function MiniAppPageInner
         )}
         {isAdmin && !liveStatus?.connected && liveStatus && (
           <Card className="border-dashed border-[var(--border)]">
-            <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)] mb-2">
-              <WifiOff size={12} /> LIVE Mirror отключён
-            </div>
-            <div className="space-y-1.5">
-              <input className="w-full input mono text-2xs" placeholder="API Key"
-                value={liveKey} onChange={e => setLiveKey(e.target.value)} />
-              <input className="w-full input mono text-2xs" type="password" placeholder="Secret Key"
-                value={liveSecret} onChange={e => setLiveSecret(e.target.value)} />
-              <input className="w-full input mono text-2xs" type="password" placeholder="Passphrase"
-                value={livePass} onChange={e => setLivePass(e.target.value)} />
-              <button className="w-full btn btn-primary text-2xs" onClick={liveConnect}
-                disabled={liveConnecting || !liveKey || !liveSecret || !livePass}>
-                {liveConnecting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
-                Подключить LIVE
-              </button>
-            </div>
+            <button
+              onClick={() => setLiveFormOpen(v => !v)}
+              className="w-full flex items-center justify-between gap-2 active:opacity-70"
+            >
+              <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)]">
+                <WifiOff size={12} /> LIVE Mirror отключён
+              </div>
+              <span className="text-2xs text-[var(--txt-muted)]">{liveFormOpen ? '▾' : '▸'}</span>
+            </button>
+            {liveFormOpen && (
+              <div className="space-y-1.5 mt-2">
+                <input className="w-full input mono text-2xs" placeholder="API Key"
+                  value={liveKey} onChange={e => setLiveKey(e.target.value)} />
+                <input className="w-full input mono text-2xs" type="password" placeholder="Secret Key"
+                  value={liveSecret} onChange={e => setLiveSecret(e.target.value)} />
+                <input className="w-full input mono text-2xs" type="password" placeholder="Passphrase"
+                  value={livePass} onChange={e => setLivePass(e.target.value)} />
+                <button className="w-full btn btn-primary text-2xs" onClick={liveConnect}
+                  disabled={liveConnecting || !liveKey || !liveSecret || !livePass}>
+                  {liveConnecting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
+                  Подключить LIVE
+                </button>
+              </div>
+            )}
           </Card>
         )}
 
