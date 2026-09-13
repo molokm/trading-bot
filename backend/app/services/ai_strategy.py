@@ -447,12 +447,13 @@ class AIStrategy:
             return self._live_equity
         c = self._live_client()
         if not c:
+            if self._tick_count % 5 == 0:
+                print("[AI-LIVE] equity: no live client", flush=True)
             return self._live_equity
         try:
             r = await c.get_balance()
             if (r or {}).get("error") or str((r or {}).get("code") or "0") not in ("0", "0.0", ""):
-                # OKX error payload — keep last known
-                print(f"[AI] live equity OKX: {r}", flush=True)
+                print(f"[AI-LIVE] equity OKX error: {r}", flush=True)
                 return self._live_equity
             data = (r or {}).get("data") or []
             total = 0.0
@@ -465,7 +466,6 @@ class AIStrategy:
                             total = v
                     except (TypeError, ValueError):
                         pass
-                # Fallback: sum per-ccy equity in details (USDT / USD)
                 if total <= 0:
                     for d in (acct.get("details") or []):
                         ccy = str(d.get("ccy") or "").upper()
@@ -481,9 +481,9 @@ class AIStrategy:
                                 pass
             self._live_equity = float(total)
             self._live_equity_ts = now
-            print(f"[AI] live equity refreshed: ${self._live_equity:.2f}", flush=True)
+            print(f"[AI-LIVE] equity refreshed: ${self._live_equity:.2f}", flush=True)
         except Exception as e:
-            print(f"[AI] live equity: {e}", flush=True)
+            print(f"[AI-LIVE] equity exception: {e}", flush=True)
         return self._live_equity
 
     async def _run(self):
@@ -2689,6 +2689,10 @@ class AIStrategy:
             print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
         if self._live_ready():
+            try:
+                await self._ensure_live_equity()
+            except Exception as e:
+                print(f"[AI-LIVE] equity refresh: {e}", flush=True)
             try:
                 await self._manage_live_orphans(client)
             except Exception as e:
