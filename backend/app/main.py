@@ -225,7 +225,6 @@ equity_tracker: Optional[EquityTracker] = None
 
 # Multi-tenant: per-user bots + their own OKX clients.
 strategy_mgr = StrategyManager(db=db, notifier=telegram)
-set_hydrate_deps(_user_okx_client, lambda: RotationConfig())
 ai_bot = None
 ai_scale_bot = None
 scalp_bot = None  # Order Book Scalp instance (retired)
@@ -911,6 +910,7 @@ async def startup():
 
     # ── Auto-restart user bots (Pro + OKX keys) after deploy ──
     try:
+        set_hydrate_deps(_user_okx_client, lambda: RotationConfig())
         await strategy_mgr.hydrate_user_bots(
             db=db,
             notifier_fn=lambda uid: _user_notifier(uid),
