@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Wallet, RefreshCw, Bot, ArrowUpRight,
-  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye
+  ArrowDownRight, Shield, Loader2, Zap, Key, Lock, Eye,
+  Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
@@ -292,6 +293,12 @@ function MiniAppPageInner
   const [aiScale, setAiScale] = useState(null)
   const [pnlData, setPnlData] = useState(null)
   const [positions, setPositions] = useState([])
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [liveKey, setLiveKey] = useState('')
+  const [liveSecret, setLiveSecret] = useState('')
+  const [livePass, setLivePass] = useState('')
+  const [liveConnecting, setLiveConnecting] = useState(false)
+  const [liveFormOpen, setLiveFormOpen] = useState(false)
   const [trades, setTrades] = useState([])
 
   const [tg, setTg] = useState(null)
@@ -327,6 +334,7 @@ function MiniAppPageInner
       }
       for (const p of (Array.isArray(positions) ? positions : [])) pushOpen(p)
       for (const p of (aiBot?.open_positions || [])) pushOpen({ ...p, bot: p.bot || 'AI Discretionary 1H' })
+      for (const p of (liveStatus?.open_positions || [])) pushOpen({ ...p, bot: 'AI Discretionary 1H' })
 
       const toRow = (tr, isOpen = false) => {
         const inst = tr.inst_id || tr.symbol || ''
@@ -556,6 +564,7 @@ function MiniAppPageInner
       pnl: () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl()),
       positions: () => isUser ? api.mePositions() : api.getPositions('SWAP'),
       trades: () => api.getPairedTrades(80),
+      live: () => api.liveStatus().catch(() => null),
     }
     const timeouts = { pnl: 25000, trades: 25000, positions: 20000 }
     // Progressive loading: update state as each promise resolves, so the
@@ -588,6 +597,7 @@ function MiniAppPageInner
             break
           }
           case 'pnl': setPnlData(v); break
+          case 'live': setLiveStatus(v); break
         }
         return [name, v]
       } catch (e) {
@@ -676,6 +686,33 @@ function MiniAppPageInner
   }
 
   const proActive = role === 'user' && me?.plan === 'pro' && me?.active
+
+
+  /* ── LIVE Mirror connect/disconnect ── */
+  const liveConnect = async () => {
+    if (!liveKey || !liveSecret || !livePass) return
+    setLiveConnecting(true)
+    try {
+      await withTimeout(api.liveConnect({
+        key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE'
+      }), 20000)
+      setLiveKey(''); setLiveSecret(''); setLivePass('')
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+    setLiveConnecting(false)
+  }
+  const liveDisconnect = async () => {
+    try {
+      await withTimeout(api.liveDisconnect(), 15000)
+      const s = await api.liveStatus().catch(() => null)
+      setLiveStatus(s)
+    } catch (e) {
+      try { tg?.showAlert?.('Ошибка: ' + (e.message || e)) } catch {}
+    }
+  }
 
 
   /* ── Compact strategy card (full width, with optional status text) ── */
@@ -850,6 +887,12 @@ function MiniAppPageInner
           <span className="px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--info-dim)] text-[var(--info)]">
             DEMO
           </span>
+          {liveStatus?.connected && (
+            <span className="flex items-center gap-1 px-2 py-1 rounded-lg text-2xs font-bold bg-[var(--profit-dim)] text-[var(--profit)]">
+              <Wifi size={10} />
+              LIVE
+            </span>
+          )}
           {role === 'user' && me?.plan && (
             <span className={`ml-1 px-2 py-1 rounded-lg text-2xs font-bold ${
               me?.plan === 'pro' ? 'bg-[var(--info-dim)] text-[var(--info)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-secondary)]'
@@ -1050,6 +1093,105 @@ function MiniAppPageInner
           </div>
         </div>
 
+        {/* ═══ LIVE Mirror (admin only) ═══ */}
+        {isAdmin && liveStatus?.connected && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE Mirror
+              </span>
+            </SectionTitle>
+            <Card className="border-[var(--profit)]/30">
+              <div className="grid grid-cols-4 gap-1.5 mb-2">
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
+                  <div className={`text-xs font-bold mono ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{fmt(liveStatus?.total_pnl ?? 0)}
+                  </div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Сделок</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.lifetime_trades ?? 0}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">WR</div>
+                  <div className="text-xs font-bold mono">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                </div>
+                <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5 text-center">
+                  <div className="text-2xs text-[var(--txt-muted)]">Equity</div>
+                  <div className="text-xs font-bold mono">${fmt(liveStatus?.equity ?? 0, 0)}</div>
+                </div>
+              </div>
+              <button onClick={liveDisconnect} className="w-full btn btn-ghost text-2xs text-[var(--loss)]">
+                <WifiOff size={12} /> Отключить LIVE
+              </button>
+            </Card>
+          </div>
+        )}
+        {isAdmin && !liveStatus?.connected && liveStatus && (
+          <Card className="border-dashed border-[var(--border)]">
+            <button
+              onClick={() => setLiveFormOpen(v => !v)}
+              className="w-full flex items-center justify-between gap-2 active:opacity-70"
+            >
+              <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)]">
+                <WifiOff size={12} /> LIVE Mirror отключён
+              </div>
+              <span className="text-2xs text-[var(--txt-muted)]">{liveFormOpen ? '▾' : '▸'}</span>
+            </button>
+            {liveFormOpen && (
+              <div className="space-y-1.5 mt-2">
+                <input className="w-full input mono text-2xs" placeholder="API Key"
+                  value={liveKey} onChange={e => setLiveKey(e.target.value)} />
+                <input className="w-full input mono text-2xs" type="password" placeholder="Secret Key"
+                  value={liveSecret} onChange={e => setLiveSecret(e.target.value)} />
+                <input className="w-full input mono text-2xs" type="password" placeholder="Passphrase"
+                  value={livePass} onChange={e => setLivePass(e.target.value)} />
+                <button className="w-full btn btn-primary text-2xs" onClick={liveConnect}
+                  disabled={liveConnecting || !liveKey || !liveSecret || !livePass}>
+                  {liveConnecting ? <Loader2 size={12} className="animate-spin" /> : <Wifi size={12} />}
+                  Подключить LIVE
+                </button>
+              </div>
+            )}
+          </Card>
+        )}
+
+        {/* ═══ LIVE positions ═══ */}
+        {liveStatus?.open_positions?.length > 0 && (
+          <div>
+            <SectionTitle>
+              <span className="flex items-center gap-1">
+                <Wifi size={11} className="text-[var(--profit)]" />
+                LIVE позиции
+              </span>
+            </SectionTitle>
+            <div className="space-y-1.5">
+              {liveStatus.open_positions.map((p, i) => {
+                const isLong = p.side !== 'short'
+                return (
+                  <Card key={i} className="py-2 border-[var(--profit)]/20">
+                    <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-xs font-bold text-[var(--txt)] truncate">{p.coin}</span>
+                        <span className={`text-2xs font-bold px-1 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          {isLong ? 'LONG' : 'SHORT'}
+                        </span>
+                      </div>
+                      <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] font-semibold">LIVE</span>
+                    </div>
+                    <div className="flex items-center justify-between text-2xs text-[var(--txt-muted)] mono">
+                      <span>вх {fmt(p.entry_price, 4)}</span>
+                      <span>SL {fmt(p.stop_price, 4)}</span>
+                    </div>
+                  </Card>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {/* ═══ Positions ═══ */}
         <div>
           <SectionTitle>{t('mini.positions')}</SectionTitle>
@@ -1171,7 +1313,7 @@ function MiniAppPageInner
 
         {/* ═══ Footer ═══ */}
         <div className="pb-1 pt-1 text-center text-2xs text-[var(--txt-muted)]">
-          COPIX • {connected ? 'DEMO' : 'OFFLINE'}
+          COPIX • {connected ? (liveStatus?.connected ? 'DEMO + LIVE' : 'DEMO') : 'OFFLINE'}
         </div>
 
         {/* ═══ Diagnostics panel (admin only) ═══ */}
