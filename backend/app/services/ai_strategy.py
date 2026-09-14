@@ -302,7 +302,7 @@ class AIStrategy:
         from .ai_agent import (
             is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
         )
-        # Preferred: config/env → groq → openrouter → gemini → openai (BAI removed)
+        # Preferred: config/env → groq → openrouter → deepseek → gemini → openai (BAI removed)
         if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
             preferred = str(self.config.provider).strip().lower()
         else:
@@ -313,6 +313,8 @@ class AIStrategy:
                 preferred = "groq"
             elif os.getenv("OPENROUTER_API_KEY", "").strip() and is_provider_available("openrouter"):
                 preferred = "openrouter"
+            elif os.getenv("DEEPSEEK_API_KEY", "").strip() and is_provider_available("deepseek"):
+                preferred = "deepseek"
             elif os.getenv("GEMINI_API_KEY", "").strip() and is_provider_available("gemini"):
                 preferred = "gemini"
             elif os.getenv("OPENAI_API_KEY", "").strip() and is_provider_available("openai"):

@@ -61,3 +61,7 @@ services:
       # lightweight read-only view. Set to 0 to re-enable execution.
       - key: SM_EXECUTION_DISABLED
         value: "1"
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        sync: false

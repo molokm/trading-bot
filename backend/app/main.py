@@ -1519,11 +1519,27 @@ async def ai_start(data: dict=None):
                         capital = total_eq
             except Exception:
                 pass
-        provider = data.get('provider') or ('groq' if os.getenv('GROQ_API_KEY', '').strip() else 'openrouter' if os.getenv('OPENROUTER_API_KEY', '').strip() else None)
-        cfg = AIConfig(capital=capital, max_leverage=float(data.get('max_leverage') or 3), max_positions=int(data.get('max_positions') or 1), risk_per_trade=float(data.get('risk_per_trade') or 0.02), poll_interval_sec=int(data.get('poll_interval_sec') or 120), provider=provider, execute=_exec)
-        if data.get('symbols'):
-            cfg.symbols = list(data['symbols'])
-        if live_manager and (not live_manager.get_client()):
+
+        provider = data.get("provider") or (
+            "groq" if os.getenv("GROQ_API_KEY", "").strip()
+            else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip()
+                  else ("deepseek" if os.getenv("DEEPSEEK_API_KEY", "").strip() else None))
+        )
+
+        cfg = AIConfig(
+            capital=capital,
+            max_leverage=float(data.get("max_leverage") or 3),
+            max_positions=int(data.get("max_positions") or 1),
+            risk_per_trade=float(data.get("risk_per_trade") or 0.02),
+            poll_interval_sec=int(data.get("poll_interval_sec") or 120),
+            provider=provider,
+            execute=_exec,
+        )
+        if data.get("symbols"):
+            cfg.symbols = list(data["symbols"])
+
+        # Ensure live_manager has creds if it was initialized empty
+        if live_manager and not live_manager.get_client():
             try:
                 _lk = await db.get_setting('live_mirror_key') or ''
                 _ls = await db.get_setting('live_mirror_secret') or ''
