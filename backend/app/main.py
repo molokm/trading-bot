@@ -595,16 +595,30 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
     try:
         print('[startup] AI Discretionary auto-start ...', flush=True)
+        # force=1 → always start; force=0 → start unless user explicitly Stopped (ai_bot_running=0)
         _ai_force = os.getenv('AI_FORCE_AUTOSTART', '0').strip().lower() not in ('0', 'false', 'no', 'off')
-        _ai_was_running = False
+        # Default ON when setting missing (AI-only product should run after deploy)
+        _ai_was_running = True
         try:
             _db_val = await db.get_setting('ai_bot_running')
             if _db_val is not None and str(_db_val).strip() != '':
-                _ai_was_running = str(_db_val).strip() == '1'
-        except Exception:
-            pass
+                v = str(_db_val).strip().lower()
+                if v in ('0', 'false', 'no', 'off'):
+                    _ai_was_running = False
+                elif v in ('1', 'true', 'yes', 'on'):
+                    _ai_was_running = True
+            # One-shot recovery: stage-5 deploys left ai_bot_running=0 without a real user Stop
+            if not _ai_was_running and AI_ONLY_MODE:
+                _rec = await db.get_setting('ai_autostart_recover_v1')
+                if not _rec:
+                    await db.set_setting('ai_bot_running', '1')
+                    await db.set_setting('ai_autostart_recover_v1', '1')
+                    _ai_was_running = True
+                    print('[startup] AI auto-start: recovered ai_bot_running=1 (one-shot)', flush=True)
+        except Exception as _ase:
+            print(f'[startup] AI auto-start state read: {_ase}', flush=True)
         _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or _ai_was_running))
-        print(f'[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} force={_ai_force} db_state={('running' if _ai_was_running else 'stopped')} do={_do_ai}', flush=True)
+        print(f'[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} force={_ai_force} db_state={("running" if _ai_was_running else "stopped")} do={_do_ai}', flush=True)
         if _do_ai:
             _demo = _env_demo
             try:
@@ -624,7 +638,12 @@ async def startup():
                         await client_manager.init_client(_k, _s, _pw, False)
             except Exception as _ce:
                 print(f'[startup] AI client init: {_ce}', flush=True)
-            _has_keys = bool(client_manager and client_manager.get_client() and getattr(client_manager.get_client(), 'has_credentials', lambda: False)() or (_env_key and _env_secret and _env_pass))
+            _cli = client_manager.get_client() if client_manager else None
+            _has_keys = bool(
+                (_cli and getattr(_cli, 'has_credentials', lambda: False)())
+                or (_env_key and _env_secret and _env_pass)
+                or (_demo_key and _demo_secret and _demo_pass)
+            )
             if not _has_keys:
                 print('[startup]   AI Discretionary skipped (no OKX keys)', flush=True)
             else:
