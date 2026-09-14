@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.7-journal"
+STRATEGY_VERSION = "v1.8-trend-gate"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -104,9 +104,9 @@ class AIConfig:
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
     min_confidence: float = 0.62
-    min_adx: float = 15.0                  # was 18 — still filtered, but less dead
+    min_adx: float = 18.0                  # restore stronger trend filter
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 12.0
+    adx_soft_floor: float = 14.0
     adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
     min_roc_abs: float = 0.25
     min_stop_pct: float = 0.018
@@ -132,8 +132,8 @@ class AIConfig:
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.45
-    block_chop_opens: bool = False
+    quant_min_align: float = 0.55
+    block_chop_opens: bool = True
     # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
     adapt_window: int = 12
@@ -897,8 +897,11 @@ class AIStrategy:
                 "rsi": ind.get("rsi"),
                 "funding_rate": ind.get("funding_rate"),
                 "block_open": (
-                    (reg == "chop" and best < float(getattr(self.config, "quant_min_align", 0.45) or 0.45))
-                    or (reg != "chop" and best < 0.42)
+                    (reg == "chop" and (
+                        bool(getattr(self.config, "block_chop_opens", True))
+                        or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+                    ))
+                    or (reg != "chop" and best < 0.50)
                     or self._adx_blocks_open(float(ind.get("adx") or 0), best)
                 ),
             }
@@ -922,7 +925,9 @@ class AIStrategy:
             "global_regime": g,
             # Global chop no longer hard-blocks every open — per-coin
             # block_open (align/adx gates) decides instead.
-            "block_open": False,
+            "block_open": bool(
+                getattr(self.config, "block_chop_opens", True) and g == "chop"
+            ),
             "coins": by_coin,
             "btc_roc": round(btc_roc, 4),
             "btc_impulse": btc_impulse,
@@ -2790,18 +2795,39 @@ class AIStrategy:
                 for coin_q, cq in (q.get("coins") or {}).items():
                     if cq.get("block_open"):
                         continue
-                    side = str(cq.get("best_side") or "")
-                    al = float(cq.get("align_score") or 0)
+                    reg = str(cq.get("regime") or "").lower()
+                    al_l = float(cq.get("align_long") or 0)
+                    al_s = float(cq.get("align_short") or 0)
+                    # Side must agree with regime — never long into bear / short into bull
+                    if reg == "bear":
+                        side, al = "short", al_s
+                    elif reg == "bull":
+                        side, al = "long", al_l
+                    elif reg == "chop":
+                        # chop: only if one side clearly dominates
+                        if al_l >= al_s and al_l >= 0.85:
+                            side, al = "long", al_l
+                        elif al_s > al_l and al_s >= 0.85:
+                            side, al = "short", al_s
+                        else:
+                            continue
+                    else:
+                        side = str(cq.get("best_side") or "")
+                        al = float(cq.get("align_score") or 0)
                     if side not in ("long", "short"):
                         continue
-                    if al < max(min_al, 0.75):
+                    if reg == "bear" and side == "long":
                         continue
-                    if al < min_cf and al < 0.85:
-                        continue  # need strong quant if below conf gate
+                    if reg == "bull" and side == "short":
+                        continue
+                    if al < max(min_al, 0.78):
+                        continue
+                    if al < min_cf and al < 0.88:
+                        continue
                     if best is None or al > best[2]:
-                        best = (coin_q, side, al)
+                        best = (coin_q, side, al, reg)
                 if best:
-                    coin_q, side, al = best
+                    coin_q, side, al, reg = best
                     decision = {
                         "action": "open",
                         "symbol": coin_q,
@@ -2810,7 +2836,7 @@ class AIStrategy:
                         "stop_pct": 0.03,
                         "take_pct": 0.06,
                         "confidence": round(min(0.92, max(al, min_cf)), 3),
-                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} (LLM was {action}/{reason_l[:40]})",
+                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} regime={reg} (LLM was {action}/{reason_l[:40]})",
                     }
                     self._last_decision = self._enrich_decision(decision, snap)
                     self._decision_log.append(self._last_decision)
@@ -2836,6 +2862,12 @@ class AIStrategy:
             if conf < float(self.config.min_confidence or 0):
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason=f"low_conf:{conf}")
+                return
+            veto = self._quant_veto_open(decision)
+            if veto:
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=str(veto)[:80])
+                print(f"[AI] open veto {coin}: {veto}", flush=True)
                 return
             if self.config.block_llm_error_opens and (
                 "llm_error" in reason.lower() or reason.lower().startswith("fallback")
