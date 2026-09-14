@@ -187,7 +187,7 @@ _mom_auto = os.getenv("MOM_AUTO_START", "0").strip().lower() not in ("0", "false
 _imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
-# AI_FORCE_AUTOSTART=1 (default): start AI after every deploy even if last state was Stop
+# AI_FORCE_AUTOSTART=0 (default): only auto-start if ai_bot_running=1 before redeploy
 # Product mode: only AI Discretionary is active (no multi-bot PnL/claim collisions)
 AI_ONLY_MODE = True  # single-bot product: AI Discretionary only
 if AI_ONLY_MODE:
@@ -829,10 +829,12 @@ async def startup():
         # Always auto-start after deploy/restart when BOTS_AUTO_START + AI_AUTO_START
         # are on (defaults). Persist flag so manual Stop still wins until next
         # explicit Start — unless AI_FORCE_AUTOSTART=1 (always on after boot).
-        _ai_force = os.getenv("AI_FORCE_AUTOSTART", "1").strip().lower() not in (
+        # Default OFF: respect manual Stop — only restore if was running
+        _ai_force = os.getenv("AI_FORCE_AUTOSTART", "0").strip().lower() not in (
             "0", "false", "no", "off"
         )
-        _ai_was_running = True
+        # Only auto-start if DB says it was running before shutdown/redeploy
+        _ai_was_running = False
         try:
             _db_val = await db.get_setting("ai_bot_running")
             if _db_val is not None and str(_db_val).strip() != "":
