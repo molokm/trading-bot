@@ -187,6 +187,7 @@ _mom_auto = os.getenv("MOM_AUTO_START", "0").strip().lower() not in ("0", "false
 _imp_auto = os.getenv("IMP_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _val_auto = os.getenv("VAL_AUTO_START", "0").strip().lower() not in ("0", "false", "no", "off")
 _ai_auto = os.getenv("AI_AUTO_START", "1").strip().lower() not in ("0", "false", "no", "off")
+# AI_FORCE_AUTOSTART=1 (default): start AI after every deploy even if last state was Stop
 # Product mode: only AI Discretionary is active (no multi-bot PnL/claim collisions)
 AI_ONLY_MODE = True  # single-bot product: AI Discretionary only
 if AI_ONLY_MODE:
@@ -825,9 +826,12 @@ async def startup():
 
     try:
         print("[startup] AI Discretionary auto-start ...", flush=True)
-        # Restore from DB: only auto-start if bot was running before redeploy.
-        # Missing setting (fresh DB / pre-migration) = default ON, so the first
-        # deploy after this change doesn't unexpectedly stop a running bot.
+        # Always auto-start after deploy/restart when BOTS_AUTO_START + AI_AUTO_START
+        # are on (defaults). Persist flag so manual Stop still wins until next
+        # explicit Start — unless AI_FORCE_AUTOSTART=1 (always on after boot).
+        _ai_force = os.getenv("AI_FORCE_AUTOSTART", "1").strip().lower() not in (
+            "0", "false", "no", "off"
+        )
         _ai_was_running = True
         try:
             _db_val = await db.get_setting("ai_bot_running")
@@ -835,38 +839,95 @@ async def startup():
                 _ai_was_running = str(_db_val).strip() == "1"
         except Exception:
             pass
-        print(f"[startup] AI auto-start: db_state={'running' if _ai_was_running else 'stopped'}", flush=True)
-        if _env_key and _env_secret and _env_pass and _ai_was_running:
+        _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or _ai_was_running))
+        print(
+            f"[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} "
+            f"force={_ai_force} db_state={'running' if _ai_was_running else 'stopped'} do={_do_ai}",
+            flush=True,
+        )
+        if _do_ai:
             _demo = _env_demo
-            if _demo:
-                _exec = True
+            # Ensure OKX client for the active mode
+            try:
+                if _demo:
+                    await _ensure_showcase()
+                    _k = _demo_key or _env_key
+                    _s = _demo_secret or _env_secret
+                    _pw = _demo_pass or _env_pass
+                    if _k and _s and _pw and client_manager:
+                        await client_manager.init_client(_k, _s, _pw, True)
+                else:
+                    await _load_live_creds_from_db()
+                    _k = _live_key or _env_key
+                    _s = _live_secret or _env_secret
+                    _pw = _live_pass or _env_pass
+                    if _k and _s and _pw and client_manager:
+                        await client_manager.init_client(_k, _s, _pw, False)
+            except Exception as _ce:
+                print(f"[startup] AI client init: {_ce}", flush=True)
+
+            _has_keys = bool(
+                (client_manager and client_manager.get_client()
+                 and getattr(client_manager.get_client(), "has_credentials", lambda: False)())
+                or (_env_key and _env_secret and _env_pass)
+            )
+            if not _has_keys:
+                print("[startup]   AI Discretionary skipped (no OKX keys)", flush=True)
             else:
-                env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
-                _exec = env_ex not in ("0", "false", "no", "off")
-            ai_cfg = AIConfig(
-                capital=float(os.getenv("AI_CAPITAL", "10000")),
-                max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
-                max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
-                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
-                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
-                execute=_exec,
-            )
-            ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db,
-                               notifier=telegram, live_client_manager=live_manager)
-            ai_bot.start()
-            _positions_cache = None
-            print(
-                f"[startup]   AI Discretionary RUNNING (restored) execute={_exec} capital={ai_cfg.capital}",
-                flush=True,
-            )
+                if _demo:
+                    _exec = True
+                else:
+                    env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
+                    _exec = env_ex not in ("0", "false", "no", "off")
+                try:
+                    from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
+                    _syms = list(_AI_SYMS)
+                except Exception:
+                    _syms = ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"]
+                # Optional capital override from DB
+                _cap = float(os.getenv("AI_CAPITAL", "10000"))
+                try:
+                    _cap_db = await db.get_setting("ai_live_capital")
+                    if _cap_db and float(_cap_db) >= 100:
+                        _cap = float(_cap_db)
+                except Exception:
+                    pass
+                ai_cfg = AIConfig(
+                    symbols=_syms,
+                    capital=_cap,
+                    max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                    max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
+                    risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                    poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                    execute=_exec,
+                )
+                ai_bot = AIStrategy(
+                    config=ai_cfg,
+                    client_manager=client_manager,
+                    db=db,
+                    notifier=telegram,
+                    live_client_manager=live_manager,
+                )
+                ai_bot.start()
+                _positions_cache = None
+                try:
+                    await db.set_setting("ai_bot_running", "1")
+                except Exception:
+                    pass
+                print(
+                    f"[startup]   AI Discretionary RUNNING (auto) execute={_exec} "
+                    f"capital={ai_cfg.capital} symbols={_syms} mode={'DEMO' if _demo else 'LIVE'}",
+                    flush=True,
+                )
         else:
-            reason = "no OKX keys" if not (_env_key and _env_secret and _env_pass) else "was stopped before redeploy"
             print(
-                f"[startup]   AI Discretionary skipped ({reason})",
+                "[startup]   AI Discretionary skipped "
+                f"(auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} was_run={_ai_was_running})",
                 flush=True,
             )
     except Exception as e:
-        print(f"[startup]   AI FAILED: {e}", flush=True)
+        import traceback
+        print(f"[startup]   AI FAILED: {e}\n{traceback.format_exc()}", flush=True)
 
     # AI Scale-In (SCL) — independent auto-start after deploy/restart (default ON)
     try:
