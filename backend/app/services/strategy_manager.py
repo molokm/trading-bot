@@ -101,7 +101,7 @@ class StrategyManager:
                     continue
                 notifier = notifier_fn(uid) if notifier_fn else None
                 cfg = _default_rotation_config()
-                from .rotation_strategy import RotationStrategy
+                from .legacy_stubs import RotationStrategy
                 bot = RotationStrategy(config=cfg, client_manager=ub.client_holder,
                                        db=db, notifier=notifier)
                 bot.BOT_ID = ub.rot_bot_id
@@ -136,9 +136,9 @@ PerUserClientManager = _ClientHolder
 def _default_rotation_config():
     if _default_rotation_config_fn:
         return _default_rotation_config_fn()
-    from .rotation_strategy import RotationConfig
+    from .legacy_stubs import RotationConfig
     return RotationConfig()
     if _default_rotation_config_fn:
         return _default_rotation_config_fn()
-    from .rotation_strategy import RotationConfig
+    from .legacy_stubs import RotationConfig
     return RotationConfig()

@@ -74,40 +74,21 @@ from app.services.auth import (
     get_blacklist, set_blacklist,
 )
 from app.services.strategy_manager import StrategyManager, PerUserClientManager, set_hydrate_deps
-from app.services.rotation_strategy import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC
-from app.services.impulse_strategy import ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION
-from app.services.validation_strategy import ValidationStrategy, make_validation_config, VAL_BOT_ID
-from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, STRATEGY_NAME as AI_SCALE_NAME
+# Stage-4: all retired bots live in one stub module (AI_ONLY product)
+from app.services.legacy_stubs import (
+    RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC, RotPosition, COINS,
+    ImpulseStrategy, ImpulseConfig, IMP_BOT_ID,
+    STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION,
+    ValidationStrategy, make_validation_config, VAL_BOT_ID,
+    AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, AI_SCALE_NAME,
+    OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID,
+    SCALP_NAME, SCALP_VERSION, SCALP_DESC, compute_book_metrics,
+    VWAPMeanReversion, VWAPScalpConfig, VWAP_BOT_ID, VWAP_NAME, VWAP_VERSION, VWAP_DESC,
+    SmartMoneyTracker, TrackerConfig, OKXCopyAPI, SM_BOT_ID, SM_NAME, SM_VERSION,
+    get_mirror,
+)
 from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
 from app.services.ai_agent import llm_status
-from app.services.orderbook_scalp_strategy import (
-    OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID,
-    STRATEGY_NAME as SCALP_NAME, STRATEGY_VERSION as SCALP_VERSION,
-    STRATEGY_DESC as SCALP_DESC, compute_book_metrics,
-)
-try:
-    from app.services.scalping_vwap_rev import (
-        VWAPMeanReversion, ScalpConfig as VWAPScalpConfig, VWAP_BOT_ID,
-        STRATEGY_NAME as VWAP_NAME, STRATEGY_VERSION as VWAP_VERSION,
-        STRATEGY_DESC as VWAP_DESC,
-    )
-except Exception as _vwap_imp_err:
-    print(f"[startup] VWAP module unavailable: {_vwap_imp_err}", flush=True)
-    VWAP_BOT_ID = "vwap_mean_rev"
-    VWAP_NAME = "VWAP Mean Reversion"
-    VWAP_VERSION = "off"
-    VWAP_DESC = "unavailable"
-    class VWAPScalpConfig:
-        def __init__(self, **kwargs): pass
-    class VWAPMeanReversion:
-        def __init__(self, *a, **k): self._running=False; self._positions={}; self._trade_log=[]
-        def start(self): pass
-        def stop(self): pass
-        def get_status(self): return {"running": False, "strategy": VWAP_NAME, "version": "off"}
-from app.services.smart_money_tracker import (
-    SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
-    BOT_ID as SM_BOT_ID, STRATEGY_NAME as SM_NAME, STRATEGY_VERSION as SM_VERSION,
-)
 from app.services.telegram_notifier import TelegramNotifier
 from app.services import pnl_engine
 from app.services.pnl_engine import PNL_EPOCH_ISO
@@ -628,11 +609,11 @@ async def startup():
         # Restore position claims from durable snapshots
         try:
             from app.services.position_claim import restore_snapshots_to_claims
-            from app.services.rotation_strategy import ROT_BOT_ID
-            from app.services.impulse_strategy import IMP_BOT_ID
+            from app.services.legacy_stubs import ROT_BOT_ID
+            from app.services.legacy_stubs import IMP_BOT_ID
             from app.services.ai_strategy import AI_BOT_ID
             try:
-                from app.services.validation_strategy import VAL_BOT_ID
+                from app.services.legacy_stubs import VAL_BOT_ID
             except Exception:
                 VAL_BOT_ID = "validation_strategy"
             rest = await restore_snapshots_to_claims(
@@ -1000,7 +981,7 @@ async def startup():
                 else:
                     env_ex = os.getenv("AI_EXECUTE", "1").strip().lower()
                     _exec_s = env_ex not in ("0", "false", "no", "off")
-                from app.services.ai_scale_strategy import AIScaleStrategy, AIScaleConfig
+                from app.services.legacy_stubs import AIScaleStrategy, AIScaleConfig
                 scfg = AIScaleConfig(
                     capital=float(os.getenv("AI_SCALE_CAPITAL", "5000")),
                     max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
@@ -3213,9 +3194,7 @@ async def ai_decide_once():
 def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
     """Create global Smart Money tracker on first use (browse/copy without manual Start)."""
     global sm_tracker
-    from app.services.smart_money_tracker import (
-        SmartMoneyTracker, TrackerConfig, OKXCopyAPI,
-    )
+    from app.services.legacy_stubs import SmartMoneyTracker, TrackerConfig, OKXCopyAPI
     if sm_tracker is None:
         okx = OKXCopyAPI(
             api_key=_env_key or os.getenv("OKX_API_KEY", ""),
@@ -3309,7 +3288,7 @@ async def smart_money_discover(
     """
     import asyncio
     from app.services.smart_money_light import discover_okx_light
-    from app.services.smart_money_tracker import OKXCopyAPI
+    from app.services.legacy_stubs import OKXCopyAPI
 
     src_list = [s.strip().lower() for s in (sources or "okx").split(",") if s.strip()]
     want_okx = "okx" in src_list
@@ -3474,7 +3453,7 @@ def _sm_okx_api() -> "OKXCopyAPI":
     """Build a fresh OKX Copy Trading API client (no tracker thread, no
     background work). Copy trading on OKX is a one-shot REST call, so it
     does NOT need the Smart Money tracker thread that crashed the process."""
-    from app.services.smart_money_tracker import OKXCopyAPI
+    from app.services.legacy_stubs import OKXCopyAPI
     return OKXCopyAPI(
         api_key=_env_key or os.getenv("OKX_API_KEY", ""),
         secret_key=_env_secret or os.getenv("OKX_SECRET_KEY", "") or os.getenv("OKX_SECRET", ""),
@@ -4759,7 +4738,7 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
         now_iso = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
         try:
             if bot_label == "Momentum" and rotation:
-                from app.services.rotation_strategy import RotPosition
+                from app.services.legacy_stubs import RotPosition
                 if coin not in (getattr(rotation, "_positions", None) or {}):
                     rotation._positions[coin] = RotPosition(
                         symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
@@ -4803,7 +4782,7 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
             elif bot_label.startswith("MACD") and validation:
                 pos_map = getattr(validation, "_positions", None)
                 if pos_map is not None and coin not in pos_map:
-                    from app.services.rotation_strategy import RotPosition
+                    from app.services.legacy_stubs import RotPosition
                     pos_map[coin] = RotPosition(
                         symbol=inst_id, coin=coin, inst_id=inst_id, side=side,
                         size=sz, size_original=sz, entry_price=entry, stop_price=stop,
@@ -4998,7 +4977,7 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                 candidates = []
                 # (bot_id, label, bot_obj, universe)
                 try:
-                    from app.services.rotation_strategy import COINS as _RC
+                    from app.services.legacy_stubs import COINS as _RC
                 except Exception:
                     _RC = ["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"]
                 if rotation and getattr(rotation, "_running", False):
@@ -5146,7 +5125,7 @@ async def positions_bind(data: dict = None):
     if bid == ROT_BOT_ID:
         # inject memory via internal helper path: call get_positions logic lightly
         try:
-            from app.services.rotation_strategy import RotPosition
+            from app.services.legacy_stubs import RotPosition
             global rotation
             if rotation:
                 coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
@@ -7656,7 +7635,7 @@ async def admin_reset_trading_stats(data: dict = None):
         "smart_money",
     ]
     try:
-        from app.services.orderbook_scalp_strategy import SCALP_BOT_ID
+        from app.services.legacy_stubs import SCALP_BOT_ID
         bot_ids.append(SCALP_BOT_ID)
     except Exception:
         pass
