@@ -231,6 +231,8 @@ async def debug_server_hits():
 
 @app.on_event('startup')
 async def startup():
+    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
+    _STARTED_AT = _time.time()
     # Stage-5: publish handles for routers
     try:
         import app.runtime as _rt
@@ -244,9 +246,6 @@ async def startup():
         _rt.env_demo = _env_demo
     except Exception as _e:
         print(f"[runtime] publish: {_e}", flush=True)
-
-    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
-    _STARTED_AT = _time.time()
     try:
         print('[startup] 0/7 auth secrets ...', flush=True)
         ensure_auth_secrets()
