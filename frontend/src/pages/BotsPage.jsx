@@ -1,163 +1,15 @@
-const AI_ONLY_MODE = true
-import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import { Brain, 
-  Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import { Brain, Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
   ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot,
   Link, Unlink, AlertTriangle, Wifi, WifiOff
 } from 'lucide-react'
 import { api } from '../services/api'
-import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
+import { Tip, StatusBadge, ConfirmDialog, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
+/** Stage-3: AI Discretionary + Live mirror only (legacy bots removed). */
 
-/** Coins the validation bot trades (MACD+Donchian universe, 10 coins like Momentum/Impulse) */
-const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
-
-/** Params that map 1:1 to RotationConfig on the backend */
-const ROTATION_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'breakeven_pct', 'partial_tp_pct', 'partial_tp_ratio',
-  'trail_atr_mult', 'adx_min', 'min_hold_days', 'max_leverage',
-]
-
-const PARAM_BASE = {
-  capital:            { min: 500, max: 100000, step: 500, unit: '$' },
-  top_k:              { min: 1, max: 4, step: 1, unit: '' },
-  risk_per_trade:     { min: 0.5, max: 20, step: 0.5, unit: '%', asPercent: true },
-  poll_interval_sec:  { min: 60, max: 900, step: 60, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's' },
-  breakeven_pct:      { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
-  partial_tp_pct:     { min: 1, max: 20, step: 0.5, unit: '%', asPercent: true },
-  partial_tp_ratio:   { min: 20, max: 100, step: 5, unit: '%', asPercent: true },
-  trail_atr_mult:     { min: 0.2, max: 2, step: 0.1, unit: '×ATR' },
-  adx_min:            { min: 10, max: 40, step: 1, unit: '' },
-  min_hold_days:      { min: 1, max: 14, step: 1, unit: 'd' },
-  max_leverage:       { min: 1, max: 5, step: 0.5, unit: 'x' },
-}
-
-const DEFAULT_MOM_CONFIG = {
-  capital: 10000, top_k: 2, risk_per_trade: 0.14, poll_interval_sec: 300,
-  breakeven_pct: 0.05, partial_tp_pct: 0.08, partial_tp_ratio: 0.5,
-  trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
-}
-
-/** Params that map 1:1 to ImpulseConfig on the backend */
-const IMPULSE_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'entry_roc', 'max_adds', 'cooldown_bars',
-  'sl_atr_mult', 'sl_atr_mult_short', 'trail_atr_mult', 'trail_atr_mult_short',
-  'tp1_atr', 'tp1_frac', 'tp2_atr', 'tp2_frac', 'max_hold_bars', 'max_leverage',
-]
-
-/** Impulse uses its own ranges (shares keys with momentum but different scale) */
-const IMPULSE_PARAM_BASE = {
-  ...PARAM_BASE,
-  entry_roc:            { min: 1, max: 8, step: 0.5, unit: '%' },
-  max_adds:             { min: 0, max: 4, step: 1, unit: '' },
-  cooldown_bars:        { min: 0, max: 15, step: 1, unit: 'd' },
-  sl_atr_mult:          { min: 2, max: 10, step: 0.5, unit: '×ATR' },
-  sl_atr_mult_short:    { min: 2, max: 10, step: 0.5, unit: '×ATR' },
-  trail_atr_mult:       { min: 3, max: 15, step: 0.5, unit: '×ATR' },
-  trail_atr_mult_short: { min: 3, max: 15, step: 0.5, unit: '×ATR' },
-  tp1_atr:              { min: 1, max: 6, step: 0.5, unit: '×ATR' },
-  tp1_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
-  tp2_atr:              { min: 3, max: 12, step: 0.5, unit: '×ATR' },
-  tp2_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
-  max_hold_bars:        { min: 5, max: 90, step: 1, unit: 'd' },
-  max_leverage:         { min: 1, max: 5, step: 0.5, unit: 'x' },
-}
-
-const DEFAULT_IMP_CONFIG = {
-  capital: 10000, top_k: 4, risk_per_trade: 0.10, poll_interval_sec: 300,
-  entry_roc: 4.0, max_adds: 2, cooldown_bars: 5,
-  sl_atr_mult: 5.0, sl_atr_mult_short: 5.0,
-  trail_atr_mult: 8.0, trail_atr_mult_short: 8.0,
-  tp1_atr: 2.0, tp1_frac: 0.3, tp2_atr: 6.0, tp2_frac: 0.3,
-  max_hold_bars: 30, max_leverage: 3.0,
-}
-
-/** Params the validation bot accepts via /api/validation/start */
-const VALIDATION_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'donchian_n', 'tp_pct', 'tp_ratio', 'tp2_pct', 'be_pct',
-  'chandelier_atr', 'max_hold_days', 'max_leverage', 'allocation_pct',
-]
-
-/** Validation ranges (MACD+Donchian) on a small budget */
-const VALIDATION_PARAM_BASE = {
-  ...PARAM_BASE,
-  capital:          { min: 50, max: 5000, step: 50, unit: '$' },
-  top_k:            { min: 1, max: 4, step: 1, unit: '' },
-  risk_per_trade:   { min: 1, max: 30, step: 1, unit: '%', asPercent: true },
-  donchian_n:       { min: 5, max: 30, step: 1, unit: 'd' },
-  tp_pct:           { min: 2, max: 20, step: 0.5, unit: '%', asPercent: true },
-  tp_ratio:         { min: 10, max: 60, step: 5, unit: '%', asPercent: true },
-  tp2_pct:          { min: 3, max: 30, step: 0.5, unit: '%', asPercent: true },
-  be_pct:           { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
-  chandelier_atr:   { min: 2, max: 8, step: 0.5, unit: '×ATR' },
-  max_hold_days:    { min: 1, max: 10, step: 1, unit: 'd' },
-  max_leverage:     { min: 1, max: 3, step: 0.5, unit: 'x' },
-  allocation_pct:   { min: 5, max: 100, step: 5, unit: '%', asPercent: true },
-}
-
-const DEFAULT_VAL_CONFIG = {
-  capital: 300, top_k: 4, risk_per_trade: 0.14, poll_interval_sec: 300,
-  donchian_n: 15, tp_pct: 0.08, tp_ratio: 0.3, tp2_pct: 0.10,
-  be_pct: 0.015, chandelier_atr: 4.0, max_hold_days: 3, max_leverage: 1,
-  allocation_pct: 0.15,
-}
-
-// Независимый бэктест (Backtrader, нативные 1D OKX) — по каждой стратегии
-const MOM_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+20.6%' },
-    { year: '2024', ret: '+85.0%' },
-    { year: '2025', ret: '+16.7%' },
-    { year: '2026', ret: '+150.5%' },
-  ],
-  summary: { cagr: '75.9%', dd: '43.4%' },
-}
-const IMP_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+114.9%' },
-    { year: '2024', ret: '+114.1%' },
-    { year: '2025', ret: '-10.4%' },
-    { year: '2026', ret: '+34.1%' },
-  ],
-  summary: { cagr: '68.7%', dd: '38.7%' },
-}
-const VAL_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+25.3%' },
-    { year: '2024', ret: '+56.7%' },
-    { year: '2025', ret: '+18.7%' },
-    { year: '2026', ret: '-17.5%' },
-  ],
-  summary: { cagr: '23.9%', dd: '31.0%' },
-}
-
-function getParamMeta(t, base = PARAM_BASE) {
-  const result = {}
-  for (const key of Object.keys(base)) {
-    const b = base[key]
-    result[key] = {
-      ...b,
-      label: t(`bots.param.${key}.label`),
-      tip: t(`bots.param.${key}.tip`),
-      unit: b.unitKey ? t(b.unitKey) : b.unit,
-    }
-  }
-  return result
-}
-
-function toDisplay(raw, meta) {
-  if (raw == null || Number.isNaN(raw)) return meta.min
-  return meta.asPercent ? +(raw * 100).toFixed(2) : raw
-}
-
-function fromDisplay(display, meta) {
-  return meta.asPercent ? display / 100 : display
-}
+const AI_SYMBOLS = ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']
 
 function BotSparkline({ botId, pnl }) {
   const points = useMemo(() => {
@@ -606,26 +458,8 @@ function BotCard({
   )
 }
 
-function loadSavedConfig(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return fallback
-    return { ...fallback, ...JSON.parse(raw) }
-  } catch {
-    return fallback
-  }
-}
-
 export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
-  const strategyDesc = getStrategyDesc(t)
-
-  const [momentumStatus, setMomentumStatus] = useState(null)
-  const [momLoading, setMomLoading] = useState(false)
-  const [impulseStatus, setImpulseStatus] = useState(null)
-  const [impLoading, setImpLoading] = useState(false)
-  const [valStatus, setValStatus] = useState(null)
-  const [valLoading, setValLoading] = useState(false)
   const [aiStatus, setAiStatus] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
   const [liveStatus, setLiveStatus] = useState(null)
@@ -633,11 +467,6 @@ export default function BotsPage({ connected, isGuest }) {
   const [liveKey, setLiveKey] = useState('')
   const [liveSecret, setLiveSecret] = useState('')
   const [livePass, setLivePass] = useState('')
-  const [aiScaleStatus, setAiScaleStatus] = useState(null)
-  const [aiScaleLoading, setAiScaleLoading] = useState(false)
-  const [aiScaleCapital, setAiScaleCapital] = useState(5000)
-  const [abCompare, setAbCompare] = useState(null)
-  const [abLoading, setAbLoading] = useState(false)
   const [aiCapital, setAiCapital] = useState(() => {
     try {
       const v = Number(localStorage.getItem('ai_live_capital') || '10000')
@@ -648,28 +477,8 @@ export default function BotsPage({ connected, isGuest }) {
   })
   const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
-  const [sliderOpen, setSliderOpen] = useState(false)
-  const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'impulse' | 'validation'
-  const [saving, setSaving] = useState(false)
-  const formRef = useRef(null)
-
-  const [momLocal, setMomLocal] = useState(() => loadSavedConfig('bot_config_momentum', {
-    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
-    config: DEFAULT_MOM_CONFIG,
-  }))
-
-  const [impLocal, setImpLocal] = useState(() => loadSavedConfig('bot_config_impulse', {
-    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
-    config: DEFAULT_IMP_CONFIG,
-  }))
-
-  const [valLocal, setValLocal] = useState(() => loadSavedConfig('bot_config_validation', {
-    symbols: [...VALIDATION_SYMBOL_OPTIONS],
-    config: DEFAULT_VAL_CONFIG,
-  }))
 
   const refreshStatus = useCallback(async () => {
-    // AI_ONLY product: only AI + live mirror
     const [a, ls] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
@@ -685,55 +494,6 @@ export default function BotsPage({ connected, isGuest }) {
     return () => clearInterval(id)
   }, [connected, refreshStatus])
 
-  const momToggle = async () => {
-    setMomLoading(true)
-    try {
-      if (momentumStatus?.running) {
-        await api.momentumStop()
-      } else {
-        await api.momentumStart({
-          symbols: momLocal.symbols,
-          ...momLocal.config,
-          leverage: momLocal.config.max_leverage,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setMomLoading(false)
-  }
-
-  const impToggle = async () => {
-    setImpLoading(true)
-    try {
-      if (impulseStatus?.running) {
-        await api.impulseStop()
-      } else {
-        await api.impulseStart({
-          symbols: impLocal.symbols,
-          ...impLocal.config,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setImpLoading(false)
-  }
-
-  const valToggle = async () => {
-    setValLoading(true)
-    try {
-      if (valStatus?.running) {
-        await api.validationStop()
-      } else {
-        await api.validationStart({
-          symbols: valLocal.symbols,
-          ...valLocal.config,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setValLoading(false)
-  }
-
   const aiToggle = async () => {
     setAiLoading(true)
     try {
@@ -747,43 +507,12 @@ export default function BotsPage({ connected, isGuest }) {
           provider: 'groq',
           execute: true,
           max_positions: 1,
-          symbols: ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'],
+          symbols: AI_SYMBOLS,
         })
       }
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setAiLoading(false)
-  }
-
-  const abStartBoth = async () => {
-    setAbLoading(true)
-    try {
-      await api.aiAbStart({
-        capital_a: Math.max(100, Number(aiCapital) || 5000),
-        capital_b: Math.max(100, Number(aiScaleCapital) || 4000),
-      })
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setAbLoading(false)
-  }
-
-  const aiScaleToggle = async () => {
-    setAiScaleLoading(true)
-    try {
-      if (aiScaleStatus?.running) {
-        await api.aiScaleStop()
-      } else {
-        const cap = Math.max(100, Number(aiScaleCapital) || 5000)
-        await api.aiScaleStart({
-          capital: cap,
-          execute: true,
-          max_adds: 3,
-          symbols: ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'],
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setAiScaleLoading(false)
   }
 
   const liveConnect = async () => {
@@ -805,69 +534,9 @@ export default function BotsPage({ connected, isGuest }) {
     setLiveLoading(false)
   }
 
-  const handleSave = (botData) => {
-    setSaving(true)
-    const payload = { symbols: botData.symbols, config: botData.config }
-    if (editingBot === 'momentum') {
-      setMomLocal(payload)
-      localStorage.setItem('bot_config_momentum', JSON.stringify(payload))
-    } else if (editingBot === 'impulse') {
-      setImpLocal(payload)
-      localStorage.setItem('bot_config_impulse', JSON.stringify(payload))
-    } else if (editingBot === 'validation') {
-      setValLocal(payload)
-      localStorage.setItem('bot_config_validation', JSON.stringify(payload))
-    }
-    setTimeout(() => {
-      setSaving(false)
-      setSliderOpen(false)
-      setEditingBot(null)
-    }, 200)
-  }
-
-  const momRunning = !!momentumStatus?.running
-  const momStartedAt = momentumStatus?.started_at ? Date.parse(momentumStatus.started_at) : null
-
-  const momCfg = momentumStatus?.config
-  const momTags = [
-    ...(momCfg?.symbols?.length ? [`${momCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: momCfg?.top_k || 2 }),
-    ...(momCfg?.max_leverage ? [t('bots.tag_leverage', { x: momCfg.max_leverage })] : []),
-    t('bots.tag_regime'),
-    t('bots.tag_trailing'),
-    t('bots.tag_roi'),
-  ]
-
-  const impRunning = !!impulseStatus?.running
-  const impStartedAt = impulseStatus?.started_at ? Date.parse(impulseStatus.started_at) : null
-
-  const valRunning = !!valStatus?.running
-  const valStartedAt = valStatus?.started_at ? Date.parse(valStatus.started_at) : null
-
-  const valCfg = valStatus?.config
-  const valTags = [
-    ...(valCfg?.symbols?.length ? [`${valCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: valCfg?.top_k || 4 }),
-    ...(valCfg?.max_leverage ? [t('bots.tag_leverage', { x: valCfg.max_leverage })] : []),
-    t('bots.tag_breakout'),
-    t('bots.tag_partial_tp'),
-  ]
-
-  const impCfg = impulseStatus?.config
-  const impTags = [
-    ...(impCfg?.symbols?.length ? [`${impCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: impCfg?.top_k || 4 }),
-    ...(impCfg?.max_leverage ? [t('bots.tag_leverage', { x: impCfg.max_leverage })] : []),
-    t('bots.tag_pyramid'),
-    t('bots.tag_cascade_tp'),
-    t('bots.tag_trailing'),
-  ]
-
   const aiRunning = !!aiStatus?.running
   const aiStartedAt = aiStatus?.started_at ? Date.parse(aiStatus.started_at) : null
+  const coins = aiStatus?.symbols || aiStatus?.config?.symbols || AI_SYMBOLS
 
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
@@ -896,7 +565,7 @@ export default function BotsPage({ connected, isGuest }) {
           accentTxt="text-[var(--accent)]"
           statusMode={aiRunning ? 'live' : 'stopped'}
           statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={aiStatus?.symbols || aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']}
+          coins={coins}
           description={
             aiStatus?.pulse
             || aiStatus?.description
@@ -908,7 +577,7 @@ export default function BotsPage({ connected, isGuest }) {
             '1H',
             aiStatus?.execute ? 'execute' : 'signals',
           ]}
-          tagline={(aiStatus?.symbols || aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']).join(' · ')}
+          tagline={coins.join(' · ')}
           pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
           trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
           winRate={aiStatus?.win_rate}
@@ -928,7 +597,6 @@ export default function BotsPage({ connected, isGuest }) {
           onCapitalChange={(v) => setAiCapital(v)}
         />
 
-        {/* ─── LIVE Mirror Card ─── */}
         <LiveMirrorCard
           connected={!!liveStatus?.connected}
           liveStatus={liveStatus}
@@ -942,32 +610,6 @@ export default function BotsPage({ connected, isGuest }) {
           t={t}
         />
       </div>
-
-      <SliderPanel
-        open={sliderOpen}
-        onClose={() => { setSliderOpen(false); setEditingBot(null) }}
-        title={`${t('bots.edit')} ${
-          editingBot === 'impulse' ? t('docs.strat_impulse_title')
-          : editingBot === 'validation' ? t('dash.validation_bot')
-          : 'Momentum'
-        }`}
-        footer={
-          <>
-            <button className="btn btn-ghost" onClick={() => { setSliderOpen(false); setEditingBot(null) }}>{t('bots.cancel')}</button>
-            <button className="btn btn-primary" onClick={() => formRef.current?.requestSubmit()} disabled={saving}>
-              {saving ? <Loader /> : <><Zap size={13} /> {t('bots.save')}</>}
-            </button>
-          </>
-        }
-      >
-        <BotConfigForm
-          ref={formRef}
-          botType={editingBot}
-          symbols={editingBot === 'impulse' ? impLocal.symbols : editingBot === 'validation' ? valLocal.symbols : momLocal.symbols}
-          config={editingBot === 'impulse' ? impLocal.config : editingBot === 'validation' ? valLocal.config : momLocal.config}
-          onSave={handleSave}
-        />
-      </SliderPanel>
 
       <ConfirmDialog
         open={confirmStopAll}
@@ -986,151 +628,3 @@ export default function BotsPage({ connected, isGuest }) {
     </div>
   )
 }
-
-function pickRotationParams(cfg) {
-  const out = {}
-  for (const key of ROTATION_PARAMS) {
-    if (cfg[key] != null) out[key] = cfg[key]
-  }
-  if (cfg.leverage != null && out.max_leverage == null) out.max_leverage = cfg.leverage
-  return out
-}
-
-function pickParams(cfg, keys) {
-  const out = {}
-  for (const key of keys) {
-    if (cfg[key] != null) out[key] = cfg[key]
-  }
-  return out
-}
-
-const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, config, onSave }, ref) {
-  const { t } = useTranslation()
-  const isImpulse = botType === 'impulse'
-  const isValidation = botType === 'validation'
-  const defaultConfig = isImpulse ? DEFAULT_IMP_CONFIG : isValidation ? DEFAULT_VAL_CONFIG : DEFAULT_MOM_CONFIG
-  const PARAM_LIST = isImpulse ? IMPULSE_PARAMS : isValidation ? VALIDATION_PARAMS : ROTATION_PARAMS
-  const PARAM_META = useMemo(() => getParamMeta(t, isImpulse ? IMPULSE_PARAM_BASE : isValidation ? VALIDATION_PARAM_BASE : PARAM_BASE), [t, isImpulse, isValidation])
-
-  const [form, setForm] = useState({
-    symbols: symbols?.length ? [...symbols] : (isValidation ? [...VALIDATION_SYMBOL_OPTIONS] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']),
-    config: { ...defaultConfig, ...config },
-  })
-
-  useEffect(() => {
-    setForm({
-      symbols: symbols?.length ? [...symbols] : (isValidation ? [...VALIDATION_SYMBOL_OPTIONS] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']),
-      config: { ...defaultConfig, ...config },
-    })
-  }, [botType, symbols, config])
-
-  const handleSubmit = (e) => {
-    e.preventDefault()
-    onSave(form)
-  }
-
-  const updateConfig = (key, val) => {
-    setForm(f => ({ ...f, config: { ...f.config, [key]: val } }))
-  }
-
-  return (
-    <form ref={ref} onSubmit={handleSubmit} className="space-y-5">
-      <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-        {isImpulse
-          ? <Zap size={14} className="text-[var(--profit)]" />
-          : isValidation
-            ? <FlaskConical size={14} className="text-[var(--warn)]" />
-            : <TrendingUp size={14} className="text-[var(--info)]" />}
-        <div>
-          <div className="text-xs font-semibold text-[var(--txt)]">
-            {isImpulse ? t('docs.strat_impulse_title') : isValidation ? t('dash.validation_bot') : t('dash.momentum_bot')}
-          </div>
-          <div className="text-2xs text-[var(--txt-muted)]">
-            {isImpulse ? 'impulse_1d' : isValidation ? 'macd_donchian_validation' : 'momentum_rotation'}
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
-          {t('bots.coins_label')} <Tip text={t('bots.coins_tip')} />
-        </label>
-        <div className="flex flex-wrap gap-2 mt-2">
-          {(isValidation ? VALIDATION_SYMBOL_OPTIONS : SYMBOL_OPTIONS).map(s => {
-            const active = form.symbols.includes(s)
-            return (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setForm(f => ({
-                  ...f,
-                  symbols: active
-                    ? (f.symbols.length > 1 ? f.symbols.filter(x => x !== s) : f.symbols)
-                    : [...f.symbols, s],
-                }))}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                  active
-                    ? 'border-[var(--info)] bg-[var(--info-dim)] text-[var(--info)]'
-                    : 'border-[var(--border)] text-[var(--txt-muted)] hover:border-[var(--border-hover)]'
-                }`}
-              >
-                {s}/USDT
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-3 block">{t('bots.params')}</label>
-        <div className="space-y-4">
-          {PARAM_LIST.map(key => {
-            const meta = PARAM_META[key]
-            if (!meta) return null
-            const rawVal = form.config[key] ?? (meta.asPercent ? meta.min / 100 : meta.min)
-            const displayVal = toDisplay(rawVal, meta)
-            return (
-              <div key={key}>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs text-[var(--txt-secondary)] flex items-center gap-1">
-                    {meta.label}
-                    <Tip text={meta.tip} />
-                  </span>
-                  <span className="mono text-xs font-semibold text-[var(--txt)]">{displayVal}{meta.unit}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={meta.min}
-                    max={meta.max}
-                    step={meta.step}
-                    value={displayVal}
-                    onChange={e => updateConfig(key, fromDisplay(parseFloat(e.target.value), meta))}
-                    className="flex-1"
-                  />
-                  <input
-                    type="number"
-                    className="w-20 text-right mono"
-                    value={displayVal}
-                    onChange={e => {
-                      const v = parseFloat(e.target.value)
-                      if (!isNaN(v)) updateConfig(key, fromDisplay(v, meta))
-                    }}
-                    step={meta.step}
-                    min={meta.min}
-                    max={meta.max}
-                  />
-                </div>
-                {key === 'risk_per_trade' && <RiskMeter percentValue={displayVal} />}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      <p className="text-2xs text-[var(--txt-muted)]">
-        {t('bots.config_apply_hint')}
-      </p>
-    </form>
-  )
-})
