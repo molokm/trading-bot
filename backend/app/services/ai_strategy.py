@@ -3439,6 +3439,7 @@ class AIStrategy:
             "reason": reason[:900],
             "pulse": pulse[:900],
             "watch": watch,
+            "symbols": list(self.config.symbols or []),
             "symbols_scanned": list(self.config.symbols or []),
             "time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),

@@ -621,7 +621,7 @@ async def startup():
                 needs_cleanup = True
         except Exception:
             pass  # table might not exist yet on very first run
-        if needs_cleanup:
+        if needs_cleanup and not AI_ONLY_MODE:
             print("[startup]   Old momentum data found - one-time cleanup ...", flush=True)
             # NEVER delete positions — claims must survive deploy / cleanup
             for table in ["trades", "signals", "performance_metrics"]:
@@ -631,7 +631,9 @@ async def startup():
                     print(f"[startup]   clear {table}: {e}", flush=True)
             print("[startup]   Clean slate ready.", flush=True)
         print("[startup] 4/7 Rotation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start and _mom_auto:
+        if AI_ONLY_MODE:
+            print("[startup]   Rotation skipped (AI_ONLY_MODE)", flush=True)
+        elif _env_key and _env_secret and _env_pass and _bots_auto_start and _mom_auto:
             # v6.9-AI: match RotationConfig defaults (gate-aware). Do not re-inflate risk.
             rot_config = RotationConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
@@ -674,7 +676,9 @@ async def startup():
         else:
             print("[startup]   Rotation skipped (no OKX env keys)", flush=True)
         print("[startup] 5/7 Impulse 1D auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start and _imp_auto:
+        if AI_ONLY_MODE:
+            print("[startup]   Impulse skipped (AI_ONLY_MODE)", flush=True)
+        elif _env_key and _env_secret and _env_pass and _bots_auto_start and _imp_auto:
             imp_config = ImpulseConfig(
                 symbols=["BTC", "ETH", "BNB", "XRP", "SOL", "DOGE", "ADA", "TRX", "AVAX", "LTC"],
                 capital=10000.0,
@@ -711,7 +715,9 @@ async def startup():
         else:
             print("[startup]   Impulse skipped (no OKX env keys)", flush=True)
         print("[startup] 6/7 MACD+Donchian Validation auto-start ...", flush=True)
-        if _env_key and _env_secret and _env_pass and _bots_auto_start and _val_auto:
+        if AI_ONLY_MODE:
+            print("[startup]   Validation skipped (AI_ONLY_MODE)", flush=True)
+        elif _env_key and _env_secret and _env_pass and _bots_auto_start and _val_auto:
             val_config = make_validation_config(
                 capital=300.0,
                 top_k=2,
@@ -3203,6 +3209,8 @@ def _ensure_sm_tracker(*, execute: bool | None = None, start: bool = False):
 
 @app.get("/api/smart-money/status")
 async def smart_money_status():
+    if AI_ONLY_MODE:
+        return {"running": False, "available": False, "retired": True}
     global sm_tracker
     if not sm_tracker:
         st = {

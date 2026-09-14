@@ -669,57 +669,14 @@ export default function BotsPage({ connected, isGuest }) {
   }))
 
   const refreshStatus = useCallback(async () => {
-    // Skip disabled bots in AI_ONLY_MODE to reduce API calls by 75%
-    const [m, i, v, a, asc, ls] = await Promise.all([
-      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-      AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+    // AI_ONLY product: only AI + live mirror
+    const [a, ls] = await Promise.all([
       api.aiStatus().catch(() => null),
-      Promise.resolve(null),
       api.liveStatus().catch(() => null),
     ])
-    if (m) {
-      setMomentumStatus(m)
-      if (m.config) {
-        setMomLocal(prev => ({
-          symbols: m.config.symbols || prev.symbols,
-          config: { ...prev.config, ...pickRotationParams(m.config) },
-        }))
-      }
-    }
-    if (i) {
-      setImpulseStatus(i)
-      if (i.config) {
-        setImpLocal(prev => ({
-          symbols: i.config.symbols || prev.symbols,
-          config: { ...prev.config, ...pickParams(i.config, IMPULSE_PARAMS) },
-        }))
-      }
-    }
-    if (v) {
-      setValStatus(v)
-      if (v.config) {
-        setValLocal(prev => ({
-          symbols: v.config.symbols || prev.symbols,
-          config: { ...prev.config, ...pickParams(v.config, VALIDATION_PARAMS) },
-        }))
-      }
-    }
-    if (a) {
-      setAiStatus(a)
-    }
-    if (asc) {
-      setAiScaleStatus(asc)
-    }
-    if (ls) {
-      setLiveStatus(ls)
-    }
-    try {
-      const ab = await api.aiAbCompare().catch(() => null)
-      if (ab) setAbCompare(ab)
-    } catch {}
-
-    setApiAlive(!!(m || i || v || a))
+    if (a) setAiStatus(a)
+    if (ls) setLiveStatus(ls)
+    setApiAlive(!!a)
   }, [])
 
   useEffect(() => {
@@ -939,7 +896,7 @@ export default function BotsPage({ connected, isGuest }) {
           accentTxt="text-[var(--accent)]"
           statusMode={aiRunning ? 'live' : 'stopped'}
           statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']}
+          coins={aiStatus?.symbols || aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']}
           description={
             aiStatus?.pulse
             || aiStatus?.description
@@ -951,7 +908,7 @@ export default function BotsPage({ connected, isGuest }) {
             '1H',
             aiStatus?.execute ? 'execute' : 'signals',
           ]}
-          tagline={(aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'XRP']).join(' · ')}
+          tagline={(aiStatus?.symbols || aiStatus?.config?.symbols || ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']).join(' · ')}
           pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
           trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
           winRate={aiStatus?.win_rate}
@@ -1016,9 +973,8 @@ export default function BotsPage({ connected, isGuest }) {
         open={confirmStopAll}
         onClose={() => setConfirmStopAll(false)}
         onConfirm={async () => {
-          try { await api.momentumStop() } catch {}
-          try { await api.impulseStop() } catch {}
-          try { await api.validationStop() } catch {}
+          try { await api.aiStop() } catch {}
+          try { await api.liveDisconnect() } catch {}
           await refreshStatus()
           setConfirmStopAll(false)
         }}
