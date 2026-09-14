@@ -595,30 +595,24 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
     try:
         print('[startup] AI Discretionary auto-start ...', flush=True)
-        # force=1 → always start; force=0 → start unless user explicitly Stopped (ai_bot_running=0)
-        _ai_force = os.getenv('AI_FORCE_AUTOSTART', '0').strip().lower() not in ('0', 'false', 'no', 'off')
-        # Default ON when setting missing (AI-only product should run after deploy)
-        _ai_was_running = True
+        # AI_ONLY product: auto-start after every deploy unless user explicitly pressed Stop
+        # (ai_user_stopped=1). Old ai_bot_running=0 no longer blocks startup.
+        _ai_force = os.getenv('AI_FORCE_AUTOSTART', '1' if AI_ONLY_MODE else '0').strip().lower() not in ('0', 'false', 'no', 'off')
+        _user_stopped = False
         try:
-            _db_val = await db.get_setting('ai_bot_running')
-            if _db_val is not None and str(_db_val).strip() != '':
-                v = str(_db_val).strip().lower()
-                if v in ('0', 'false', 'no', 'off'):
-                    _ai_was_running = False
-                elif v in ('1', 'true', 'yes', 'on'):
-                    _ai_was_running = True
-            # One-shot recovery: stage-5 deploys left ai_bot_running=0 without a real user Stop
-            if not _ai_was_running and AI_ONLY_MODE:
-                _rec = await db.get_setting('ai_autostart_recover_v1')
-                if not _rec:
-                    await db.set_setting('ai_bot_running', '1')
-                    await db.set_setting('ai_autostart_recover_v1', '1')
-                    _ai_was_running = True
-                    print('[startup] AI auto-start: recovered ai_bot_running=1 (one-shot)', flush=True)
+            _us = await db.get_setting('ai_user_stopped')
+            _user_stopped = str(_us or '').strip().lower() in ('1', 'true', 'yes', 'on')
         except Exception as _ase:
             print(f'[startup] AI auto-start state read: {_ase}', flush=True)
-        _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or _ai_was_running))
-        print(f'[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} force={_ai_force} db_state={("running" if _ai_was_running else "stopped")} do={_do_ai}', flush=True)
+        # force wins; otherwise start when auto flags on and user did not Stop
+        _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or not _user_stopped))
+        if _user_stopped and not _ai_force:
+            _do_ai = False
+        print(
+            f'[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} '
+            f'force={_ai_force} user_stopped={_user_stopped} do={_do_ai}',
+            flush=True,
+        )
         if _do_ai:
             _demo = _env_demo
             try:
@@ -670,14 +664,75 @@ async def startup():
                 _positions_cache = None
                 try:
                     await db.set_setting('ai_bot_running', '1')
+                    await db.set_setting('ai_user_stopped', '0')
                 except Exception:
                     pass
-                print(f'[startup]   AI Discretionary RUNNING (auto) execute={_exec} capital={ai_cfg.capital} symbols={_syms} mode={('DEMO' if _demo else 'LIVE')}', flush=True)
+                print(f'[startup]   AI Discretionary RUNNING (auto) execute={_exec} capital={ai_cfg.capital} symbols={_syms} mode={("DEMO" if _demo else "LIVE")}', flush=True)
         else:
-            print(f'[startup]   AI Discretionary skipped (auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} was_run={_ai_was_running})', flush=True)
+            print(f'[startup]   AI Discretionary skipped (auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} user_stopped={_user_stopped})', flush=True)
     except Exception as e:
         import traceback
         print(f'[startup]   AI FAILED: {e}\n{traceback.format_exc()}', flush=True)
+
+    # Delayed AI auto-start retry (keys / showcase may lag first attempt)
+    async def _ai_autostart_retry():
+        await asyncio.sleep(12)
+        global ai_bot
+        try:
+            if ai_bot and getattr(ai_bot, "_running", False):
+                return
+            if not (_bots_auto_start and _ai_auto):
+                return
+            try:
+                _us = await db.get_setting("ai_user_stopped") if db else None
+                if str(_us or "").strip().lower() in ("1", "true", "yes", "on"):
+                    if os.getenv("AI_FORCE_AUTOSTART", "1" if AI_ONLY_MODE else "0").strip().lower() in ("0", "false", "no", "off"):
+                        print("[startup] AI retry skipped (user_stopped)", flush=True)
+                        return
+            except Exception:
+                pass
+            print("[startup] AI auto-start RETRY ...", flush=True)
+            await _ensure_showcase()
+            _k = _demo_key or _env_key
+            _s = _demo_secret or _env_secret
+            _pw = _demo_pass or _env_pass
+            if not (_k and _s and _pw):
+                print("[startup] AI retry: still no OKX keys", flush=True)
+                return
+            if client_manager:
+                await client_manager.init_client(_k, _s, _pw, True)
+            try:
+                from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
+                _syms = list(_AI_SYMS)
+            except Exception:
+                _syms = ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"]
+            _cap = float(os.getenv("AI_CAPITAL", "10000"))
+            ai_cfg = AIConfig(
+                symbols=_syms, capital=_cap,
+                max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
+                max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
+                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "120")),
+                execute=True,
+            )
+            ai_bot = AIStrategy(
+                config=ai_cfg, client_manager=client_manager, db=db,
+                notifier=telegram, live_client_manager=live_manager,
+            )
+            ai_bot.start()
+            if db:
+                await db.set_setting("ai_bot_running", "1")
+                await db.set_setting("ai_user_stopped", "0")
+            print("[startup]   AI Discretionary RUNNING (retry)", flush=True)
+        except Exception as e:
+            print(f"[startup] AI retry failed: {e}", flush=True)
+
+    try:
+        import asyncio as _aio
+        _aio.get_event_loop().create_task(_ai_autostart_retry())
+    except Exception as e:
+        print(f"[startup] AI retry schedule: {e}", flush=True)
+
     try:
         print('[startup] AI Scale-In (SCL) — RETIRED, skip auto-start', flush=True)
         _scale_auto = False
@@ -1590,6 +1645,7 @@ async def ai_start(data: dict=None):
         if db:
             try:
                 await db.set_setting('ai_bot_running', '1')
+                await db.set_setting('ai_user_stopped', '0')
             except Exception:
                 pass
         mode_str = 'DEMO' if _demo else 'LIVE'
@@ -1611,6 +1667,7 @@ async def ai_stop():
     if db:
         try:
             await db.set_setting('ai_bot_running', '0')
+            await db.set_setting('ai_user_stopped', '1')  # explicit Stop — skip autostart until Start
         except Exception:
             pass
     return {'message': 'AI stopped', 'running': False}
