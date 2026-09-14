@@ -240,48 +240,25 @@ export default function Dashboard({ health, connected, isGuest }) {
       }
       
       // 🔄 PRIORITY 2: Secondary data (tickers, other bots) - load in background
-      const [
-        pf2,
-        pos2,
-        tk,
-        momStatus,
-        impStatus,
-        valStatus,
-        aiSt2,
-        aiScaleSt2,
-        smartMoneySt,
-        vwapRevSt,
-        priceTickers,
-        liveSt,
-      ] = await Promise.all([
+      // Stage-2: AI_ONLY — only portfolio/positions/tickers/AI/live
+      const [pf2, pos2, tk, aiSt2, priceTickers, liveSt] = await Promise.all([
         isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
         isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
         api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.aiStatus().catch(() => null),
-        Promise.resolve(null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
         api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
         api.liveStatus().catch(() => null),
       ])
-      
-      // Demo mode: update portfolio/positions from second batch
+
       if (!isLive) {
         if (pf2) setPortfolio(pf2)
         if (pos2) setPositions(pos2.positions || [])
         if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
-        if (aiScaleSt2 && !aiScaleSt2.detail) setAiScaleStatus(aiScaleSt2)
+      } else if (aiSt2 && !aiSt2.detail) {
+        setAiStatus(aiSt2)
       }
-      
+
       if (tk) setTicker(tk)
-      if (momStatus) setMomentumStatus(momStatus)
-      if (impStatus) setImpulseStatus(impStatus)
-      if (valStatus) setValidationStatus(valStatus)
-      setSmartMoneyStatus(smartMoneySt)
-      setVwapRevStatus(vwapRevSt)
       if (liveSt) setLiveStatus(liveSt)
 
       if (priceTickers?.tickers) {
@@ -299,12 +276,10 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [momTrades, trades, pnlData] = await Promise.all([
-        AI_ONLY_MODE ? Promise.resolve(null) : Promise.resolve(null).catch(() => null),
+      const [trades, pnlData] = await Promise.all([
         api.getPairedTrades(50).catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
-      if (momTrades) setMomentumTrades(momTrades.trades || [])
       if (trades) setTradeLog(trades.trades || [])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         // ONLY accept pnl_engine payloads — never bot-status seeds
