@@ -1635,28 +1635,82 @@ async def live_status():
         except Exception:
             pass
     equity = float(live_data.get('equity') or 0)
-    if connected and lc is not None and live_data.get('open_positions'):
+    # Always pull LIVE exchange positions so UI/mirror shows them even if bot
+    # memory was empty after redeploy (bot adopts on next tick).
+    if connected and lc is not None:
         try:
+            if ai_bot and hasattr(ai_bot, '_reconcile_live_from_exchange'):
+                try:
+                    await ai_bot._reconcile_live_from_exchange()
+                    st2 = ai_bot.get_status()
+                    live_data = (st2 or {}).get('live') or live_data
+                except Exception as _re:
+                    print(f'[LIVE] status reconcile: {_re}', flush=True)
             ex_resp = await lc.get_positions('SWAP')
+            ex_list = []
             ex_map = {}
             for ep in (ex_resp or {}).get('data') or []:
-                ex_map[f'{ep.get('instId')}|{str(ep.get('posSide') or 'net').lower()}'] = ep
-            for p in live_data['open_positions']:
-                inst = p.get('symbol') or ''
-                side = str(p.get('side') or 'long').lower()
-                ep = ex_map.get(f'{inst}|{side}') or ex_map.get(f'{inst}|net')
-                if not ep:
+                try:
+                    sz = abs(float(ep.get('pos') or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
                     continue
+                inst = ep.get('instId') or ''
+                pos_side = str(ep.get('posSide') or 'net').lower()
+                raw = float(ep.get('pos') or 0)
+                side = 'short' if (pos_side == 'short' or (pos_side == 'net' and raw < 0)) else 'long'
+                key = f'{inst}|{pos_side}'
+                ex_map[key] = ep
+                ex_map[f'{inst}|{side}'] = ep
                 try:
-                    p['upl'] = float(ep.get('upl') or 0)
+                    upl = float(ep.get('upl') or 0)
                 except (TypeError, ValueError):
-                    p['upl'] = 0.0
+                    upl = 0.0
                 try:
-                    p['upl_ratio'] = float(ep.get('uplRatio') or 0)
+                    entry = float(ep.get('avgPx') or 0)
                 except (TypeError, ValueError):
-                    p['upl_ratio'] = 0.0
-                p['mark_px'] = ep.get('markPx') or ''
-                p['liq_px'] = ep.get('liqPx') or ''
+                    entry = 0.0
+                try:
+                    lev = float(ep.get('lever') or 0)
+                except (TypeError, ValueError):
+                    lev = 0.0
+                ex_list.append({
+                    'symbol': inst,
+                    'coin': inst.replace('-USDT-SWAP', '').replace('-USD-SWAP', ''),
+                    'side': side,
+                    'size': sz,
+                    'entry_price': entry,
+                    'upl': upl,
+                    'upl_ratio': float(ep.get('uplRatio') or 0) if ep.get('uplRatio') not in (None, '') else 0.0,
+                    'mark_px': ep.get('markPx') or '',
+                    'liq_px': ep.get('liqPx') or '',
+                    'leverage': lev,
+                    'account_mode': 'live',
+                    'source': 'exchange',
+                })
+            mem = list(live_data.get('open_positions') or [])
+            if not mem and ex_list:
+                live_data['open_positions'] = ex_list
+            else:
+                for p in mem:
+                    inst = p.get('symbol') or p.get('inst_id') or ''
+                    side = str(p.get('side') or 'long').lower()
+                    ep = ex_map.get(f'{inst}|{side}') or ex_map.get(f'{inst}|net') or ex_map.get(f'{inst}|long') or ex_map.get(f'{inst}|short')
+                    if not ep:
+                        continue
+                    try:
+                        p['upl'] = float(ep.get('upl') or 0)
+                    except (TypeError, ValueError):
+                        p['upl'] = 0.0
+                    try:
+                        p['upl_ratio'] = float(ep.get('uplRatio') or 0)
+                    except (TypeError, ValueError):
+                        p['upl_ratio'] = 0.0
+                    p['mark_px'] = ep.get('markPx') or ''
+                    p['liq_px'] = ep.get('liqPx') or ''
+                live_data['open_positions'] = mem
+            live_data['exchange_position_count'] = len(ex_list)
         except Exception as e:
             print(f'[LIVE] status positions enrich: {e}', flush=True)
     if connected and lc is not None:
@@ -1765,14 +1819,24 @@ async def live_connect(data: dict=None):
                         stored = json.loads(raw_pos) if isinstance(raw_pos, str) else raw_pos or {}
                         if not isinstance(stored, dict):
                             stored = {}
-                    all_pos = await lc.get_positions()
-                    for p in all_pos.get('data') or [] if isinstance(all_pos, dict) else all_pos or []:
-                        c = (p.get('instId') or '').replace('-USDT-SWAP', '')
+                    all_pos = await lc.get_positions('SWAP')
+                    for p in (all_pos.get('data') or []) if isinstance(all_pos, dict) else (all_pos or []):
+                        c = (p.get('instId') or '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
                         pos_side = (p.get('posSide') or 'net').lower()
-                        side = 'short' if pos_side == 'short' else 'long'
-                        sz = float(p.get('pos') or 0)
-                        entry = float(p.get('avgPx') or 0)
-                        if sz <= 0 or entry <= 0 or c in ai_bot._live_positions:
+                        try:
+                            raw_sz = float(p.get('pos') or 0)
+                        except (TypeError, ValueError):
+                            raw_sz = 0.0
+                        sz = abs(raw_sz)
+                        if pos_side == 'short' or (pos_side == 'net' and raw_sz < 0):
+                            side = 'short'
+                        else:
+                            side = 'long'
+                        try:
+                            entry = float(p.get('avgPx') or 0)
+                        except (TypeError, ValueError):
+                            entry = 0.0
+                        if sz <= 0 or c in ai_bot._live_positions:
                             continue
                         import math as _m
                         unc = float(p.get('upl') or 0)
@@ -1785,6 +1849,10 @@ async def live_connect(data: dict=None):
                         ai_bot._live_positions[c] = pos
                         print(f'[LIVE] hydrate adopt {c}: sz={sz} entry={entry} pnl={unc:+.2f}', flush=True)
                     ai_bot._persist_live()
+                    try:
+                        await ai_bot._reconcile_live_from_exchange()
+                    except Exception as _re:
+                        print(f'[LIVE] reconcile after hydrate: {_re}', flush=True)
                     await ai_bot._clone_missing_to_live()
                 except Exception as e:
                     print(f'[LIVE] hydrate positions: {e}', flush=True)

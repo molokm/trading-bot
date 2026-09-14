@@ -2094,6 +2094,102 @@ class AIStrategy:
                     self._live_positions.pop(coin, None)
         self._persist_live()
 
+
+    async def _reconcile_live_from_exchange(self) -> None:
+        """Adopt open LIVE SWAP positions from the mirror account into memory.
+
+        The live account is dedicated to mirroring — any non-zero position on an
+        allowed symbol is treated as a mirror position (rehydrate after redeploy).
+        """
+        if not self._live_ready():
+            return
+        lc = self._live_client()
+        if not lc:
+            return
+        try:
+            resp = await lc.get_positions("SWAP")
+            if (resp or {}).get("error"):
+                print(f"[AI-LIVE] reconcile get_positions error: {resp}", flush=True)
+                return
+            data = (resp or {}).get("data") or []
+            seen: set[str] = set()
+            allowed = set(self.config.symbols or []) or {
+                "BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI",
+            }
+            for ep in data:
+                inst = ep.get("instId") or ""
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if not coin or (allowed and coin not in allowed):
+                    continue
+                try:
+                    sz = abs(float(ep.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
+                    continue
+                pos_side = (ep.get("posSide") or "net").lower()
+                # net mode: sign of pos
+                raw_pos = float(ep.get("pos") or 0)
+                if pos_side == "short" or (pos_side == "net" and raw_pos < 0):
+                    side = "short"
+                else:
+                    side = "long"
+                try:
+                    entry = float(ep.get("avgPx") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    unc = float(ep.get("upl") or 0)
+                except (TypeError, ValueError):
+                    unc = 0.0
+                try:
+                    lev = float(ep.get("lever") or 0)
+                except (TypeError, ValueError):
+                    lev = 0.0
+                seen.add(coin)
+                old = self._live_positions.get(coin)
+                if old and abs(float(old.size or 0) - sz) < 1e-9 and old.side == side:
+                    # refresh mark fields only
+                    old.unrealized_pnl = unc
+                    if entry > 0:
+                        old.entry_price = entry
+                    continue
+                pos = AIPosition(
+                    coin=coin,
+                    inst_id=inst or f"{coin}-USDT-SWAP",
+                    side=side,
+                    size=sz,
+                    entry_price=entry or (old.entry_price if old else 0),
+                    stop_price=float(getattr(old, "stop_price", 0) or 0),
+                    take_price=float(getattr(old, "take_price", 0) or 0),
+                    leverage=lev or float(getattr(old, "leverage", 0) or 0),
+                    opened_at=getattr(old, "opened_at", None) or datetime.now(timezone.utc).isoformat(),
+                    peak_price=float(getattr(old, "peak_price", 0) or entry or 0),
+                    unrealized_pnl=unc,
+                    tg_message_id=int(getattr(old, "tg_message_id", 0) or 0),
+                    signal_id=int(getattr(old, "signal_id", 0) or 0),
+                )
+                self._live_positions[coin] = pos
+                print(
+                    f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} upl={unc:+.2f}",
+                    flush=True,
+                )
+                try:
+                    await claim_open(self.db, self._live_bot_id(), pos.inst_id, side, sz, entry)
+                except Exception as ce:
+                    print(f"[AI-LIVE] claim after adopt {coin}: {ce}", flush=True)
+            # drop memory positions that vanished on exchange
+            for coin in list(self._live_positions.keys()):
+                if coin not in seen:
+                    print(f"[AI-LIVE] reconcile drop {coin} (gone on exchange)", flush=True)
+                    self._live_positions.pop(coin, None)
+            try:
+                await self._persist_live_async()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[AI-LIVE] reconcile: {e}", flush=True)
+
     async def _clone_missing_to_live(self):
         """After hydrate: clone demo positions that are missing from live."""
         if not self._live_ready():
@@ -2667,6 +2763,12 @@ class AIStrategy:
         await self._reconcile_positions_with_exchange(client)
         if not self._positions:
             await self._restore_open_positions(client)
+        # Live mirror: re-adopt exchange positions after redeploy / late connect
+        try:
+            if self._live_ready() and (self._tick_count == 0 or self._tick_count % 3 == 0):
+                await self._reconcile_live_from_exchange()
+        except Exception as _le:
+            print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
         # Once per process-ish: sweep unclaimed exchange positions
         try:
             n = int(getattr(self, "_orphan_tick", 0) or 0) + 1
@@ -3258,8 +3360,11 @@ class AIStrategy:
                 all_pos = await lc.get_positions()
                 ex_pos: dict[str, dict] = {}
                 for p in ((all_pos.get("data") or []) if isinstance(all_pos, dict) else (all_pos or [])):
-                    c = (p.get("instId") or "").replace("-USDT-SWAP", "")
-                    sz = float(p.get("pos") or 0)
+                    c = (p.get("instId") or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    try:
+                        sz = abs(float(p.get("pos") or 0))
+                    except (TypeError, ValueError):
+                        sz = 0.0
                     if c and sz > 0:
                         ex_pos[c] = p
                 used = set()
@@ -3267,7 +3372,13 @@ class AIStrategy:
                 for coin, ex in ex_pos.items():
                     pos_side = (ex.get("posSide") or "net").lower()
                     side = "short" if pos_side == "short" else "long"
-                    sz = float(ex.get("pos") or 0)
+                    try:
+                        raw_sz = float(ex.get("pos") or 0)
+                    except (TypeError, ValueError):
+                        raw_sz = 0.0
+                    sz = abs(raw_sz)
+                    if pos_side == "net" and raw_sz < 0:
+                        side = "short"
                     entry = float(ex.get("avgPx") or 0)
                     if not side or sz <= 0 or coin in self._live_positions:
                         continue
