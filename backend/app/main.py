@@ -2517,6 +2517,31 @@ async def live_status():
         except Exception:
             pass
     equity = float(live_data.get("equity") or 0)
+    # Enrich open positions with live exchange metrics (uPnL, mark, liq)
+    if connected and lc is not None and live_data.get("open_positions"):
+        try:
+            ex_resp = await lc.get_positions("SWAP")
+            ex_map = {}
+            for ep in (ex_resp or {}).get("data") or []:
+                ex_map[f"{ep.get('instId')}|{str(ep.get('posSide') or 'net').lower()}"] = ep
+            for p in live_data["open_positions"]:
+                inst = p.get("symbol") or ""
+                side = str(p.get("side") or "long").lower()
+                ep = ex_map.get(f"{inst}|{side}") or ex_map.get(f"{inst}|net")
+                if not ep:
+                    continue
+                try:
+                    p["upl"] = float(ep.get("upl") or 0)
+                except (TypeError, ValueError):
+                    p["upl"] = 0.0
+                try:
+                    p["upl_ratio"] = float(ep.get("uplRatio") or 0)
+                except (TypeError, ValueError):
+                    p["upl_ratio"] = 0.0
+                p["mark_px"] = ep.get("markPx") or ""
+                p["liq_px"] = ep.get("liqPx") or ""
+        except Exception as e:
+            print(f"[LIVE] status positions enrich: {e}", flush=True)
     # Always try a fresh OKX balance when mirror client is up (fixes UI stuck at $0)
     if connected and lc is not None:
         try:

@@ -383,19 +383,47 @@ function LiveMirrorCard({
           <PerfTile label="WR" value={liveWinRate != null ? `${liveWinRate}%` : '—'} />
         </div>
         {liveOpen.length > 0 && (
-          <div className="space-y-1">
+          <div className="space-y-1.5">
             <div className="text-2xs text-[var(--txt-muted)] font-medium">{t('dash.open_positions')} (LIVE)</div>
             {liveOpen.map((p, i) => {
               const isLong = p.side !== 'short'
+              const upl = Number(p.upl ?? 0)
+              const uplPct = Number(p.upl_ratio ?? 0) * 100
+              const mark = Number(p.mark_px || 0)
               return (
-                <div key={i} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
-                  <div className="flex items-center gap-1.5">
-                    <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                    <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                <div key={i} className="p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                      <span className="text-xs font-bold text-[var(--txt)]">{p.coin}</span>
+                      {p.leverage ? <span className="text-2xs text-[var(--txt-muted)]">x{p.leverage}</span> : null}
+                    </div>
+                    <div className="text-right">
+                      <div className={`mono text-2xs font-bold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                      </div>
+                      <div className={`text-2xs mono ${upl >= 0 ? 'text-[var(--profit)] opacity-70' : 'text-[var(--loss)] opacity-70'}`}>
+                        {uplPct >= 0 ? '+' : ''}{uplPct.toFixed(2)}%
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry_price).toFixed(4)}</span>
-                    <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_sl')} {Number(p.stop_price).toFixed(4)}</span>
+                  <div className="grid grid-cols-4 gap-1 text-2xs">
+                    <div>
+                      <div className="text-[var(--txt-muted)]">вх</div>
+                      <div className="mono text-[var(--txt)]">{Number(p.entry_price).toFixed(4)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">сейчас</div>
+                      <div className="mono text-[var(--txt)]">{mark > 0 ? mark.toFixed(4) : '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">SL</div>
+                      <div className="mono text-[var(--loss)]">{Number(p.stop_price).toFixed(4)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">TP</div>
+                      <div className="mono text-[var(--profit)]">{Number(p.take_price).toFixed(4)}</div>
+                    </div>
                   </div>
                 </div>
               )

@@ -3691,6 +3691,7 @@ class AIStrategy:
                         "stop_price": p.stop_price,
                         "take_price": p.take_price,
                         "leverage": p.leverage,
+                        "opened_at": p.opened_at,
                         "account_mode": "live",
                     }
                     for p in self._live_positions.values()
