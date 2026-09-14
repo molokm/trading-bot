@@ -790,7 +790,7 @@ export default function BotsPage({ connected, isGuest }) {
           provider: 'groq',
           execute: true,
           max_positions: 1,
-          symbols: ['BTC', 'ETH', 'SOL', 'XRP'],
+          symbols: ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'],
         })
       }
       await refreshStatus()
@@ -821,7 +821,7 @@ export default function BotsPage({ connected, isGuest }) {
           capital: cap,
           execute: true,
           max_adds: 3,
-          symbols: ['BTC', 'ETH', 'SOL', 'XRP'],
+          symbols: ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'],
         })
       }
       await refreshStatus()

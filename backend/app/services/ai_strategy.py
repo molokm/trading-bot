@@ -1,4 +1,4 @@
-"""AI Discretionary Strategy — 1H BTC/ETH/SOL/XRP with LLM (or mock) decisions.
+"""AI Discretionary Strategy — 1H multi-coin (BTC ETH SOL OKB DOGE XRP BCH DAI) with LLM decisions.
 
 Safety envelope (anti-liquidation oriented):
   - capital baseline $10_000, max leverage 3x
@@ -78,8 +78,14 @@ STRATEGY_DESC = (
     "индикаторный выход и self-adapt."
 )
 
-CT_VAL = {"BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0}
-LOT_SZ = {"BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01}
+CT_VAL = {
+    "BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0,
+    "OKB": 1.0, "DOGE": 1000.0, "BCH": 0.1, "DAI": 10.0,
+}
+LOT_SZ = {
+    "BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01,
+    "OKB": 0.1, "DOGE": 1.0, "BCH": 0.01, "DAI": 1.0,
+}
 
 
 @dataclass

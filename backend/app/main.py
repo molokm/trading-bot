@@ -4897,11 +4897,11 @@ async def get_positions(request: Request, inst_type: str = "SWAP"):
                     if coin in univ:
                         candidates.append((VAL_BOT_ID, "MACD+Donchian Validation", validation))
                 if ai_bot and getattr(ai_bot, "_running", False):
-                    univ = list(getattr(getattr(ai_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
+                    univ = list(getattr(getattr(ai_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"])
                     if coin in univ:
                         candidates.append((AI_BOT_ID, "AI Discretionary 1H", ai_bot))
                 if ai_scale_bot and getattr(ai_scale_bot, "_running", False):
-                    univ = list(getattr(getattr(ai_scale_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "XRP"])
+                    univ = list(getattr(getattr(ai_scale_bot, "config", None), "symbols", None) or ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"])
                     if coin in univ:
                         candidates.append((AI_SCALE_BOT_ID, "AI Scale-In 1H", ai_scale_bot))
                 # Only auto-claim when exactly one candidate is running for this coin
