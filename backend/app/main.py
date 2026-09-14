@@ -153,7 +153,53 @@ app.add_middleware(
 # Gzip-compress all responses (JS bundles drop ~70-80% in size: the 565kB
 # charts chunk -> ~164kB over the wire). Only compresses if client sends
 # Accept-Encoding: gzip, so API clients are unaffected.
+
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# ── AI_ONLY: hard-retire legacy bot/API surface (stage 1 cut) ──────────────
+_RETIRED_API_PREFIXES = (
+    "/api/momentum",
+    "/api/rotation",
+    "/api/impulse",
+    "/api/validation",
+    "/api/smart-money",
+    "/api/vwap_rev",
+    "/api/ai-scale",
+    "/api/backtest",
+    "/api/me/rotation",
+    "/api/me/impulse",
+    "/api/tracker",
+    "/api/ai/ab-compare",
+    "/api/ai/ab-start",
+    "/api/scalp",
+)
+
+
+@app.middleware("http")
+async def _retired_legacy_api(request: Request, call_next):
+    """Stage-1 cut: refuse retired multi-bot endpoints while AI_ONLY_MODE is on.
+
+    Returns a lightweight JSON stub (HTTP 200) so old frontend polls do not
+    spam 4xx/5xx; mutating methods still no-op with retired=true.
+    """
+    if not AI_ONLY_MODE:
+        return await call_next(request)
+    path = request.url.path or ""
+    for pref in _RETIRED_API_PREFIXES:
+        if path == pref or path.startswith(pref + "/"):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                {
+                    "retired": True,
+                    "available": False,
+                    "running": False,
+                    "detail": "Endpoint retired — AI Discretionary only",
+                    "path": path,
+                },
+                status_code=200,
+            )
+    return await call_next(request)
+
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 if STATIC_DIR.exists():
