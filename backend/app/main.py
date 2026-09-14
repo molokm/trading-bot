@@ -229,11 +229,10 @@ async def debug_server_hits():
     """Return the most recent server-side API hits (for Mini App diagnostics)."""
     return {'hits': _SERVER_HITS[-80:]}
 
-@app.on_event('startup')
-async def startup():
-    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
-    _STARTED_AT = _time.time()
-    # Stage-5: publish handles for routers
+
+
+def _publish_runtime():
+    """Share handles with app.routers without circular imports."""
     try:
         import app.runtime as _rt
         _rt.db = db
@@ -246,6 +245,12 @@ async def startup():
         _rt.env_demo = _env_demo
     except Exception as _e:
         print(f"[runtime] publish: {_e}", flush=True)
+
+@app.on_event('startup')
+async def startup():
+    # global MUST be the first statement (Python forbids prior use of these names)
+    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
+    _STARTED_AT = _time.time()
     try:
         print('[startup] 0/7 auth secrets ...', flush=True)
         ensure_auth_secrets()
@@ -724,6 +729,12 @@ async def startup():
                 pass
     except Exception as e:
         print(f'[startup] Scale PnL memory shift: {e}', flush=True)
+    try:
+        _publish_runtime()
+        print('[startup] runtime published', flush=True)
+    except Exception:
+        pass
+
 
 @app.on_event('shutdown')
 async def shutdown():
