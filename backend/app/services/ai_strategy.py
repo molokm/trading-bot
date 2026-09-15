@@ -71,7 +71,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.8-trend-gate"
+STRATEGY_VERSION = "v1.9-no-countertrend"
 STRATEGY_DESC = (
     "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
@@ -971,12 +971,42 @@ class AIStrategy:
             return f"quant_veto:weak_long_align"
         if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]) - 1e-9:
             return f"quant_veto:weak_short_align"
-        # regime side match
-        reg = cq.get("regime") or q.get("global_regime")
+        # regime side match — coin AND market (BTC / global)
+        reg = str(cq.get("regime") or q.get("global_regime") or "").lower()
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
         if reg == "bull" and side == "short":
             return "quant_veto:short_in_bull"
         if reg == "bear" and side == "long":
             return "quant_veto:long_in_bear"
+        # Hard: never fight BTC / global trend (demo opened short in bull market)
+        if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+            return "quant_veto:short_vs_btc_bull"
+        if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+            return "quant_veto:long_vs_btc_bear"
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        # Mild BTC drift still blocks opposing opens
+        if side == "short" and btc_roc >= 0.20:
+            return f"quant_veto:short_vs_btc_roc_up:{btc_roc:.2f}"
+        if side == "long" and btc_roc <= -0.20:
+            return f"quant_veto:long_vs_btc_roc_down:{btc_roc:.2f}"
+        # 4H alignment if present on coin indicators
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        tf4 = ind.get("tf_4h") or cq.get("tf_4h") or {}
+        try:
+            e4f = float(tf4.get("ema21") or tf4.get("ema_fast") or 0)
+            e4s = float(tf4.get("ema50") or tf4.get("ema_slow") or 0)
+            c4 = float(tf4.get("close") or 0)
+        except (TypeError, ValueError):
+            e4f = e4s = c4 = 0.0
+        if e4f and e4s and c4:
+            if side == "short" and e4f > e4s and c4 > e4s:
+                return "quant_veto:short_vs_4h_bull"
+            if side == "long" and e4f < e4s and c4 < e4s:
+                return "quant_veto:long_vs_4h_bear"
 
         # Funding: paying high funding against the side is toxic for holds on 1H
         if getattr(self.config, "funding_filter_enabled", True):
@@ -2902,23 +2932,35 @@ class AIStrategy:
                 min_al = float(self._effective_min_align())
                 min_cf = float(self._effective_min_confidence())
                 best = None
+                g_reg = str(q.get("global_regime") or "").lower()
+                btc_reg = str(q.get("btc_regime") or g_reg or "").lower()
+                try:
+                    btc_roc = float(q.get("btc_roc") or 0)
+                except (TypeError, ValueError):
+                    btc_roc = 0.0
                 for coin_q, cq in (q.get("coins") or {}).items():
                     if cq.get("block_open"):
                         continue
                     reg = str(cq.get("regime") or "").lower()
                     al_l = float(cq.get("align_long") or 0)
                     al_s = float(cq.get("align_short") or 0)
-                    # Side must agree with regime — never long into bear / short into bull
+                    # Side must agree with coin regime AND BTC/global — never fight the market
                     if reg == "bear":
                         side, al = "short", al_s
                     elif reg == "bull":
                         side, al = "long", al_l
                     elif reg == "chop":
-                        # chop: only if one side clearly dominates
-                        if al_l >= al_s and al_l >= 0.85:
-                            side, al = "long", al_l
-                        elif al_s > al_l and al_s >= 0.85:
-                            side, al = "short", al_s
+                        # chop coin: only with BTC trend, never counter-trend
+                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= 0.20:
+                            if al_l >= 0.85:
+                                side, al = "long", al_l
+                            else:
+                                continue
+                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -0.20:
+                            if al_s >= 0.85:
+                                side, al = "short", al_s
+                            else:
+                                continue
                         else:
                             continue
                     else:
@@ -2929,6 +2971,10 @@ class AIStrategy:
                     if reg == "bear" and side == "long":
                         continue
                     if reg == "bull" and side == "short":
+                        continue
+                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= 0.20):
+                        continue
+                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -0.20):
                         continue
                     if al < max(min_al, 0.78):
                         continue
@@ -3034,7 +3080,8 @@ class AIStrategy:
                                   reason=f"flat_roc:{roc:.2f}")
                 return
             side = decision["side"]
-            # Require EMA alignment with side
+            # Require EMA alignment with side (incl. trend EMA200 when present)
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
             if ema_f and ema_s and close:
                 if side == "long" and not (ema_f >= ema_s and close >= ema_s):
                     self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bullish")
@@ -3042,6 +3089,13 @@ class AIStrategy:
                 if side == "short" and not (ema_f <= ema_s and close <= ema_s):
                     self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bearish")
                     return
+                if ema200 > 0:
+                    if side == "long" and close < ema200:
+                        self._record_exec("open_skip", coin=coin, side=side, reason="below_ema200")
+                        return
+                    if side == "short" and close > ema200:
+                        self._record_exec("open_skip", coin=coin, side=side, reason="above_ema200")
+                        return
                 if side == "long" and roc < 0:
                     self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_long")
                     return
