@@ -4,7 +4,6 @@ Providers (env AI_LLM_PROVIDER):
   - mock   : rule-based heuristic (no API key) — default for dry-run
   - groq   : free-tier friendly OpenAI-compatible API (GROQ_API_KEY)
   - openai : OpenAI or any compatible base URL (OPENAI_API_KEY, OPENAI_BASE_URL)
-  - gemini : Google Gemini (GEMINI_API_KEY)
 
 Always returns a validated dict decision; invalid/unsafe → hold.
 """
@@ -24,7 +23,7 @@ log = logging.getLogger("ai_agent")
 # ── provider rotation & cooldown ──────────────────────────────
 _llm_cooldowns: dict[str, float] = {}  # provider -> expiry timestamp (time.time())
 _last_provider_used: str | None = None  # last successfully used provider
-PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai"]
+PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "openai"]
 COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
 COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
 COOLDOWN_ON_NO_CREDIT = 3600  # 1h if provider has no balance
@@ -440,7 +439,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,openai").split(",")
         if x.strip()
     ]
     chain = [primary]
@@ -450,8 +449,6 @@ def _provider_chain(primary: str) -> list[str]:
     out = []
     for p in chain:
         if p == "groq" and os.getenv("GROQ_API_KEY", "").strip():
-            out.append(p)
-        elif p == "gemini" and os.getenv("GEMINI_API_KEY", "").strip():
             out.append(p)
         elif p == "openrouter" and (
             os.getenv("OPENROUTER_API_KEY", "").strip()
@@ -518,15 +515,8 @@ async def _call_provider(provider: str, user_msg: str) -> str:
             system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
         )
-    if provider == "gemini":
-        return await _gemini(
-            api_key=os.getenv("GEMINI_API_KEY", ""),
-            model=os.getenv("GEMINI_MODEL") or "gemini-2.0-flash",
-            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
-            user=user_msg,
-        )
     if provider == "bai":
-        raise RuntimeError("BAI provider removed — use groq/openrouter/gemini/openai")
+        raise RuntimeError("BAI provider removed — use groq/openrouter/openai")
     raise RuntimeError(f"unknown or unconfigured provider {provider}")
 
 
@@ -635,25 +625,6 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
     raise RuntimeError(last_err or "LLM request failed")
 
 
-async def _gemini(api_key: str, model: str, system: str, user: str) -> str:
-    if not api_key:
-        raise RuntimeError("missing GEMINI_API_KEY")
-    url = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{model}:generateContent?key={api_key}"
-    )
-    body = {
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": [{"text": user}]}],
-        "generationConfig": {"temperature": 0.2},
-    }
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        r = await client.post(url, json=body)
-        r.raise_for_status()
-        data = r.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
-
-
 def llm_status() -> dict:
     """Public-safe LLM config for /api/ai/status (no secrets)."""
     import time as _time
@@ -668,8 +639,7 @@ def llm_status() -> dict:
             _resolve_groq_model(os.getenv("AI_LLM_MODEL"))
             if provider == "groq"
             else (os.getenv("AI_LLM_MODEL") or (
-                "gpt-4o-mini" if provider == "openai" else
-                "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
+                "gpt-4o-mini" if provider == "openai" else "mock-heuristic"
             ))
         ),
         "groq_key_configured": bool(key),
@@ -677,6 +647,5 @@ def llm_status() -> dict:
         "rate_limit_cooldown_sec": cool,
         "rate_limited": cool > 0,
         "fallbacks": _provider_chain(provider),
-        "gemini_configured": bool(os.getenv("GEMINI_API_KEY", "").strip()),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
     }

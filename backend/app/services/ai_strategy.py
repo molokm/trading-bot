@@ -220,6 +220,7 @@ class AIStrategy:
         self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
         self._equity = self._capital + self._session_pnl
         self._last_activity = None
+        self._next_tick_at = None
         self._last_tick_error = None
         self._started_at = None
         self._tick_count = 0
@@ -295,14 +296,14 @@ class AIStrategy:
     def _provider(self) -> str:
         """Pick the best available LLM provider with rotation.
 
-        Rotation order: groq → openrouter → gemini → openai
+        Rotation order: groq → openrouter → openai
         When the current provider is rate-limited, automatically falls through
         to the next one that has an API key and is not on cooldown.
         """
         from .ai_agent import (
             is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
         )
-        # Preferred: config/env → groq → openrouter → gemini → openai (BAI removed)
+        # Preferred: config/env → groq → openrouter → openai (BAI removed)
         if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
             preferred = str(self.config.provider).strip().lower()
         else:
@@ -313,8 +314,6 @@ class AIStrategy:
                 preferred = "groq"
             elif os.getenv("OPENROUTER_API_KEY", "").strip() and is_provider_available("openrouter"):
                 preferred = "openrouter"
-            elif os.getenv("GEMINI_API_KEY", "").strip() and is_provider_available("gemini"):
-                preferred = "gemini"
             elif os.getenv("OPENAI_API_KEY", "").strip() and is_provider_available("openai"):
                 preferred = "openai"
             else:
@@ -559,6 +558,8 @@ class AIStrategy:
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
             import time as _t
+            _next_ts = _t.time() + _sleep
+            self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
             self._llm_rate_limit_until = 0.0
             self._llm_rate_limited = False
             try:
@@ -3939,6 +3940,8 @@ class AIStrategy:
             "health": {
                 "alive": self._running and self._last_activity is not None,
                 "last_activity": self._last_activity,
+                "next_tick_at": self._next_tick_at,
+                "poll_interval_sec": self.config.poll_interval_sec,
                 "tick_count": self._tick_count,
                 "tick_fail_count": self._tick_fail_count,
                 "consecutive_fails": self._consecutive_fails,

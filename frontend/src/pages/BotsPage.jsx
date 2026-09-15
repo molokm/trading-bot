@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Brain, Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
   ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot,
   Link, Unlink, AlertTriangle, Wifi, WifiOff
@@ -132,6 +132,35 @@ function ManagedPill({ statusMode, managed, apiAlive, lastActivity, heartbeatMax
       <span className="text-[0.6rem] font-semibold whitespace-nowrap">{label}</span>
       {lastStr && <span className="text-[0.55rem] opacity-70 whitespace-nowrap">{lastStr}</span>}
       <Tip text={t('bots.managed_tip')} />
+    </div>
+  )
+}
+
+function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
+  const [remaining, setRemaining] = useState(null)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!nextTickAt) { setRemaining(null); return }
+    const tick = () => {
+      const diff = Math.max(0, Math.floor((Date.parse(nextTickAt) - Date.now()) / 1000))
+      setRemaining(diff)
+    }
+    tick()
+    ref.current = setInterval(tick, 1000)
+    return () => clearInterval(ref.current)
+  }, [nextTickAt])
+
+  if (remaining === null) return null
+  const pct = pollIntervalSec ? Math.round(((pollIntervalSec - remaining) / pollIntervalSec) * 100) : 0
+
+  return (
+    <div className="flex items-center gap-2 text-[0.6rem] text-[var(--txt-muted)]">
+      <Clock size={11} className="flex-shrink-0 opacity-60" />
+      <span>След. проверка: <span className="mono font-semibold text-[var(--txt)]">{remaining}с</span></span>
+      <div className="flex-1 h-1 rounded-full bg-[var(--bg)] overflow-hidden max-w-[60px]">
+        <div className="h-full rounded-full bg-[var(--info)] transition-all duration-1000" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
     </div>
   )
 }
@@ -307,6 +336,7 @@ function BotCard({
   managed, lastActivity, heartbeatMaxAge, apiAlive,
   isGuest, loading, t,
   capitalValue, onCapitalChange, showCapital,
+  nextTickAt, pollIntervalSec,
 }) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
@@ -364,6 +394,11 @@ function BotCard({
             <PerfTile label={t('bots.win_rate')} value={winRate != null ? `${winRate}%` : '—'} />
             <PerfTile label={t('bots.open_count')} value={openPositions.length} />
           </div>
+          {statusMode === 'live' && nextTickAt && (
+            <div className="mt-2">
+              <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+            </div>
+          )}
         </div>
 
         {/* Open positions */}
@@ -636,6 +671,8 @@ const aiRunning = !!aiStatus?.running
           lastActivity={aiStatus?.last_activity}
           heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 120) * 3}
           apiAlive={apiAlive}
+          nextTickAt={aiStatus?.health?.next_tick_at}
+          pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
           onToggle={aiToggle}
           isGuest={isGuest}
           loading={aiLoading}
