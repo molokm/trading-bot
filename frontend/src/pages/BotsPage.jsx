@@ -539,16 +539,26 @@ export default function BotsPage({ connected, isGuest }) {
     setLiveLoading(false)
   }
 
-  const liveDisconnect = async () => {
+    const liveDisconnect = async () => {
     setLiveLoading(true)
     try {
       await api.liveDisconnect()
+      setLiveStatus({
+        connected: false,
+        enabled: false,
+        equity: 0,
+        capital: 0,
+        total_pnl: 0,
+        unrealized_pnl: 0,
+        open_positions: [],
+        lifetime_trades: 0,
+      })
       await refreshStatus()
     } catch (e) { alert(e.message) }
     setLiveLoading(false)
   }
 
-  const aiRunning = !!aiStatus?.running
+const aiRunning = !!aiStatus?.running
   const aiStartedAt = aiStatus?.started_at ? Date.parse(aiStatus.started_at) : null
   const coins = aiStatus?.symbols || aiStatus?.config?.symbols || AI_SYMBOLS
 
@@ -612,7 +622,7 @@ export default function BotsPage({ connected, isGuest }) {
         />
 
         <LiveMirrorCard
-          connected={!!liveStatus?.connected}
+          connected={!!liveStatus?.connected && liveStatus?.enabled !== false}
           liveStatus={liveStatus}
           loading={liveLoading}
           liveKey={liveKey} setLiveKey={setLiveKey}

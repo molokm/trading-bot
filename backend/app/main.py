@@ -1712,12 +1712,39 @@ async def live_status():
         lc = live_manager.get_client() if live_manager else None
     except Exception:
         lc = None
-    if lc is None or getattr(lc, 'demo', False) or not getattr(lc, 'has_credentials', lambda: False)():
+    # Do not auto-heal if user explicitly disconnected
+    _mirror_on = True
+    try:
+        en = await db.get_setting('live_mirror_enabled') if db else None
+        if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
+            _mirror_on = False
+    except Exception:
+        pass
+    if _mirror_on and (lc is None or getattr(lc, 'demo', False) or not getattr(lc, 'has_credentials', lambda: False)()):
         try:
             await _ensure_live_mirror_client()
             lc = live_manager.get_client() if live_manager else None
         except Exception as e:
             print(f'[LIVE] status ensure: {e}', flush=True)
+    if not _mirror_on:
+        lc = None
+    connected = lc is not None and not getattr(lc, 'demo', False) and getattr(lc, 'has_credentials', lambda: False)()
+    if not _mirror_on:
+        return {
+            'connected': False,
+            'enabled': False,
+            'demo': False,
+            'equity': 0,
+            'capital': 0,
+            'total_pnl': 0,
+            'unrealized_pnl': 0,
+            'session_pnl': 0,
+            'lifetime_trades': 0,
+            'lifetime_fees': 0,
+            'win_rate': None,
+            'open_positions': [],
+            'pnl_source': 'disabled',
+        }
     if lc is not None and getattr(lc, 'demo', False):
         lc = None
     connected = lc is not None and getattr(lc, 'has_credentials', lambda: False)()
@@ -2064,6 +2091,7 @@ async def live_status():
         'win_rate': win_rate,
         'open_positions': positions_out,
         'pnl_source': 'okx_live',
+        'enabled': True,
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
 
@@ -2120,6 +2148,7 @@ async def live_connect(data: dict=None):
             await db.set_setting('live_mirror_secret', secret)
             await db.set_setting('live_mirror_pass', passphrase)
             await db.set_setting('live_mirror_capital', str(round(capital, 2)))
+            await db.set_setting('live_mirror_enabled', '1')
             await _save_live_creds(key, secret, passphrase)
             print('[LIVE] creds persisted to DB (plaintext + encrypted)', flush=True)
             if capital > 0:
@@ -2197,22 +2226,41 @@ async def live_connect(data: dict=None):
 
 @app.post('/api/live/disconnect', dependencies=[Depends(require_admin)])
 async def live_disconnect():
-    """Disconnect the LIVE mirror — stops mirroring but preserves credentials."""
-    global ai_bot, live_manager
+    """Disconnect LIVE mirror. Stops mirroring until explicit /api/live/connect.
+
+    Credentials stay in DB for easier re-connect, but live_mirror_enabled=0
+    prevents heal/status from auto-reconnecting.
+    """
+    global ai_bot, live_manager, _live_key, _live_secret, _live_pass
+    if db:
+        try:
+            await db.set_setting('live_mirror_enabled', '0')
+        except Exception as e:
+            print(f'[LIVE] disable flag: {e}', flush=True)
     try:
         live_manager = OKXClientManager.new_instance()
     except Exception:
         pass
+    # Clear in-memory keys so status cannot briefly re-init without flag check
+    # (keys remain in DB for next connect form / ensure when enabled=1)
     if ai_bot:
         try:
             ai_bot.live_client_manager = None
-            ai_bot._live_positions.clear()
+            try:
+                ai_bot._live_positions.clear()
+            except Exception:
+                pass
             ai_bot._live_equity = 0.0
             ai_bot._live_equity_ts = 0.0
+            ai_bot._live_capital = 0.0
         except Exception as e:
             print(f'[LIVE] unbind: {e}', flush=True)
-    print('[LIVE] mirror DISCONNECTED', flush=True)
-    return {'message': 'LIVE mirror отключён', 'connected': False}
+    print('[LIVE] mirror DISCONNECTED (enabled=0)', flush=True)
+    return {
+        'message': 'LIVE mirror отключён — для повторного подключения укажите ключи и капитал',
+        'connected': False,
+        'enabled': False,
+    }
 
 @app.get('/api/live/trades')
 async def live_trades():
@@ -2629,8 +2677,18 @@ async def _load_live_creds_from_db() -> None:
 
 
 async def _ensure_live_mirror_client() -> bool:
-    """Init/rebind live_manager from DB/env and attach to ai_bot. Survives restart."""
+    """Init/rebind live_manager from DB/env and attach to ai_bot. Survives restart.
+
+    Respects live_mirror_enabled=0 after explicit Disconnect (do not auto-heal).
+    """
     global live_manager, ai_bot, _live_key, _live_secret, _live_pass
+    try:
+        en = await db.get_setting('live_mirror_enabled') if db else None
+        # Explicit disconnect → stay offline until /api/live/connect
+        if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
+            return False
+    except Exception as e:
+        print(f'[LIVE] ensure enabled flag: {e}', flush=True)
     try:
         await _load_live_creds_from_db()
     except Exception as e:
