@@ -126,7 +126,7 @@ function DashBotPanel({
   title, version, running, loading, accent = 'text-[var(--accent)]',
   pnl, trades, winRate, openCount, model, capital, pulse, tagline,
   isGuest, onStart, onStop, startLabel, t,
-  nextTickAt, pollIntervalSec,
+  nextTickAt, pollIntervalSec, topSignals,
 }) {
   const pnlN = Number(pnl ?? 0)
   const pnlCls = pnlN >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
@@ -174,6 +174,36 @@ function DashBotPanel({
         {running && nextTickAt && (
           <div className="pt-1">
             <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+          </div>
+        )}
+        {running && topSignals && topSignals.length > 0 && (
+          <div className="space-y-1 pt-1">
+            <div className="flex items-center gap-1.5 text-[0.6rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
+              <Target size={9} />
+              <span>{t('dash.top_signals') || 'Сигналы на вход'}</span>
+            </div>
+            {topSignals.map((s, i) => {
+              const isLong = s.side === 'long'
+              const scorePct = Math.round((s.score || 0) * 100)
+              return (
+                <div key={s.coin + i} className="flex items-center gap-1.5 py-0.5">
+                  <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
+                  <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                    {isLong ? 'L' : 'S'}
+                  </span>
+                  <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+                  <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
+                  <div className="flex-1" />
+                  <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+                    <div className="h-full rounded-full" style={{
+                      width: `${scorePct}%`,
+                      backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                    }} />
+                  </div>
+                  <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+                </div>
+              )
+            })}
           </div>
         )}
         {(pulse) && (
@@ -1540,6 +1570,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             t={t}
             nextTickAt={aiStatus?.health?.next_tick_at}
             pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
+            topSignals={aiStatus?.top_signals}
             startLabel={`${t('dash.start')} AI`}
             onStart={async () => {
               try {
@@ -1551,8 +1582,6 @@ export default function Dashboard({ health, connected, isGuest }) {
               try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
-
-          <TopSignals signals={aiStatus?.top_signals} t={t} />
 
           {/* ─── LIVE Mirror Panel ─── */}
           {liveStatus?.connected && (
