@@ -2190,8 +2190,8 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
                 print(f'[LIVE] encrypt save: {e}', flush=True)
             print('[LIVE] creds + enabled=1 persisted', flush=True)
         except Exception as e:
-            print(f'[LIVE] persist: {e}', flush=True)
-            raise HTTPException(status_code=500, detail=f'Не удалось сохранить ключи: {e}')
+            # Mirror is already live in-memory; log DB issue but do not block connect
+            print(f'[LIVE] persist warning (mirror still connected in-memory): {e}', flush=True)
 
     if ai_bot:
         try:

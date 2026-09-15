@@ -492,11 +492,12 @@ class Database:
         return [dict(r) for r in rows]
 
     async def _execute(self, sql: str, params: tuple = ()):
+        """Run write SQL. asyncpg autocommits each statement (no .commit()).
+        aiosqlite needs an explicit await commit."""
         if self._pg_mode:
             conn = await self._pg_connect()
             try:
                 await conn.execute(sql, *params)
-                await conn.commit()
             finally:
                 await conn.close()
         else:
@@ -508,12 +509,11 @@ class Database:
             conn = await self._pg_connect()
             try:
                 val = await conn.fetchval(sql, *params)
-                await conn.commit()
                 return val
             finally:
                 await conn.close()
         cur = await self._conn.execute(sql, params)
-        self._conn.commit()
+        await self._conn.commit()
         return cur.lastrowid
 
     # ── Exchange close trades (raw OKX bills → DB) ──
@@ -546,7 +546,6 @@ class Database:
                         t.get("account_mode") or "demo",
                         t.get("account_key") or "showcase",
                     ))
-                await conn.commit()
                 return len(trades)
             finally:
                 await conn.close()
