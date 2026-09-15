@@ -109,11 +109,11 @@ class AIConfig:
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
-    min_confidence: float = 0.62
-    min_adx: float = 18.0                  # restore stronger trend filter
+    min_confidence: float = 0.55
+    min_adx: float = 15.0                  # restore stronger trend filter
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 14.0
-    adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
+    adx_soft_floor: float = 12.0
+    adx_align_bypass: float = 0.65         # align >= this may bypass min_adx down to soft floor
     min_roc_abs: float = 0.25
     min_stop_pct: float = 0.018
     max_stop_pct: float = 0.05
@@ -138,7 +138,7 @@ class AIConfig:
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.55
+    quant_min_align: float = 0.45
     block_chop_opens: bool = True
     # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
@@ -940,7 +940,7 @@ class AIStrategy:
                         bool(getattr(self.config, "block_chop_opens", True))
                         or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
                     ))
-                    or (reg != "chop" and best < 0.50)
+                    or (reg != "chop" and best < 0.45)
                     or self._adx_blocks_open(float(ind.get("adx") or 0), best)
                 ),
             }
@@ -3660,6 +3660,7 @@ class AIStrategy:
 
         Score = align_score * adx_factor * regime_factor.
         Coins with block_open=True get score=0 (filtered out).
+        Display uses align_score directly (familiar 0-1 scale).
         """
         q = self._build_quant()
         coins = q.get("coins") or {}
@@ -3679,14 +3680,15 @@ class AIStrategy:
             adx_f = min(adx / 40.0, 1.0)
             # Regime factor: trending = boost, chop = penalty
             regime_f = {"bull": 1.0, "bear": 0.9, "chop": 0.35, "unknown": 0.6}.get(regime, 0.6)
-            score = al * adx_f * regime_f
-            if score < 0.05:
+            rank_score = al * adx_f * regime_f
+            if rank_score < 0.05:
                 continue
             ind = inds.get(coin) or {}
             scored.append({
                 "coin": coin,
                 "side": c.get("best_side"),
-                "score": round(score, 3),
+                "score": round(al, 3),
+                "rank_score": round(rank_score, 3),
                 "align_score": round(al, 3),
                 "adx": round(adx, 1),
                 "regime": regime,
@@ -3694,7 +3696,7 @@ class AIStrategy:
                 "close": ind.get("close"),
                 "change_pct": round(float(ind.get("roc_3") or 0) * 100, 2),
             })
-        scored.sort(key=lambda x: x["score"], reverse=True)
+        scored.sort(key=lambda x: x["rank_score"], reverse=True)
         return scored[:n]
 
     def _enrich_decision(self, decision: dict, snap: dict | None = None) -> dict:
