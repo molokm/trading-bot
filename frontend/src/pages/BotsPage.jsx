@@ -528,15 +528,39 @@ export default function BotsPage({ connected, isGuest }) {
   }
 
   const liveConnect = async () => {
+    const cap = Number(liveCapital)
+    if (!(cap >= 10)) {
+      alert('Укажите капитал зеркала (мин. $10)')
+      return
+    }
+    if (!liveKey?.trim() || !liveSecret?.trim() || !livePass?.trim()) {
+      alert('Заполните API Key, Secret и Passphrase')
+      return
+    }
     setLiveLoading(true)
     try {
-      const cap = Number(liveCapital)
-      if (!(cap >= 10)) { alert('Укажите капитал зеркала (мин. $10)'); return }
-      await api.liveConnect({ key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE', capital: cap })
-      setLiveKey(''); setLiveSecret(''); setLivePass('')
+      const res = await api.liveConnect({
+        key: liveKey.trim(),
+        secret: liveSecret.trim(),
+        passphrase: livePass.trim(),
+        confirm: 'LIVE',
+        capital: cap,
+      })
+      setLiveKey(''); setLiveSecret(''); setLivePass(''); setLiveCapital('')
+      // Optimistic UI — status may lag one poll
+      setLiveStatus((prev) => ({
+        ...(prev || {}),
+        connected: true,
+        enabled: true,
+        capital: res?.capital ?? cap,
+        equity: res?.equity ?? (prev?.equity || 0),
+      }))
       await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setLiveLoading(false)
+    } catch (e) {
+      alert(e?.message || String(e) || 'Не удалось подключить LIVE')
+    } finally {
+      setLiveLoading(false)
+    }
   }
 
     const liveDisconnect = async () => {

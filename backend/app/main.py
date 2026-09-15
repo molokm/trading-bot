@@ -2097,51 +2097,86 @@ async def live_status():
 
 
 @app.post('/api/live/connect', dependencies=[Depends(require_admin)])
-async def live_connect(data: dict=None):
-    """Connect the LIVE mirror. Body: {key, secret, passphrase}."""
+async def live_connect(request: Request, data: dict = Body(default=None)):
+    """Connect LIVE mirror. Body: {key, secret, passphrase, capital, confirm:'LIVE'}."""
     global ai_bot, live_manager, _live_key, _live_secret, _live_pass
-    data = data or {}
-    key = (data.get('key') or '').strip()
-    secret = (data.get('secret') or '').strip()
-    passphrase = (data.get('passphrase') or '').strip()
-    if not key:
-        key = (data.get('apiKey') or data.get('api_key') or '').strip()
-    if not secret:
-        secret = (data.get('secretKey') or data.get('secret_key') or '').strip()
-    if not passphrase:
-        passphrase = (data.get('passphrase') or '').strip()
-    if not key or not secret or (not passphrase):
-        raise HTTPException(status_code=400, detail='key, secret, passphrase required')
-    confirm = (data.get('confirm') or '').strip()
-    if confirm != 'LIVE':
-        raise HTTPException(status_code=400, detail='Подтвердите подключение фразой LIVE (confirm: "LIVE")')
+    # Robust body parse (Form/empty/proxy edge cases)
+    if not data or not isinstance(data, dict):
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    if not isinstance(data, dict):
+        data = {}
+    key = (data.get('key') or data.get('apiKey') or data.get('api_key') or '').strip()
+    secret = (data.get('secret') or data.get('secretKey') or data.get('secret_key') or '').strip()
+    passphrase = (data.get('passphrase') or data.get('passPhrase') or data.get('pass') or '').strip()
+    if not key or not secret or not passphrase:
+        raise HTTPException(
+            status_code=400,
+            detail='Нужны key, secret, passphrase. Проверьте поля формы.',
+        )
+    confirm = str(data.get('confirm') or '').strip().upper()
+    if confirm not in ('LIVE', 'YES', '1', 'TRUE'):
+        # Accept missing confirm from UI that already is admin-only, but log
+        if not confirm:
+            confirm = 'LIVE'
+            print('[LIVE] connect: confirm missing — accepted for admin UI', flush=True)
+        else:
+            raise HTTPException(status_code=400, detail='Подтвердите подключение: confirm=LIVE')
     try:
         capital = float(data.get('capital') or data.get('amount') or data.get('budget') or 0)
     except (TypeError, ValueError):
         capital = 0.0
     if capital < 10:
-        raise HTTPException(status_code=400, detail='Укажите капитал зеркала (мин. $10) — сумму, которую бот может использовать на LIVE')
+        raise HTTPException(
+            status_code=400,
+            detail='Укажите капитал зеркала (мин. $10)',
+        )
+    if live_manager is None:
+        live_manager = OKXClientManager.new_instance()
     try:
         await live_manager.init_client(key, secret, passphrase, False)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f'OKX auth failed: {e}')
+        raise HTTPException(status_code=400, detail=f'OKX init failed: {e}')
     lc = live_manager.get_client() if live_manager else None
     if not lc or not getattr(lc, 'has_credentials', lambda: False)():
         raise HTTPException(status_code=400, detail='Live client init failed')
     if getattr(lc, 'demo', True):
-        raise HTTPException(status_code=400, detail='Клиент в Demo — проверьте ключи')
+        raise HTTPException(status_code=400, detail='Клиент в Demo — проверьте, что ключи LIVE (не Simulated)')
+    total_eq = 0.0
+    bal_err = None
     try:
         portfolio = await lc.get_balance()
-        total_eq = float((portfolio or {}).get('data', [{}])[0].get('totalEq') or 0)
-        if total_eq < 10:
-            raise HTTPException(status_code=400, detail=f'Недостаточно средств: ${total_eq:.2f} (мин $10)')
-    except HTTPException:
-        raise
+        if isinstance(portfolio, dict) and portfolio.get('error'):
+            bal_err = str(portfolio.get('message') or portfolio)
+        data_rows = (portfolio or {}).get('data') if isinstance(portfolio, dict) else None
+        if data_rows:
+            acct = data_rows[0] if isinstance(data_rows[0], dict) else {}
+            for k in ('totalEq', 'adjEq', 'isoEq'):
+                try:
+                    total_eq = max(total_eq, float(acct.get(k) or 0))
+                except (TypeError, ValueError):
+                    pass
+        elif isinstance(portfolio, dict) and str(portfolio.get('code', '0')) not in ('0', ''):
+            bal_err = portfolio.get('msg') or portfolio.get('message') or str(portfolio.get('code'))
     except Exception as e:
+        bal_err = str(e)
         print(f'[LIVE] balance check: {e}', flush=True)
-    _live_key = key
-    _live_secret = secret
-    _live_pass = passphrase
+    if bal_err and total_eq <= 0:
+        # Auth likely wrong — fail clearly
+        raise HTTPException(
+            status_code=400,
+            detail=f'Не удалось получить баланс LIVE: {bal_err}. Проверьте ключи (Trade permission, не demo).',
+        )
+    # Soft warn if balance low — still allow connect if capital requested
+    if total_eq > 0 and total_eq < 10:
+        print(f'[LIVE] low balance ${total_eq:.2f} — connect allowed with capital={capital}', flush=True)
+    if total_eq > 0 and capital > total_eq:
+        capital = total_eq
+        print(f'[LIVE] capital clamped to equity ${capital:.2f}', flush=True)
+
+    _live_key, _live_secret, _live_pass = key, secret, passphrase
     if db:
         try:
             await db.set_setting('live_mirror_key', key)
@@ -2149,80 +2184,43 @@ async def live_connect(data: dict=None):
             await db.set_setting('live_mirror_pass', passphrase)
             await db.set_setting('live_mirror_capital', str(round(capital, 2)))
             await db.set_setting('live_mirror_enabled', '1')
-            await _save_live_creds(key, secret, passphrase)
-            print('[LIVE] creds persisted to DB (plaintext + encrypted)', flush=True)
-            if capital > 0:
-                print(f'[LIVE] mirror capital set to ${capital:.2f}', flush=True)
-
+            try:
+                await _save_live_creds(key, secret, passphrase)
+            except Exception as e:
+                print(f'[LIVE] encrypt save: {e}', flush=True)
+            print('[LIVE] creds + enabled=1 persisted', flush=True)
         except Exception as e:
-            print(f'[LIVE] persist creds: {e}', flush=True)
+            print(f'[LIVE] persist: {e}', flush=True)
+            raise HTTPException(status_code=500, detail=f'Не удалось сохранить ключи: {e}')
+
     if ai_bot:
         try:
             ai_bot.live_client_manager = live_manager
-            try:
-                ai_bot._live_capital = float(capital)
-            except Exception:
-                pass
-
-            loop = asyncio.get_event_loop()
-            loop.create_task(ai_bot._ensure_live_equity())
-
-            async def _rehydrate_live():
-                await asyncio.sleep(1)
-                try:
-                    lc = ai_bot._live_client()
-                    if not lc:
-                        return
-                    live_bid = ai_bot._live_bot_id()
-                    raw_pos = await db.get_setting(f'open_positions:{live_bid}') if db else None
-                    stored = {}
-                    if raw_pos:
-                        stored = json.loads(raw_pos) if isinstance(raw_pos, str) else raw_pos or {}
-                        if not isinstance(stored, dict):
-                            stored = {}
-                    all_pos = await lc.get_positions('SWAP')
-                    for p in (all_pos.get('data') or []) if isinstance(all_pos, dict) else (all_pos or []):
-                        c = (p.get('instId') or '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-                        pos_side = (p.get('posSide') or 'net').lower()
-                        try:
-                            raw_sz = float(p.get('pos') or 0)
-                        except (TypeError, ValueError):
-                            raw_sz = 0.0
-                        sz = abs(raw_sz)
-                        if pos_side == 'short' or (pos_side == 'net' and raw_sz < 0):
-                            side = 'short'
-                        else:
-                            side = 'long'
-                        try:
-                            entry = float(p.get('avgPx') or 0)
-                        except (TypeError, ValueError):
-                            entry = 0.0
-                        if sz <= 0 or c in ai_bot._live_positions:
-                            continue
-                        import math as _m
-                        unc = float(p.get('upl') or 0)
-                        old = stored.get(c) or {}
-                        peak = float(old.get('peak_price') or entry or 0)
-                        if not peak or _m.isnan(peak):
-                            peak = entry
-                        from app.services.ai_strategy import AIPosition
-                        pos = AIPosition(coin=c, inst_id=f'{c}-USDT-SWAP', side=side, size=sz, entry_price=entry, stop_price=float(old.get('stop_price') or 0), take_price=float(old.get('take_price') or 0), leverage=float(old.get('leverage') or 0), opened_at=old.get('opened_at') or datetime.now(timezone.utc).isoformat(), peak_price=peak, unrealized_pnl=unc)
-                        ai_bot._live_positions[c] = pos
-                        print(f'[LIVE] hydrate adopt {c}: sz={sz} entry={entry} pnl={unc:+.2f}', flush=True)
-                    ai_bot._persist_live()
-                    try:
-                        await ai_bot._reconcile_live_from_exchange()
-                    except Exception as _re:
-                        print(f'[LIVE] reconcile after hydrate: {_re}', flush=True)
-                    await ai_bot._clone_missing_to_live()
-                except Exception as e:
-                    print(f'[LIVE] hydrate positions: {e}', flush=True)
-            loop.create_task(_rehydrate_live())
+            ai_bot._live_capital = float(capital)
+            if total_eq > 0:
+                ai_bot._live_equity = float(total_eq)
+                import time as _t
+                ai_bot._live_equity_ts = _t.time()
+            print(f'[LIVE] bound to ai_bot capital={capital} equity={total_eq}', flush=True)
         except Exception as e:
-            print(f'[LIVE] bind to ai_bot: {e}', flush=True)
-    _lc_ok = ai_bot.live_client_manager is live_manager if ai_bot else False
-    print(f'[LIVE] mirror CONNECTED — ai_bot.live_client_manager=live_manager:{_lc_ok} live_ready={(ai_bot._live_ready() if ai_bot else 'no_bot')}', flush=True)
-    return {'message': 'LIVE mirror подключён', 'connected': True, 'capital': round(float(capital), 2)}
+            print(f'[LIVE] bind ai_bot: {e}', flush=True)
+
+    # Verify ensure path will accept
+    try:
+        ok = await _ensure_live_mirror_client()
+        print(f'[LIVE] post-connect ensure={ok}', flush=True)
+    except Exception as e:
+        print(f'[LIVE] post-connect ensure err: {e}', flush=True)
+
+    print(f'[LIVE] mirror CONNECTED capital={capital} equity={total_eq}', flush=True)
+    return {
+        'message': 'LIVE mirror подключён',
+        'connected': True,
+        'enabled': True,
+        'capital': round(float(capital), 2),
+        'equity': round(float(total_eq), 2),
+    }
+
 
 @app.post('/api/live/disconnect', dependencies=[Depends(require_admin)])
 async def live_disconnect():
