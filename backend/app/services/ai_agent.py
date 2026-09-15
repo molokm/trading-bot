@@ -24,7 +24,7 @@ log = logging.getLogger("ai_agent")
 # ── provider rotation & cooldown ──────────────────────────────
 _llm_cooldowns: dict[str, float] = {}  # provider -> expiry timestamp (time.time())
 _last_provider_used: str | None = None  # last successfully used provider
-PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "deepseek", "gemini", "openai"]
+PROVIDER_ROTATION_ORDER = ["groq", "openrouter", "gemini", "openai"]
 COOLDOWN_ON_RATE_LIMIT = 600  # 10 min cooldown on 429/rate-limit
 COOLDOWN_ON_ERROR = 120       # 2 min cooldown on other errors
 COOLDOWN_ON_NO_CREDIT = 3600  # 1h if provider has no balance
@@ -440,7 +440,7 @@ def _provider_chain(primary: str) -> list[str]:
     # Prefer openrouter before plain openai (openai free models often 404)
     env_fb = [
         x.strip().lower()
-        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,deepseek,gemini,openai").split(",")
+        for x in (os.getenv("AI_LLM_FALLBACKS") or "openrouter,gemini,openai").split(",")
         if x.strip()
     ]
     chain = [primary]
@@ -458,8 +458,6 @@ def _provider_chain(primary: str) -> list[str]:
             or (os.getenv("OPENAI_API_KEY", "").strip()
                 and "openrouter" in (os.getenv("OPENAI_BASE_URL") or "").lower())
         ):
-            out.append(p)
-        elif p == "deepseek" and os.getenv("DEEPSEEK_API_KEY", "").strip():
             out.append(p)
         elif p == "openai" and os.getenv("OPENAI_API_KEY", "").strip():
             # Skip openai if base is openrouter (handled above) or key is openrouter-only
@@ -516,16 +514,6 @@ async def _call_provider(provider: str, user_msg: str) -> str:
         return await _openai_compatible(
             api_key=key,
             base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-            model=om,
-            system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
-            user=user_msg,
-        )
-    if provider == "deepseek":
-        key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-        om = os.getenv("DEEPSEEK_MODEL", "free/deepseek-v4-pro-0813")
-        return await _openai_compatible(
-            api_key=key,
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://openrouter.ai/api/v1"),
             model=om,
             system=(_ACTIVE_SYSTEM_PROMPT or SYSTEM_PROMPT),
             user=user_msg,
@@ -679,13 +667,10 @@ def llm_status() -> dict:
         "model": (
             _resolve_groq_model(os.getenv("AI_LLM_MODEL"))
             if provider == "groq"
-            else (os.getenv("DEEPSEEK_MODEL") or "free/deepseek-v4-pro-0813"
-                  if provider == "deepseek"
-                  else (os.getenv("AI_LLM_MODEL") or (
-                      "gpt-4o-mini" if provider == "openai" else
-                      "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
-                  ))
-            )
+            else (os.getenv("AI_LLM_MODEL") or (
+                "gpt-4o-mini" if provider == "openai" else
+                "gemini-2.0-flash" if provider == "gemini" else "mock-heuristic"
+            ))
         ),
         "groq_key_configured": bool(key),
         "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
@@ -694,5 +679,4 @@ def llm_status() -> dict:
         "fallbacks": _provider_chain(provider),
         "gemini_configured": bool(os.getenv("GEMINI_API_KEY", "").strip()),
         "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
-        "deepseek_configured": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
     }

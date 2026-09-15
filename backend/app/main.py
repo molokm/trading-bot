@@ -1649,8 +1649,7 @@ async def ai_start(data: dict=None):
 
         provider = data.get("provider") or (
             "groq" if os.getenv("GROQ_API_KEY", "").strip()
-            else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip()
-                  else ("deepseek" if os.getenv("DEEPSEEK_API_KEY", "").strip() else None))
+            else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip() else None)
         )
 
         cfg = AIConfig(
