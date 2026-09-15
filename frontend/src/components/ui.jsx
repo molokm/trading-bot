@@ -53,6 +53,91 @@ export function MetricCard({ label, value, change, changeType, tip, mono = true,
   )
 }
 
+/* ═══════ Enhanced Metric Card — modern design with gradients ═══════ */
+export function EnhancedMetricCard({ 
+  label, 
+  value, 
+  change, 
+  changeType, 
+  tip, 
+  mono = true, 
+  sparkData, 
+  className,
+  icon: Icon,
+  trend,
+  subtitle
+}) {
+  const isPositive = changeType === 'positive'
+  const isNegative = changeType === 'negative'
+  
+  const gradientClass = isPositive 
+    ? 'from-[var(--profit)]/5 to-transparent' 
+    : isNegative 
+    ? 'from-[var(--loss)]/5 to-transparent'
+    : 'from-[var(--info)]/5 to-transparent'
+  
+  const borderClass = isPositive
+    ? 'border-[var(--profit)]/20 hover:border-[var(--profit)]/40'
+    : isNegative
+    ? 'border-[var(--loss)]/20 hover:border-[var(--loss)]/40'
+    : 'border-[var(--border)] hover:border-[var(--border-hover)]'
+  
+  const iconColor = isPositive
+    ? 'text-[var(--profit)]'
+    : isNegative
+    ? 'text-[var(--loss)]'
+    : 'text-[var(--info)]'
+
+  return (
+    <div 
+      className={`
+        relative overflow-hidden rounded-xl border ${borderClass}
+        bg-gradient-to-br ${gradientClass} backdrop-blur-sm
+        p-4 transition-all duration-300 hover:scale-[1.02] hover:shadow-lg
+        ${className || ''}
+      `}
+    >
+      {/* Animated background gradient */}
+      <div className="absolute inset-0 bg-gradient-to-br from-white/[0.02] to-transparent opacity-0 hover:opacity-100 transition-opacity duration-500" />
+      
+      <div className="relative z-10">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            {Icon && <Icon size={16} className={`${iconColor} opacity-80`} />}
+            <span className="text-xs font-medium text-[var(--txt-secondary)] uppercase tracking-wider">
+              {label}
+            </span>
+            {tip && <Tip text={tip} />}
+          </div>
+          {sparkData && sparkData.length > 1 && (
+            <SparklineSvg data={sparkData} width={48} height={16} />
+          )}
+        </div>
+
+        {/* Value */}
+        <div className="flex items-baseline gap-3 mb-2">
+          <span className={`text-2xl font-bold ${mono ? 'mono' : ''} text-[var(--txt)]`}>
+            {value}
+          </span>
+          {change != null && (
+            <span className={`text-sm font-semibold ${isPositive ? 'text-[var(--profit)]' : isNegative ? 'text-[var(--loss)]' : 'text-[var(--txt-secondary)]'}`}>
+              {isPositive ? '↗' : isNegative ? '↘' : '→'} {change}
+            </span>
+          )}
+        </div>
+
+        {/* Subtitle or trend */}
+        {(subtitle || trend) && (
+          <div className="text-xs text-[var(--txt-muted)]">
+            {subtitle || trend}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /* ═══════ Inline Sparkline SVG (used by MetricCard) ═══════ */
 function SparklineSvg({ data, width = 60, height = 20 }) {
   if (!data || data.length < 2) return null
@@ -280,6 +365,47 @@ export function EmptyState({ icon: Icon, text, sub }) {
 /* ═══════ Loader ═══════ */
 export function Loader() {
   return <div className="animate-spin w-5 h-5 border-2 border-[var(--info)] border-t-transparent rounded-full" />
+}
+
+/* ═══════ Skeleton Loader — shimmer effect for loading states ═══════ */
+export function Skeleton({ className = '', variant = 'default' }) {
+  const variantClass = variant === 'text' 
+    ? 'h-4 rounded' 
+    : variant === 'title'
+    ? 'h-6 rounded'
+    : variant === 'circle'
+    ? 'rounded-full aspect-square'
+    : variant === 'card'
+    ? 'h-32 rounded-xl'
+    : 'h-12 rounded-lg'
+  
+  return (
+    <div className={`skeleton-shimmer ${variantClass} ${className}`} />
+  )
+}
+
+/* ═══════ Skeleton Metric Card ═══════ */
+export function SkeletonMetricCard() {
+  return (
+    <div className="metric-card">
+      <Skeleton variant="text" className="w-24 mb-2" />
+      <Skeleton variant="title" className="w-32 mb-1" />
+      <Skeleton variant="text" className="w-16" />
+    </div>
+  )
+}
+
+/* ═══════ Skeleton Table Row ═══════ */
+export function SkeletonTableRow({ columns = 4 }) {
+  return (
+    <tr>
+      {Array.from({ length: columns }).map((_, i) => (
+        <td key={i} className="px-4 py-3">
+          <Skeleton variant="text" />
+        </td>
+      ))}
+    </tr>
+  )
 }
 
 /* ═══════ Strategy Description Tip ═══════ */

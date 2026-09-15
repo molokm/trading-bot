@@ -29,6 +29,7 @@ export default function HistoryPage() {
   const [filterPair, setFilterPair] = useState(ALL_PAIRS_KEY)
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [report, setReport] = useState(null)
 
   useEffect(() => {
     setLoading(true)
@@ -39,6 +40,7 @@ export default function HistoryPage() {
       setTrades([])
       setLoading(false)
     })
+    api.reportSummary?.().then(setReport).catch(() => setReport(null))
   }, [])
 
   const currentTrades = trades
@@ -82,7 +84,7 @@ export default function HistoryPage() {
   const winRate = filtered.length > 0 ? ((winCount / filtered.length) * 100).toFixed(1) : '0.0'
 
   const handleExportCSV = useCallback(() => {
-    const header = [t('history.time'), t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), 'SL', 'TP', t('history.pnl'), t('history.reason')].join(',')
+    const header = [t('history.time'), 'Bot', t('history.type'), t('history.instrument'), t('history.size'), t('history.entry'), t('history.exit'), 'SL', 'TP', t('history.pnl'), 'Fee', t('history.reason')].join(',')
     const rows = filtered.map(tr => {
       const time = tr.time ? fmtTs(tr.time, locale) : ''
       const type = tr.side === 'buy' ? 'BUY' : 'SELL'
@@ -94,7 +96,9 @@ export default function HistoryPage() {
       const tp = tr.tp ? parseFloat(tr.tp).toFixed(2) : ''
       const pnl = tr.pnl != null ? (parseFloat(tr.pnl) >= 0 ? '+' : '') + parseFloat(tr.pnl).toFixed(2) : ''
       const reason = REASON_MAP[(tr.reason || '').toLowerCase()]?.label || tr.reason || ''
-      return [time, type, inst, size, entry, exit, sl, tp, pnl, reason].map(v => `"${v}"`).join(',')
+      const bot = tr.bot || ''
+      const fee = tr.fee != null && tr.fee !== '' ? parseFloat(tr.fee).toFixed(4) : ''
+      return [time, bot, type, inst, size, entry, exit, sl, tp, pnl, fee, reason].map(v => `"${v}"`).join(',')
     })
     const csv = [header, ...rows].join('\n')
     const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' })
@@ -136,6 +140,16 @@ export default function HistoryPage() {
         </div>
       </div>
 
+      {report && (
+        <div className="flex-shrink-0 flex flex-wrap gap-3 text-2xs px-3 py-2 rounded-lg border border-[var(--border)] bg-[var(--surface)]">
+          <span className="text-[var(--txt-muted)]">{t('history.report_source')}: <span className="text-[var(--txt-secondary)]">{report.pnl_source || '—'}</span></span>
+          <span>Fees: <span className="mono">{report.fees_reported ?? '—'}</span></span>
+          <span>Funding: <span className="mono">{report.funding ?? 0}</span></span>
+          <span>WR: <span className="mono">{report.win_rate_pct ?? '—'}%</span></span>
+          <span className="text-[var(--txt-muted)] truncate max-w-[280px]" title={report.note}>{report.note}</span>
+        </div>
+      )}
+
       {/* Filters */}
       <div className="panel flex-shrink-0">
         <div className="p-3 flex flex-wrap items-center gap-4">
@@ -166,7 +180,11 @@ export default function HistoryPage() {
           {currentLoading ? (
             <div className="flex items-center justify-center py-16"><Loader /></div>
           ) : pageTrades.length === 0 ? (
-            <EmptyState icon={ScrollText} text={t('history.empty')} sub={t('history.empty_hint')} />
+            <EmptyState
+              icon={ScrollText}
+              text={currentTrades.length === 0 ? t('history.empty') : t('history.empty_filtered')}
+              sub={currentTrades.length === 0 ? t('history.empty_hint') : t('history.empty_filtered_hint')}
+            />
           ) : (
             <table className="data-table">
               <thead>
