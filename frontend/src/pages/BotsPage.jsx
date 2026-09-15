@@ -233,7 +233,6 @@ function LiveMirrorCard({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <PerfTile label="Equity" value={`$${liveEquity.toFixed(0)}`} tone="neutral" />
           <PerfTile label="PnL" value={`${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}`} tone={livePnl >= 0 ? 'profit' : 'loss'} />
-          <PerfTile label="Реализ." value={`${liveRealized >= 0 ? '+' : ''}${liveRealized.toFixed(2)}`} tone={liveRealized >= 0 ? 'profit' : 'loss'} />
           <PerfTile label="Нереализ." value={`${liveUnrealized >= 0 ? '+' : ''}${liveUnrealized.toFixed(2)}`} tone={liveUnrealized >= 0 ? 'profit' : 'loss'} />
           <PerfTile label="Сделок" value={liveTrades} />
           <PerfTile label="WR" value={liveWinRate != null ? `${liveWinRate}%` : '—'} />

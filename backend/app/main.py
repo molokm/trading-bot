@@ -1807,62 +1807,161 @@ async def live_status():
                         pass
         except Exception as e:
             print(f'[LIVE] status equity: {e}', flush=True)
-    # ── Honest LIVE PnL: DB realized (live bot_id) + exchange unrealized ──
-    realized = float(live_data.get('total_pnl') or 0)
-    lifetime_trades = int(live_data.get('lifetime_trades') or 0)
-    lifetime_fees = float(live_data.get('lifetime_fees') or 0)
-    wins = None
-    try:
-        live_bid = None
-        if ai_bot and hasattr(ai_bot, '_live_bot_id'):
-            live_bid = ai_bot._live_bot_id()
-        else:
-            from app.services.ai_strategy import AI_BOT_ID
-            live_bid = f'{AI_BOT_ID}_live'
-        if db and live_bid:
-            summary = await db.get_trades_summary(live_bid)
-            if summary:
-                realized = float(summary.get('total_pnl') or 0)
-                lifetime_trades = int(summary.get('total') or lifetime_trades or 0)
-                w = int(summary.get('wins') or 0)
-                if lifetime_trades > 0:
-                    wins = round(100.0 * w / lifetime_trades, 1)
-                if ai_bot is not None:
-                    try:
-                        ai_bot._live_lifetime_pnl = realized
-                        ai_bot._live_lifetime_trades = lifetime_trades
-                        if summary.get('wins') is not None:
-                            ai_bot._live_lifetime_wins = int(summary.get('wins') or 0)
-                    except Exception:
-                        pass
-    except Exception as e:
-        print(f'[LIVE] status realized from DB: {e}', flush=True)
+    # ── LIVE PnL strictly from OKX live_manager account (not DB / not demo) ──
     positions_out = list(live_data.get('open_positions') or [])
     unrealized = 0.0
     if live_data.get('_ex_upl_sum') is not None:
-        unrealized = float(live_data.get('_ex_upl_sum') or 0)
+        try:
+            unrealized = float(live_data.get('_ex_upl_sum') or 0)
+        except (TypeError, ValueError):
+            unrealized = 0.0
     else:
         for p in positions_out:
             try:
                 unrealized += float(p.get('upl') or p.get('unrealized_pnl') or 0)
             except (TypeError, ValueError):
                 pass
-    total_pnl = round(realized + unrealized, 2)
-    win_rate = wins if wins is not None else live_data.get('win_rate')
+
+    realized = 0.0
+    lifetime_trades = 0
+    wins = 0
+    fees = 0.0
+    if connected and lc is not None:
+        try:
+            # Sum close trade PnL from OKX bills (type=2) on THIS live client only
+            after = ''
+            seen = set()
+            for _page in range(8):
+                kw = {'inst_type': 'SWAP', 'type': '2', 'limit': 100}
+                if after:
+                    kw['after'] = after
+                resp = await lc.get_bills(**kw)
+                if not resp or resp.get('error'):
+                    # try without type filter
+                    kw2 = {'inst_type': 'SWAP', 'limit': 100}
+                    if after:
+                        kw2['after'] = after
+                    resp = await lc.get_bills(**kw2)
+                if not resp or resp.get('error'):
+                    print(f"[LIVE] bills error: {(resp or {}).get('message') or resp}", flush=True)
+                    break
+                data = resp.get('data') or []
+                if not data:
+                    break
+                for b in data:
+                    bid = str(b.get('billId') or '')
+                    if bid and bid in seen:
+                        continue
+                    if bid:
+                        seen.add(bid)
+                    btype = str(b.get('type') or '')
+                    if btype and btype != '2':
+                        continue
+                    try:
+                        bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
+                    except (TypeError, ValueError):
+                        bp = 0.0
+                    try:
+                        bf = abs(float(b.get('fee') or 0))
+                    except (TypeError, ValueError):
+                        bf = 0.0
+                    # Count closes: non-zero pnl or explicit close subTypes 5/6
+                    sub = str(b.get('subType') or '')
+                    if abs(bp) < 1e-12 and sub not in ('5', '6'):
+                        fees += bf
+                        continue
+                    realized += bp
+                    fees += bf
+                    lifetime_trades += 1
+                    if bp > 0:
+                        wins += 1
+                after = str(data[-1].get('billId') or '')
+                if len(data) < 100 or not after:
+                    break
+            # Prefer freshest UPL from positions endpoint again
+            try:
+                ex_resp2 = await lc.get_positions('SWAP')
+                upl2 = 0.0
+                pos2 = []
+                for ep in (ex_resp2 or {}).get('data') or []:
+                    try:
+                        sz = abs(float(ep.get('pos') or 0))
+                    except (TypeError, ValueError):
+                        sz = 0.0
+                    if sz <= 0:
+                        continue
+                    try:
+                        u = float(ep.get('upl') or 0)
+                    except (TypeError, ValueError):
+                        u = 0.0
+                    upl2 += u
+                    inst = ep.get('instId') or ''
+                    pos_side = str(ep.get('posSide') or 'net').lower()
+                    raw = float(ep.get('pos') or 0)
+                    side = 'short' if (pos_side == 'short' or (pos_side == 'net' and raw < 0)) else 'long'
+                    try:
+                        entry = float(ep.get('avgPx') or 0)
+                    except (TypeError, ValueError):
+                        entry = 0.0
+                    try:
+                        lev = float(ep.get('lever') or 0)
+                    except (TypeError, ValueError):
+                        lev = 0.0
+                    pos2.append({
+                        'symbol': inst,
+                        'coin': inst.replace('-USDT-SWAP', '').replace('-USD-SWAP', ''),
+                        'side': side,
+                        'size': sz,
+                        'entry_price': entry,
+                        'upl': u,
+                        'upl_ratio': float(ep.get('uplRatio') or 0) if ep.get('uplRatio') not in (None, '') else 0.0,
+                        'mark_px': ep.get('markPx') or '',
+                        'liq_px': ep.get('liqPx') or '',
+                        'leverage': lev,
+                        'account_mode': 'live',
+                        'source': 'exchange',
+                    })
+                unrealized = upl2
+                if pos2:
+                    positions_out = pos2
+            except Exception as e:
+                print(f'[LIVE] positions refresh: {e}', flush=True)
+            if ai_bot is not None:
+                try:
+                    ai_bot._live_lifetime_pnl = realized
+                    ai_bot._live_lifetime_trades = lifetime_trades
+                    ai_bot._live_lifetime_wins = wins
+                    ai_bot._live_lifetime_fees = fees
+                except Exception:
+                    pass
+            print(
+                f'[LIVE] status okx: realized={realized:.2f} upl={unrealized:.2f} '
+                f'trades={lifetime_trades} equity={equity:.2f} positions={len(positions_out)}',
+                flush=True,
+            )
+        except Exception as e:
+            import traceback
+            print(f'[LIVE] okx pnl fetch: {e}\n{traceback.format_exc()}', flush=True)
+            # fallback memory only for trades count
+            lifetime_trades = int(live_data.get('lifetime_trades') or 0)
+            realized = float(live_data.get('total_pnl') or 0)
+
+    total_pnl = round(float(realized) + float(unrealized), 2)
+    win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else live_data.get('win_rate')
     return {
         'connected': connected,
         'demo': False,
         'equity': round(float(equity or 0), 2),
         'total_pnl': total_pnl,
-        'realized_pnl': round(realized, 2),
-        'unrealized_pnl': round(unrealized, 2),
-        'session_pnl': live_data.get('session_pnl', 0),
-        'lifetime_trades': lifetime_trades,
-        'lifetime_fees': round(lifetime_fees, 2),
+        'unrealized_pnl': round(float(unrealized), 2),
+        'session_pnl': round(float(realized), 2),  # realized closes from OKX bills
+        'lifetime_trades': int(lifetime_trades),
+        'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
         'open_positions': positions_out,
-        'pnl_source': 'db_realized+exchange_upl',
+        'pnl_source': 'okx_live_bills+upl',
     }
+
 
 @app.post('/api/live/connect', dependencies=[Depends(require_admin)])
 async def live_connect(data: dict=None):
