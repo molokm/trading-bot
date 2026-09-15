@@ -108,12 +108,12 @@ class AIConfig:
     funding_filter_enabled: bool = True
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
-    btc_roc_block: float = 1.5             # |BTC ROC%| above this is a strong impulse
-    min_confidence: float = 0.55
-    min_adx: float = 15.0                  # restore stronger trend filter
+    btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
+    min_confidence: float = 0.62
+    min_adx: float = 18.0                  # restore stronger trend filter
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 12.0
-    adx_align_bypass: float = 0.65         # align >= this may bypass min_adx down to soft floor
+    adx_soft_floor: float = 14.0
+    adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
     min_roc_abs: float = 0.25
     min_stop_pct: float = 0.018
     max_stop_pct: float = 0.05
@@ -138,7 +138,7 @@ class AIConfig:
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.45
+    quant_min_align: float = 0.55
     block_chop_opens: bool = True
     # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
@@ -940,7 +940,7 @@ class AIStrategy:
                         bool(getattr(self.config, "block_chop_opens", True))
                         or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
                     ))
-                    or (reg != "chop" and best < 0.45)
+                    or (reg != "chop" and best < 0.50)
                     or self._adx_blocks_open(float(ind.get("adx") or 0), best)
                 ),
             }
@@ -1020,9 +1020,9 @@ class AIStrategy:
         except (TypeError, ValueError):
             btc_roc = 0.0
         # Mild BTC drift still blocks opposing opens
-        if side == "short" and btc_roc >= 0.50:
+        if side == "short" and btc_roc >= 0.20:
             return f"quant_veto:short_vs_btc_roc_up:{btc_roc:.2f}"
-        if side == "long" and btc_roc <= -0.50:
+        if side == "long" and btc_roc <= -0.20:
             return f"quant_veto:long_vs_btc_roc_down:{btc_roc:.2f}"
         # 4H alignment if present on coin indicators
         ind = (self._latest_indicators or {}).get(coin) or {}
@@ -1048,7 +1048,7 @@ class AIStrategy:
                 fr = float(fr) if fr is not None else None
             except (TypeError, ValueError):
                 fr = None
-            lim = float(getattr(self.config, "funding_block_abs", 0.0015) or 0.0015)
+            lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
             if fr is not None and lim > 0:
                 # long pays when funding > 0; short pays when funding < 0
                 if side == "long" and fr >= lim:
@@ -3026,13 +3026,13 @@ class AIStrategy:
                         side, al = "long", al_l
                     elif reg == "chop":
                         # chop coin: only with BTC trend, never counter-trend
-                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= 0.50:
-                            if al_l >= 0.65:
+                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= 0.20:
+                            if al_l >= 0.85:
                                 side, al = "long", al_l
                             else:
                                 continue
-                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -0.50:
-                            if al_s >= 0.65:
+                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -0.20:
+                            if al_s >= 0.85:
                                 side, al = "short", al_s
                             else:
                                 continue
@@ -3047,13 +3047,13 @@ class AIStrategy:
                         continue
                     if reg == "bull" and side == "short":
                         continue
-                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= 0.50):
+                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= 0.20):
                         continue
-                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -0.50):
+                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -0.20):
                         continue
-                    if al < max(min_al, 0.55):
+                    if al < max(min_al, 0.78):
                         continue
-                    if al < min_cf and al < 0.70:
+                    if al < min_cf and al < 0.88:
                         continue
                     if best is None or al > best[2]:
                         best = (coin_q, side, al, reg)
@@ -3172,6 +3172,12 @@ class AIStrategy:
                     if side == "short" and close > ema200 + ema200_tol:
                         self._record_exec("open_skip", coin=coin, side=side, reason="above_ema200")
                         return
+                if side == "long" and roc < 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_long")
+                    return
+                if side == "short" and roc > 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
+                    return
             stop_pct = float(decision.get("stop_pct") or 0.03)
             take_pct = float(decision.get("take_pct") or 0.06)
             stop_pct = min(float(self.config.max_stop_pct), max(float(self.config.min_stop_pct), stop_pct))
