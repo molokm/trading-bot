@@ -1711,7 +1711,7 @@ class AIStrategy:
         # Prefer last indicator/mark so PnL is not stuck at entry when fill payload is empty
         mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or pos.entry_price
         fill_px, fee, _ = extract_fill_avg(fills, mark)
-        if not fill_px or abs(fill_px - pos.entry_price) < 1e-12:
+        if not fill_px or abs(fill_px - mark) < 1e-12:
             # poll order once for avgPx
             try:
                 oid = (fills[0].get("ordId") if fills else None) or (resp.get("data") or [{}])[0].get("ordId")
@@ -2067,7 +2067,7 @@ class AIStrategy:
             (self._latest_indicators.get(coin) or {}).get("close") or 0
         ) or pos.entry_price
         fill_px, fee, _ = extract_fill_avg(fills, mark)
-        if not fill_px or abs(fill_px - pos.entry_price) < 1e-12:
+        if not fill_px or abs(fill_px - mark) < 1e-12:
             try:
                 oid = ((fills[0].get("ordId") if fills else None)
                        or (resp.get("data") or [{}])[0].get("ordId"))
@@ -2274,6 +2274,21 @@ class AIStrategy:
                     tg_message_id=int(getattr(old, "tg_message_id", 0) or 0),
                     signal_id=int(getattr(old, "signal_id", 0) or 0),
                 )
+                # Compute default stop/take from entry when adopting orphaned position
+                # (old=None on restart → stop_price=0 → hard stop never/takes immediately)
+                if pos.entry_price > 0:
+                    max_stop = float(getattr(self.config, "max_stop_pct", 0.05) or 0.05)
+                    min_take = float(getattr(self.config, "min_take_pct", 0.035) or 0.035)
+                    if pos.stop_price <= 0:
+                        pos.stop_price = (
+                            pos.entry_price * (1 - max_stop) if pos.side == "long"
+                            else pos.entry_price * (1 + max_stop)
+                        )
+                    if pos.take_price <= 0:
+                        pos.take_price = (
+                            pos.entry_price * (1 + min_take) if pos.side == "long"
+                            else pos.entry_price * (1 - min_take)
+                        )
                 self._live_positions[coin] = pos
                 print(
                     f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} upl={unc:+.2f}",
