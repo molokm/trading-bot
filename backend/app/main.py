@@ -1716,7 +1716,12 @@ async def ai_stop():
 
 @app.get('/api/live/status')
 async def live_status():
-    """Public — returns live mirror connection state + stats (no secrets)."""
+    """Public — returns live mirror connection state + stats (no secrets). Cached 10s."""
+    global ai_bot, live_manager
+    # Short cache to avoid hammering OKX bills on every 30s frontend poll
+    now_s = _time.time()
+    if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 10):
+        return dict(_live_status_cache['data'])
     global ai_bot, live_manager
     lc = None
     try:
@@ -1778,7 +1783,8 @@ async def live_status():
                     live_data = (st2 or {}).get('live') or live_data
                 except Exception as _re:
                     print(f'[LIVE] status reconcile: {_re}', flush=True)
-            ex_resp = await lc.get_positions('SWAP')
+            _live_positions_resp = await lc.get_positions('SWAP')
+            ex_resp = _live_positions_resp
             ex_list = []
             ex_map = {}
             for ep in (ex_resp or {}).get('data') or []:
@@ -1846,6 +1852,8 @@ async def live_status():
             live_data['_ex_upl_sum'] = sum(float(x.get('upl') or 0) for x in ex_list)
         except Exception as e:
             print(f'[LIVE] status positions enrich: {e}', flush=True)
+    # Cache balance result to avoid duplicate OKX API call
+    _live_balance_data = None
     if connected and lc is not None:
         try:
             portfolio = await lc.get_balance()
@@ -1880,6 +1888,7 @@ async def live_status():
                         ai_bot._live_equity_ts = _t.time()
                     except Exception:
                         pass
+            _live_balance_data = portfolio
         except Exception as e:
             print(f'[LIVE] status equity: {e}', flush=True)
     # ── LIVE metrics from OKX live_manager only ──
@@ -1905,9 +1914,9 @@ async def live_status():
             pass
 
     if connected and lc is not None:
-        # Balance / equity
+        # Balance / equity (reuse cached result)
         try:
-            portfolio = await lc.get_balance()
+            portfolio = _live_balance_data or await lc.get_balance()
             debug['balance_code'] = str((portfolio or {}).get('code') or '')
             data = (portfolio or {}).get('data') or []
             if data:
@@ -1944,9 +1953,9 @@ async def live_status():
             debug['balance_err'] = str(e)
             print(f'[LIVE] balance: {e}', flush=True)
 
-        # Open positions + UPL
+        # Open positions + UPL (reuse cached)
         try:
-            ex_resp = await lc.get_positions('SWAP')
+            ex_resp = _live_positions_resp or await lc.get_positions('SWAP')
             for ep in (ex_resp or {}).get('data') or []:
                 try:
                     sz = abs(float(ep.get('pos') or 0))
@@ -2089,7 +2098,7 @@ async def live_status():
 
     total_pnl = round(float(realized) + float(unrealized), 2)
     win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else None
-    return {
+    _result = {
         'connected': connected,
         'demo': False,
         'equity': round(float(equity or 0), 2),
@@ -2105,12 +2114,16 @@ async def live_status():
         'enabled': True,
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
+    _live_status_cache['ts'] = _time.time()
+    _live_status_cache['data'] = dict(_result)
+    return _result
 
 
 @app.post('/api/live/connect', dependencies=[Depends(require_admin)])
 async def live_connect(request: Request, data: dict = Body(default=None)):
     """Connect LIVE mirror. Body: {key, secret, passphrase, capital, confirm:'LIVE'}."""
     global ai_bot, live_manager, _live_key, _live_secret, _live_pass
+    _live_status_cache.clear()
     # Robust body parse (Form/empty/proxy edge cases)
     if not data or not isinstance(data, dict):
         try:
@@ -2241,6 +2254,7 @@ async def live_disconnect():
     prevents heal/status from auto-reconnecting.
     """
     global ai_bot, live_manager, _live_key, _live_secret, _live_pass
+    _live_status_cache.clear()
     if db:
         try:
             await db.set_setting('live_mirror_enabled', '0')
@@ -3623,6 +3637,7 @@ _FUNDING_CACHE = 0.0
 _FUNDING_CACHE_TS = 0.0
 _FUNDING_TTL = 120.0
 _SM_DISCOVER_CACHE = {'ts': 0.0, 'key': '', 'data': None}
+_live_status_cache: dict = {}
 _SM_DISCOVER_LOCK = None
 
 @app.get('/api/market/ticker')
@@ -4976,7 +4991,13 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
     status = dict(status or {})
     try:
-        dash = await _compute_pnl()
+        # Use cached PnL if fresh, otherwise compute (single-flight)
+        _mode = _account_mode()
+        now_s = _time.time()
+        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+            dash = dict(_pnl_cache['data'])
+        else:
+            dash = await _compute_pnl()
         per = (dash or {}).get('per_bot') or {}
         mode = str((dash or {}).get('account_mode') or _account_mode()).lower()
         val = float(per.get(bot_label) or 0)

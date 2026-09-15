@@ -55,10 +55,33 @@ function isAdmin(isGuest) {
 /* ═══════ Dashboard ═══════ */
 
 /** Unified bot panel on Dashboard (same layout for Discretionary & Scale-In). */
+function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
+  const [remaining, setRemaining] = useState(null)
+  useEffect(() => {
+    if (!nextTickAt) { setRemaining(null); return }
+    const tick = () => setRemaining(Math.max(0, Math.floor((Date.parse(nextTickAt) - Date.now()) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [nextTickAt])
+  if (remaining === null) return null
+  const pct = pollIntervalSec ? Math.round(((pollIntervalSec - remaining) / pollIntervalSec) * 100) : 0
+  return (
+    <div className="flex items-center gap-2 text-[0.6rem] text-[var(--txt-muted)]">
+      <Clock size={11} className="flex-shrink-0 opacity-60" />
+      <span>След. проверка: <span className="mono font-semibold text-[var(--txt)]">{remaining}с</span></span>
+      <div className="flex-1 h-1 rounded-full bg-[var(--bg)] overflow-hidden max-w-[60px]">
+        <div className="h-full rounded-full bg-[var(--info)] transition-all duration-1000" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function DashBotPanel({
   title, version, running, loading, accent = 'text-[var(--accent)]',
   pnl, trades, winRate, openCount, model, capital, pulse, tagline,
   isGuest, onStart, onStop, startLabel, t,
+  nextTickAt, pollIntervalSec,
 }) {
   const pnlN = Number(pnl ?? 0)
   const pnlCls = pnlN >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
@@ -103,6 +126,11 @@ function DashBotPanel({
           {capital != null && <span>Капитал: <span className="text-[var(--txt)] mono">${Number(capital).toLocaleString()}</span></span>}
           {tagline && <span className="w-full text-[11px]">{tagline}</span>}
         </div>
+        {running && nextTickAt && (
+          <div className="pt-1">
+            <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+          </div>
+        )}
         {(pulse) && (
           <div className="p-2 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-28 overflow-y-auto text-[11px] leading-relaxed text-[var(--txt)] whitespace-pre-wrap break-words">
             {pulse}
@@ -219,57 +247,57 @@ export default function Dashboard({ health, connected, isGuest }) {
     if (!connected) { setLoading(false); return }
     if (document.hidden && !opts.force) return
     
-    // 🚀 PRIORITY 1: Live account critical data (portfolio, positions, AI status)
-    // Load these first for instant UX when live account is connected
     const isLive = !demoMode
     try {
       if (isLive) {
-        // Live: portfolio + positions are fast (cached OKX calls) — show UI immediately
-        const [pf, pos] = await Promise.all([
+        const [pf, pos, aiSt] = await Promise.all([
           api.getPortfolio().catch(() => null),
           api.getPositions('SWAP').catch(() => null),
+          api.aiStatus().catch(() => null),
         ])
         if (pf) setPortfolio(pf)
         if (pos) setPositions(pos.positions || [])
+        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
         setLoading(false)
 
-        // aiStatus triggers heavy PnL pipeline — load async without blocking UI
-        api.aiStatus().catch(() => null).then(aiSt => {
-          if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-        })
+        // Background: tickers + live status
+        const [priceTickers, liveSt] = await Promise.all([
+          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+          api.liveStatus().catch(() => null),
+        ])
+        if (liveSt) setLiveStatus(liveSt)
+        if (priceTickers?.tickers) {
+          const byCoin = {}
+          priceTickers.tickers.forEach(tp => {
+            const id = (tp.instId || '').replace('-USDT-SWAP', '')
+            if (id) byCoin[id] = tp
+          })
+          setTickers(byCoin)
+        }
+      } else {
+        const [pf, pos, tk, aiSt, priceTickers, liveSt] = await Promise.all([
+          api.getPortfolio().catch(() => null),
+          api.getPositions('SWAP').catch(() => null),
+          api.getTicker('BTC-USDT-SWAP').catch(() => null),
+          api.aiStatus().catch(() => null),
+          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+          api.liveStatus().catch(() => null),
+        ])
+        if (pf) setPortfolio(pf)
+        if (pos) setPositions(pos.positions || [])
+        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+        if (tk) setTicker(tk)
+        if (liveSt) setLiveStatus(liveSt)
+        if (priceTickers?.tickers) {
+          const byCoin = {}
+          priceTickers.tickers.forEach(tp => {
+            const id = (tp.instId || '').replace('-USDT-SWAP', '')
+            if (id) byCoin[id] = tp
+          })
+          setTickers(byCoin)
+        }
+        setLoading(false)
       }
-      
-      // 🔄 PRIORITY 2: Secondary data (tickers, other bots) - load in background
-      // Stage-2: AI_ONLY — only portfolio/positions/tickers/AI/live
-      const [pf2, pos2, tk, aiSt2, priceTickers, liveSt] = await Promise.all([
-        isLive ? Promise.resolve(null) : api.getPortfolio().catch(() => null),
-        isLive ? Promise.resolve(null) : api.getPositions('SWAP').catch(() => null),
-        api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        api.aiStatus().catch(() => null),
-        api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
-        api.liveStatus().catch(() => null),
-      ])
-
-      if (!isLive) {
-        if (pf2) setPortfolio(pf2)
-        if (pos2) setPositions(pos2.positions || [])
-        if (aiSt2 && !aiSt2.detail) setAiStatus(aiSt2)
-      } else if (aiSt2 && !aiSt2.detail) {
-        setAiStatus(aiSt2)
-      }
-
-      if (tk) setTicker(tk)
-      if (liveSt) setLiveStatus(liveSt)
-
-      if (priceTickers?.tickers) {
-        const byCoin = {}
-        priceTickers.tickers.forEach(tp => {
-          const id = (tp.instId || '').replace('-USDT-SWAP', '')
-          if (id) byCoin[id] = tp
-        })
-        setTickers(byCoin)
-      }
-      setLoading(false)
     } catch { setLoading(false) }
     if (opts.fastOnly) return
 
@@ -1465,6 +1493,8 @@ export default function Dashboard({ health, connected, isGuest }) {
             tagline={aiStatus?.config?.symbols ? (aiStatus.config.symbols || []).join(' · ') : 'BTC · ETH · SOL · XRP'}
             isGuest={isGuest}
             t={t}
+            nextTickAt={aiStatus?.health?.next_tick_at}
+            pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
             startLabel={`${t('dash.start')} AI`}
             onStart={async () => {
               try {
