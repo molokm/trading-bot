@@ -3696,7 +3696,7 @@ class AIStrategy:
                 "close": ind.get("close"),
                 "change_pct": round(float(ind.get("roc_3") or 0) * 100, 2),
             })
-        scored.sort(key=lambda x: x["rank_score"], reverse=True)
+        scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:n]
 
     def _enrich_decision(self, decision: dict, snap: dict | None = None) -> dict:
