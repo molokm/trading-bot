@@ -1644,11 +1644,15 @@ class AIStrategy:
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
         )
-        if self._live_ready():
-            try:
-                await self._open_live(coin, side, stop_pct, take_pct, reason)
-            except Exception as e:
-                print(f"[AI-LIVE] open_mirror: {e}", flush=True)
+        # Always attempt LIVE mirror after demo fill (re-check client each time)
+        try:
+            if self._live_ready() or (self.live_client_manager and self.live_client_manager.get_client()):
+                ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
+                print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
+            else:
+                print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] open_mirror: {e}", flush=True)
 
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
@@ -1839,6 +1843,15 @@ class AIStrategy:
         Called at the end of `_open` when the primary fill succeeded."""
         lc = self._live_client()
         if not lc:
+            try:
+                if self.live_client_manager:
+                    c = self.live_client_manager.get_client()
+                    if c and not getattr(c, "demo", True) and getattr(c, "has_credentials", lambda: False)():
+                        lc = c
+            except Exception:
+                pass
+        if not lc:
+            print("[AI-LIVE] open_skip: no live client (mirror offline)", flush=True)
             return False
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
@@ -1846,10 +1859,33 @@ class AIStrategy:
             print("[AI-LIVE] open_skip: no market price", flush=True)
             return False
         live_eq = await self._ensure_live_equity()
-        if live_eq <= 0:
-            print("[AI-LIVE] open_skip: no live equity", flush=True)
+        alloc = float(getattr(self, "_live_capital", 0) or 0)
+        if alloc <= 0 and self.db:
+            try:
+                raw = await self.db.get_setting("live_mirror_capital")
+                if raw:
+                    alloc = float(raw)
+                    self._live_capital = alloc
+            except Exception:
+                pass
+        size_eq = alloc if alloc >= 10 else live_eq
+        if size_eq <= 0:
+            try:
+                bal = await lc.get_balance()
+                data = (bal or {}).get("data") or []
+                if data:
+                    size_eq = float((data[0] or {}).get("totalEq") or 0)
+                    live_eq = size_eq
+                    self._live_equity = size_eq
+            except Exception as e:
+                print(f"[AI-LIVE] balance retry: {e}", flush=True)
+        if size_eq <= 0:
+            print("[AI-LIVE] open_skip: no live equity/capital", flush=True)
             return False
-        sz, lev = self._size_order(coin, entry, stop_pct, equity=live_eq)
+        if live_eq > 0 and size_eq > live_eq:
+            size_eq = live_eq
+        print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f})", flush=True)
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
             print(f"[AI-LIVE] open_skip {coin}: size=0 (equity=${live_eq:.2f})", flush=True)
             return False

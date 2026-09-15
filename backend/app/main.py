@@ -595,16 +595,23 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
     try:
         print('[startup] AI Discretionary auto-start ...', flush=True)
-        # AI_ONLY product: auto-start after every deploy unless user explicitly pressed Stop
-        # (ai_user_stopped=1). Old ai_bot_running=0 no longer blocks startup.
+        # AI_ONLY: always auto-start after deploy/restart unless AI_AUTO_START=0.
+        # User Stop is session-only unless AI_PERSIST_USER_STOP=1.
         _ai_force = os.getenv('AI_FORCE_AUTOSTART', '1' if AI_ONLY_MODE else '0').strip().lower() not in ('0', 'false', 'no', 'off')
+        _persist_stop = os.getenv('AI_PERSIST_USER_STOP', '0').strip().lower() in ('1', 'true', 'yes', 'on')
         _user_stopped = False
         try:
             _us = await db.get_setting('ai_user_stopped')
             _user_stopped = str(_us or '').strip().lower() in ('1', 'true', 'yes', 'on')
         except Exception as _ase:
             print(f'[startup] AI auto-start state read: {_ase}', flush=True)
-        # force wins; otherwise start when auto flags on and user did not Stop
+        if AI_ONLY_MODE and _user_stopped and not _persist_stop:
+            _user_stopped = False
+            try:
+                await db.set_setting('ai_user_stopped', '0')
+            except Exception:
+                pass
+            print('[startup] AI: cleared ai_user_stopped (deploy auto-start)', flush=True)
         _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or not _user_stopped))
         if _user_stopped and not _ai_force:
             _do_ai = False
@@ -668,6 +675,12 @@ async def startup():
                 except Exception:
                     pass
                 print(f'[startup]   AI Discretionary RUNNING (auto) execute={_exec} capital={ai_cfg.capital} symbols={_syms} mode={("DEMO" if _demo else "LIVE")}', flush=True)
+                try:
+                    ok_m = await _ensure_live_mirror_client()
+                    print(f'[startup]   live mirror after AI start: {ok_m}', flush=True)
+                except Exception as _me:
+                    print(f'[startup]   live mirror attach: {_me}', flush=True)
+
         else:
             print(f'[startup]   AI Discretionary skipped (auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} user_stopped={_user_stopped})', flush=True)
     except Exception as e:
@@ -727,11 +740,29 @@ async def startup():
         except Exception as e:
             print(f"[startup] AI retry failed: {e}", flush=True)
 
+    async def _live_mirror_heal():
+        """Re-bind live mirror after restart / idle disconnect every 60s."""
+        for _ in range(5):
+            await asyncio.sleep(8)
+            try:
+                ok = await _ensure_live_mirror_client()
+                if ok:
+                    print('[startup] live mirror heal: OK', flush=True)
+                    break
+            except Exception as e:
+                print(f'[startup] live mirror heal: {e}', flush=True)
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await _ensure_live_mirror_client()
+            except Exception as e:
+                print(f'[LIVE] heal loop: {e}', flush=True)
+
     try:
-        import asyncio as _aio
-        _aio.get_event_loop().create_task(_ai_autostart_retry())
+        asyncio.create_task(_ai_autostart_retry())
+        asyncio.create_task(_live_mirror_heal())
     except Exception as e:
-        print(f"[startup] AI retry schedule: {e}", flush=True)
+        print(f"[startup] AI retry / live heal schedule: {e}", flush=True)
 
     try:
         print('[startup] AI Scale-In (SCL) — RETIRED, skip auto-start', flush=True)
@@ -1681,6 +1712,12 @@ async def live_status():
         lc = live_manager.get_client() if live_manager else None
     except Exception:
         lc = None
+    if lc is None or getattr(lc, 'demo', False) or not getattr(lc, 'has_credentials', lambda: False)():
+        try:
+            await _ensure_live_mirror_client()
+            lc = live_manager.get_client() if live_manager else None
+        except Exception as e:
+            print(f'[LIVE] status ensure: {e}', flush=True)
     if lc is not None and getattr(lc, 'demo', False):
         lc = None
     connected = lc is not None and getattr(lc, 'has_credentials', lambda: False)()
@@ -2566,16 +2603,78 @@ async def risk_kill(request: Request, data: dict=None):
     return {'ok': True, **risk_get_status().to_dict()}
 
 async def _load_live_creds_from_db() -> None:
-    """Restore owner LIVE keys from encrypted settings (if any)."""
+    """Restore LIVE keys: encrypted first, then plaintext live_mirror_* fallback."""
     global _live_key, _live_secret, _live_pass
     try:
-        k, s, p = await db.get_settings_batch(['okx_live_key_enc', 'okx_live_secret_enc', 'okx_live_pass_enc'])
+        k, s, p = await db.get_settings_batch(
+            ['okx_live_key_enc', 'okx_live_secret_enc', 'okx_live_pass_enc']
+        )
         if k and s and p:
-            _live_key = decrypt_str(k) or ''
-            _live_secret = decrypt_str(s) or ''
-            _live_pass = decrypt_str(p) or ''
+            dk, ds, dp = decrypt_str(k) or '', decrypt_str(s) or '', decrypt_str(p) or ''
+            if dk and ds and dp:
+                _live_key, _live_secret, _live_pass = dk, ds, dp
+                return
     except Exception as e:
-        print(f'[creds] load live: {e}', flush=True)
+        print(f'[creds] load live enc: {e}', flush=True)
+    # Fallback: keys saved by /api/live/connect as live_mirror_*
+    try:
+        k2 = await db.get_setting('live_mirror_key')
+        s2 = await db.get_setting('live_mirror_secret')
+        p2 = await db.get_setting('live_mirror_pass')
+        if k2 and s2 and p2:
+            _live_key, _live_secret, _live_pass = str(k2), str(s2), str(p2)
+            print('[creds] load live: using live_mirror_* plaintext fallback', flush=True)
+    except Exception as e:
+        print(f'[creds] load live mirror: {e}', flush=True)
+
+
+async def _ensure_live_mirror_client() -> bool:
+    """Init/rebind live_manager from DB/env and attach to ai_bot. Survives restart."""
+    global live_manager, ai_bot, _live_key, _live_secret, _live_pass
+    try:
+        await _load_live_creds_from_db()
+    except Exception as e:
+        print(f'[LIVE] ensure load: {e}', flush=True)
+    key = _live_key or ''
+    secret = _live_secret or ''
+    passphrase = _live_pass or ''
+    if not (key and secret and passphrase):
+        try:
+            key = (await db.get_setting('live_mirror_key')) or key
+            secret = (await db.get_setting('live_mirror_secret')) or secret
+            passphrase = (await db.get_setting('live_mirror_pass')) or passphrase
+        except Exception:
+            pass
+    if not (key and secret and passphrase):
+        print('[LIVE] ensure: no credentials', flush=True)
+        return False
+    if live_manager is None:
+        live_manager = OKXClientManager.new_instance()
+    try:
+        await live_manager.init_client(key, secret, passphrase, False)
+    except Exception as e:
+        print(f'[LIVE] ensure init_client: {e}', flush=True)
+        return False
+    lc = live_manager.get_client() if live_manager else None
+    if not lc or getattr(lc, 'demo', True):
+        print('[LIVE] ensure: client missing or demo=true', flush=True)
+        return False
+    if not getattr(lc, 'has_credentials', lambda: False)():
+        print('[LIVE] ensure: no credentials on client', flush=True)
+        return False
+    if ai_bot is not None:
+        try:
+            ai_bot.live_client_manager = live_manager
+            try:
+                cap = await db.get_setting('live_mirror_capital')
+                if cap and float(cap) > 0:
+                    ai_bot._live_capital = float(cap)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f'[LIVE] ensure attach bot: {e}', flush=True)
+    print('[LIVE] ensure: mirror client ready', flush=True)
+    return True
 
 async def _save_live_creds(key: str, secret: str, passphrase: str) -> None:
     global _live_key, _live_secret, _live_pass
