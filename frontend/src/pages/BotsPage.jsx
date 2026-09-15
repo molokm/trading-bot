@@ -154,6 +154,8 @@ function LiveMirrorCard({
   const [showForm, setShowForm] = useState(false)
   if (isGuest) return null
   const livePnl = Number(liveStatus?.total_pnl ?? 0)
+  const liveRealized = Number(liveStatus?.realized_pnl ?? livePnl)
+  const liveUnrealized = Number(liveStatus?.unrealized_pnl ?? 0)
   const liveTrades = liveStatus?.lifetime_trades ?? 0
   const liveWinRate = liveStatus?.win_rate
   const liveEquity = Number(liveStatus?.equity ?? 0)
@@ -231,6 +233,8 @@ function LiveMirrorCard({
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
           <PerfTile label="Equity" value={`$${liveEquity.toFixed(0)}`} tone="neutral" />
           <PerfTile label="PnL" value={`${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}`} tone={livePnl >= 0 ? 'profit' : 'loss'} />
+          <PerfTile label="Реализ." value={`${liveRealized >= 0 ? '+' : ''}${liveRealized.toFixed(2)}`} tone={liveRealized >= 0 ? 'profit' : 'loss'} />
+          <PerfTile label="Нереализ." value={`${liveUnrealized >= 0 ? '+' : ''}${liveUnrealized.toFixed(2)}`} tone={liveUnrealized >= 0 ? 'profit' : 'loss'} />
           <PerfTile label="Сделок" value={liveTrades} />
           <PerfTile label="WR" value={liveWinRate != null ? `${liveWinRate}%` : '—'} />
         </div>

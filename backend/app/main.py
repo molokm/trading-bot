@@ -1005,7 +1005,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status'}
+PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/live/status', '/api/live/trades', '/api/meta/product'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
 GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me')
@@ -1768,6 +1768,7 @@ async def live_status():
                     p['liq_px'] = ep.get('liqPx') or ''
                 live_data['open_positions'] = mem
             live_data['exchange_position_count'] = len(ex_list)
+            live_data['_ex_upl_sum'] = sum(float(x.get('upl') or 0) for x in ex_list)
         except Exception as e:
             print(f'[LIVE] status positions enrich: {e}', flush=True)
     if connected and lc is not None:
@@ -1806,7 +1807,62 @@ async def live_status():
                         pass
         except Exception as e:
             print(f'[LIVE] status equity: {e}', flush=True)
-    return {'connected': connected, 'demo': False, 'equity': round(float(equity or 0), 2), 'total_pnl': live_data.get('total_pnl', 0), 'session_pnl': live_data.get('session_pnl', 0), 'lifetime_trades': live_data.get('lifetime_trades', 0), 'lifetime_fees': live_data.get('lifetime_fees', 0), 'win_rate': live_data.get('win_rate'), 'open_positions': live_data.get('open_positions', [])}
+    # ── Honest LIVE PnL: DB realized (live bot_id) + exchange unrealized ──
+    realized = float(live_data.get('total_pnl') or 0)
+    lifetime_trades = int(live_data.get('lifetime_trades') or 0)
+    lifetime_fees = float(live_data.get('lifetime_fees') or 0)
+    wins = None
+    try:
+        live_bid = None
+        if ai_bot and hasattr(ai_bot, '_live_bot_id'):
+            live_bid = ai_bot._live_bot_id()
+        else:
+            from app.services.ai_strategy import AI_BOT_ID
+            live_bid = f'{AI_BOT_ID}_live'
+        if db and live_bid:
+            summary = await db.get_trades_summary(live_bid)
+            if summary:
+                realized = float(summary.get('total_pnl') or 0)
+                lifetime_trades = int(summary.get('total') or lifetime_trades or 0)
+                w = int(summary.get('wins') or 0)
+                if lifetime_trades > 0:
+                    wins = round(100.0 * w / lifetime_trades, 1)
+                if ai_bot is not None:
+                    try:
+                        ai_bot._live_lifetime_pnl = realized
+                        ai_bot._live_lifetime_trades = lifetime_trades
+                        if summary.get('wins') is not None:
+                            ai_bot._live_lifetime_wins = int(summary.get('wins') or 0)
+                    except Exception:
+                        pass
+    except Exception as e:
+        print(f'[LIVE] status realized from DB: {e}', flush=True)
+    positions_out = list(live_data.get('open_positions') or [])
+    unrealized = 0.0
+    if live_data.get('_ex_upl_sum') is not None:
+        unrealized = float(live_data.get('_ex_upl_sum') or 0)
+    else:
+        for p in positions_out:
+            try:
+                unrealized += float(p.get('upl') or p.get('unrealized_pnl') or 0)
+            except (TypeError, ValueError):
+                pass
+    total_pnl = round(realized + unrealized, 2)
+    win_rate = wins if wins is not None else live_data.get('win_rate')
+    return {
+        'connected': connected,
+        'demo': False,
+        'equity': round(float(equity or 0), 2),
+        'total_pnl': total_pnl,
+        'realized_pnl': round(realized, 2),
+        'unrealized_pnl': round(unrealized, 2),
+        'session_pnl': live_data.get('session_pnl', 0),
+        'lifetime_trades': lifetime_trades,
+        'lifetime_fees': round(lifetime_fees, 2),
+        'win_rate': win_rate,
+        'open_positions': positions_out,
+        'pnl_source': 'db_realized+exchange_upl',
+    }
 
 @app.post('/api/live/connect', dependencies=[Depends(require_admin)])
 async def live_connect(data: dict=None):
