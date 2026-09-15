@@ -644,7 +644,7 @@ function MiniAppPageInner
   /* ── Auto-refresh every 30s ── */
   useEffect(() => {
     if (authing || authError) return
-    const id = setInterval(load, 300000)
+    const id = setInterval(load, 45000)
     return () => clearInterval(id)
   }, [authing, authError, load])
 

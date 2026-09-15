@@ -98,7 +98,7 @@ class AIConfig:
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
-    poll_interval_sec: int = 120           # monitor loop; LLM only on 1H close by default
+    poll_interval_sec: int = 300           # monitor loop; LLM only on 1H close by default
     # Phase-1 efficiency: decide on closed 1H bar, not every poll
     decide_on_bar_close: bool = True
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)

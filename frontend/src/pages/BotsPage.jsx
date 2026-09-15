@@ -578,7 +578,7 @@ export default function BotsPage({ connected, isGuest }) {
 
   useEffect(() => {
     refreshStatus()
-    const id = setInterval(refreshStatus, 300000)
+    const id = setInterval(refreshStatus, 30000)
     return () => clearInterval(id)
   }, [connected, refreshStatus])
 
@@ -710,10 +710,10 @@ const aiRunning = !!aiStatus?.running
           openPositions={aiStatus?.open_positions || []}
           managed={aiStatus?.running}
           lastActivity={aiStatus?.last_activity}
-          heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 120) * 3}
+          heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 300) * 3}
           apiAlive={apiAlive}
           nextTickAt={aiStatus?.health?.next_tick_at}
-          pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
+          pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
           topSignals={aiStatus?.top_signals}
           onToggle={aiToggle}
           isGuest={isGuest}

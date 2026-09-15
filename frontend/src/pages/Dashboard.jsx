@@ -303,7 +303,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       loadData({ fastOnly: false })
-    }, 300000)
+    }, 30000)
     return () => clearInterval(interval)
   }, [connected, demoMode])
 
@@ -1569,7 +1569,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             isGuest={isGuest}
             t={t}
             nextTickAt={aiStatus?.health?.next_tick_at}
-            pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
+            pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
             topSignals={aiStatus?.top_signals}
             startLabel={`${t('dash.start')} AI`}
             onStart={async () => {
