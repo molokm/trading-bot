@@ -149,16 +149,17 @@ function PerfTile({ label, value, tone = 'neutral' }) {
 function LiveMirrorCard({
   connected, liveStatus, loading,
   liveKey, setLiveKey, liveSecret, setLiveSecret, livePass, setLivePass,
+  liveCapital, setLiveCapital,
   onConnect, onDisconnect, isGuest, t,
 }) {
   const [showForm, setShowForm] = useState(false)
   if (isGuest) return null
   const livePnl = Number(liveStatus?.total_pnl ?? 0)
-  const liveRealized = Number(liveStatus?.realized_pnl ?? livePnl)
   const liveUnrealized = Number(liveStatus?.unrealized_pnl ?? 0)
   const liveTrades = liveStatus?.lifetime_trades ?? 0
   const liveWinRate = liveStatus?.win_rate
   const liveEquity = Number(liveStatus?.equity ?? 0)
+  const allocated = Number(liveStatus?.capital ?? liveCapital ?? 0)
   const liveOpen = liveStatus?.open_positions || []
 
   if (!connected) {
@@ -191,12 +192,18 @@ function LiveMirrorCard({
                 onChange={e => setLivePass(e.target.value)}
                 className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
               />
+              <input type="number" min="10" step="1" placeholder="Капитал зеркала, USDT (мин. 10)"
+                value={liveCapital}
+                onChange={e => setLiveCapital(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <div className="text-2xs text-[var(--txt-muted)]">Сумма, которую бот может использовать на LIVE (не весь счёт)</div>
               <div className="flex gap-1.5">
-                <button className="btn btn-ghost btn-sm flex-1" onClick={() => { setShowForm(false); setLiveKey(''); setLiveSecret(''); setLivePass('') }}>
+                <button className="btn btn-ghost btn-sm flex-1" onClick={() => { setShowForm(false); setLiveKey(''); setLiveSecret(''); setLivePass(''); setLiveCapital('') }}>
                   Отмена
                 </button>
                 <button className="btn btn-primary btn-sm flex-1"
-                  onClick={onConnect} disabled={loading || !liveKey || !liveSecret || !livePass}>
+                  onClick={onConnect} disabled={loading || !liveKey || !liveSecret || !livePass || !(Number(liveCapital) >= 10)}>
                   {loading ? <Loader /> : <><Link size={11} /> Подключить</>}
                 </button>
               </div>
@@ -231,6 +238,7 @@ function LiveMirrorCard({
       </div>
       <div className="p-4 space-y-3">
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <PerfTile label="Капитал" value={`$${allocated > 0 ? allocated.toFixed(0) : '—'}`} tone="neutral" />
           <PerfTile label="Equity" value={`$${liveEquity.toFixed(0)}`} tone="neutral" />
           <PerfTile label="PnL" value={`${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}`} tone={livePnl >= 0 ? 'profit' : 'loss'} />
           <PerfTile label="Нереализ." value={`${liveUnrealized >= 0 ? '+' : ''}${liveUnrealized.toFixed(2)}`} tone={liveUnrealized >= 0 ? 'profit' : 'loss'} />
@@ -468,6 +476,7 @@ export default function BotsPage({ connected, isGuest }) {
   const [liveStatus, setLiveStatus] = useState(null)
   const [liveLoading, setLiveLoading] = useState(false)
   const [liveKey, setLiveKey] = useState('')
+  const [liveCapital, setLiveCapital] = useState('')
   const [liveSecret, setLiveSecret] = useState('')
   const [livePass, setLivePass] = useState('')
   const [aiCapital, setAiCapital] = useState(() => {
@@ -521,7 +530,9 @@ export default function BotsPage({ connected, isGuest }) {
   const liveConnect = async () => {
     setLiveLoading(true)
     try {
-      await api.liveConnect({ key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE' })
+      const cap = Number(liveCapital)
+      if (!(cap >= 10)) { alert('Укажите капитал зеркала (мин. $10)'); return }
+      await api.liveConnect({ key: liveKey, secret: liveSecret, passphrase: livePass, confirm: 'LIVE', capital: cap })
       setLiveKey(''); setLiveSecret(''); setLivePass('')
       await refreshStatus()
     } catch (e) { alert(e.message) }
@@ -607,6 +618,7 @@ export default function BotsPage({ connected, isGuest }) {
           liveKey={liveKey} setLiveKey={setLiveKey}
           liveSecret={liveSecret} setLiveSecret={setLiveSecret}
           livePass={livePass} setLivePass={setLivePass}
+          liveCapital={liveCapital} setLiveCapital={setLiveCapital}
           onConnect={liveConnect}
           onDisconnect={liveDisconnect}
           isGuest={isGuest}

@@ -1807,46 +1807,160 @@ async def live_status():
                         pass
         except Exception as e:
             print(f'[LIVE] status equity: {e}', flush=True)
-    # ── LIVE PnL strictly from OKX live_manager account (not DB / not demo) ──
-    positions_out = list(live_data.get('open_positions') or [])
+    # ── LIVE metrics from OKX live_manager only ──
+    debug = {'balance_code': None, 'positions_n': 0, 'bills_n': 0, 'bills_err': None}
+    positions_out = []
     unrealized = 0.0
-    if live_data.get('_ex_upl_sum') is not None:
-        try:
-            unrealized = float(live_data.get('_ex_upl_sum') or 0)
-        except (TypeError, ValueError):
-            unrealized = 0.0
-    else:
-        for p in positions_out:
-            try:
-                unrealized += float(p.get('upl') or p.get('unrealized_pnl') or 0)
-            except (TypeError, ValueError):
-                pass
-
     realized = 0.0
     lifetime_trades = 0
     wins = 0
     fees = 0.0
-    if connected and lc is not None:
+    capital = 0.0
+    try:
+        if db:
+            raw_cap = await db.get_setting('live_mirror_capital')
+            if raw_cap not in (None, ''):
+                capital = float(raw_cap)
+    except Exception:
+        capital = 0.0
+    if ai_bot is not None and capital <= 0:
         try:
-            # Sum close trade PnL from OKX bills (type=2) on THIS live client only
+            capital = float(getattr(ai_bot, '_live_capital', 0) or 0)
+        except Exception:
+            pass
+
+    if connected and lc is not None:
+        # Balance / equity
+        try:
+            portfolio = await lc.get_balance()
+            debug['balance_code'] = str((portfolio or {}).get('code') or '')
+            data = (portfolio or {}).get('data') or []
+            if data:
+                acct = data[0] if isinstance(data[0], dict) else {}
+                total = 0.0
+                for k in ('totalEq', 'adjEq', 'isoEq'):
+                    try:
+                        total = max(total, float(acct.get(k) or 0))
+                    except (TypeError, ValueError):
+                        pass
+                if total <= 0:
+                    for d in acct.get('details') or []:
+                        ccy = str(d.get('ccy') or '').upper()
+                        if ccy not in ('USDT', 'USD', 'USDC'):
+                            continue
+                        for k in ('eq', 'cashBal', 'availBal', 'availEq'):
+                            try:
+                                v = float(d.get(k) or 0)
+                                if v > 0:
+                                    total += v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+                if total > 0:
+                    equity = total
+                if ai_bot is not None:
+                    try:
+                        ai_bot._live_equity = float(equity)
+                        import time as _t
+                        ai_bot._live_equity_ts = _t.time()
+                    except Exception:
+                        pass
+        except Exception as e:
+            debug['balance_err'] = str(e)
+            print(f'[LIVE] balance: {e}', flush=True)
+
+        # Open positions + UPL
+        try:
+            ex_resp = await lc.get_positions('SWAP')
+            for ep in (ex_resp or {}).get('data') or []:
+                try:
+                    sz = abs(float(ep.get('pos') or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
+                    continue
+                try:
+                    u = float(ep.get('upl') or 0)
+                except (TypeError, ValueError):
+                    u = 0.0
+                unrealized += u
+                inst = ep.get('instId') or ''
+                pos_side = str(ep.get('posSide') or 'net').lower()
+                try:
+                    raw = float(ep.get('pos') or 0)
+                except (TypeError, ValueError):
+                    raw = 0.0
+                side = 'short' if (pos_side == 'short' or (pos_side == 'net' and raw < 0)) else 'long'
+                try:
+                    entry = float(ep.get('avgPx') or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    lev = float(ep.get('lever') or 0)
+                except (TypeError, ValueError):
+                    lev = 0.0
+                try:
+                    mark = float(ep.get('markPx') or 0)
+                except (TypeError, ValueError):
+                    mark = 0.0
+                positions_out.append({
+                    'symbol': inst,
+                    'coin': inst.replace('-USDT-SWAP', '').replace('-USD-SWAP', ''),
+                    'side': side,
+                    'size': sz,
+                    'entry_price': entry,
+                    'upl': u,
+                    'unrealized_pnl': u,
+                    'upl_ratio': float(ep.get('uplRatio') or 0) if ep.get('uplRatio') not in (None, '') else 0.0,
+                    'mark_px': mark or (ep.get('markPx') or ''),
+                    'liq_px': ep.get('liqPx') or '',
+                    'leverage': lev,
+                    'account_mode': 'live',
+                    'source': 'exchange',
+                })
+            debug['positions_n'] = len(positions_out)
+            if ai_bot and hasattr(ai_bot, '_reconcile_live_from_exchange'):
+                try:
+                    await ai_bot._reconcile_live_from_exchange()
+                except Exception as _re:
+                    print(f'[LIVE] reconcile: {_re}', flush=True)
+        except Exception as e:
+            debug['positions_err'] = str(e)
+            print(f'[LIVE] positions: {e}', flush=True)
+
+        # Realized from bills (type=2) — tolerant parse
+        try:
             after = ''
             seen = set()
-            for _page in range(8):
-                kw = {'inst_type': 'SWAP', 'type': '2', 'limit': 100}
-                if after:
-                    kw['after'] = after
-                resp = await lc.get_bills(**kw)
-                if not resp or resp.get('error'):
-                    # try without type filter
-                    kw2 = {'inst_type': 'SWAP', 'limit': 100}
+            for _page in range(6):
+                params_try = [
+                    {'instType': 'SWAP', 'type': '2', 'limit': '100'},
+                    {'instType': 'SWAP', 'limit': '100'},
+                ]
+                data = []
+                last_err = None
+                for pr in params_try:
                     if after:
-                        kw2['after'] = after
-                    resp = await lc.get_bills(**kw2)
-                if not resp or resp.get('error'):
-                    print(f"[LIVE] bills error: {(resp or {}).get('message') or resp}", flush=True)
+                        pr = dict(pr)
+                        pr['after'] = after
+                    try:
+                        resp = await lc._request('GET', '/api/v5/account/bills', params=pr)
+                    except Exception as e:
+                        last_err = str(e)
+                        continue
+                    if not isinstance(resp, dict):
+                        continue
+                    if resp.get('error'):
+                        last_err = resp.get('message')
+                        continue
+                    if str(resp.get('code', '0')) not in ('0', ''):
+                        last_err = resp.get('msg') or resp.get('message')
+                        continue
+                    data = resp.get('data') or []
                     break
-                data = resp.get('data') or []
                 if not data:
+                    if last_err:
+                        debug['bills_err'] = last_err
                     break
                 for b in data:
                     bid = str(b.get('billId') or '')
@@ -1855,7 +1969,7 @@ async def live_status():
                     if bid:
                         seen.add(bid)
                     btype = str(b.get('type') or '')
-                    if btype and btype != '2':
+                    if btype and btype not in ('2', '1'):
                         continue
                     try:
                         bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
@@ -1865,101 +1979,55 @@ async def live_status():
                         bf = abs(float(b.get('fee') or 0))
                     except (TypeError, ValueError):
                         bf = 0.0
-                    # Count closes: non-zero pnl or explicit close subTypes 5/6
-                    sub = str(b.get('subType') or '')
-                    if abs(bp) < 1e-12 and sub not in ('5', '6'):
-                        fees += bf
+                    fees += bf
+                    # only count rows that moved PnL (closes / funding already filtered by type)
+                    if abs(bp) < 1e-12:
                         continue
                     realized += bp
-                    fees += bf
                     lifetime_trades += 1
                     if bp > 0:
                         wins += 1
+                debug['bills_n'] = len(seen)
                 after = str(data[-1].get('billId') or '')
                 if len(data) < 100 or not after:
                     break
-            # Prefer freshest UPL from positions endpoint again
-            try:
-                ex_resp2 = await lc.get_positions('SWAP')
-                upl2 = 0.0
-                pos2 = []
-                for ep in (ex_resp2 or {}).get('data') or []:
-                    try:
-                        sz = abs(float(ep.get('pos') or 0))
-                    except (TypeError, ValueError):
-                        sz = 0.0
-                    if sz <= 0:
-                        continue
-                    try:
-                        u = float(ep.get('upl') or 0)
-                    except (TypeError, ValueError):
-                        u = 0.0
-                    upl2 += u
-                    inst = ep.get('instId') or ''
-                    pos_side = str(ep.get('posSide') or 'net').lower()
-                    raw = float(ep.get('pos') or 0)
-                    side = 'short' if (pos_side == 'short' or (pos_side == 'net' and raw < 0)) else 'long'
-                    try:
-                        entry = float(ep.get('avgPx') or 0)
-                    except (TypeError, ValueError):
-                        entry = 0.0
-                    try:
-                        lev = float(ep.get('lever') or 0)
-                    except (TypeError, ValueError):
-                        lev = 0.0
-                    pos2.append({
-                        'symbol': inst,
-                        'coin': inst.replace('-USDT-SWAP', '').replace('-USD-SWAP', ''),
-                        'side': side,
-                        'size': sz,
-                        'entry_price': entry,
-                        'upl': u,
-                        'upl_ratio': float(ep.get('uplRatio') or 0) if ep.get('uplRatio') not in (None, '') else 0.0,
-                        'mark_px': ep.get('markPx') or '',
-                        'liq_px': ep.get('liqPx') or '',
-                        'leverage': lev,
-                        'account_mode': 'live',
-                        'source': 'exchange',
-                    })
-                unrealized = upl2
-                if pos2:
-                    positions_out = pos2
-            except Exception as e:
-                print(f'[LIVE] positions refresh: {e}', flush=True)
-            if ai_bot is not None:
-                try:
-                    ai_bot._live_lifetime_pnl = realized
-                    ai_bot._live_lifetime_trades = lifetime_trades
-                    ai_bot._live_lifetime_wins = wins
-                    ai_bot._live_lifetime_fees = fees
-                except Exception:
-                    pass
-            print(
-                f'[LIVE] status okx: realized={realized:.2f} upl={unrealized:.2f} '
-                f'trades={lifetime_trades} equity={equity:.2f} positions={len(positions_out)}',
-                flush=True,
-            )
         except Exception as e:
-            import traceback
-            print(f'[LIVE] okx pnl fetch: {e}\n{traceback.format_exc()}', flush=True)
-            # fallback memory only for trades count
-            lifetime_trades = int(live_data.get('lifetime_trades') or 0)
-            realized = float(live_data.get('total_pnl') or 0)
+            debug['bills_err'] = str(e)
+            print(f'[LIVE] bills: {e}', flush=True)
+
+        if ai_bot is not None:
+            try:
+                ai_bot._live_lifetime_pnl = realized
+                ai_bot._live_lifetime_trades = lifetime_trades
+                ai_bot._live_lifetime_wins = wins
+                ai_bot._live_lifetime_fees = fees
+                if capital > 0:
+                    ai_bot._live_capital = capital
+            except Exception:
+                pass
+        print(
+            f'[LIVE] status: connected={connected} equity={equity:.2f} capital={capital:.2f} '
+            f'realized={realized:.2f} upl={unrealized:.2f} pos={len(positions_out)} bills={debug.get("bills_n")} '
+            f'bal_code={debug.get("balance_code")} err={debug.get("bills_err") or debug.get("positions_err") or ""}',
+            flush=True,
+        )
 
     total_pnl = round(float(realized) + float(unrealized), 2)
-    win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else live_data.get('win_rate')
+    win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else None
     return {
         'connected': connected,
         'demo': False,
         'equity': round(float(equity or 0), 2),
+        'capital': round(float(capital or 0), 2),
         'total_pnl': total_pnl,
         'unrealized_pnl': round(float(unrealized), 2),
-        'session_pnl': round(float(realized), 2),  # realized closes from OKX bills
+        'session_pnl': round(float(realized), 2),
         'lifetime_trades': int(lifetime_trades),
         'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
         'open_positions': positions_out,
-        'pnl_source': 'okx_live_bills+upl',
+        'pnl_source': 'okx_live',
+        'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
 
 
@@ -1982,6 +2050,12 @@ async def live_connect(data: dict=None):
     confirm = (data.get('confirm') or '').strip()
     if confirm != 'LIVE':
         raise HTTPException(status_code=400, detail='Подтвердите подключение фразой LIVE (confirm: "LIVE")')
+    try:
+        capital = float(data.get('capital') or data.get('amount') or data.get('budget') or 0)
+    except (TypeError, ValueError):
+        capital = 0.0
+    if capital < 10:
+        raise HTTPException(status_code=400, detail='Укажите капитал зеркала (мин. $10) — сумму, которую бот может использовать на LIVE')
     try:
         await live_manager.init_client(key, secret, passphrase, False)
     except Exception as e:
@@ -2008,13 +2082,22 @@ async def live_connect(data: dict=None):
             await db.set_setting('live_mirror_key', key)
             await db.set_setting('live_mirror_secret', secret)
             await db.set_setting('live_mirror_pass', passphrase)
+            await db.set_setting('live_mirror_capital', str(round(capital, 2)))
             await _save_live_creds(key, secret, passphrase)
             print('[LIVE] creds persisted to DB (plaintext + encrypted)', flush=True)
+            if capital > 0:
+                print(f'[LIVE] mirror capital set to ${capital:.2f}', flush=True)
+
         except Exception as e:
             print(f'[LIVE] persist creds: {e}', flush=True)
     if ai_bot:
         try:
             ai_bot.live_client_manager = live_manager
+            try:
+                ai_bot._live_capital = float(capital)
+            except Exception:
+                pass
+
             loop = asyncio.get_event_loop()
             loop.create_task(ai_bot._ensure_live_equity())
 
@@ -2073,7 +2156,7 @@ async def live_connect(data: dict=None):
             print(f'[LIVE] bind to ai_bot: {e}', flush=True)
     _lc_ok = ai_bot.live_client_manager is live_manager if ai_bot else False
     print(f'[LIVE] mirror CONNECTED — ai_bot.live_client_manager=live_manager:{_lc_ok} live_ready={(ai_bot._live_ready() if ai_bot else 'no_bot')}', flush=True)
-    return {'message': 'LIVE mirror подключён', 'connected': True}
+    return {'message': 'LIVE mirror подключён', 'connected': True, 'capital': round(float(capital), 2)}
 
 @app.post('/api/live/disconnect', dependencies=[Depends(require_admin)])
 async def live_disconnect():
