@@ -68,6 +68,7 @@ function TopSignals({ signals, t }) {
         {signals.map((s, i) => {
           const isLong = s.side === 'long'
           const scorePct = Math.round((s.score || 0) * 100)
+          const alignPct = Math.round((s.align_score || 0) * 100)
           return (
             <div key={s.coin + i} className="flex items-center gap-2 p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]">
               <span className="text-[0.6rem] font-bold text-[var(--txt-muted)] w-4 text-center">#{i + 1}</span>
@@ -85,6 +86,7 @@ function TopSignals({ signals, t }) {
                   </span>
                 )}
               </div>
+              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
               <div className="w-12 h-1.5 rounded-full bg-[var(--border)] overflow-hidden flex-shrink-0">
                 <div className="h-full rounded-full transition-all" style={{
                   width: `${scorePct}%`,
@@ -185,6 +187,7 @@ function DashBotPanel({
             {topSignals.map((s, i) => {
               const isLong = s.side === 'long'
               const scorePct = Math.round((s.score || 0) * 100)
+              const alignPct = Math.round((s.align_score || 0) * 100)
               return (
                 <div key={s.coin + i} className="flex items-center gap-1.5 py-0.5">
                   <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
@@ -194,6 +197,7 @@ function DashBotPanel({
                   <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
                   <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
                   <div className="flex-1" />
+                  <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
                   <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
                     <div className="h-full rounded-full" style={{
                       width: `${scorePct}%`,

@@ -3688,8 +3688,7 @@ class AIStrategy:
             scored.append({
                 "coin": coin,
                 "side": c.get("best_side"),
-                "score": round(al, 3),
-                "rank_score": round(rank_score, 3),
+                "score": round(rank_score, 3),
                 "align_score": round(al, 3),
                 "adx": round(adx, 1),
                 "regime": regime,
