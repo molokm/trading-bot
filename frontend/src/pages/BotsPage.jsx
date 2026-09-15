@@ -578,7 +578,7 @@ export default function BotsPage({ connected, isGuest }) {
 
   useEffect(() => {
     refreshStatus()
-    const id = setInterval(refreshStatus, 30000)
+    const id = setInterval(refreshStatus, 300000)
     return () => clearInterval(id)
   }, [connected, refreshStatus])
 

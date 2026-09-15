@@ -303,7 +303,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       loadData({ fastOnly: false })
-    }, 30000)
+    }, 300000)
     return () => clearInterval(interval)
   }, [connected, demoMode])
 
