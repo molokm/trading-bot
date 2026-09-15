@@ -69,6 +69,9 @@ function TopSignals({ signals, t }) {
           const isLong = s.side === 'long'
           const scorePct = Math.round((s.score || 0) * 100)
           const alignPct = Math.round((s.align_score || 0) * 100)
+          const fp = s.filters_passed ?? 10
+          const ft = s.filters_total ?? 10
+          const blocked = s.blocked_reason
           return (
             <div key={s.coin + i} className="flex items-center gap-2 p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]">
               <span className="text-[0.6rem] font-bold text-[var(--txt-muted)] w-4 text-center">#{i + 1}</span>
@@ -86,6 +89,13 @@ function TopSignals({ signals, t }) {
                   </span>
                 )}
               </div>
+              {blocked ? (
+                <span className="text-[0.5rem] px-1 py-px rounded bg-[var(--warn)]/15 text-[var(--warn)] font-medium" title={blocked}>
+                  {blocked.replace(/_/g, ' ')}
+                </span>
+              ) : (
+                <span className="text-[0.55rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
+              )}
               <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
               <div className="w-12 h-1.5 rounded-full bg-[var(--border)] overflow-hidden flex-shrink-0">
                 <div className="h-full rounded-full transition-all" style={{

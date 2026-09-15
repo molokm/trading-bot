@@ -3657,44 +3657,165 @@ class AIStrategy:
         return board
 
     def _top_signals(self, n: int = 3) -> list:
-        """Top-N coins ranked by composite entry signal score.
+        """Top-N coins ranked by *entry readiness* — realistic probability of
+        actually passing all trade-entry filters.
 
-        Score = align_score * adx_factor * regime_factor.
-        Coins with block_open=True get score=0 (filtered out).
-        Display uses align_score directly (familiar 0-1 scale).
+        For each coin × best_side, simulate the veto pipeline:
+        block_open, regime match, BTC trend/ROC, funding, ADX, ROC, EMA.
+        Score = alignment × filter_pass_ratio × adx_factor × regime_factor.
+        Coins that fail hard filters get score=0 and blocked_reason.
         """
         q = self._build_quant()
         coins = q.get("coins") or {}
         inds = self._latest_indicators or {}
         open_coins = {p.coin for p in self._positions.values()}
+
+        # market-level context (same as _quant_veto_open)
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        min_al = float(q.get("min_align") or self._effective_min_align())
+        min_adx_cfg = float(self.config.min_adx or 18)
+        adx_soft = float(self.config.adx_soft_floor or 14)
+        adx_bypass = float(self.config.adx_align_bypass or 0.72)
+        funding_lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+        btc_filter_on = bool(getattr(self.config, "btc_filter_enabled", True))
+        funding_filter_on = bool(getattr(self.config, "funding_filter_enabled", True))
+
         scored = []
         for coin, c in coins.items():
             if coin in open_coins:
                 continue
-            al = float(c.get("align_score") or 0)
+
+            regime = str(c.get("regime") or "unknown").lower()
+            al_l = float(c.get("align_long") or 0)
+            al_s = float(c.get("align_short") or 0)
             adx = float(c.get("adx") or 0)
-            regime = c.get("regime") or "unknown"
-            block = bool(c.get("block_open"))
-            if block or al < 0.30:
-                continue
-            # ADX factor: 0-1, peaks at 40+
-            adx_f = min(adx / 40.0, 1.0)
-            # Regime factor: trending = boost, chop = penalty
-            regime_f = {"bull": 1.0, "bear": 0.9, "chop": 0.35, "unknown": 0.6}.get(regime, 0.6)
-            rank_score = al * adx_f * regime_f
-            if rank_score < 0.05:
-                continue
             ind = inds.get(coin) or {}
+
+            # pick best side (same logic as quant_auto)
+            if regime == "bear":
+                side, al = "short", al_s
+            elif regime == "bull":
+                side, al = "long", al_l
+            elif regime == "chop":
+                # chop: only with BTC trend, never counter
+                if btc_reg == "bull" or btc_roc >= 0.20:
+                    side, al = "long", al_l
+                elif btc_reg == "bear" or btc_roc <= -0.20:
+                    side, al = "short", al_s
+                else:
+                    side, al = ("long" if al_l >= al_s else "short"), max(al_l, al_s)
+            else:
+                side = c.get("best_side") or ("long" if al_l >= al_s else "short")
+                al = max(al_l, al_s)
+
+            if side not in ("long", "short"):
+                continue
+
+            # ── simulate veto pipeline ──
+            blockers = []
+
+            # 1. block_open (align < 0.50 / chop / ADX)
+            if c.get("block_open"):
+                blockers.append("block_open")
+
+            # 2. regime side match
+            if regime == "bull" and side == "short":
+                blockers.append("short_in_bull")
+            if regime == "bear" and side == "long":
+                blockers.append("long_in_bear")
+
+            # 3. BTC/global trend fight
+            if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+                blockers.append("short_vs_btc_bull")
+            if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+                blockers.append("long_vs_btc_bear")
+
+            # 4. BTC ROC drift
+            if side == "short" and btc_roc >= 0.20:
+                blockers.append("short_vs_btc_roc_up")
+            if side == "long" and btc_roc <= -0.20:
+                blockers.append("long_vs_btc_roc_down")
+
+            # 5. Funding filter
+            if funding_filter_on:
+                fr = ind.get("funding_rate") or c.get("funding_rate")
+                try:
+                    fr = float(fr) if fr is not None else None
+                except (TypeError, ValueError):
+                    fr = None
+                if fr is not None and funding_lim > 0:
+                    if side == "long" and fr >= funding_lim:
+                        blockers.append("funding_toxic_long")
+                    if side == "short" and fr <= -funding_lim:
+                        blockers.append("funding_toxic_short")
+
+            # 6. BTC impulse (alts only)
+            if btc_filter_on and coin != "BTC":
+                impulse = q.get("btc_impulse")
+                if impulse == "up" and side == "short":
+                    blockers.append("btc_impulse_up")
+                if impulse == "down" and side == "long":
+                    blockers.append("btc_impulse_down")
+
+            # 7. ADX strength
+            align_for_adx = al_s if side == "short" else al_l
+            adx_ok = adx >= min_adx_cfg or (align_for_adx >= adx_bypass and adx >= adx_soft)
+            if not adx_ok:
+                blockers.append(f"low_adx:{adx:.0f}")
+
+            # 8. ROC momentum
+            roc = float(ind.get("roc_3") or 0)
+            if abs(roc) < float(self.config.min_roc_abs or 0.25):
+                blockers.append("flat_roc")
+
+            # 9. EMA alignment
+            ema_f = float(ind.get("ema_fast") or 0)
+            ema_s = float(ind.get("ema_slow") or 0)
+            close = float(ind.get("close") or 0)
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    blockers.append("ema_not_bullish")
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    blockers.append("ema_not_bearish")
+
+            # 10. EMA200 trend gate
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
+            if ema200 > 0 and close:
+                tol = ema200 * 0.005
+                if side == "long" and close < ema200 - tol:
+                    blockers.append("below_ema200")
+                if side == "short" and close > ema200 + tol:
+                    blockers.append("above_ema200")
+
+            # ── composite score ──
+            hard_block = bool(c.get("block_open")) or len(blockers) >= 4
+            n_filters = 10  # total veto checks
+            pass_ratio = max(0, (n_filters - len(blockers)) / n_filters)
+            adx_f = min(adx / 40.0, 1.0)
+            regime_f = {"bull": 1.0, "bear": 0.9, "chop": 0.35, "unknown": 0.6}.get(regime, 0.6)
+            # score: high only if alignment is strong AND most filters pass
+            score = al * adx_f * regime_f * pass_ratio if not hard_block else 0.0
+            if score < 0.03:
+                continue
+
             scored.append({
                 "coin": coin,
-                "side": c.get("best_side"),
-                "score": round(rank_score, 3),
+                "side": side,
+                "score": round(score, 3),
                 "align_score": round(al, 3),
                 "adx": round(adx, 1),
                 "regime": regime,
                 "rsi": round(float(ind.get("rsi") or 0), 1),
-                "close": ind.get("close"),
-                "change_pct": round(float(ind.get("roc_3") or 0) * 100, 2),
+                "close": close,
+                "change_pct": round(float(roc) * 100, 2),
+                "filters_passed": n_filters - len(blockers),
+                "filters_total": n_filters,
+                "blocked_reason": blockers[0] if blockers else None,
             })
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:n]

@@ -178,6 +178,9 @@ function CompactSignals({ signals, t }) {
           const isLong = s.side === 'long'
           const scorePct = Math.round((s.score || 0) * 100)
           const alignPct = Math.round((s.align_score || 0) * 100)
+          const fp = s.filters_passed ?? 10
+          const ft = s.filters_total ?? 10
+          const blocked = s.blocked_reason
           return (
             <div key={s.coin + i} className="flex items-center gap-1.5 p-1.5 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
               <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3 text-center">#{i + 1}</span>
@@ -187,6 +190,13 @@ function CompactSignals({ signals, t }) {
               <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
               <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
               <div className="flex-1" />
+              {blocked ? (
+                <span className="text-[0.48rem] px-1 py-px rounded bg-[var(--warn)]/15 text-[var(--warn)] font-medium truncate max-w-[80px]" title={blocked}>
+                  {blocked.replace(/_/g, ' ')}
+                </span>
+              ) : (
+                <span className="text-[0.5rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
+              )}
               <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
               <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
                 <div className="h-full rounded-full" style={{
