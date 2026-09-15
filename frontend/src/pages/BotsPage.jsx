@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Brain, Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
   ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot,
-  Link, Unlink, AlertTriangle, Wifi, WifiOff
+  Link, Unlink, AlertTriangle, Wifi, WifiOff, Target
 } from 'lucide-react'
 import { api } from '../services/api'
 import { Tip, StatusBadge, ConfirmDialog, Loader } from '../components/ui'
@@ -160,6 +160,42 @@ function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
       <span>След. проверка: <span className="mono font-semibold text-[var(--txt)]">{remaining}с</span></span>
       <div className="flex-1 h-1 rounded-full bg-[var(--bg)] overflow-hidden max-w-[60px]">
         <div className="h-full rounded-full bg-[var(--info)] transition-all duration-1000" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function CompactSignals({ signals, t }) {
+  if (!signals || signals.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5 text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
+        <Target size={10} />
+        <span>{t('bots.top_signals') || 'Сигналы на вход'}</span>
+      </div>
+      <div className="grid grid-cols-1 gap-1">
+        {signals.map((s, i) => {
+          const isLong = s.side === 'long'
+          const scorePct = Math.round((s.score || 0) * 100)
+          return (
+            <div key={s.coin + i} className="flex items-center gap-1.5 p-1.5 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
+              <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3 text-center">#{i + 1}</span>
+              <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                {isLong ? 'L' : 'S'}
+              </span>
+              <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+              <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
+              <div className="flex-1" />
+              <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+                <div className="h-full rounded-full" style={{
+                  width: `${scorePct}%`,
+                  backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                }} />
+              </div>
+              <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+            </div>
+          )
+        })}
       </div>
     </div>
   )
@@ -336,7 +372,7 @@ function BotCard({
   managed, lastActivity, heartbeatMaxAge, apiAlive,
   isGuest, loading, t,
   capitalValue, onCapitalChange, showCapital,
-  nextTickAt, pollIntervalSec,
+  nextTickAt, pollIntervalSec, topSignals,
 }) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
@@ -397,6 +433,11 @@ function BotCard({
           {statusMode === 'live' && nextTickAt && (
             <div className="mt-2">
               <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+            </div>
+          )}
+          {topSignals && topSignals.length > 0 && (
+            <div className="mt-2">
+              <CompactSignals signals={topSignals} t={t} />
             </div>
           )}
         </div>
@@ -673,6 +714,7 @@ const aiRunning = !!aiStatus?.running
           apiAlive={apiAlive}
           nextTickAt={aiStatus?.health?.next_tick_at}
           pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 120}
+          topSignals={aiStatus?.top_signals}
           onToggle={aiToggle}
           isGuest={isGuest}
           loading={aiLoading}

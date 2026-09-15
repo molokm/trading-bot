@@ -3655,6 +3655,48 @@ class AIStrategy:
             })
         return board
 
+    def _top_signals(self, n: int = 3) -> list:
+        """Top-N coins ranked by composite entry signal score.
+
+        Score = align_score * adx_factor * regime_factor.
+        Coins with block_open=True get score=0 (filtered out).
+        """
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        inds = self._latest_indicators or {}
+        open_coins = {p.coin for p in self._positions.values()}
+        scored = []
+        for coin, c in coins.items():
+            if coin in open_coins:
+                continue
+            al = float(c.get("align_score") or 0)
+            adx = float(c.get("adx") or 0)
+            regime = c.get("regime") or "unknown"
+            block = bool(c.get("block_open"))
+            if block or al < 0.30:
+                continue
+            # ADX factor: 0-1, peaks at 40+
+            adx_f = min(adx / 40.0, 1.0)
+            # Regime factor: trending = boost, chop = penalty
+            regime_f = {"bull": 1.0, "bear": 0.9, "chop": 0.35, "unknown": 0.6}.get(regime, 0.6)
+            score = al * adx_f * regime_f
+            if score < 0.05:
+                continue
+            ind = inds.get(coin) or {}
+            scored.append({
+                "coin": coin,
+                "side": c.get("best_side"),
+                "score": round(score, 3),
+                "align_score": round(al, 3),
+                "adx": round(adx, 1),
+                "regime": regime,
+                "rsi": round(float(ind.get("rsi") or 0), 1),
+                "close": ind.get("close"),
+                "change_pct": round(float(ind.get("roc_3") or 0) * 100, 2),
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:n]
+
     def _enrich_decision(self, decision: dict, snap: dict | None = None) -> dict:
         """Attach Russian pulse + watch to a raw LLM decision (used by tick and /decide)."""
         decision = dict(decision or {})
@@ -3925,6 +3967,7 @@ class AIStrategy:
                 if self._last_decision else self._last_decision
             ),
             "watch": (self._last_decision or {}).get("watch") or self._watch_board(),
+            "top_signals": self._top_signals(3),
             "pulse": self._safe_pulse_text(),
             "symbols_scanned": list(self.config.symbols or []),
             "adaptive": self._adapt,

@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
-  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert, Wifi, WifiOff
+  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert, Wifi, WifiOff,
+  Target
 } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, EnhancedMetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader, Skeleton, SkeletonMetricCard } from '../components/ui'
@@ -55,6 +56,50 @@ function isAdmin(isGuest) {
 /* ═══════ Dashboard ═══════ */
 
 /** Unified bot panel on Dashboard (same layout for Discretionary & Scale-In). */
+function TopSignals({ signals, t }) {
+  if (!signals || signals.length === 0) return null
+  return (
+    <div className="panel flex-shrink-0">
+      <div className="panel-header">
+        <Target size={13} className="text-[var(--accent)]" />
+        <span className="flex-1 truncate text-xs font-bold">{t('dash.top_signals') || 'Сигналы на вход'}</span>
+      </div>
+      <div className="p-2 space-y-1">
+        {signals.map((s, i) => {
+          const isLong = s.side === 'long'
+          const scorePct = Math.round((s.score || 0) * 100)
+          return (
+            <div key={s.coin + i} className="flex items-center gap-2 p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-[0.6rem] font-bold text-[var(--txt-muted)] w-4 text-center">#{i + 1}</span>
+              <span className={`px-1 py-0.5 rounded text-[0.6rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                {isLong ? 'L' : 'S'}
+              </span>
+              <span className="text-xs font-semibold text-[var(--txt)] mono">{s.coin}</span>
+              <div className="flex-1" />
+              <div className="flex items-center gap-1.5 text-[0.6rem] text-[var(--txt-muted)]">
+                <span>{t('dash.regime') || 'Режим'}: <span className="text-[var(--txt)] mono">{s.regime}</span></span>
+                <span>ADX: <span className="text-[var(--txt)] mono">{s.adx}</span></span>
+                {s.change_pct != null && (
+                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)'}>
+                    {s.change_pct >= 0 ? '+' : ''}{s.change_pct}%
+                  </span>
+                )}
+              </div>
+              <div className="w-12 h-1.5 rounded-full bg-[var(--border)] overflow-hidden flex-shrink-0">
+                <div className="h-full rounded-full transition-all" style={{
+                  width: `${scorePct}%`,
+                  backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                }} />
+              </div>
+              <span className="mono text-[0.65rem] font-bold text-[var(--txt)] w-8 text-right">{scorePct}%</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
   const [remaining, setRemaining] = useState(null)
   useEffect(() => {
@@ -1506,6 +1551,8 @@ export default function Dashboard({ health, connected, isGuest }) {
               try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
+
+          <TopSignals signals={aiStatus?.top_signals} t={t} />
 
           {/* ─── LIVE Mirror Panel ─── */}
           {liveStatus?.connected && (
