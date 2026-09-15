@@ -444,8 +444,40 @@ class AIStrategy:
                         reason = "no_credentials"
                     else:
                         reason = "ok"  # shouldn't reach here if r is False
-            print(f"[AI-LIVE] _live_ready=False reason={reason}", flush=True)
+            # Throttle logs: every ~10 checks
+            n = int(getattr(self, "_live_ready_log_n", 0) or 0) + 1
+            self._live_ready_log_n = n
+            if n <= 3 or n % 10 == 0:
+                print(f"[AI-LIVE] _live_ready=False reason={reason}", flush=True)
         return r
+
+    async def _mirror_enabled(self) -> bool:
+        """True if user has not explicitly disconnected the LIVE mirror."""
+        if not self.db:
+            return self._live_client() is not None
+        try:
+            en = await self.db.get_setting("live_mirror_enabled")
+            if str(en or "").strip().lower() in ("0", "false", "no", "off"):
+                return False
+        except Exception:
+            pass
+        return True
+
+    async def _try_refresh_live_client(self) -> bool:
+        """Call main's ensure callback if wired; return whether live client is ready."""
+        if self._live_client():
+            return True
+        if not await self._mirror_enabled():
+            return False
+        cb = getattr(self, "_live_ensure_cb", None)
+        if cb is None:
+            return False
+        try:
+            ok = await cb()
+            return bool(ok) and self._live_client() is not None
+        except Exception as e:
+            print(f"[AI-LIVE] ensure_cb: {e}", flush=True)
+            return False
 
     async def _ensure_live_equity(self) -> float:
         """Best-effort live account equity (USDT totalEq). Cached ~30s."""
@@ -1644,13 +1676,17 @@ class AIStrategy:
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
         )
-        # Always attempt LIVE mirror after demo fill (re-check client each time)
+        # Mirror to LIVE after primary fill (re-bind client if needed)
         try:
-            if self._live_ready() or (self.live_client_manager and self.live_client_manager.get_client()):
-                ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
-                print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
+            if not await self._mirror_enabled():
+                print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
-                print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
+                await self._try_refresh_live_client()
+                if self._live_client():
+                    ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
+                    print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
+                else:
+                    print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
         except Exception as e:
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
 
@@ -1829,11 +1865,15 @@ class AIStrategy:
             )
         except Exception:
             pass
-        if self._live_ready():
-            try:
-                await self._close_live(coin, reason)
-            except Exception as e:
-                print(f"[AI-LIVE] close_mirror: {e}", flush=True)
+        try:
+            if await self._mirror_enabled():
+                await self._try_refresh_live_client()
+                if self._live_client():
+                    await self._close_live(coin, reason)
+                else:
+                    print(f"[AI-LIVE] close skip {coin}: live not ready", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] close_mirror: {e}", flush=True)
 
     # ── LIVE mirror execution ──────────────────────────────────────────────────
 

@@ -665,8 +665,13 @@ async def startup():
                         _cap = float(_cap_db)
                 except Exception:
                     pass
+                try:
+                    await _ensure_live_mirror_client()
+                except Exception as _em:
+                    print(f'[startup] pre-AI live ensure: {_em}', flush=True)
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '120')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+                _wire_ai_live_cb(ai_bot)
                 ai_bot.start()
                 _positions_cache = None
                 try:
@@ -732,11 +737,17 @@ async def startup():
                 config=ai_cfg, client_manager=client_manager, db=db,
                 notifier=telegram, live_client_manager=live_manager,
             )
+            _wire_ai_live_cb(ai_bot)
             ai_bot.start()
             if db:
                 await db.set_setting("ai_bot_running", "1")
                 await db.set_setting("ai_user_stopped", "0")
             print("[startup]   AI Discretionary RUNNING (retry)", flush=True)
+            try:
+                await _ensure_live_mirror_client()
+                _wire_ai_live_cb(ai_bot)
+            except Exception as _er:
+                print(f"[startup] retry live ensure: {_er}", flush=True)
         except Exception as e:
             print(f"[startup] AI retry failed: {e}", flush=True)
 
@@ -1670,6 +1681,7 @@ async def ai_start(data: dict=None):
             except Exception as e:
                 print(f'[AI/start] live mirror DB restore: {e}', flush=True)
         ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+        _wire_ai_live_cb(ai_bot)
         ai_bot.start()
         global _positions_cache
         _positions_cache = None
@@ -2243,7 +2255,8 @@ async def live_disconnect():
     # (keys remain in DB for next connect form / ensure when enabled=1)
     if ai_bot:
         try:
-            ai_bot.live_client_manager = None
+            # Keep manager object bound (empty) so reconnect can init_client on same ref
+            ai_bot.live_client_manager = live_manager
             try:
                 ai_bot._live_positions.clear()
             except Exception:
@@ -2626,7 +2639,16 @@ async def health(request: Request):
             diag['pnl_source'] = _pr.get('source')
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
+        _live_on = False
+    _live_en = None
+    try:
+        _lc = live_manager.get_client() if live_manager else None
+        _live_on = bool(_lc and not getattr(_lc, 'demo', True) and getattr(_lc, 'has_credentials', lambda: False)())
+        if db:
+            _live_en = await db.get_setting('live_mirror_enabled')
+    except Exception:
+        pass
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
 
 @app.get('/api/risk/status')
 async def risk_status():
@@ -2672,6 +2694,18 @@ async def _load_live_creds_from_db() -> None:
             print('[creds] load live: using live_mirror_* plaintext fallback', flush=True)
     except Exception as e:
         print(f'[creds] load live mirror: {e}', flush=True)
+
+
+def _wire_ai_live_cb(bot) -> None:
+    """Attach live-mirror ensure callback so strategy can rebind after restart."""
+    if bot is None:
+        return
+    try:
+        bot._live_ensure_cb = _ensure_live_mirror_client
+        if live_manager is not None and getattr(bot, 'live_client_manager', None) is None:
+            bot.live_client_manager = live_manager
+    except Exception as e:
+        print(f'[LIVE] wire cb: {e}', flush=True)
 
 
 async def _ensure_live_mirror_client() -> bool:
