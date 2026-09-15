@@ -354,7 +354,12 @@ async def startup():
         if (_demo_key or _env_key) and (_demo_secret or _env_secret) and (_demo_pass or _env_pass):
             await showcase_manager.init_client(_demo_key or _env_key, _demo_secret or _env_secret, _demo_pass or _env_pass, True)
             print('[startup] showcase DEMO ready', flush=True)
-        if _env_key and _env_secret and _env_pass:
+        # Init main client_manager — respect restored live mode from DB
+        if not _env_demo and _live_key and _live_secret and _live_pass:
+            # DB restored LIVE mode — init with live keys
+            await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
+            print('[startup] client_manager LIVE (restored from DB)', flush=True)
+        elif _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, True)
             _env_demo = True
         _lm_key = _live_key
@@ -376,6 +381,15 @@ async def startup():
         if not (_lm_key and _lm_secret and _lm_pass):
             _lm_source = 'none'
         print(f'[startup] live mirror creds: source={_lm_source} key={('yes' if _lm_key else 'no')}', flush=True)
+        # Auto-reconnect mirror on restart: if keys exist, re-enable even if disabled previously
+        if _lm_key and _lm_secret and _lm_pass and db:
+            try:
+                _prev_en = await db.get_setting('live_mirror_enabled')
+                if str(_prev_en or '').strip().lower() in ('0', 'false', 'no', 'off'):
+                    await db.set_setting('live_mirror_enabled', '1')
+                    print('[startup] live mirror auto-re-enabled (keys present, was disabled)', flush=True)
+            except Exception:
+                pass
         if _lm_key and _lm_secret and _lm_pass:
             try:
                 await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
@@ -711,14 +725,22 @@ async def startup():
                 pass
             print("[startup] AI auto-start RETRY ...", flush=True)
             await _ensure_showcase()
-            _k = _demo_key or _env_key
-            _s = _demo_secret or _env_secret
-            _pw = _demo_pass or _env_pass
+            # Respect restored live mode from DB (same as main startup)
+            _retry_demo = _env_demo
+            if not _retry_demo and _live_key and _live_secret and _live_pass:
+                _k = _live_key
+                _s = _live_secret
+                _pw = _live_pass
+            else:
+                _k = _demo_key or _env_key
+                _s = _demo_secret or _env_secret
+                _pw = _demo_pass or _env_pass
+                _retry_demo = True
             if not (_k and _s and _pw):
                 print("[startup] AI retry: still no OKX keys", flush=True)
                 return
             if client_manager:
-                await client_manager.init_client(_k, _s, _pw, True)
+                await client_manager.init_client(_k, _s, _pw, _retry_demo)
             try:
                 from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
                 _syms = list(_AI_SYMS)
