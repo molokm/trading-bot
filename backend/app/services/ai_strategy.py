@@ -1494,6 +1494,37 @@ class AIStrategy:
         return max(0.0, sz), round(lev, 2)
 
     # ── execution helpers ──────────────────────────────────────
+    async def _avail_usdt(self, client) -> float:
+        """Real available USDT on the account backing `client` (demo or live).
+        Used to cap sizing — internal equity may drift from exchange balance
+        (e.g. 51008: insufficient loan quota on demo)."""
+        try:
+            r = await client.get_balance()
+            if (r or {}).get("error"):
+                return 0.0
+            data = (r or {}).get("data") or []
+            if not data or not isinstance(data[0], dict):
+                return 0.0
+            acct = data[0]
+            best = 0.0
+            for d in (acct.get("details") or []):
+                if str(d.get("ccy") or "").upper() != "USDT":
+                    continue
+                try:
+                    v = float(d.get("availBal") or 0)
+                except (TypeError, ValueError):
+                    v = 0.0
+                if v > best:
+                    best = v
+            if best <= 0:
+                try:
+                    best = float(acct.get("totalAvailBal") or 0)
+                except (TypeError, ValueError):
+                    best = 0.0
+            return max(0.0, best)
+        except Exception:
+            return 0.0
+
     async def _place(self, client, inst_id, side, sz, pos_side):
         coin = inst_id.split("-")[0]
         cl_id = f"ai{int(time.time() * 1000)}"
@@ -1509,7 +1540,9 @@ class AIStrategy:
         entry = float(ind.get("close") or 0)
         if entry <= 0:
             return
-        sz, lev = self._size_order(coin, entry, stop_pct)
+        avail = await self._avail_usdt(client)
+        eq_cap = min(self._equity, avail) if avail > 0 else self._equity
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=eq_cap)
         if sz <= 0:
             self._record_exec("open_skip", coin=coin, side=side, reason="size=0",
                               entry=entry, stop_pct=stop_pct)
@@ -1561,6 +1594,23 @@ class AIStrategy:
                     self._record_exec("open_error", coin=coin, side=side,
                                       reason=str(e2), size=sz, leverage=lev)
                     return
+            # 51008: margin/borrow quota — resize from real available balance, retry once
+            if resp.get("error") and "51008" in msg and avail > 0:
+                sz2, lev2 = self._size_order(coin, entry, stop_pct,
+                                             equity=avail * 0.9)
+                if sz2 > 0 and sz2 < sz:
+                    try:
+                        await client.set_leverage(inst, lev2, mgn_mode="cross",
+                                                  pos_side=pos_side_try or "net")
+                    except Exception:
+                        pass
+                    try:
+                        resp = await self._place(client, inst, order_side, sz2,
+                                                 pos_side_try)
+                        if not resp.get("error"):
+                            sz, lev = sz2, lev2
+                    except Exception:
+                        pass
             if resp.get("error"):
                 self._record_exec(
                     "open_error", coin=coin, side=side,
@@ -1923,7 +1973,11 @@ class AIStrategy:
             return False
         if live_eq > 0 and size_eq > live_eq:
             size_eq = live_eq
-        print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f})", flush=True)
+        # cap by real available USDT (margin already used by other positions)
+        avail_live = await self._avail_usdt(lc)
+        if avail_live > 0 and size_eq > avail_live:
+            size_eq = avail_live
+        print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
             print(f"[AI-LIVE] open_skip {coin}: size=0 (equity=${live_eq:.2f})", flush=True)
@@ -1955,6 +2009,22 @@ class AIStrategy:
                 except Exception as e2:
                     print(f"[AI-LIVE] open_error net-retry {coin}: {e2}", flush=True)
                     return False
+            # 51008: margin/borrow quota — resize from real available balance, retry once
+            if resp.get("error") and "51008" in msg and avail_live > 0:
+                sz2, lev2 = self._size_order(coin, entry, stop_pct,
+                                             equity=avail_live * 0.9)
+                if sz2 > 0 and sz2 < sz:
+                    try:
+                        await lc.set_leverage(inst, lev2, mgn_mode="cross",
+                                              pos_side=side)
+                    except Exception:
+                        pass
+                    try:
+                        resp = await self._place(lc, inst, order_side, sz2, side)
+                        if not resp.get("error"):
+                            sz, lev = sz2, lev2
+                    except Exception:
+                        pass
             if resp.get("error"):
                 print(f"[AI-LIVE] open_error {coin}: {resp.get('message')}", flush=True)
                 return False
