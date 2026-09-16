@@ -116,10 +116,10 @@ export const api = {
   getPositions: (instType = 'SWAP') =>
     request(`/positions?inst_type=${instType}`),
 
-  closePosition: (instId, posSide, sz, mgnMode = 'cross') =>
+  closePosition: (instId, posSide, sz, mgnMode = 'cross', account = 'demo') =>
     request('/positions/close', {
       method: 'POST',
-      body: JSON.stringify({ instId, posSide, sz, mgnMode }),
+      body: JSON.stringify({ instId, posSide, sz, mgnMode, account }),
     }),
 
   // ── Market ──

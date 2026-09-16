@@ -157,7 +157,8 @@ class OKXClient:
     async def place_order(self, inst_id: str, side: str, ord_type: str,
                            sz: str, px: str = None, td_mode: str = "cash",
                            pos_side: str = None, reduce_only: bool = False,
-                           tgt_ccy: str = None, cl_ord_id: str = None) -> dict:
+                           tgt_ccy: str = None, cl_ord_id: str = None,
+                           is_close: bool = False) -> dict:
         body = {
             "instId": inst_id,
             "tdMode": td_mode,
@@ -176,8 +177,9 @@ class OKXClient:
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
         # Block new risk-increasing orders when kill switch / daily loss limits hit.
-        # reduce_only closes always pass.
-        assert_can_open(is_reduce_only=bool(reduce_only))
+        # reduce_only / explicit closes always pass. is_close marks a position
+        # reduction in hedge mode (where OKX forbids the reduceOnly flag).
+        assert_can_open(is_reduce_only=bool(reduce_only or is_close))
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:

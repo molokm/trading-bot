@@ -20,7 +20,7 @@ from typing import Optional
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
 from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
-from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status
+from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status, mock_decide
 import json
 from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
@@ -172,6 +172,7 @@ class AIPosition:
     signal_id: int = 0
     tg_message_id: int = 0
     peak_price: float = 0.0
+    unrealized_pnl: float = 0.0
 
 
 class AIStrategy:
@@ -1525,13 +1526,13 @@ class AIStrategy:
         except Exception:
             return 0.0
 
-    async def _place(self, client, inst_id, side, sz, pos_side):
+    async def _place(self, client, inst_id, side, sz, pos_side, is_close=False):
         coin = inst_id.split("-")[0]
         cl_id = f"ai{int(time.time() * 1000)}"
         return await client.place_order(
             inst_id=inst_id, side=side, ord_type="market",
             sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
-            cl_ord_id=cl_id,
+            cl_ord_id=cl_id, is_close=is_close,
         )
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
@@ -1753,7 +1754,8 @@ class AIStrategy:
                     pass
             return
         close_side = "sell" if pos.side == "long" else "buy"
-        resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side)
+        resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side,
+                                 is_close=True)
         if resp.get("error"):
             print(f"[AI] close error {coin}: {resp.get('message')}", flush=True)
             return
@@ -2125,7 +2127,7 @@ class AIStrategy:
         close_side = "sell" if pos.side == "long" else "buy"
         try:
             resp = await self._place(lc, pos.inst_id, close_side,
-                                     pos.size, pos.side)
+                                     pos.size, pos.side, is_close=True)
         except Exception as e:
             print(f"[AI-LIVE] close_error {coin}: {e}", flush=True)
             return False
@@ -2345,20 +2347,8 @@ class AIStrategy:
                     signal_id=int(getattr(old, "signal_id", 0) or 0),
                 )
                 # Compute default stop/take from entry when adopting orphaned position
-                # (old=None on restart → stop_price=0 → hard stop never/takes immediately)
-                if pos.entry_price > 0:
-                    max_stop = float(getattr(self.config, "max_stop_pct", 0.05) or 0.05)
-                    min_take = float(getattr(self.config, "min_take_pct", 0.035) or 0.035)
-                    if pos.stop_price <= 0:
-                        pos.stop_price = (
-                            pos.entry_price * (1 - max_stop) if pos.side == "long"
-                            else pos.entry_price * (1 + max_stop)
-                        )
-                    if pos.take_price <= 0:
-                        pos.take_price = (
-                            pos.entry_price * (1 + min_take) if pos.side == "long"
-                            else pos.entry_price * (1 - min_take)
-                        )
+                # (old=None on restart → stop/take=0 → hard stop never/takes immediately)
+                self._ensure_default_stops(pos)
                 self._live_positions[coin] = pos
                 print(
                     f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} upl={unc:+.2f}",
@@ -2384,6 +2374,12 @@ class AIStrategy:
         """After hydrate: clone demo positions that are missing from live."""
         if not self._live_ready():
             return
+        # Adopt whatever is already on the live account FIRST — otherwise a
+        # pre-existing (un-hydrated) position would get a duplicate market order.
+        try:
+            await self._reconcile_live_from_exchange()
+        except Exception as e:
+            print(f"[AI-LIVE] clone_missing pre-reconcile: {e}", flush=True)
         for coin, demo_pos in self._positions.items():
             if coin in self._live_positions:
                 continue
@@ -2418,12 +2414,37 @@ class AIStrategy:
             return
         try:
             live_bid = self._live_bot_id()
-            key = f"open_positions:{live_bid}"
+            # Separate key from open_positions:* (claim list-format snapshot)
+            key = f"live_book:{live_bid}"
             val = json.dumps({c: asdict(p) for c, p in self._live_positions.items()})
-            await self.db.execute("INSERT INTO settings (key, value) VALUES ($1, $2) "
-                                  "ON CONFLICT (key) DO UPDATE SET value = $2", key, val)
+            await self.db.set_setting(key, val)
         except Exception as e:
             print(f"[AI-LIVE] persist: {e}", flush=True)
+
+    def _ensure_default_stops(self, pos) -> None:
+        """Set sane stop/take when they leaked in as 0 (adopted/hydrated position).
+
+        stop_price==0 breaks _manage_stops: long stop never fires, short stop
+        fires instantly; take_price==0 closes longs immediately as 'take'.
+        """
+        try:
+            entry = float(pos.entry_price or 0)
+            if entry <= 0:
+                return
+            max_stop = float(getattr(self.config, "max_stop_pct", 0.05) or 0.05)
+            min_take = float(getattr(self.config, "min_take_pct", 0.035) or 0.035)
+            if float(pos.stop_price or 0) <= 0:
+                pos.stop_price = (
+                    entry * (1 - max_stop) if pos.side == "long"
+                    else entry * (1 + max_stop)
+                )
+            if float(pos.take_price or 0) <= 0:
+                pos.take_price = (
+                    entry * (1 + min_take) if pos.side == "long"
+                    else entry * (1 - min_take)
+                )
+        except Exception as e:
+            print(f"[AI] ensure_default_stops {getattr(pos, 'coin', '?')}: {e}", flush=True)
 
     def _unrealized_pct(self, pos, px: float) -> float:
         if not px or not pos.entry_price:
@@ -2560,19 +2581,21 @@ class AIStrategy:
                     if new_stop < pos.stop_price:
                         pos.stop_price = new_stop
 
-            # Hard stop / take first
+            # Hard stop / take first (skip levels that were never set)
+            sp = float(pos.stop_price or 0)
+            tp = float(pos.take_price or 0)
             if pos.side == "long":
-                if px <= pos.stop_price:
+                if sp > 0 and px <= sp:
                     await self._close(client, coin, "stop")
                     continue
-                if px >= pos.take_price:
+                if tp > 0 and px >= tp:
                     await self._close(client, coin, "take")
                     continue
             else:
-                if px >= pos.stop_price:
+                if sp > 0 and px >= sp:
                     await self._close(client, coin, "stop")
                     continue
-                if px <= pos.take_price:
+                if tp > 0 and px <= tp:
                     await self._close(client, coin, "take")
                     continue
 
@@ -2583,6 +2606,21 @@ class AIStrategy:
                 await self._close(client, coin, reason)
 
 
+
+    async def _other_ai_owns(self, inst_id: str, side: str) -> bool:
+        """True if a DIFFERENT bot (not this one, not its live-mirror twin)
+        holds a DB claim on this instrument."""
+        if not self.db:
+            return False
+        try:
+            ours = {str(self.BOT_ID), str(self._live_bot_id())}
+            sql = ("SELECT bot_id FROM positions WHERE inst_id = $1"
+                   if self.db._pg_mode else
+                   "SELECT bot_id FROM positions WHERE inst_id = ?")
+            rows = await self.db._fetchall(sql, (inst_id,))
+            return any(str(r["bot_id"]) not in ours for r in (rows or []))
+        except Exception:
+            return False
 
     async def _owned_via_trades(self, inst_id: str, side: str) -> bool:
         """True if latest DB trade for this inst by AI is consistent with an open."""
@@ -3566,12 +3604,20 @@ class AIStrategy:
         try:
             lc = self._live_client()
             if lc:
-                raw_pos = await self.db.get_setting(f"open_positions:{live_bid}")
+                raw_pos = await self.db.get_setting(f"live_book:{live_bid}")
                 stored: dict = {}
                 if raw_pos:
                     stored = json.loads(raw_pos) if isinstance(raw_pos, str) else (raw_pos or {})
-                    if not isinstance(stored, dict):
-                        stored = {}
+                if not isinstance(stored, dict) or not stored:
+                    # Legacy: open_positions:{bid} may hold an older dict-format snapshot
+                    try:
+                        legacy = await self.db.get_setting(f"open_positions:{live_bid}")
+                        if legacy:
+                            lg = json.loads(legacy) if isinstance(legacy, str) else legacy
+                            if isinstance(lg, dict):
+                                stored = lg
+                    except Exception:
+                        pass
                 all_pos = await lc.get_positions()
                 ex_pos: dict[str, dict] = {}
                 for p in ((all_pos.get("data") or []) if isinstance(all_pos, dict) else (all_pos or [])):
@@ -3620,6 +3666,7 @@ class AIStrategy:
                         tg_message_id=int(old.get("tg_message_id") or 0),
                         signal_id=sr or 0,
                     )
+                    self._ensure_default_stops(pos)
                     self._live_positions[coin] = pos
                     used.add(coin)
                     print(f"[AI-LIVE] hydrate adopt {coin}: sz={sz} entry={entry} "

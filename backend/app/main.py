@@ -66,7 +66,7 @@ from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
 from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
 from app.services.analysis_logger import DEFAULT_PATH
 from app.services import trade_attribution as trade_attr
-from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, orphan_close_enabled, claim_open
+from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, release_open
 from app.services.account_context import filter_rows_for_mode
 MOM_BOT_ID = 'momentum_strategy'
 load_dotenv()
@@ -686,6 +686,20 @@ async def startup():
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '300')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
+                # Apply saved AI settings (thresholds etc.) — without this, every
+                # redeploy silently reverts all UI-tuned params to code defaults.
+                try:
+                    import json as _json
+                    _cfgkey = 'ai_config:demo' if _demo else 'ai_config:live'
+                    _raw_cfg = await db.get_setting(_cfgkey)
+                    if _raw_cfg:
+                        _saved_cfg = _json.loads(_raw_cfg)
+                        for _k in ('capital', 'symbols', 'execute'):
+                            _saved_cfg.pop(_k, None)
+                        ai_bot.apply_config_dict(_saved_cfg, keep_execute=True)
+                        print(f'[startup] applied saved AI config ({_cfgkey}, {len(_saved_cfg)} keys)', flush=True)
+                except Exception as _ce:
+                    print(f'[startup] saved AI config apply: {_ce}', flush=True)
                 ai_bot.start()
                 _positions_cache = None
                 try:
@@ -1072,7 +1086,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
 PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/live/status', '/api/live/trades', '/api/meta/product'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
-GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me')
+GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
 
 @app.middleware('http')
 async def auth_middleware(request: Request, call_next):
@@ -1383,7 +1397,7 @@ async def me_credentials_test(request: Request, data: dict=None):
 async def me_portfolio(request: Request):
     role, user_id, _ = await _me_ctx(request)
     if user_id is None:
-        return await get_portfolio()
+        return await get_portfolio(request)
     client = await _user_okx_client(user_id)
     if not client:
         raise HTTPException(status_code=400, detail='Подключите ключи OKX в настройках')
@@ -1403,7 +1417,7 @@ async def me_portfolio(request: Request):
 async def me_positions(request: Request, inst_type: str='SWAP'):
     role, user_id, _ = await _me_ctx(request)
     if user_id is None:
-        return await get_positions(inst_type)
+        return await get_positions(request, inst_type)
     client = await _user_okx_client(user_id)
     if not client:
         raise HTTPException(status_code=400, detail='Подключите ключи OKX в настройках')
@@ -1689,9 +1703,9 @@ async def ai_start(data: dict=None):
         # Ensure live_manager has creds if it was initialized empty
         if live_manager and not live_manager.get_client():
             try:
-                _lk = await db.get_setting('live_mirror_key') or ''
-                _ls = await db.get_setting('live_mirror_secret') or ''
-                _lp = await db.get_setting('live_mirror_pass') or ''
+                if not (_live_key and _live_secret and _live_pass):
+                    await _load_live_creds_from_db()
+                _lk, _ls, _lp = _live_key, _live_secret, _live_pass
                 if _lk and _ls and _lp:
                     await live_manager.init_client(_lk, _ls, _lp, False)
                     _lc = live_manager.get_client()
@@ -1703,6 +1717,23 @@ async def ai_start(data: dict=None):
                 print(f'[AI/start] live mirror DB restore: {e}', flush=True)
         ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
         _wire_ai_live_cb(ai_bot)
+        try:
+            import json as _json
+            _cfgkey = 'ai_config:demo' if _demo else 'ai_config:live'
+            _raw_cfg = await db.get_setting(_cfgkey)
+            if _raw_cfg:
+                _saved_cfg = _json.loads(_raw_cfg)
+                for _k in ('capital', 'symbols', 'execute', 'provider'):
+                    _saved_cfg.pop(_k, None)
+                ai_bot.apply_config_dict(_saved_cfg, keep_execute=True)
+                # Explicit request-body values win over saved config
+                for _k, _cast in (('max_leverage', float), ('max_positions', int),
+                                  ('risk_per_trade', float), ('poll_interval_sec', int)):
+                    if data.get(_k):
+                        setattr(ai_bot.config, _k, _cast(data[_k]))
+                print(f'[AI/start] applied saved AI config ({_cfgkey})', flush=True)
+        except Exception as _ce:
+            print(f'[AI/start] saved config apply: {_ce}', flush=True)
         ai_bot.start()
         global _positions_cache
         _positions_cache = None
@@ -2225,13 +2256,17 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
     _live_key, _live_secret, _live_pass = key, secret, passphrase
     if db:
         try:
-            await db.set_setting('live_mirror_key', key)
-            await db.set_setting('live_mirror_secret', secret)
-            await db.set_setting('live_mirror_pass', passphrase)
             await db.set_setting('live_mirror_capital', str(round(capital, 2)))
             await db.set_setting('live_mirror_enabled', '1')
             try:
                 await _save_live_creds(key, secret, passphrase)
+                # MIGRATION: purge legacy plaintext copies if they exist
+                for _pk in ('live_mirror_key', 'live_mirror_secret', 'live_mirror_pass'):
+                    try:
+                        if await db.get_setting(_pk):
+                            await db.set_setting(_pk, '')
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f'[LIVE] encrypt save: {e}', flush=True)
             print('[LIVE] creds + enabled=1 persisted', flush=True)
@@ -3623,7 +3658,20 @@ async def positions_bind(data: dict=None):
 
 @app.post('/api/positions/close', dependencies=[Depends(require_admin)])
 async def close_position(data: dict):
-    client = client_manager.get_client()
+    account = str(data.get('account') or '').lower()
+    client = None
+    if account == 'live':
+        if live_manager:
+            try:
+                _lc = live_manager.get_client()
+                if _lc and not getattr(_lc, 'demo', True) and getattr(_lc, 'has_credentials', lambda: False)():
+                    client = _lc
+            except Exception:
+                client = None
+        if not client:
+            raise HTTPException(status_code=400, detail='LIVE-подключение не активно')
+    else:
+        client = client_manager.get_client()
     if not client:
         raise HTTPException(status_code=400, detail='API not configured')
     inst_id = data.get('instId')

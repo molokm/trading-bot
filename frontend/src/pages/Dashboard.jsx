@@ -977,7 +977,8 @@ export default function Dashboard({ health, connected, isGuest }) {
     const posId = `${p.instId}_${p.posSide}`
     setClosing(posId)
     try {
-      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross')
+      const account = p.account_mode === 'live' ? 'live' : 'demo'
+      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross', account)
       loadData()
     } catch (e) { alert(t('dash.error') + e.message) }
     finally { setClosing(null) }

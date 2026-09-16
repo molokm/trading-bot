@@ -191,6 +191,7 @@ async def flatten_position(client, inst_id: str, side: str, size: float) -> dict
                 "ord_type": "market",
                 "sz": str(size),
                 "td_mode": "cross",
+                "is_close": True,
             }
             if ps:
                 params["pos_side"] = ps
