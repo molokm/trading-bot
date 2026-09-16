@@ -4900,10 +4900,12 @@ async def _compute_pnl():
         client = client_manager.get_client() if client_manager else None
         if client:
             pos = await client.get_positions(inst_type='SWAP')
-            for p in pos or []:
+            _pos_rows = [] if (isinstance(pos, dict) and pos.get('error')) else (
+                (pos.get('data') or []) if isinstance(pos, dict) else (pos or []))
+            for p in _pos_rows:
                 try:
                     unreal += float(p.get('upl') or 0)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, AttributeError):
                     pass
         data['unrealized'] = round(unreal, 2)
         data['economic_approx'] = round(float(data.get('total') or 0) + unreal, 2)
