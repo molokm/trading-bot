@@ -1066,19 +1066,21 @@ class AIStrategy:
                 return f"quant_veto:btc_impulse_down_no_alt_long"
         return None
 
-    def _closed_trades(self) -> list:
+    def _closed_trades(self, demo_only: bool = False) -> list:
         out = []
         for t in self._trade_log:
             if t.get("pnl") is None:
                 continue
             if t.get("reason") in (None, "open"):
                 continue
+            if demo_only and t.get("account_mode") == "live":
+                continue
             out.append(t)
         return out
 
     def _rolling_stats(self) -> dict:
         n = int(getattr(self.config, "adapt_window", 12) or 12)
-        closed = self._closed_trades()[-n:]
+        closed = self._closed_trades(demo_only=True)[-n:]
         if not closed:
             return {"n": 0, "win_rate": None, "avg_pnl": 0.0, "sum_pnl": 0.0,
                     "streak": 0, "streak_kind": "none"}
@@ -1749,7 +1751,7 @@ class AIStrategy:
             del self._positions[coin]
             if self.db:
                 try:
-                    await self.db.delete_position(self.BOT_ID)
+                    await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
                 except Exception:
                     pass
             return
@@ -1889,7 +1891,7 @@ class AIStrategy:
         del self._positions[coin]
         if self.db:
             try:
-                await self.db.delete_position(self.BOT_ID)
+                await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
             except Exception:
                 pass
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
@@ -1920,7 +1922,9 @@ class AIStrategy:
             if await self._mirror_enabled():
                 await self._try_refresh_live_client()
                 if self._live_client():
-                    await self._close_live(coin, reason)
+                    ok = await self._close_live(coin, reason)
+                    if not ok:
+                        print(f"[AI-LIVE] WARN: LIVE close FAILED for {coin} — position still open on exchange, next tick will retry", flush=True)
                 else:
                     print(f"[AI-LIVE] close skip {coin}: live not ready", flush=True)
         except Exception as e:
@@ -2125,14 +2129,24 @@ class AIStrategy:
             return False
         live_bid = self._live_bot_id()
         close_side = "sell" if pos.side == "long" else "buy"
-        try:
-            resp = await self._place(lc, pos.inst_id, close_side,
-                                     pos.size, pos.side, is_close=True)
-        except Exception as e:
-            print(f"[AI-LIVE] close_error {coin}: {e}", flush=True)
-            return False
-        if resp.get("error"):
-            print(f"[AI-LIVE] close_error {coin}: {resp.get('message')}", flush=True)
+        resp = None
+        for _attempt in range(2):
+            try:
+                resp = await self._place(lc, pos.inst_id, close_side,
+                                         pos.size, pos.side, is_close=True)
+            except Exception as e:
+                print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {e}", flush=True)
+                if _attempt == 0:
+                    await asyncio.sleep(3)
+                continue
+            if resp.get("error"):
+                print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {resp.get('message')}", flush=True)
+                if _attempt == 0:
+                    await asyncio.sleep(3)
+                continue
+            break
+        else:
+            print(f"[AI-LIVE] close FAILED {coin}: 2/2 attempts failed — LIVE position remains open on exchange", flush=True)
             return False
         fills = resp.get("data") or []
         mark = float(

@@ -381,15 +381,6 @@ async def startup():
         if not (_lm_key and _lm_secret and _lm_pass):
             _lm_source = 'none'
         print(f'[startup] live mirror creds: source={_lm_source} key={('yes' if _lm_key else 'no')}', flush=True)
-        # Auto-reconnect mirror on restart: if keys exist, re-enable even if disabled previously
-        if _lm_key and _lm_secret and _lm_pass and db:
-            try:
-                _prev_en = await db.get_setting('live_mirror_enabled')
-                if str(_prev_en or '').strip().lower() in ('0', 'false', 'no', 'off'):
-                    await db.set_setting('live_mirror_enabled', '1')
-                    print('[startup] live mirror auto-re-enabled (keys present, was disabled)', flush=True)
-            except Exception:
-                pass
         if _lm_key and _lm_secret and _lm_pass:
             try:
                 await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
