@@ -114,7 +114,7 @@ class AIConfig:
     # Soft ADX: if align is strong, allow down to adx_soft_floor
     adx_soft_floor: float = 14.0
     adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
-    min_roc_abs: float = 0.25
+    min_roc_abs: float = 0.15
     min_stop_pct: float = 0.018
     max_stop_pct: float = 0.05
     min_take_pct: float = 0.035
