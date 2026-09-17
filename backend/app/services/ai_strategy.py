@@ -1022,7 +1022,8 @@ class AIStrategy:
         except (TypeError, ValueError):
             btc_roc = 0.0
         # Mild BTC drift still blocks opposing opens
-        btc_roc_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+        _raw_veto = getattr(self.config, "btc_roc_veto", None)
+        btc_roc_thr = float(_raw_veto) if _raw_veto is not None else 0.20
         if side == "short" and btc_roc >= btc_roc_thr:
             return f"quant_veto:short_vs_btc_roc_up:{btc_roc:.2f}"
         if side == "long" and btc_roc <= -btc_roc_thr:
