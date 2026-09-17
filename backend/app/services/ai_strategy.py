@@ -109,6 +109,7 @@ class AIConfig:
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
+    btc_roc_veto: float = 0.20             # BTC ROC% against side → block open (short blocked if btc_roc >= this)
     min_confidence: float = 0.62
     min_adx: float = 18.0                  # restore stronger trend filter
     # Soft ADX: if align is strong, allow down to adx_soft_floor
@@ -1021,9 +1022,10 @@ class AIStrategy:
         except (TypeError, ValueError):
             btc_roc = 0.0
         # Mild BTC drift still blocks opposing opens
-        if side == "short" and btc_roc >= 0.20:
+        btc_roc_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+        if side == "short" and btc_roc >= btc_roc_thr:
             return f"quant_veto:short_vs_btc_roc_up:{btc_roc:.2f}"
-        if side == "long" and btc_roc <= -0.20:
+        if side == "long" and btc_roc <= -btc_roc_thr:
             return f"quant_veto:long_vs_btc_roc_down:{btc_roc:.2f}"
         # 4H alignment if present on coin indicators
         ind = (self._latest_indicators or {}).get(coin) or {}
@@ -1356,6 +1358,7 @@ class AIStrategy:
             "allocation_pct", "bar", "candle_limit", "poll_interval_sec",
             "min_confidence", "min_adx", "adx_soft_floor", "adx_align_bypass",
             "min_roc_abs", "min_stop_pct", "max_stop_pct", "min_take_pct",
+            "btc_roc_veto",
             "max_hold_hours", "block_llm_error_opens", "indicator_exit",
             "min_hold_minutes", "exit_min_profit_pct", "exit_on_ema_cross",
             "exit_on_price_vs_ema", "exit_on_roc_flip", "exit_weak_adx",
