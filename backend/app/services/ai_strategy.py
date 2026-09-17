@@ -3154,6 +3154,7 @@ class AIStrategy:
                     btc_roc = float(q.get("btc_roc") or 0)
                 except (TypeError, ValueError):
                     btc_roc = 0.0
+                _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
                 for coin_q, cq in (q.get("coins") or {}).items():
                     if cq.get("block_open"):
                         continue
@@ -3167,12 +3168,12 @@ class AIStrategy:
                         side, al = "long", al_l
                     elif reg == "chop":
                         # chop coin: only with BTC trend, never counter-trend
-                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= 0.20:
+                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
                             if al_l >= 0.85:
                                 side, al = "long", al_l
                             else:
                                 continue
-                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -0.20:
+                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
                             if al_s >= 0.85:
                                 side, al = "short", al_s
                             else:
@@ -3188,9 +3189,9 @@ class AIStrategy:
                         continue
                     if reg == "bull" and side == "short":
                         continue
-                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= 0.20):
+                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr):
                         continue
-                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -0.20):
+                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr):
                         continue
                     if al < max(min_al, 0.78):
                         continue
