@@ -110,7 +110,7 @@ function MiniAppPageInner() {
         const initData = tg?.initData || ''
         if (initData) {
           try {
-            const r = await withTimeout(api.authTelegram(initData), 20000)
+            const r = await withTimeout(api.telegramAuth(initData), 20000)
             if (r?.token) localStorage.setItem('auth_token', r.token)
             if (r?.role) localStorage.setItem('auth_role', r.role)
           } catch (e) {
