@@ -1735,15 +1735,22 @@ class AIStrategy:
         # Mirror to LIVE after primary fill (re-bind client if needed)
         try:
             if not await self._mirror_enabled():
+                _m = "disabled_by_user"
+                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
                 await self._try_refresh_live_client()
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
+                    _m = "mirror_ok" if ok else "mirror_fail"
+                    self._exec_log.append(_exec_evt(_m, coin, side, reason=reason))
                     print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
                 else:
+                    _m = "live_not_ready"
+                    self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
                     print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
         except Exception as e:
+            self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
 
     async def _close(self, client, coin: str, reason: str):
