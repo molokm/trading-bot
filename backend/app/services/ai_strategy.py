@@ -4112,9 +4112,29 @@ class AIStrategy:
                     side = b.get("best_side") or "—"
                     side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
                     coin = b.get("coin") or "?"
+                    # Compute next 1H bar close time
+                    next_bar_info = ""
+                    try:
+                        from datetime import datetime, timezone, timedelta
+                        now = datetime.now(timezone.utc)
+                        bar = getattr(self.config, "bar", "1H") or "1H"
+                        if bar == "1H":
+                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                        elif bar == "4H":
+                            h = (now.hour // 4 + 1) * 4
+                            next_bar = now.replace(hour=h, minute=0, second=0, microsecond=0)
+                            if h >= 24:
+                                next_bar += timedelta(days=1)
+                                next_bar = next_bar.replace(hour=0)
+                        else:
+                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                        wait_min = int((next_bar - now).total_seconds() / 60)
+                        next_bar_info = f" (решение через ~{wait_min} мин, {next_bar.strftime('%H:%M')} UTC)"
+                    except Exception:
+                        pass
                     line += (
                         f" Доступно: {coin} {side_ru} ({best_free[0]:.2f}) "
-                        "— жду подтверждения LLM/quant."
+                        f"— жду подтверждения LLM/quant{next_bar_info}."
                     )
                 elif best_any:
                     b = best_any[1]
