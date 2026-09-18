@@ -1519,6 +1519,22 @@ async def ai_status():
     global ai_bot
     if not ai_bot:
         return {'running': False, 'strategy': 'AI Discretionary 1H', 'total_pnl': 0, 'lifetime_pnl': 0, 'open_positions': []}
+    # Lightweight reconcile: drop positions that are flat on exchange (at most once per 30s)
+    try:
+        if ai_bot._positions and ai_bot._running:
+            now_ts = _time.time()
+            last = getattr(ai_bot, '_last_status_reconcile_ts', 0)
+            if now_ts - last > 30:
+                ai_bot._last_status_reconcile_ts = now_ts
+                client = None
+                try:
+                    client = await ai_bot._client()
+                except Exception:
+                    pass
+                if client:
+                    await ai_bot._reconcile_positions_with_exchange(client)
+    except Exception as _re:
+        pass
     try:
         status = ai_bot.get_status()
     except Exception as e:
