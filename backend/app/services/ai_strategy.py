@@ -1990,10 +1990,10 @@ class AIStrategy:
             return False
         if live_eq > 0 and size_eq > live_eq:
             size_eq = live_eq
-        # cap by real available USDT (margin already used by other positions)
+        # NOTE: mirror uses equity-based sizing, NOT avail_usdt.
+        # In cross-margin accounts availBal can be near-zero while totalEq is healthy.
+        # _size_order already caps via allocation_pct + max_leverage.
         avail_live = await self._avail_usdt(lc)
-        if avail_live > 0 and size_eq > avail_live:
-            size_eq = avail_live
         print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
