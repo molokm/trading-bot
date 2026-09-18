@@ -1232,13 +1232,10 @@ export default function Dashboard({ health, connected, isGuest }) {
         />
       </div>
 
-      {/* ═══ Цены — компактная панель ═══ */}
-      <div className="panel flex-shrink-0">
-        <div className="panel-header">
-          <span className="text-[var(--txt-muted)]">{t('dash.prices')}</span>
-          <Tip text={t('dash.prices_tip')} />
-        </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5">
+      {/* ═══ Цены — компактный тикер ═══ */}
+      <div className="panel flex-shrink-0 !py-1.5 !px-3">
+        <div className="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
+          <span className="text-[var(--txt-muted)] text-2xs font-medium">{t('dash.prices')}</span>
           {PRICE_COINS.map((coin) => {
             const tk = coin === 'BTC' ? ticker : tickers[coin]
             const price = tk ? parseFloat(tk.last) : 0
@@ -1247,9 +1244,9 @@ export default function Dashboard({ health, connected, isGuest }) {
             const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
             const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
             return (
-              <span key={coin} className="flex items-center gap-1.5 py-1 coin-ticker">
-                <span className="text-xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
-                <span className="text-xs mono text-[var(--txt)]">{priceStr}</span>
+              <span key={coin} className="flex items-center gap-1 coin-ticker">
+                <span className="text-2xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
+                <span className="text-2xs mono text-[var(--txt)]">{priceStr}</span>
                 <span className={`text-2xs mono ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{changeStr}</span>
               </span>
             )
