@@ -2683,6 +2683,7 @@ class AIStrategy:
         """Drop memory positions that are flat on OKX OR owned by another bot.
 
         Prevents both Discretionary and Scale-In showing Pos.1 for one exchange position.
+        Sends a Telegram notification when a position is detected as manually closed.
         """
         if not client:
             return
@@ -2732,11 +2733,46 @@ class AIStrategy:
             side = getattr(pos, "side", "long")
 
             if not info:
+                exit_px = 0.0
+                try:
+                    ticker = await client.get_ticker(inst)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        exit_px = float(_td[0].get("last") or 0)
+                except Exception:
+                    pass
+                pnl = 0.0
+                try:
+                    sz = float(getattr(pos, "size", 0) or 0)
+                    entry = float(getattr(pos, "entry_price", 0) or 0)
+                    if sz and entry and exit_px:
+                        if side == "long":
+                            pnl = (exit_px - entry) * abs(sz)
+                        else:
+                            pnl = (entry - exit_px) * abs(sz)
+                except Exception:
+                    pass
                 print(
                     f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
-                    f"(was {side} sz={getattr(pos, 'size', 0)})",
+                    f"(was {side} sz={getattr(pos, 'size', 0)} pnl={pnl:+.2f})",
                     flush=True,
                 )
+                if self.notifier:
+                    try:
+                        _txt = self.notifier.close_msg(
+                            coin=coin, side=side,
+                            entry=round(float(getattr(pos, "entry_price", 0) or 0), 4),
+                            exit_px=round(exit_px, 4),
+                            pnl=round(pnl, 2),
+                            reason="manual_close",
+                            bot_name=self.BOT_NAME,
+                            signal_id=getattr(pos, "signal_id", 0),
+                            account_mode=self._account_mode_tag()[0],
+                            account_key=self._account_mode_tag()[1],
+                        )
+                        await self.notifier.send_trade(_txt)
+                    except Exception as _nte:
+                        print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
                 self._positions.pop(coin, None)
                 try:
                     if self.db:

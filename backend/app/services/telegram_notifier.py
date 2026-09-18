@@ -403,6 +403,7 @@ class TelegramNotifier:
             "exchange_stop": "стоп на бирже",
             "partial_tp": "частичный TP",
             "manual": "вручную",
+            "manual_close": "закрыто вручную",
             "stop_loss": "стоп-лосс",
             "take_profit": "тейк-профит",
         }.get(reason, reason)
