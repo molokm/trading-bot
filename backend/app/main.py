@@ -1531,6 +1531,20 @@ async def ai_status():
     status['lifetime_pnl_internal'] = internal
     return await _apply_history_kpi(status, 'AI Discretionary 1H')
 
+@app.get('/api/ai/diagnostics')
+async def ai_diagnostics():
+    """Per-coin veto diagnostics — shows exactly why each coin is or isn't trading."""
+    global ai_bot
+    if not ai_bot:
+        return {'running': False, 'error': 'AI bot not started'}
+    try:
+        return {'running': ai_bot._running, **ai_bot._diagnose_open()}
+    except Exception as e:
+        import traceback
+        print(f'[ai/diagnostics] error: {e}', flush=True)
+        traceback.print_exc()
+        return {'error': str(e), 'running': getattr(ai_bot, '_running', False)}
+
 @app.post('/api/admin/reassign-trade', dependencies=[Depends(require_admin)])
 async def admin_reassign_trade(data: dict=None):
     """Reassign a closed trade between strategy bots (DB + override list)."""

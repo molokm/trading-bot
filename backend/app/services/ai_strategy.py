@@ -3209,7 +3209,8 @@ class AIStrategy:
                         "stop_pct": 0.03,
                         "take_pct": 0.06,
                         "confidence": round(min(0.92, max(al, min_cf)), 3),
-                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} regime={reg} (LLM was {action}/{reason_l[:40]})",
+                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} regime={reg}",
+                        "source": "quant_auto",
                     }
                     self._last_decision = self._enrich_decision(decision, snap)
                     self._decision_log.append(self._last_decision)
@@ -3242,7 +3243,7 @@ class AIStrategy:
                                   reason=str(veto)[:80])
                 print(f"[AI] open veto {coin}: {veto}", flush=True)
                 return
-            if self.config.block_llm_error_opens and (
+            if self.config.block_llm_error_opens and decision.get("source") != "quant_auto" and (
                 "llm_error" in reason.lower() or reason.lower().startswith("fallback")
                 or "mock:" in reason.lower()
                 or "llm_cooldown" in reason.lower()
@@ -3835,6 +3836,7 @@ class AIStrategy:
         funding_lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
         btc_filter_on = bool(getattr(self.config, "btc_filter_enabled", True))
         funding_filter_on = bool(getattr(self.config, "funding_filter_enabled", True))
+        _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
 
         scored = []
         for coin, c in coins.items():
@@ -3854,9 +3856,9 @@ class AIStrategy:
                 side, al = "long", al_l
             elif regime == "chop":
                 # chop: only with BTC trend, never counter
-                if btc_reg == "bull" or btc_roc >= 0.20:
+                if btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
                     side, al = "long", al_l
-                elif btc_reg == "bear" or btc_roc <= -0.20:
+                elif btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
                     side, al = "short", al_s
                 else:
                     side, al = ("long" if al_l >= al_s else "short"), max(al_l, al_s)
@@ -3887,9 +3889,9 @@ class AIStrategy:
                 blockers.append("long_vs_btc_bear")
 
             # 4. BTC ROC drift
-            if side == "short" and btc_roc >= 0.20:
+            if side == "short" and btc_roc >= _btc_roc_veto_thr:
                 blockers.append("short_vs_btc_roc_up")
-            if side == "long" and btc_roc <= -0.20:
+            if side == "long" and btc_roc <= -_btc_roc_veto_thr:
                 blockers.append("long_vs_btc_roc_down")
 
             # 5. Funding filter
@@ -3921,7 +3923,7 @@ class AIStrategy:
 
             # 8. ROC momentum
             roc = float(ind.get("roc_3") or 0)
-            if abs(roc) < float(self.config.min_roc_abs or 0.25):
+            if abs(roc) < float(getattr(self.config, "min_roc_abs", 0.15) or 0.15):
                 blockers.append("flat_roc")
 
             # 9. EMA alignment
@@ -4297,4 +4299,188 @@ class AIStrategy:
                     for p in self._live_positions.values()
                 ],
             },
+        }
+
+    def _diagnose_open(self) -> dict:
+        """Per-coin veto diagnostics — run the full pipeline for each coin/side
+        and report exactly why it would or would not open a trade.
+        Returns { coin: { regime, block_open, indicators, vetoes: [...], would_open: bool } }."""
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        inds = self._latest_indicators or {}
+        open_coins = {p.coin for p in self._positions.values()}
+
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        btc_impulse = q.get("btc_impulse") or "flat"
+        min_al = float(q.get("min_align") or self._effective_min_align())
+        min_conf = float(self._effective_min_confidence())
+        min_adx_cfg = float(self.config.min_adx or 18)
+        adx_soft = float(self.config.adx_soft_floor or 14)
+        adx_bypass = float(self.config.adx_align_bypass or 0.72)
+        funding_lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+        btc_filter_on = bool(getattr(self.config, "btc_filter_enabled", True))
+        funding_filter_on = bool(getattr(self.config, "funding_filter_enabled", True))
+        _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+        min_roc = float(getattr(self.config, "min_roc_abs", 0.15) or 0.15)
+
+        result = {}
+        for coin, c in coins.items():
+            regime = str(c.get("regime") or "unknown").lower()
+            al_l = float(c.get("align_long") or 0)
+            al_s = float(c.get("align_short") or 0)
+            adx = float(c.get("adx") or 0)
+            ind = inds.get(coin) or {}
+            roc_val = float(ind.get("roc_3") or 0)
+            ema_f = float(ind.get("ema_fast") or ind.get("ema21") or 0)
+            ema_s = float(ind.get("ema_slow") or ind.get("ema50") or 0)
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
+            close = float(ind.get("close") or 0)
+            rsi = float(ind.get("rsi") or 0)
+            macd_h = float(ind.get("macd_hist") or 0)
+            funding = ind.get("funding_rate")
+
+            # pick best side
+            if regime == "bear":
+                side, al = "short", al_s
+            elif regime == "bull":
+                side, al = "long", al_l
+            elif regime == "chop":
+                if btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
+                    side, al = "long", al_l
+                elif btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
+                    side, al = "short", al_s
+                else:
+                    side, al = ("long" if al_l >= al_s else "short"), max(al_l, al_s)
+            else:
+                side = "long" if al_l >= al_s else "short"
+                al = max(al_l, al_s)
+
+            vetoes = []
+
+            # 1. block_open
+            if c.get("block_open"):
+                reason_parts = []
+                if al < 0.50:
+                    reason_parts.append(f"align={al:.3f}<0.50")
+                elif regime == "chop" and al < 0.85:
+                    reason_parts.append(f"chop+align={al:.3f}<0.85")
+                if adx < min_adx_cfg and al < adx_bypass:
+                    reason_parts.append(f"adx={adx:.0f}<{min_adx_cfg:.0f}")
+                detail = ", ".join(reason_parts) if reason_parts else "unknown"
+                vetoes.append(f"block_open({detail})")
+
+            # 2. regime side match
+            if regime == "bull" and side == "short":
+                vetoes.append("short_in_bull")
+            if regime == "bear" and side == "long":
+                vetoes.append("long_in_bear")
+
+            # 3. BTC/global trend fight
+            if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+                vetoes.append(f"short_vs_{btc_reg}_btc")
+            if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+                vetoes.append(f"long_vs_{btc_reg}_btc")
+
+            # 4. BTC ROC drift
+            if side == "short" and btc_roc >= _btc_roc_veto_thr:
+                vetoes.append(f"short_vs_btc_roc({btc_roc:.4f}>={_btc_roc_veto_thr})")
+            if side == "long" and btc_roc <= -_btc_roc_veto_thr:
+                vetoes.append(f"long_vs_btc_roc({btc_roc:.4f}<=-{_btc_roc_veto_thr})")
+
+            # 5. Funding
+            if funding_filter_on and funding is not None:
+                try:
+                    fr = float(funding)
+                    if side == "long" and fr >= funding_lim:
+                        vetoes.append(f"funding_toxic_long({fr:.6f}>={funding_lim})")
+                    if side == "short" and fr <= -funding_lim:
+                        vetoes.append(f"funding_toxic_short({fr:.6f}<=-{funding_lim})")
+                except (TypeError, ValueError):
+                    pass
+
+            # 6. BTC impulse
+            if btc_filter_on and coin != "BTC":
+                if btc_impulse == "up" and side == "short":
+                    vetoes.append("btc_impulse_up")
+                if btc_impulse == "down" and side == "long":
+                    vetoes.append("btc_impulse_down")
+
+            # 7. ADX strength
+            align_for_adx = al_s if side == "short" else al_l
+            adx_ok = adx >= min_adx_cfg or (align_for_adx >= adx_bypass and adx >= adx_soft)
+            if not adx_ok:
+                vetoes.append(f"low_adx({adx:.0f}<{min_adx_cfg:.0f})")
+
+            # 8. ROC momentum
+            if abs(roc_val) < min_roc:
+                vetoes.append(f"flat_roc(|{roc_val:.4f}|<{min_roc})")
+
+            # 9. EMA alignment
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    vetoes.append("ema_not_bullish")
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    vetoes.append("ema_not_bearish")
+
+            # 10. EMA200 trend gate
+            if ema200 > 0 and close:
+                tol = ema200 * 0.005
+                if side == "long" and close < ema200 - tol:
+                    vetoes.append(f"below_ema200({close:.2f}<{ema200 - tol:.2f})")
+                if side == "short" and close > ema200 + tol:
+                    vetoes.append(f"above_ema200({close:.2f}>{ema200 + tol:.2f})")
+
+            # 11. Already open?
+            if coin in open_coins:
+                vetoes.append("already_open")
+
+            # 12. max positions?
+            if len(self._positions) >= self.config.max_positions:
+                vetoes.append("max_positions")
+
+            would_open = len(vetoes) == 0
+
+            result[coin] = {
+                "regime": regime,
+                "side": side,
+                "block_open": bool(c.get("block_open")),
+                "align_long": round(al_l, 3),
+                "align_short": round(al_s, 3),
+                "adx": round(adx, 1),
+                "rsi": round(rsi, 1),
+                "macd_hist": round(macd_h, 4),
+                "roc_3": round(roc_val, 4),
+                "ema21": round(ema_f, 4) if ema_f else None,
+                "ema50": round(ema_s, 4) if ema_s else None,
+                "ema200": round(ema200, 4) if ema200 else None,
+                "close": round(close, 4),
+                "funding_rate": funding,
+                "vetoes": vetoes,
+                "veto_count": len(vetoes),
+                "would_open": would_open,
+            }
+
+        return {
+            "global_regime": global_reg,
+            "btc_regime": btc_reg,
+            "btc_roc": round(btc_roc, 6),
+            "btc_impulse": btc_impulse,
+            "config_snapshot": {
+                "min_roc_abs": min_roc,
+                "min_adx": min_adx_cfg,
+                "min_align": min_al,
+                "min_confidence": min_conf,
+                "btc_roc_veto": _btc_roc_veto_thr,
+                "funding_block_abs": funding_lim,
+                "btc_filter_enabled": btc_filter_on,
+                "funding_filter_enabled": funding_filter_on,
+            },
+            "open_positions": len(self._positions),
+            "max_positions": self.config.max_positions,
+            "coins": result,
         }
