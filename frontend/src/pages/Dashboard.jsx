@@ -1284,7 +1284,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                     {displayPositions.filter((p) => {
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const bn = resolveBotName(p)
-                      if (!bn || bn === 'Smart Money') return false
+                      if (bn === 'Smart Money') return false
                       return true
                     }).map((p, i) => {
                       const upl = parseFloat(p.upl || 0)

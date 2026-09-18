@@ -3987,13 +3987,20 @@ class AIStrategy:
         watch = self._watch_board()
         act = (decision.get("action") or "hold").lower()
         reason = str(decision.get("reason") or "")
+        # Stale-action guard: if action references a coin we no longer hold
+        _act_sym = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+        _pos_map = getattr(self, "_positions", None) or {}
+        if act in ("close", "reduce") and _act_sym and _act_sym not in _pos_map:
+            act = "hold"
+        elif act == "open" and _act_sym and _act_sym in _pos_map:
+            act = "hold"
         # Always show human RU status as primary reason for UI
         # Always prefer live pulse for UI (avoids stale "Открыто: BTC шорт" when flat)
         if act == "hold" or not reason:
             reason = pulse
         elif reason and not reason.startswith("Бот работает"):
             # Drop stale open-claims in reason if we have no positions
-            if not (getattr(self, "_positions", None) or {}):
+            if not _pos_map:
                 reason = pulse
             else:
                 reason = f"{pulse} | {reason}"
@@ -4058,6 +4065,15 @@ class AIStrategy:
             conf_f = float(conf) if conf is not None else None
         except (TypeError, ValueError):
             conf_f = None
+
+        # If action references a coin that no longer exists, treat as hold
+        if act in ("close", "reduce", "open"):
+            _sym_check = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+            _pos_map = getattr(self, "_positions", None) or {}
+            if act in ("close", "reduce") and _sym_check and _sym_check not in _pos_map:
+                act = "hold"
+            elif act == "open" and _sym_check and _sym_check in _pos_map:
+                act = "hold"
 
         best_free = None
         best_any = None
