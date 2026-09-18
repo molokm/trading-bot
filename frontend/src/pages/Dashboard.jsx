@@ -480,9 +480,19 @@ export default function Dashboard({ health, connected, isGuest }) {
     for (const lp of (liveStatus?.open_positions || [])) {
       const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
       const side = (lp.side || 'long').toLowerCase()
-      if (demoKeys.has(`${coin}|${side}`)) continue
       const sz = parseFloat(lp.size || 0)
       if (!sz) continue
+      if (demoKeys.has(`${coin}|${side}`)) {
+        const idx = result.findIndex(r => {
+          const rc = (r.instId || '').replace('-USDT-SWAP', '').toUpperCase()
+          const rs = (r.posSide || '').toLowerCase()
+          return rc === coin && rs === side && r.account_mode === 'demo'
+        })
+        if (idx >= 0) {
+          result[idx].account_mode = 'demo+live'
+        }
+        continue
+      }
       result.push({
         instId: lp.symbol || `${coin}-USDT-SWAP`,
         posSide: side,
@@ -1354,6 +1364,8 @@ export default function Dashboard({ health, connected, isGuest }) {
                           <td className="text-center">
                             {accountMode === 'live'
                               ? <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                              : accountMode === 'demo+live'
+                              ? <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">DEMO + LIVE</span>
                               : <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                             }
                           </td>
