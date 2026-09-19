@@ -1515,7 +1515,11 @@ async def me_pnl(request: Request):
 
 @app.get('/api/me/dashboard')
 async def me_dashboard(request: Request):
-    role, user_id, user_row = await _me_ctx(request)
+    """MiniApp dashboard: DEMO (shared server bot data) and LIVE (user's own OKX account)."""
+    try:
+        role, user_id, user_row = await _me_ctx(request)
+    except Exception:
+        role, user_id, user_row = 'guest', None, None
     demo = {}
     live = {}
     try:

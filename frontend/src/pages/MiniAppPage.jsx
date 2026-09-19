@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import {
   RefreshCw, Zap, Wifi, WifiOff, Bot, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
@@ -61,7 +61,7 @@ function Metric({ label, value, className = '' }) {
 }
 
 function MiniAppPageInner() {
-  const [authing, setAuthing] = useState(true)
+  const { t } = useTranslation()
   const [loading, setLoading] = useState(false)
   const [data, setData] = useState(null)
   const [mode, setMode] = useState('demo')
@@ -81,7 +81,7 @@ function MiniAppPageInner() {
           } catch {}
         }
       } finally {
-        if (!cancelled) setAuthing(false)
+        if (!cancelled) setLoading(false)
       }
     })()
     return () => { cancelled = true }
@@ -92,41 +92,24 @@ function MiniAppPageInner() {
     try {
       const d = await withTimeout(api.meDashboard(), 20000)
       setData(d)
-      if (d?.live?.connected && mode === 'demo') setMode('live')
     } catch {}
     setLoading(false)
-  }, [mode])
+  }, [])
 
-  useEffect(() => { if (!authing) load() }, [authing, load])
-  useEffect(() => { if (authing) return; const id = setInterval(load, 30000); return () => clearInterval(id) }, [authing, load])
+  useEffect(() => { load() }, [])
 
-  const demo = data?.demo || {}
-  const live = data?.live || {}
-  const liveConnected = !!live.connected
-  const isLive = mode === 'live' && liveConnected
+  const isLive = mode === 'live' && data?.live?.connected
 
   const metrics = useMemo(() => {
-    if (isLive) {
-      return {
-        total: live.unrealized ?? 0,
-        today: 0,
-        unreal: live.unrealized ?? 0,
-        equity: live.equity ?? null,
-        tradesN: 0,
-      }
+    if (isLive && data?.live) {
+      return {total: data.live.unrealized ?? 0, today: 0, unreal: data.live.unrealized ?? 0, equity: data.live.equity ?? null, tradesN: 0}
     }
-    return {
-      total: demo.pnl ?? 0,
-      today: demo.session_pnl ?? 0,
-      unreal: 0,
-      equity: demo.equity ?? null,
-      capital: demo.capital ?? null,
-      tradesN: demo.trades ?? 0,
-    }
-  }, [isLive, demo, live])
+    const d = data?.demo || {}
+    return {total: d.pnl ?? 0, today: d.session_pnl ?? 0, unreal: 0, equity: d.equity ?? null, capital: d.capital ?? null, tradesN: d.trades ?? 0}
+  }, [isLive, data])
 
   const viewPositions = useMemo(() => {
-    const src = isLive ? (live.positions || []) : (demo.positions || [])
+    const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
     return src.map((p, i) => ({
       key: `${p.coin || p.symbol || i}-${p.side}`,
       coin: (p.coin || p.symbol || '').replace('-USDT-SWAP', ''),
@@ -137,13 +120,11 @@ function MiniAppPageInner() {
       upl: Number(p.upl || p.unrealized_pnl || 0),
       lever: Number(p.leverage || p.lever || 0),
     })).filter(p => p.size > 0)
-  }, [isLive, demo, live])
+  }, [isLive, data])
 
   const viewTrades = useMemo(() => {
     const all = data?.trades || []
-    const filtered = isLive
-      ? all.filter(t => t.account_mode === 'live')
-      : all.filter(t => t.account_mode !== 'live')
+    const filtered = isLive ? all.filter(t => t.account_mode === 'live') : all.filter(t => t.account_mode !== 'live')
     return (filtered.length ? filtered : all).slice(0, 10).map(t => ({
       time: t.time || t.timestamp || '',
       inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
@@ -152,8 +133,12 @@ function MiniAppPageInner() {
     }))
   }, [data?.trades, isLive])
 
-  if (authing) {
+  if (loading) {
     return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Загрузка…</div>
+  }
+
+  if (!data) {
+    return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Настройте Telegram бота</div>
   }
 
   return (
@@ -171,8 +156,8 @@ function MiniAppPageInner() {
         <div className="flex items-center gap-1.5">
           <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.65rem] font-bold">
             <button type="button" onClick={() => setMode('demo')} className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}>DEMO</button>
-            <button type="button" onClick={() => liveConnected && setMode('live')} disabled={!liveConnected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)'} ${!liveConnected ? 'opacity-40' : ''}`}>
-              {liveConnected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
+            <button type="button" onClick={() => setMode('live')} disabled={!data?.live?.connected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)'} ${!data?.live?.connected ? 'opacity-40' : ''}`}>
+              {data?.live?.connected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
             </button>
           </div>
           <button type="button" className="p-1.5 rounded-lg hover:bg-[var(--surface-raised)]" onClick={load} disabled={loading}>
@@ -181,12 +166,12 @@ function MiniAppPageInner() {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3" style={{ WebkitOverflowScrolling: 'touch' }}>
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
         <Card>
           <div className="flex items-center justify-between mb-2.5">
             <span className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">{isLive ? 'LIVE PnL' : 'DEMO PnL'}</span>
             {metrics.equity != null && (
-              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">Eq ${fmt(metrics.equity)}{metrics.capital ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}</span>
+              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">Eq ${fmt(metrics.equity)}{metrics.capital != null ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}</span>
             )}
           </div>
           <div className="grid grid-cols-3 gap-2">
@@ -200,23 +185,23 @@ function MiniAppPageInner() {
           <Card>
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${demo.running ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'}`}>
-                  <Bot size={18} className={demo.running ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${data?.demo?.running ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'}`}>
+                  <Bot size={18} className={data?.demo?.running ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
                 </div>
                 <div className="min-w-0">
                   <div className="text-sm font-bold truncate">AI Discretionary 1H</div>
-                  <div className="text-[0.65rem] text-[var(--txt-muted)]">{demo.model || 'LLM'} · сделок {metrics.tradesN}{demo.win_rate ? ` · WR ${demo.win_rate}%` : ''}</div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)]">{data?.demo?.model || 'LLM'} · сделок {metrics.tradesN}{data?.demo?.win_rate ? ` · WR ${data?.demo?.win_rate}%` : ''}</div>
                 </div>
               </div>
-              <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${demo.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
-                {demo.running ? 'ON' : 'OFF'}
+              <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${data?.demo?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+                {data?.demo?.running ? 'ON' : 'OFF'}
               </span>
             </div>
-            {demo.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{demo.pulse}</p>}
+            {data?.demo?.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{data?.demo?.pulse}</p>}
           </Card>
         )}
 
-        {isLive && !liveConnected && (
+        {isLive && !data?.live?.connected && (
           <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Подключите LIVE ключи OKX в настройках бота</Card>
         )}
 
