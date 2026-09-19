@@ -1074,7 +1074,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product'}
+PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/meta/product'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
 GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
@@ -1512,6 +1512,111 @@ async def me_pnl(request: Request):
                     total += pnl
                     count += 1
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': 'user_bots'}
+
+@app.get('/api/me/dashboard')
+async def me_dashboard(request: Request):
+    role, user_id, user_row = await _me_ctx(request)
+    demo = {}
+    live = {}
+    try:
+        if ai_bot:
+            st = ai_bot.get_status()
+            demo = {
+                'running': st.get('running', False),
+                'pnl': round(st.get('lifetime_pnl', 0), 2),
+                'session_pnl': round(st.get('session_pnl', 0), 2),
+                'equity': round(st.get('equity', 0), 2),
+                'capital': st.get('capital'),
+                'trades': st.get('lifetime_trades', 0),
+                'win_rate': st.get('win_rate'),
+                'positions': st.get('open_positions', []),
+                'pulse': st.get('pulse') or st.get('description') or '',
+                'model': st.get('model') or (st.get('llm') or {}).get('model') or '',
+            }
+    except Exception as e:
+        demo = {'error': str(e)}
+    has_live = False
+    if role == 'admin' and user_id is None:
+        has_live = bool(_live_key and _live_secret and _live_pass)
+    elif user_id and user_row:
+        has_live = bool(user_row.get('okx_key_enc')) and not bool(user_row.get('okx_demo', 1))
+    if has_live:
+        try:
+            client = None
+            if role == 'admin' and user_id is None:
+                lc = live_manager.get_client() if live_manager else None
+                client = lc
+            elif user_id:
+                client = await _user_okx_client(str(user_id))
+            if client:
+                bal = await client.get_balance()
+                bal_data = bal.get('data', [])
+                acct = bal_data[0] if isinstance(bal_data, list) and bal_data else (bal_data if isinstance(bal_data, dict) else {})
+                details = acct.get('details', []) if isinstance(acct, dict) else []
+                usdt_eq = sum(float(d.get('eq', 0)) for d in details if d.get('ccy') == 'USDT')
+                total_eq = float(acct.get('totalEq', usdt_eq)) if isinstance(acct, dict) else usdt_eq
+                pos_result = await client.get_positions('SWAP')
+                raw_pos = pos_result.get('data', []) if isinstance(pos_result, dict) else (pos_result or [])
+                positions = []
+                unrealized = 0.0
+                for rp in raw_pos:
+                    inst = str(rp.get('instId', ''))
+                    coin = inst.split('-')[0] if inst else ''
+                    pos_raw = float(rp.get('pos', 0) or 0)
+                    sz = abs(pos_raw)
+                    if sz <= 1e-12:
+                        continue
+                    side = str(rp.get('posSide', '')).lower()
+                    if side in ('', 'net'):
+                        side = 'long' if pos_raw > 0 else 'short'
+                    entry = float(rp.get('avgPx', 0) or 0)
+                    mark = float(rp.get('markPx', 0) or 0)
+                    upl = float(rp.get('upl', 0) or 0)
+                    lever = float(rp.get('lever', 0) or 0)
+                    unrealized += upl
+                    positions.append({
+                        'coin': coin, 'symbol': inst, 'side': side,
+                        'size': sz, 'entry_price': entry, 'mark_price': mark,
+                        'upl': round(upl, 2), 'leverage': lever,
+                    })
+                live = {
+                    'connected': True,
+                    'equity': round(total_eq, 2),
+                    'unrealized': round(unrealized, 2),
+                    'positions': positions,
+                }
+        except Exception as e:
+            live = {'connected': False, 'error': str(e)}
+    else:
+        live = {'connected': False}
+    trades = []
+    try:
+        if role == 'admin' and user_id is None:
+            rows = await db.get_trades(limit=20)
+            for t in rows:
+                trades.append({
+                    'time': t.get('timestamp', ''),
+                    'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
+                    'side': t.get('side', ''),
+                    'pnl': float(t.get('pnl', 0) or 0),
+                    'account_mode': t.get('account_mode', 'demo'),
+                })
+        elif user_id:
+            ub = strategy_mgr.get_or_create(str(user_id))
+            for bid in (ub.rot_bot_id, ub.imp_bot_id):
+                rows = await db.get_trades(bot_id=bid, limit=20)
+                for t in rows:
+                    trades.append({
+                        'time': t.get('timestamp', ''),
+                        'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
+                        'side': t.get('side', ''),
+                        'pnl': float(t.get('pnl', 0) or 0),
+                        'account_mode': 'live',
+                    })
+    except Exception:
+        pass
+    trades.sort(key=lambda x: x.get('time', ''), reverse=True)
+    return {'demo': demo, 'live': live, 'trades': trades[:20], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
 async def ai_status():

@@ -3,17 +3,12 @@ import {
   RefreshCw, Zap, Wifi, WifiOff, Bot, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { api } from '../services/api'
-import { useTranslation } from '../hooks/useTranslation'
-import { fmtTs } from '../utils/time'
 
 window.__MINI_APP__ = true
 
 function fmt(n, digits = 2) {
   if (n == null || Number.isNaN(Number(n))) return '—'
-  return Number(n).toLocaleString('en-US', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 
 function pnlClass(v) {
@@ -31,36 +26,20 @@ function pnlSign(v) {
 function withTimeout(promise, ms = 15000) {
   return new Promise((resolve, reject) => {
     const id = setTimeout(() => reject(new Error('timeout')), ms)
-    promise.then(
-      (v) => { clearTimeout(id); resolve(v) },
-      (e) => { clearTimeout(id); reject(e) },
-    )
+    promise.then(v => { clearTimeout(id); resolve(v) }, e => { clearTimeout(id); reject(e) })
   })
 }
 
 class MiniAppErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props)
-    this.state = { err: null }
-  }
-  static getDerivedStateFromError(err) {
-    return { err }
-  }
+  constructor(props) { super(props); this.state = { err: null } }
+  static getDerivedStateFromError(err) { return { err } }
   render() {
     if (this.state.err) {
       return (
         <div className="min-h-[100dvh] flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-[var(--txt)]">
-          <div className="text-sm font-semibold">Mini App error</div>
-          <div className="text-2xs text-[var(--txt-muted)] text-center max-w-xs break-words">
-            {String(this.state.err?.message || this.state.err)}
-          </div>
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold"
-            onClick={() => window.location.reload()}
-          >
-            Reload
-          </button>
+          <div className="text-sm font-semibold">Ошибка</div>
+          <div className="text-2xs text-[var(--txt-muted)] text-center max-w-xs break-words">{String(this.state.err?.message || this.state.err)}</div>
+          <button type="button" className="px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold" onClick={() => window.location.reload()}>Обновить</button>
         </div>
       )
     }
@@ -69,11 +48,7 @@ class MiniAppErrorBoundary extends React.Component {
 }
 
 function Card({ children, className = '' }) {
-  return (
-    <div className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 ${className}`}>
-      {children}
-    </div>
-  )
+  return <div className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 ${className}`}>{children}</div>
 }
 
 function Metric({ label, value, className = '' }) {
@@ -86,38 +61,25 @@ function Metric({ label, value, className = '' }) {
 }
 
 function MiniAppPageInner() {
-  const { t } = useTranslation()
   const [authing, setAuthing] = useState(true)
-  const [authError, setAuthError] = useState('')
   const [loading, setLoading] = useState(false)
-  const [loaded, setLoaded] = useState(false)
-  const [mode, setMode] = useState('demo') // demo | live — view switch
+  const [data, setData] = useState(null)
+  const [mode, setMode] = useState('demo')
 
-  const [connected, setConnected] = useState(false)
-  const [dashData, setDashData] = useState(null)
-
-  /* ── Telegram auth ── */
   useEffect(() => {
     let cancelled = false
     ;(async () => {
       try {
         const tg = window.Telegram?.WebApp
-        try { tg?.ready?.(); tg?.expand?.() } catch { /* ignore */ }
+        try { tg?.ready?.(); tg?.expand?.() } catch {}
         const initData = tg?.initData || ''
         if (initData) {
           try {
             const r = await withTimeout(api.telegramAuth(initData), 20000)
             if (r?.token) localStorage.setItem('auth_token', r.token)
             if (r?.role) localStorage.setItem('auth_role', r.role)
-          } catch (e) {
-            // Guest/public mini view still works without token for public endpoints
-            if (!localStorage.getItem('auth_token')) {
-              console.warn('tg auth', e?.message || e)
-            }
-          }
+          } catch {}
         }
-      } catch (e) {
-        if (!cancelled) setAuthError(String(e?.message || e))
       } finally {
         if (!cancelled) setAuthing(false)
       }
@@ -125,140 +87,77 @@ function MiniAppPageInner() {
     return () => { cancelled = true }
   }, [])
 
-  const isLive = mode === 'live' && dashData?.mode === 'live'
-  const demoData = dashData?.demo || {}
-  const liveData = dashData?.live || {}
-  const liveConnected = !!liveData?.connected
-  const credsConfigured = !!dashData?.creds_configured
-
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [health, dash] = await Promise.allSettled([
-        withTimeout(api.health(), 10000),
-        withTimeout(api.meDashboard(), 15000),
-      ])
-      if (health.status === 'fulfilled') setConnected(!!health.value?.connected)
-      if (dash.status === 'fulfilled') setDashData(dash.value)
+      const d = await withTimeout(api.meDashboard(), 20000)
+      setData(d)
+      if (d?.live?.connected && mode === 'demo') setMode('live')
     } catch {}
-    setLoaded(true)
     setLoading(false)
-  }, [])
+  }, [mode])
 
-  useEffect(() => {
-    if (!authing) load()
-  }, [authing, load])
+  useEffect(() => { if (!authing) load() }, [authing, load])
+  useEffect(() => { if (authing) return; const id = setInterval(load, 30000); return () => clearInterval(id) }, [authing, load])
 
-  useEffect(() => {
-    if (authing) return undefined
-    const id = setInterval(load, 40000)
-    return () => clearInterval(id)
-  }, [authing, load])
-
-  useEffect(() => {
-    if (liveConnected && dashData?.mode === 'live') setMode('live')
-  }, [liveConnected, dashData?.mode])
+  const demo = data?.demo || {}
+  const live = data?.live || {}
+  const liveConnected = !!live.connected
+  const isLive = mode === 'live' && liveConnected
 
   const metrics = useMemo(() => {
     if (isLive) {
       return {
-        total: liveData.total_pnl ?? 0,
+        total: live.unrealized ?? 0,
         today: 0,
-        unreal: liveData.open_positions?.reduce((s, p) => s + (p.unrealized_pnl || 0), 0) ?? 0,
-        equity: liveData.equity ?? null,
-        capital: null,
-        tradesN: liveData.trades?.length ?? 0,
+        unreal: live.unrealized ?? 0,
+        equity: live.equity ?? null,
+        tradesN: 0,
       }
     }
     return {
-      total: demoData.total_pnl ?? demoData.lifetime_pnl ?? 0,
-      today: 0,
+      total: demo.pnl ?? 0,
+      today: demo.session_pnl ?? 0,
       unreal: 0,
-      equity: null,
-      capital: demoData.capital ?? null,
-      tradesN: demoData.lifetime_trades ?? demoData.total_trades ?? 0,
+      equity: demo.equity ?? null,
+      capital: demo.capital ?? null,
+      tradesN: demo.trades ?? 0,
     }
-  }, [isLive, liveData, demoData])
+  }, [isLive, demo, live])
 
   const viewPositions = useMemo(() => {
-    if (isLive) {
-      return (liveData.open_positions || []).map((p, i) => ({
-        key: `${p.coin}-${p.side}-${i}`,
-        instId: p.symbol || `${p.coin}-USDT-SWAP`,
-        side: p.side,
-        px: Number(p.entry_price || 0),
-        mark: Number(p.mark_price || 0),
-        size: Number(p.size || 0),
-        lev: Number(p.leverage || 0),
-        upl: Number(p.unrealized_pnl || 0),
-      }))
-    }
-    return (demoData.open_positions || []).map((p, i) => ({
-      key: `${p.coin}-${p.side}-${i}`,
-      instId: p.symbol || `${p.coin}-USDT-SWAP`,
-      side: p.side,
-      px: Number(p.entry_price || 0),
-      mark: 0,
-      size: Number(p.size || 0),
-      lev: Number(p.leverage || 0),
-      upl: 0,
-    }))
-  }, [isLive, liveData, demoData])
+    const src = isLive ? (live.positions || []) : (demo.positions || [])
+    return src.map((p, i) => ({
+      key: `${p.coin || p.symbol || i}-${p.side}`,
+      coin: (p.coin || p.symbol || '').replace('-USDT-SWAP', ''),
+      side: (p.side || 'long').toLowerCase(),
+      size: Number(p.size || p.sz || 0),
+      entry: Number(p.entry_price || p.entry || p.px || 0),
+      mark: Number(p.mark_price || p.mark || 0),
+      upl: Number(p.upl || p.unrealized_pnl || 0),
+      lever: Number(p.leverage || p.lever || 0),
+    })).filter(p => p.size > 0)
+  }, [isLive, demo, live])
 
   const viewTrades = useMemo(() => {
-    if (isLive) {
-      return (liveData.trades || []).slice(0, 8).map((tr, i) => ({
-        key: i,
-        time: tr.time,
-        inst: tr.inst || '',
-        side: tr.side || '',
-        pnl: Number(tr.pnl || 0),
-        closed: true,
-      }))
-    }
-    return (demoData.recent_trades || []).slice(0, 8).map((tr, i) => ({
-      key: i,
-      time: tr.time,
-      inst: (tr.symbol || '').replace('-USDT-SWAP', ''),
-      side: tr.side || '',
-      pnl: Number(tr.pnl || 0),
-      closed: tr.reason !== 'open',
+    const all = data?.trades || []
+    const filtered = isLive
+      ? all.filter(t => t.account_mode === 'live')
+      : all.filter(t => t.account_mode !== 'live')
+    return (filtered.length ? filtered : all).slice(0, 10).map(t => ({
+      time: t.time || t.timestamp || '',
+      inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
+      side: (t.side || '').toLowerCase(),
+      pnl: Number(t.pnl || 0),
     }))
-  }, [isLive, liveData, demoData])
-
-  const aiRunning = !!demoData.running
-  const pulse = demoData.pulse || demoData.description || ''
+  }, [data?.trades, isLive])
 
   if (authing) {
-    return (
-      <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">
-        {t('mini.loading') || 'Loading…'}
-      </div>
-    )
-  }
-
-  if (authError && !loaded) {
-    return (
-      <div className="min-h-[100dvh] flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)]">
-        <div className="text-sm font-semibold text-[var(--txt)]">{t('mini.auth_error') || 'Auth error'}</div>
-        <button
-          type="button"
-          onClick={() => window.location.reload()}
-          className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold"
-        >
-          <RefreshCw size={15} />
-          {t('mini.reload') || 'Refresh'}
-        </button>
-      </div>
-    )
+    return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Загрузка…</div>
   }
 
   return (
-    <div
-      className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden"
-      style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
-    >
-      {/* Header */}
+    <div className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
       <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
         <div className="flex items-center gap-2 min-w-0">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center shadow">
@@ -268,134 +167,81 @@ function MiniAppPageInner() {
             <div className="text-sm font-bold leading-none">COPIX</div>
             <div className="text-[0.6rem] text-[var(--txt-muted)] mt-0.5 truncate">AI · 1H</div>
           </div>
-          <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[0.6rem] font-bold ${
-            connected ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'
-          }`}>
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse' : 'bg-[var(--loss)]'}`} />
-            {connected ? 'ON' : 'OFF'}
-          </span>
         </div>
         <div className="flex items-center gap-1.5">
-          {/* Demo / Live switch */}
           <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.65rem] font-bold">
-            <button
-              type="button"
-              onClick={() => setMode('demo')}
-              className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}
-            >
-              DEMO
-            </button>
-            <button
-              type="button"
-              onClick={() => liveConnected && setMode('live')}
-              disabled={!liveConnected}
-              className={`px-2 py-1 flex items-center gap-0.5 ${
-                mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'
-              } ${!liveConnected ? 'opacity-40' : ''}`}
-              title={liveConnected ? 'LIVE' : (credsConfigured ? 'LIVE connecting...' : 'Connect OKX keys for LIVE')}
-            >
-              {liveConnected ? <Wifi size={10} /> : <WifiOff size={10} />}
-              LIVE
+            <button type="button" onClick={() => setMode('demo')} className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}>DEMO</button>
+            <button type="button" onClick={() => liveConnected && setMode('live')} disabled={!liveConnected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)'} ${!liveConnected ? 'opacity-40' : ''}`}>
+              {liveConnected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
             </button>
           </div>
-          <button
-            type="button"
-            className="p-1.5 rounded-lg hover:bg-[var(--surface-raised)]"
-            onClick={load}
-            disabled={loading}
-            title={t('mini.reload') || 'Refresh'}
-          >
+          <button type="button" className="p-1.5 rounded-lg hover:bg-[var(--surface-raised)]" onClick={load} disabled={loading}>
             <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
 
-      <div
-        className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3"
-        style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
-      >
-        {/* PnL */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3" style={{ WebkitOverflowScrolling: 'touch' }}>
         <Card>
           <div className="flex items-center justify-between mb-2.5">
-            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">
-              {mode === 'live' ? 'LIVE PnL' : 'DEMO PnL'}
-            </span>
+            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">{isLive ? 'LIVE PnL' : 'DEMO PnL'}</span>
             {metrics.equity != null && (
-              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">
-                Eq ${fmt(metrics.equity)}
-                {metrics.capital != null ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}
-              </span>
+              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">Eq ${fmt(metrics.equity)}{metrics.capital ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}</span>
             )}
           </div>
           <div className="grid grid-cols-3 gap-2">
-            <Metric label={t('mini.total_pnl') || 'Total'} value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
-            <Metric label={t('mini.today') || 'Today'} value={pnlSign(metrics.today)} className={pnlClass(metrics.today)} />
-            <Metric label={t('mini.unrealized') || 'Open'} value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
+            <Metric label="Всего" value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
+            <Metric label="Сегодня" value={pnlSign(metrics.today)} className={pnlClass(metrics.today)} />
+            <Metric label="Открыто" value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
           </div>
         </Card>
 
-        {/* AI bot */}
-        <Card>
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex items-center gap-2 min-w-0">
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                aiRunning ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'
-              }`}>
-                <Bot size={18} className={aiRunning ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-bold truncate">AI Discretionary 1H</div>
-                <div className="text-[0.65rem] text-[var(--txt-muted)]">
-                  {aiBot?.model || aiBot?.llm?.model || 'LLM'} · сделок {metrics.tradesN}
+        {!isLive && (
+          <Card>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${demo.running ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'}`}>
+                  <Bot size={18} className={demo.running ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold truncate">AI Discretionary 1H</div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)]">{demo.model || 'LLM'} · сделок {metrics.tradesN}{demo.win_rate ? ` · WR ${demo.win_rate}%` : ''}</div>
                 </div>
               </div>
+              <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${demo.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+                {demo.running ? 'ON' : 'OFF'}
+              </span>
             </div>
-            <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${
-              aiRunning
-                ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
-            }`}>
-              {aiRunning ? (t('mini.running') || 'ON') : (t('mini.stopped') || 'OFF')}
-            </span>
-          </div>
-          {pulse ? (
-            <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">
-              {pulse}
-            </p>
-          ) : null}
-        </Card>
+            {demo.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{demo.pulse}</p>}
+          </Card>
+        )}
 
-        {/* Positions */}
+        {isLive && !liveConnected && (
+          <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Подключите LIVE ключи OKX в настройках бота</Card>
+        )}
+
         <div>
           <div className="flex items-center justify-between mb-1.5 px-0.5">
-            <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">
-              {t('mini.positions') || 'Positions'}
-            </h2>
+            <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">Позиции</h2>
             <span className="text-[0.65rem] text-[var(--txt-muted)]">{viewPositions.length}</span>
           </div>
           {viewPositions.length === 0 ? (
-            <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">
-              {t('mini.no_positions') || 'No open positions'}
-            </Card>
+            <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет открытых позиций</Card>
           ) : (
             <div className="space-y-2 max-h-[40vh] overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-              {viewPositions.map((p) => (
+              {viewPositions.map(p => (
                 <Card key={p.key} className="py-2.5">
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-xs font-bold truncate">{(p.instId || '').replace('-USDT-SWAP', '')}</span>
-                      <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${
-                        p.side === 'long'
-                          ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                          : 'bg-[var(--loss-dim)] text-[var(--loss)]'
-                      }`}>
+                      <span className="text-xs font-bold truncate">{p.coin}</span>
+                      <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                         {p.side === 'long' ? 'LONG' : 'SHORT'}
                       </span>
                     </div>
                     <span className={`text-xs font-bold mono ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
                   </div>
                   <div className="text-[0.65rem] text-[var(--txt-muted)] mono">
-                    ${fmt(p.px)}{p.lev ? ` · ${fmt(p.lev, 1)}x` : ''}{p.size ? ` · ${fmt(p.size, 3)}` : ''}
+                    ${fmt(p.entry)}{p.lever ? ` · ${fmt(p.lever, 1)}x` : ''}{p.size ? ` · ${fmt(p.size, 3)}` : ''}
                   </div>
                 </Card>
               ))}
@@ -403,41 +249,22 @@ function MiniAppPageInner() {
           )}
         </div>
 
-        {/* Trades */}
         <div className="pb-6">
-          <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)] mb-1.5 px-0.5">
-            {t('mini.last_trades') || 'Recent trades'}
-          </h2>
+          <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)] mb-1.5 px-0.5">Сделки</h2>
           <Card className="p-0 overflow-hidden">
             {viewTrades.length === 0 ? (
-              <div className="py-4 text-center text-xs text-[var(--txt-muted)]">
-                {t('mini.no_trades') || 'No trades yet'}
-              </div>
+              <div className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет сделок</div>
             ) : (
               <div className="divide-y divide-[var(--border)]">
-                {viewTrades.map((tr) => (
-                  <div key={tr.key} className="flex items-center justify-between gap-2 px-3 py-2.5">
+                {viewTrades.map((tr, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2.5">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      {tr.closed ? (
-                        Number(tr.pnl) >= 0
-                          ? <ArrowUpRight size={14} className="text-[var(--profit)] flex-shrink-0" />
-                          : <ArrowDownRight size={14} className="text-[var(--loss)] flex-shrink-0" />
-                      ) : (
-                        <span className="w-3.5 h-3.5 rounded-full border-2 border-[var(--info)] flex-shrink-0" />
-                      )}
+                      {Number(tr.pnl) >= 0 ? <ArrowUpRight size={14} className="text-[var(--profit)] flex-shrink-0" /> : <ArrowDownRight size={14} className="text-[var(--loss)] flex-shrink-0" />}
                       <div className="min-w-0">
-                        <div className="text-xs font-semibold truncate">
-                          {tr.inst || '—'}{' '}
-                          <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span>
-                        </div>
-                        <div className="text-[0.6rem] text-[var(--txt-muted)]">
-                          {tr.time ? fmtTs(tr.time, 'ru-RU') : ''}
-                        </div>
+                        <div className="text-xs font-semibold truncate">{tr.inst || '—'} <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span></div>
                       </div>
                     </div>
-                    <span className={`text-xs font-bold mono flex-shrink-0 ${tr.closed ? pnlClass(tr.pnl) : 'text-[var(--txt-muted)]'}`}>
-                      {tr.closed ? pnlSign(tr.pnl) : '—'}
-                    </span>
+                    <span className={`text-xs font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>{pnlSign(tr.pnl)}</span>
                   </div>
                 ))}
               </div>
@@ -450,9 +277,5 @@ function MiniAppPageInner() {
 }
 
 export default function MiniAppPage(props) {
-  return (
-    <MiniAppErrorBoundary>
-      <MiniAppPageInner {...props} />
-    </MiniAppErrorBoundary>
-  )
+  return <MiniAppErrorBoundary><MiniAppPageInner {...props} /></MiniAppErrorBoundary>
 }
