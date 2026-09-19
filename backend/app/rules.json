@@ -1,0 +1,116 @@
+{
+  "version": "1.0",
+  "name": "Trend Join Long — Crypto",
+  "description": "Trend-following strategy: buy pullbacks in confirmed uptrend. Adapted from Humbled Trader's Trend Join Long for crypto markets.",
+  "timeframe": "4H",
+  "symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP", "SOL-USDT-SWAP", "BNB-USDT-SWAP"],
+  "max_positions": 3,
+  "risk_per_trade_pct": 2.0,
+  "account_risk_limit_pct": 6.0,
+
+  "entry_rules": {
+    "logic": "ALL",
+    "rules": [
+      {
+        "id": "trend_filter",
+        "description": "EMA alignment: fast > slow (confirmed uptrend)",
+        "indicator": "ema",
+        "params": { "fast": 20, "slow": 50 },
+        "condition": "ema_fast > ema_slow",
+        "required": true
+      },
+      {
+        "id": "pullback_zone",
+        "description": "Price pulled back near fast EMA (buy the dip)",
+        "indicator": "price_distance_ema",
+        "params": { "ema_period": 20, "max_distance_pct": 2.5, "min_distance_pct": -3.0 },
+        "condition": "dist_ema BETWEEN -3.0 AND 2.5",
+        "required": true
+      },
+      {
+        "id": "rsi_not_dead",
+        "description": "RSI not deeply oversold (no panic selling)",
+        "indicator": "rsi",
+        "params": { "period": 14 },
+        "condition": "rsi > 30",
+        "required": true
+      },
+      {
+        "id": "adx_trending",
+        "description": "ADX confirms trend strength",
+        "indicator": "adx",
+        "params": { "period": 14, "threshold": 18 },
+        "condition": "adx > 18",
+        "required": true
+      },
+      {
+        "id": "volume_confirm",
+        "description": "Volume above average OR strong trend (EMA aligned)",
+        "indicator": "volume_ratio",
+        "params": { "sma_period": 20, "min_ratio": 1.2 },
+        "condition": "vol_ratio > 1.2 OR trend_strong",
+        "required": false
+      }
+    ]
+  },
+
+  "exit_rules": {
+    "stop_loss": {
+      "type": "atr",
+      "atr_multiplier": 1.8,
+      "atr_period": 14,
+      "max_pct": 8.0
+    },
+    "take_profit": {
+      "type": "atr",
+      "atr_multiplier": 4.5,
+      "atr_period": 14
+    },
+    "trailing_stop": {
+      "enabled": false,
+      "note": "V3 validated: fixed TP/SL with 1:2.5 R:R outperforms trailing stop"
+    }
+  },
+
+  "position_sizing": {
+    "method": "risk_based",
+    "risk_per_trade_pct": 2.0,
+    "max_position_pct": 35,
+    "drawdown_scaling": {
+      "enabled": true,
+      "rules": [
+        { "dd_above_pct": 10, "risk_mult": 0.6 },
+        { "dd_above_pct": 5, "risk_mult": 0.8 },
+        { "dd_below_pct": -5, "risk_mult": 1.1 }
+      ]
+    }
+  },
+
+  "filters": {
+    "cooldown_days": 3,
+    "circuit_breaker": {
+      "enabled": true,
+      "max_drawdown_pct": 15,
+      "cooldown_days": 10
+    },
+    "min_atr_pct": 1.2,
+    "roc_min": -3.0
+  },
+
+  "scanner": {
+    "enabled": true,
+    "scan_interval_minutes": 30,
+    "min_volume_usd_24h": 50000000,
+    "min_change_pct_4h": 1.5,
+    "max_results": 10
+  },
+
+  "notifications": {
+    "telegram": {
+      "enabled": true,
+      "events": ["entry", "exit", "daily_summary", "circuit_breaker"],
+      "include_r_multiple": true,
+      "include_planned_trade": true
+    }
+  }
+}
