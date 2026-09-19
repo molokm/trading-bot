@@ -94,11 +94,7 @@ function MiniAppPageInner() {
   const [mode, setMode] = useState('demo') // demo | live — view switch
 
   const [connected, setConnected] = useState(false)
-  const [aiBot, setAiBot] = useState(null)
-  const [liveStatus, setLiveStatus] = useState(null)
-  const [pnlData, setPnlData] = useState(null)
-  const [positions, setPositions] = useState([])
-  const [trades, setTrades] = useState([])
+  const [dashData, setDashData] = useState(null)
 
   /* ── Telegram auth ── */
   useEffect(() => {
@@ -129,40 +125,22 @@ function MiniAppPageInner() {
     return () => { cancelled = true }
   }, [])
 
-  const liveConnected = !!(liveStatus?.connected && liveStatus?.enabled !== false)
+  const isLive = mode === 'live' && dashData?.mode === 'live'
+  const demoData = dashData?.demo || {}
+  const liveData = dashData?.live || {}
+  const liveConnected = !!liveData?.connected
+  const credsConfigured = !!dashData?.creds_configured
 
   const load = useCallback(async () => {
     setLoading(true)
-    const tasks = [
-      ['health', () => api.health()],
-      ['ai', () => api.aiStatus()],
-      ['live', () => api.liveStatus().catch(() => null)],
-      ['pnl', () => (api.getPnlSummary ? api.getPnlSummary() : api.getPnl())],
-      ['positions', () => api.getPositions('SWAP')],
-      ['trades', () => api.getPairedTrades(40)],
-    ]
-    await Promise.allSettled(tasks.map(async ([name, fn]) => {
-      try {
-        const v = await withTimeout(fn(), name === 'trades' || name === 'pnl' ? 25000 : 15000)
-        if (name === 'health') setConnected(!!v?.connected)
-        if (name === 'ai') setAiBot(v)
-        if (name === 'live') setLiveStatus(v)
-        if (name === 'pnl') setPnlData(v)
-        if (name === 'positions') {
-          const pos = Array.isArray(v) ? v : (v?.positions || v?.data || [])
-          setPositions(Array.isArray(pos) ? pos.filter(Boolean) : [])
-        }
-        if (name === 'trades') {
-          let list = []
-          if (Array.isArray(v)) list = v
-          else if (Array.isArray(v?.trades)) list = v.trades
-          else if (Array.isArray(v?.data)) list = v.data
-          setTrades(list || [])
-        }
-      } catch {
-        /* keep previous values */
-      }
-    }))
+    try {
+      const [health, dash] = await Promise.allSettled([
+        withTimeout(api.health(), 10000),
+        withTimeout(api.meDashboard(), 15000),
+      ])
+      if (health.status === 'fulfilled') setConnected(!!health.value?.connected)
+      if (dash.status === 'fulfilled') setDashData(dash.value)
+    } catch {}
     setLoaded(true)
     setLoading(false)
   }, [])
@@ -177,100 +155,79 @@ function MiniAppPageInner() {
     return () => clearInterval(id)
   }, [authing, load])
 
-  /* Prefer LIVE view when mirror is on */
   useEffect(() => {
-    if (liveConnected) setMode((m) => (m === 'demo' ? 'live' : m))
-  }, [liveConnected])
+    if (liveConnected && dashData?.mode === 'live') setMode('live')
+  }, [liveConnected, dashData?.mode])
 
   const metrics = useMemo(() => {
-    if (mode === 'live' && liveConnected) {
-      const live = liveStatus || {}
-      const aiLive = aiBot?.live || {}
+    if (isLive) {
       return {
-        total: live.total_pnl ?? aiLive.total_pnl ?? 0,
-        today: live.session_pnl ?? aiLive.session_pnl ?? 0,
-        unreal: live.unrealized_pnl ?? 0,
-        equity: live.equity ?? aiLive.equity ?? null,
-        capital: live.capital ?? null,
-        tradesN: live.lifetime_trades ?? aiLive.lifetime_trades ?? 0,
+        total: liveData.total_pnl ?? 0,
+        today: 0,
+        unreal: liveData.open_positions?.reduce((s, p) => s + (p.unrealized_pnl || 0), 0) ?? 0,
+        equity: liveData.equity ?? null,
+        capital: null,
+        tradesN: liveData.trades?.length ?? 0,
       }
     }
-    const p = pnlData || {}
     return {
-      total: p.total_pnl ?? p.total ?? aiBot?.lifetime_pnl ?? aiBot?.total_pnl ?? 0,
-      today: p.today_pnl ?? p.today ?? p.day_pnl ?? 0,
-      unreal: p.unrealized_pnl ?? p.unrealized ?? 0,
+      total: demoData.total_pnl ?? demoData.lifetime_pnl ?? 0,
+      today: 0,
+      unreal: 0,
       equity: null,
-      capital: aiBot?.capital ?? null,
-      tradesN: aiBot?.lifetime_trades ?? aiBot?.total_trades ?? 0,
+      capital: demoData.capital ?? null,
+      tradesN: demoData.lifetime_trades ?? demoData.total_trades ?? 0,
     }
-  }, [mode, liveConnected, liveStatus, aiBot, pnlData])
+  }, [isLive, liveData, demoData])
 
   const viewPositions = useMemo(() => {
-    if (mode === 'live' && liveConnected) {
-      const fromLive = liveStatus?.open_positions || aiBot?.live?.open_positions || []
-      if (fromLive.length) return fromLive.map((p) => ({
-        instId: p.instId || p.inst_id || `${p.coin || ''}-USDT-SWAP`,
-        side: (p.side || p.posSide || '').toLowerCase().includes('short') ? 'short' : 'long',
-        px: Number(p.avgPx || p.entry || p.entry_price || 0),
-        mark: Number(p.markPx || p.mark || 0),
-        size: Number(p.pos || p.size || p.sz || 0),
-        lev: Number(p.lever || p.leverage || 0),
-        upl: Number(p.upl || p.unrealized_pnl || 0),
-        bot: 'AI',
-      }))
-    }
-    const fromAi = aiBot?.open_positions || []
-    if (fromAi.length) {
-      return fromAi.map((p) => ({
-        instId: p.inst_id || p.instId || `${p.coin || ''}-USDT-SWAP`,
-        side: (p.side || 'long').toLowerCase(),
-        px: Number(p.entry_price || p.entry || 0),
-        mark: Number(p.mark || 0),
-        size: Number(p.size || p.sz || 0),
+    if (isLive) {
+      return (liveData.open_positions || []).map((p, i) => ({
+        key: `${p.coin}-${p.side}-${i}`,
+        instId: p.symbol || `${p.coin}-USDT-SWAP`,
+        side: p.side,
+        px: Number(p.entry_price || 0),
+        mark: Number(p.mark_price || 0),
+        size: Number(p.size || 0),
         lev: Number(p.leverage || 0),
-        upl: Number(p.unrealized_pnl || p.upl || 0),
-        bot: 'AI',
+        upl: Number(p.unrealized_pnl || 0),
       }))
     }
-    return (positions || []).map((p) => {
-      const raw = Number(p.pos || p.size || 0)
-      const side = (p.posSide || p.side || (raw < 0 ? 'short' : 'long')).toLowerCase()
-      return {
-        instId: p.instId || p.inst_id,
-        side: side.includes('short') ? 'short' : 'long',
-        px: Number(p.avgPx || p.avg_px || 0),
-        mark: Number(p.markPx || 0),
-        size: Math.abs(raw),
-        lev: Number(p.lever || p.leverage || 0),
-        upl: Number(p.upl || 0),
-        bot: p.bot_label || p.bot || 'AI',
-      }
-    }).filter((p) => p.size > 0)
-  }, [mode, liveConnected, liveStatus, aiBot, positions])
+    return (demoData.open_positions || []).map((p, i) => ({
+      key: `${p.coin}-${p.side}-${i}`,
+      instId: p.symbol || `${p.coin}-USDT-SWAP`,
+      side: p.side,
+      px: Number(p.entry_price || 0),
+      mark: 0,
+      size: Number(p.size || 0),
+      lev: Number(p.leverage || 0),
+      upl: 0,
+    }))
+  }, [isLive, liveData, demoData])
 
   const viewTrades = useMemo(() => {
-    const list = Array.isArray(trades) ? trades : []
-    const filtered = mode === 'live'
-      ? list.filter((tr) => String(tr.account_mode || tr.mode || '').toLowerCase() === 'live'
-        || String(tr.bot_id || '').includes('live'))
-      : list.filter((tr) => String(tr.account_mode || tr.mode || 'demo').toLowerCase() !== 'live')
-    const src = filtered.length ? filtered : (mode === 'live' ? [] : list)
-    return src.slice(0, 8).map((tr) => {
-      const pnl = Number(tr.pnl ?? tr.realized_pnl ?? 0)
-      const closed = tr.state === 'closed' || tr.closed || tr.exit_price != null || (tr.pnl != null && tr.side !== 'open')
-      return {
-        time: tr.time || tr.timestamp || tr.closed_at || tr.created_at,
-        inst: (tr.inst_id || tr.symbol || tr.inst || '').replace('-USDT-SWAP', ''),
-        side: (tr.side || tr.pos_side || '').toLowerCase(),
-        pnl,
-        closed,
-      }
-    })
-  }, [trades, mode])
+    if (isLive) {
+      return (liveData.trades || []).slice(0, 8).map((tr, i) => ({
+        key: i,
+        time: tr.time,
+        inst: tr.inst || '',
+        side: tr.side || '',
+        pnl: Number(tr.pnl || 0),
+        closed: true,
+      }))
+    }
+    return (demoData.recent_trades || []).slice(0, 8).map((tr, i) => ({
+      key: i,
+      time: tr.time,
+      inst: (tr.symbol || '').replace('-USDT-SWAP', ''),
+      side: tr.side || '',
+      pnl: Number(tr.pnl || 0),
+      closed: tr.reason !== 'open',
+    }))
+  }, [isLive, liveData, demoData])
 
-  const aiRunning = !!(aiBot?.running)
-  const pulse = aiBot?.pulse || aiBot?.description || aiBot?.last_decision?.reason || ''
+  const aiRunning = !!demoData.running
+  const pulse = demoData.pulse || demoData.description || ''
 
   if (authing) {
     return (
@@ -335,7 +292,7 @@ function MiniAppPageInner() {
               className={`px-2 py-1 flex items-center gap-0.5 ${
                 mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'
               } ${!liveConnected ? 'opacity-40' : ''}`}
-              title={liveConnected ? 'LIVE mirror' : 'LIVE not connected'}
+              title={liveConnected ? 'LIVE' : (credsConfigured ? 'LIVE connecting...' : 'Connect OKX keys for LIVE')}
             >
               {liveConnected ? <Wifi size={10} /> : <WifiOff size={10} />}
               LIVE
@@ -422,8 +379,8 @@ function MiniAppPageInner() {
             </Card>
           ) : (
             <div className="space-y-2 max-h-[40vh] overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
-              {viewPositions.map((p, i) => (
-                <Card key={`${p.instId}-${i}`} className="py-2.5">
+              {viewPositions.map((p) => (
+                <Card key={p.key} className="py-2.5">
                   <div className="flex items-center justify-between gap-2 mb-1">
                     <div className="flex items-center gap-1.5 min-w-0">
                       <span className="text-xs font-bold truncate">{(p.instId || '').replace('-USDT-SWAP', '')}</span>
@@ -458,8 +415,8 @@ function MiniAppPageInner() {
               </div>
             ) : (
               <div className="divide-y divide-[var(--border)]">
-                {viewTrades.map((tr, i) => (
-                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2.5">
+                {viewTrades.map((tr) => (
+                  <div key={tr.key} className="flex items-center justify-between gap-2 px-3 py-2.5">
                     <div className="flex items-center gap-1.5 min-w-0">
                       {tr.closed ? (
                         Number(tr.pnl) >= 0
