@@ -3,6 +3,7 @@ import {
   RefreshCw, Zap, Wifi, WifiOff, Bot, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { api } from '../services/api'
+import { useTranslation } from '../hooks/useTranslation'
 
 window.__MINI_APP__ = true
 
