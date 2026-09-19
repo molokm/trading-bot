@@ -365,9 +365,6 @@ export const api = {
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
 
   meDashboard: () => request('/me/dashboard'),
-</parameter=oldString>
-  telegramAuth: (initData) =>
-    request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
 
   debugMiniLog: (logs) =>
     request('/debug/mini-log', { method: 'POST', body: JSON.stringify({ logs }) }),
