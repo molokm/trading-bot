@@ -126,7 +126,7 @@ function MiniAppPageInner() {
   const viewTrades = useMemo(() => {
     const all = data?.trades || []
     const filtered = isLive ? all.filter(t => t.account_mode === 'live') : all.filter(t => t.account_mode !== 'live')
-    return (filtered.length ? filtered : all).slice(0, 10).map(t => ({
+    return filtered.slice(0, 10).map(t => ({
       time: t.time || t.timestamp || '',
       inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
       side: (t.side || '').toLowerCase(),

@@ -1564,6 +1564,7 @@ async def me_dashboard(request: Request):
             }
     except Exception as e:
         demo = {'error': str(e)}
+    trades = []
     has_live = False
     if role == 'admin' and user_id is None:
         has_live = bool(_live_key and _live_secret and _live_pass)
@@ -1664,8 +1665,6 @@ async def me_dashboard(request: Request):
                             bts = int(b.get('ts') or 0)
                         except (TypeError, ValueError):
                             bts = 0
-                        if bts < day_start_ms:
-                            continue
                         try:
                             bp = float(b.get('pnl') or 0)
                         except (TypeError, ValueError):
@@ -1685,7 +1684,6 @@ async def me_dashboard(request: Request):
             live = {'connected': False, 'error': str(e)}
     else:
         live = {'connected': False}
-    trades = []
     try:
         if role == 'admin' and user_id is None:
             rows = await db.get_trades(limit=20)
