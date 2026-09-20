@@ -1685,6 +1685,7 @@ async def me_dashboard(request: Request):
     else:
         live = {'connected': False}
     try:
+        has_demo_trades = False
         if role == 'admin' and user_id is None:
             rows = await db.get_trades(limit=20)
             for t in rows:
@@ -1695,6 +1696,7 @@ async def me_dashboard(request: Request):
                     'pnl': float(t.get('pnl', 0) or 0),
                     'account_mode': t.get('account_mode', 'demo'),
                 })
+                has_demo_trades = True
         elif user_id:
             ub = strategy_mgr.get_or_create(str(user_id))
             for bid in (ub.rot_bot_id, ub.imp_bot_id):
@@ -1707,7 +1709,7 @@ async def me_dashboard(request: Request):
                         'pnl': float(t.get('pnl', 0) or 0),
                         'account_mode': 'live',
                     })
-        if not trades and ai_bot:
+        if not has_demo_trades and ai_bot:
             for t in (ai_bot.get_status() or {}).get('recent_trades', [])[-20:]:
                 if 'pnl' not in t:
                     continue
@@ -1718,7 +1720,8 @@ async def me_dashboard(request: Request):
                     'pnl': float(t.get('pnl', 0) or 0),
                     'account_mode': t.get('account_mode', 'demo'),
                 })
-        if not trades:
+                has_demo_trades = True
+        if not has_demo_trades:
             try:
                 epoch = await get_pnl_epoch()
                 epoch_ms = 0
