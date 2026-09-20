@@ -1546,6 +1546,10 @@ async def me_dashboard(request: Request):
     try:
         if ai_bot:
             st = ai_bot.get_status()
+            try:
+                st = await _apply_history_kpi(st, 'AI Discretionary 1H')
+            except Exception:
+                pass
             demo = {
                 'running': st.get('running', False),
                 'pnl': round(st.get('lifetime_pnl', 0), 2),
@@ -1626,6 +1630,17 @@ async def me_dashboard(request: Request):
                     'pnl': float(t.get('pnl', 0) or 0),
                     'account_mode': t.get('account_mode', 'demo'),
                 })
+            if not trades and ai_bot:
+                for t in (ai_bot.get_status() or {}).get('recent_trades', [])[-20:]:
+                    if 'pnl' not in t:
+                        continue
+                    trades.append({
+                        'time': t.get('time', t.get('ts', '')),
+                        'inst': (t.get('symbol', t.get('inst_id', '')) or '').replace('-USDT-SWAP', ''),
+                        'side': t.get('side', ''),
+                        'pnl': float(t.get('pnl', 0) or 0),
+                        'account_mode': t.get('account_mode', 'demo'),
+                    })
         elif user_id:
             ub = strategy_mgr.get_or_create(str(user_id))
             for bid in (ub.rot_bot_id, ub.imp_bot_id):
