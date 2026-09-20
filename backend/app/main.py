@@ -681,6 +681,11 @@ async def startup():
                 except Exception:
                     pass
                 try:
+                    _lm_en = await db.get_setting('live_mirror_enabled') if db else 'N/A'
+                    _lm_k = await db.get_setting('live_mirror_key') if db else 'N/A'
+                    _lm_s = await db.get_setting('live_mirror_secret') if db else 'N/A'
+                    _lm_p = await db.get_setting('live_mirror_pass') if db else 'N/A'
+                    _slog(f'live mirror pre-check: enabled={_lm_en} key={"set" if _lm_k else "missing"} secret={"set" if _lm_s else "missing"} pass={"set" if _lm_p else "missing"}')
                     _pre_ok = await _ensure_live_mirror_client()
                     _slog(f'pre-AI live ensure: {_pre_ok}')
                 except Exception as _em:
@@ -2942,6 +2947,7 @@ async def _ensure_live_mirror_client() -> bool:
         # Explicit disconnect → stay offline until /api/live/connect
         if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
             print(f'[LIVE] ensure: disabled by user (enabled={en})', flush=True)
+            _startup_log = getattr(_ensure_live_mirror_client, '_slog_ref', None)
             return False
     except Exception as e:
         print(f'[LIVE] ensure enabled flag: {e}', flush=True)
