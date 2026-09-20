@@ -597,10 +597,13 @@ async def startup():
         print('[startup] Orphan sweeper scheduled (+120s)', flush=True)
     except Exception as e:
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
+    _startup_log = []
+    def _slog(msg):
+        _startup_log.append(msg)
+        print(f'[startup-diag] {msg}', flush=True)
     try:
+        _slog('AI auto-start entry point reached')
         print('[startup] AI Discretionary auto-start ...', flush=True)
-        # AI_ONLY: always auto-start after deploy/restart unless AI_AUTO_START=0.
-        # User Stop is session-only unless AI_PERSIST_USER_STOP=1.
         _ai_force = os.getenv('AI_FORCE_AUTOSTART', '1' if AI_ONLY_MODE else '0').strip().lower() not in ('0', 'false', 'no', 'off')
         _persist_stop = os.getenv('AI_PERSIST_USER_STOP', '0').strip().lower() in ('1', 'true', 'yes', 'on')
         _user_stopped = False
@@ -608,17 +611,19 @@ async def startup():
             _us = await db.get_setting('ai_user_stopped')
             _user_stopped = str(_us or '').strip().lower() in ('1', 'true', 'yes', 'on')
         except Exception as _ase:
-            print(f'[startup] AI auto-start state read: {_ase}', flush=True)
+            _slog(f'AI auto-start state read error: {_ase}')
+        _slog(f'ai_force={_ai_force} persist_stop={_persist_stop} user_stopped_raw={_us!r} user_stopped={_user_stopped}')
         if (AI_ONLY_MODE or _env_demo) and _user_stopped and not _persist_stop:
             _user_stopped = False
             try:
                 await db.set_setting('ai_user_stopped', '0')
             except Exception:
                 pass
-            print('[startup] AI: cleared ai_user_stopped (deploy auto-start)', flush=True)
+            _slog('cleared ai_user_stopped')
         _do_ai = bool(_bots_auto_start and _ai_auto and (_ai_force or not _user_stopped))
         if _user_stopped and not _ai_force:
             _do_ai = False
+        _slog(f'do_ai={_do_ai} bots_auto={_bots_auto_start} ai_auto={_ai_auto}')
         print(
             f'[startup] AI auto-start: bots={_bots_auto_start} ai_auto={_ai_auto} '
             f'force={_ai_force} user_stopped={_user_stopped} do={_do_ai}',
@@ -626,12 +631,14 @@ async def startup():
         )
         if _do_ai:
             _demo = _env_demo
+            _slog(f'mode={"DEMO" if _demo else "LIVE"}')
             try:
                 if _demo:
                     await _ensure_showcase()
                     _k = _demo_key or _env_key
                     _s = _demo_secret or _env_secret
                     _pw = _demo_pass or _env_pass
+                    _slog(f'demo keys: k={bool(_k)} s={bool(_s)} pw={bool(_pw)} cm={bool(client_manager)}')
                     if _k and _s and _pw and client_manager:
                         await client_manager.init_client(_k, _s, _pw, True)
                 else:
@@ -639,17 +646,21 @@ async def startup():
                     _k = _live_key or _env_key
                     _s = _live_secret or _env_secret
                     _pw = _live_pass or _env_pass
+                    _slog(f'live keys: k={bool(_k)} s={bool(_s)} pw={bool(_pw)} cm={bool(client_manager)}')
                     if _k and _s and _pw and client_manager:
                         await client_manager.init_client(_k, _s, _pw, False)
             except Exception as _ce:
-                print(f'[startup] AI client init: {_ce}', flush=True)
+                _slog(f'client init error: {_ce}')
             _cli = client_manager.get_client() if client_manager else None
+            _has_creds = getattr(_cli, 'has_credentials', lambda: False)() if _cli else False
             _has_keys = bool(
-                (_cli and getattr(_cli, 'has_credentials', lambda: False)())
+                (_cli and _has_creds)
                 or (_env_key and _env_secret and _env_pass)
                 or (_demo_key and _demo_secret and _demo_pass)
             )
+            _slog(f'cli={bool(_cli)} has_creds={_has_creds} env_keys={bool(_env_key)} demo_keys={bool(_demo_key)} has_keys={_has_keys}')
             if not _has_keys:
+                _slog('SKIPPED: no OKX keys')
                 print('[startup]   AI Discretionary skipped (no OKX keys)', flush=True)
             else:
                 if _demo:
@@ -672,12 +683,10 @@ async def startup():
                 try:
                     await _ensure_live_mirror_client()
                 except Exception as _em:
-                    print(f'[startup] pre-AI live ensure: {_em}', flush=True)
+                    _slog(f'pre-AI live ensure: {_em}')
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '300')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
-                # Apply saved AI settings (thresholds etc.) — without this, every
-                # redeploy silently reverts all UI-tuned params to code defaults.
                 try:
                     import json as _json
                     _cfgkey = 'ai_config:demo' if _demo else 'ai_config:live'
@@ -687,10 +696,11 @@ async def startup():
                         for _k in ('capital', 'symbols', 'execute'):
                             _saved_cfg.pop(_k, None)
                         ai_bot.apply_config_dict(_saved_cfg, keep_execute=True)
-                        print(f'[startup] applied saved AI config ({_cfgkey}, {len(_saved_cfg)} keys)', flush=True)
+                        _slog(f'applied saved config ({_cfgkey}, {len(_saved_cfg)} keys)')
                 except Exception as _ce:
-                    print(f'[startup] saved AI config apply: {_ce}', flush=True)
+                    _slog(f'saved config apply error: {_ce}')
                 ai_bot.start()
+                _slog(f'ai_bot started: running={ai_bot._running}')
                 _positions_cache = None
                 try:
                     await db.set_setting('ai_bot_running', '1')
@@ -700,15 +710,21 @@ async def startup():
                 print(f'[startup]   AI Discretionary RUNNING (auto) execute={_exec} capital={ai_cfg.capital} symbols={_syms} mode={("DEMO" if _demo else "LIVE")}', flush=True)
                 try:
                     ok_m = await _ensure_live_mirror_client()
-                    print(f'[startup]   live mirror after AI start: {ok_m}', flush=True)
+                    _slog(f'live mirror after AI start: {ok_m}')
                 except Exception as _me:
-                    print(f'[startup]   live mirror attach: {_me}', flush=True)
-
+                    _slog(f'live mirror attach error: {_me}')
         else:
+            _slog(f'SKIPPED: auto-start off')
             print(f'[startup]   AI Discretionary skipped (auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} user_stopped={_user_stopped})', flush=True)
     except Exception as e:
         import traceback
+        _slog(f'AI FAILED: {e}\n{traceback.format_exc()}')
         print(f'[startup]   AI FAILED: {e}\n{traceback.format_exc()}', flush=True)
+    try:
+        import json as _sj
+        await db.set_setting('startup_log', _sj.dumps(_startup_log[-50:]))
+    except Exception:
+        pass
 
     # Delayed AI auto-start retry (keys / showcase may lag first attempt)
     async def _ai_autostart_retry():
@@ -1073,7 +1089,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product'}
+PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
 GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
@@ -1654,6 +1670,15 @@ async def ai_status():
     status['total_pnl_internal'] = internal
     status['lifetime_pnl_internal'] = internal
     return await _apply_history_kpi(status, 'AI Discretionary 1H')
+
+@app.get('/api/startup-log')
+async def startup_log():
+    try:
+        import json as _sj
+        raw = await db.get_setting('startup_log')
+        return {'log': _sj.loads(raw) if raw else []}
+    except Exception as e:
+        return {'log': [], 'error': str(e)}
 
 @app.get('/api/ai/diagnostics')
 async def ai_diagnostics():
