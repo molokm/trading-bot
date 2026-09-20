@@ -2414,13 +2414,11 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
             await db.set_setting('live_mirror_enabled', '1')
             try:
                 await _save_live_creds(key, secret, passphrase)
-                # MIGRATION: purge legacy plaintext copies if they exist
-                for _pk in ('live_mirror_key', 'live_mirror_secret', 'live_mirror_pass'):
-                    try:
-                        if await db.get_setting(_pk):
-                            await db.set_setting(_pk, '')
-                    except Exception:
-                        pass
+                # Also keep plaintext as fallback for when TOKEN_ENCRYPTION_KEY
+                # is not set (ephemeral Fernet key breaks decryption after restart)
+                await db.set_setting('live_mirror_key', key)
+                await db.set_setting('live_mirror_secret', secret)
+                await db.set_setting('live_mirror_pass', passphrase)
             except Exception as e:
                 print(f'[LIVE] encrypt save: {e}', flush=True)
             print('[LIVE] creds + enabled=1 persisted', flush=True)
