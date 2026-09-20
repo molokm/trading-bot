@@ -103,7 +103,7 @@ function MiniAppPageInner() {
 
   const metrics = useMemo(() => {
     if (isLive && data?.live) {
-      return {total: data.live.unrealized ?? 0, today: 0, unreal: data.live.unrealized ?? 0, equity: data.live.equity ?? null, tradesN: 0}
+      return {total: data.live.total_pnl ?? data.live.unrealized ?? 0, today: data.live.session_pnl ?? 0, unreal: data.live.unrealized ?? 0, equity: data.live.equity ?? null, tradesN: data.live.trades ?? 0}
     }
     const d = data?.demo || {}
     return {total: d.pnl ?? 0, today: d.session_pnl ?? 0, unreal: 0, equity: d.equity ?? null, capital: d.capital ?? null, tradesN: d.trades ?? 0}
@@ -199,6 +199,23 @@ function MiniAppPageInner() {
               </span>
             </div>
             {data?.demo?.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{data?.demo?.pulse}</p>}
+          </Card>
+        )}
+
+        {isLive && (
+          <Card>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-[var(--profit-dim)]">
+                  <Bot size={18} className="text-[var(--profit)]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold truncate">LIVE Mirror</div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)]">сделок {metrics.tradesN}{data?.live?.win_rate != null ? ` · WR ${data?.live?.win_rate}%` : ''}</div>
+                </div>
+              </div>
+              <span className="flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LIVE</span>
+            </div>
           </Card>
         )}
 

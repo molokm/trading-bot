@@ -1614,6 +1614,73 @@ async def me_dashboard(request: Request):
                     'unrealized': round(unrealized, 2),
                     'positions': positions,
                 }
+                try:
+                    bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
+                    bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
+                    now_ms = int(_time.time() * 1000)
+                    day_start_ms = now_ms - (now_ms % 86400000)
+                    day_pnl = 0.0
+                    total_realized = 0.0
+                    total_trades_n = 0
+                    wins_n = 0
+                    losses_n = 0
+                    _seen_oids = set()
+                    _day_seen_oids = set()
+                    for b in bill_data:
+                        oid = str(b.get('ordId', '') or '')
+                        sub = str(b.get('subType', '') or '')
+                        if sub not in ('5', '6'):
+                            continue
+                        try:
+                            bp = float(b.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        try:
+                            bts = int(b.get('ts') or 0)
+                        except (TypeError, ValueError):
+                            bts = 0
+                        if oid and oid not in _seen_oids:
+                            _seen_oids.add(oid)
+                            total_realized += bp
+                            total_trades_n += 1
+                            if bp > 0:
+                                wins_n += 1
+                            elif bp < 0:
+                                losses_n += 1
+                        if oid and bts >= day_start_ms and oid not in _day_seen_oids:
+                            _day_seen_oids.add(oid)
+                            day_pnl += bp
+                    live['session_pnl'] = round(day_pnl, 2)
+                    live['total_pnl'] = round(total_realized, 2)
+                    live['trades'] = total_trades_n
+                    live['win_rate'] = round(wins_n / total_trades_n * 100, 1) if total_trades_n else None
+                    live['wins'] = wins_n
+                    live['losses'] = losses_n
+                    for b in bill_data:
+                        sub = str(b.get('subType', '') or '')
+                        if sub not in ('5', '6'):
+                            continue
+                        try:
+                            bts = int(b.get('ts') or 0)
+                        except (TypeError, ValueError):
+                            bts = 0
+                        if bts < day_start_ms:
+                            continue
+                        try:
+                            bp = float(b.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        inst = str(b.get('instId', '') or '')
+                        side_val = 'sell' if sub == '5' else 'buy'
+                        trades.append({
+                            'time': bts,
+                            'inst': inst.replace('-USDT-SWAP', ''),
+                            'side': side_val,
+                            'pnl': round(bp, 4),
+                            'account_mode': 'live',
+                        })
+                except Exception:
+                    pass
         except Exception as e:
             live = {'connected': False, 'error': str(e)}
     else:
@@ -5275,6 +5342,8 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
         status['kpi_from_history'] = True
         status['pnl_epoch'] = (dash or {}).get('pnl_epoch')
         status['account_mode'] = mode
+        day_val = float((dash or {}).get('1d') or 0)
+        status['session_pnl'] = round(day_val, 2)
         try:
             all_stats = await _bot_history_stats()
             stats = all_stats.get(bot_label) or {}
