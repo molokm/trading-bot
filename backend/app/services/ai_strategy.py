@@ -3436,7 +3436,11 @@ class AIStrategy:
             veto = self._quant_veto_open(decision)
             if veto:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
-                                  reason=str(veto)[:80])
+                                   reason=str(veto)[:80])
+                decision["veto_reason"] = str(veto)
+                self._last_decision = self._enrich_decision(decision, snap)
+                self._decision_log.append(self._last_decision)
+                self._decision_log = self._decision_log[-200:]
                 print(f"[AI] open veto {coin}: {veto}", flush=True)
                 return
             if self.config.block_llm_error_opens and decision.get("source") != "quant_auto" and (
@@ -4367,6 +4371,9 @@ class AIStrategy:
                 f"Сигнал на вход: {sym} {side_ru}"
                 + (f" (уверенность {conf_f:.2f})." if conf_f is not None else ".")
             )
+            veto_reason = decision.get("veto_reason")
+            if veto_reason:
+                lines.append(f"Заблокирован квантом: {veto_reason}.")
             if open_list:
                 parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
                 lines.append(f"Уже открыто: {', '.join(parts)}.")
