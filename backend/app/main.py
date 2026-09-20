@@ -610,7 +610,7 @@ async def startup():
             _user_stopped = str(_us or '').strip().lower() in ('1', 'true', 'yes', 'on')
         except Exception as _ase:
             print(f'[startup] AI auto-start state read: {_ase}', flush=True)
-        if AI_ONLY_MODE and _user_stopped and not _persist_stop:
+        if (AI_ONLY_MODE or _env_demo) and _user_stopped and not _persist_stop:
             _user_stopped = False
             try:
                 await db.set_setting('ai_user_stopped', '0')

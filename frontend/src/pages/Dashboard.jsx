@@ -1215,33 +1215,33 @@ export default function Dashboard({ health, connected, isGuest }) {
         />
       </div>
 
-      {/* ═══ Цены — компактный тикер ═══ */}
-      <div className="panel flex-shrink-0 !py-1.5 !px-3">
-        <div className="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
-          <span className="text-[var(--txt-muted)] text-2xs font-medium">{t('dash.prices')}</span>
-          {PRICE_COINS.map((coin) => {
-            const tk = coin === 'BTC' ? ticker : tickers[coin]
-            const price = tk ? parseFloat(tk.last) : 0
-            const change = tk ? change24hPct(tk) : 0
-            const isUp = change >= 0
-            const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
-            const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
-            return (
-              <span key={coin} className="flex items-center gap-1 coin-ticker">
-                <span className="text-2xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
-                <span className="text-2xs mono text-[var(--txt)]">{priceStr}</span>
-                <span className={`text-2xs mono ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{changeStr}</span>
-              </span>
-            )
-          })}
-        </div>
-      </div>
-
       {/* ═══ MAIN GRID 65/35 ═══ */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
-        {/* ═══ LEFT — Positions + Trades ═══ */}
+        {/* ═══ LEFT — Цены + Positions + Trades ═══ */}
         <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
+
+          {/* Цены — компактный тикер */}
+          <div className="panel flex-shrink-0 !py-1 !px-2.5">
+            <div className="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
+              <span className="text-[var(--txt-muted)] text-2xs font-medium">{t('dash.prices')}</span>
+              {PRICE_COINS.map((coin) => {
+                const tk = coin === 'BTC' ? ticker : tickers[coin]
+                const price = tk ? parseFloat(tk.last) : 0
+                const change = tk ? change24hPct(tk) : 0
+                const isUp = change >= 0
+                const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
+                const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
+                return (
+                  <span key={coin} className="flex items-center gap-1 coin-ticker">
+                    <span className="text-2xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
+                    <span className="text-2xs mono text-[var(--txt)]">{priceStr}</span>
+                    <span className={`text-2xs mono ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{changeStr}</span>
+                  </span>
+                )
+              })}
+            </div>
+          </div>
 
           {/* Open Positions */}
           <div className="panel flex-1 flex flex-col min-h-0">
