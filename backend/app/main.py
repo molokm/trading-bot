@@ -681,7 +681,8 @@ async def startup():
                 except Exception:
                     pass
                 try:
-                    await _ensure_live_mirror_client()
+                    _pre_ok = await _ensure_live_mirror_client()
+                    _slog(f'pre-AI live ensure: {_pre_ok}')
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
