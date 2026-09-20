@@ -2940,6 +2940,7 @@ async def _ensure_live_mirror_client() -> bool:
         en = await db.get_setting('live_mirror_enabled') if db else None
         # Explicit disconnect → stay offline until /api/live/connect
         if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
+            print(f'[LIVE] ensure: disabled by user (enabled={en})', flush=True)
             return False
     except Exception as e:
         print(f'[LIVE] ensure enabled flag: {e}', flush=True)
@@ -2958,10 +2959,11 @@ async def _ensure_live_mirror_client() -> bool:
         except Exception:
             pass
     if not (key and secret and passphrase):
-        print('[LIVE] ensure: no credentials', flush=True)
+        print(f'[LIVE] ensure: no credentials (enc_key={bool(_live_key)} db_key={bool(key)})', flush=True)
         return False
     if live_manager is None:
         live_manager = OKXClientManager.new_instance()
+        print('[LIVE] ensure: created new live_manager', flush=True)
     try:
         await live_manager.init_client(key, secret, passphrase, False)
     except Exception as e:
@@ -2969,7 +2971,7 @@ async def _ensure_live_mirror_client() -> bool:
         return False
     lc = live_manager.get_client() if live_manager else None
     if not lc or getattr(lc, 'demo', True):
-        print('[LIVE] ensure: client missing or demo=true', flush=True)
+        print(f'[LIVE] ensure: client missing or demo=true (lc={lc is not None} demo={getattr(lc, "demo", "?")})', flush=True)
         return False
     if not getattr(lc, 'has_credentials', lambda: False)():
         print('[LIVE] ensure: no credentials on client', flush=True)
