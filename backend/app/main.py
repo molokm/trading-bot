@@ -547,7 +547,6 @@ async def startup():
         print('[startup] 7/7 Done ...', flush=True)
     except Exception as e:
         print(f'[startup] ERROR: {e}', flush=True)
-        raise
     global bot_poller, equity_tracker
     try:
         if telegram.token:
