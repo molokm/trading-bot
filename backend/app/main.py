@@ -249,7 +249,7 @@ def _publish_runtime():
 @app.on_event('startup')
 async def startup():
     # global MUST be the first statement (Python forbids prior use of these names)
-    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache
+    global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache, live_manager
     _STARTED_AT = _time.time()
     try:
         print('[startup] 0/7 auth secrets ...', flush=True)
