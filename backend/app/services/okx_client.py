@@ -280,6 +280,24 @@ class OKXClient:
             body["tpOrdPx"] = tp_ord_px or "-1"
         return await self._request("POST", "/api/v5/trade/order-algo", body=body)
 
+    async def amend_algo_order(self, inst_id: str, algo_id: str,
+                               ord_type: str = "conditional",
+                               sl_trigger_px: str = None, sl_ord_px: str = "-1",
+                               tp_trigger_px: str = None, tp_ord_px: str = "-1") -> dict:
+        """Amend a conditional (TP/SL) algo order. OKX /api/v5/trade/amend-algos."""
+        body = {
+            "instId": inst_id,
+            "algoId": algo_id,
+            "ordType": ord_type,
+        }
+        if sl_trigger_px:
+            body["slTriggerPx"] = sl_trigger_px
+            body["slOrdPx"] = sl_ord_px or "-1"
+        if tp_trigger_px:
+            body["tpTriggerPx"] = tp_trigger_px
+            body["tpOrdPx"] = tp_ord_px or "-1"
+        return await self._request("POST", "/api/v5/trade/amend-algos", body=body)
+
     async def cancel_algo_order(self, inst_id: str, algo_id: str,
                                 ord_type: str = "conditional") -> dict:
         """Cancel a single algo order. OKX /api/v5/trade/cancel-algos."""

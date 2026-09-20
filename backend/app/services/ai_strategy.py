@@ -174,6 +174,8 @@ class AIPosition:
     tg_message_id: int = 0
     peak_price: float = 0.0
     unrealized_pnl: float = 0.0
+    sl_algo_id: str = ""
+    tp_algo_id: str = ""
 
 
 class AIStrategy:
@@ -1732,6 +1734,11 @@ class AIStrategy:
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
         )
+        # Place exchange-level SL/TP algo orders (replaces software-only stop)
+        try:
+            await self._place_exchange_sl_tp(client, pos)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP placement: {e}", flush=True)
         # Mirror to LIVE after primary fill (re-bind client if needed)
         try:
             if not await self._mirror_enabled():
@@ -1757,6 +1764,11 @@ class AIStrategy:
         pos = self._positions.get(coin)
         if not pos:
             return
+        # Cancel exchange SL/TP algo orders first
+        try:
+            await self._cancel_exchange_sl_tp(client, pos)
+        except Exception as e:
+            print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
         if not self._execute_enabled():
             print(f"[AI] SIGNAL close {coin} ({reason}) execute=0", flush=True)
             del self._positions[coin]
@@ -1766,6 +1778,27 @@ class AIStrategy:
                 except Exception:
                     pass
             return
+        # Safety: verify position still exists on exchange (exchange algo may have closed it)
+        try:
+            ep = await client.get_positions(inst_id=pos.inst_id)
+            epos_list = ep.get("data") or []
+            has_pos = False
+            for ep_ in epos_list:
+                ep_sz = abs(float(ep_.get("pos") or 0))
+                if ep_sz > 0:
+                    has_pos = True
+                    break
+            if not has_pos:
+                print(f"[AI] close skip {coin}: exchange pos already gone (algo fired?)", flush=True)
+                del self._positions[coin]
+                if self.db:
+                    try:
+                        await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
+                    except Exception:
+                        pass
+                return
+        except Exception as e:
+            print(f"[AI] close exchange-check: {e}", flush=True)
         close_side = "sell" if pos.side == "long" else "buy"
         resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side,
                                  is_close=True)
@@ -2128,6 +2161,11 @@ class AIStrategy:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
               f"lev={lev} (mirror)", flush=True)
+        # Place exchange-level SL/TP on live account
+        try:
+            await self._place_exchange_sl_tp(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] exchange SL/TP: {e}", flush=True)
         self._persist_live()
         return True
 
@@ -2138,6 +2176,27 @@ class AIStrategy:
         if not lc or not pos:
             self._live_positions.pop(coin, None)
             return False
+        # Cancel exchange SL/TP algo orders first
+        try:
+            await self._cancel_exchange_sl_tp(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] cancel exchange SL/TP: {e}", flush=True)
+        # Safety: verify position still exists on exchange
+        try:
+            ep = await lc.get_positions(inst_id=pos.inst_id)
+            epos_list = ep.get("data") or []
+            has_pos = False
+            for ep_ in epos_list:
+                ep_sz = abs(float(ep_.get("pos") or 0))
+                if ep_sz > 0:
+                    has_pos = True
+                    break
+            if not has_pos:
+                print(f"[AI-LIVE] close skip {coin}: exchange pos already gone", flush=True)
+                self._live_positions.pop(coin, None)
+                return False
+        except Exception as e:
+            print(f"[AI-LIVE] close exchange-check: {e}", flush=True)
         live_bid = self._live_bot_id()
         close_side = "sell" if pos.side == "long" else "buy"
         resp = None
@@ -2446,6 +2505,94 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] persist: {e}", flush=True)
 
+    # ── Exchange-level SL/TP algo orders ──────────────────────────────────────
+
+    def _get_algo_client(self, client):
+        """Return the OKX client that owns the position (demo primary or live)."""
+        return client
+
+    async def _place_exchange_sl_tp(self, client, pos) -> None:
+        """Place a real exchange conditional (SL+TP) algo order for a position.
+
+        OKX conditional type supports both sl and tp in one request.  When one
+        triggers, the other is auto-cancelled.  The algo ID is stored in
+        pos.sl_algo_id; if tp_px is provided it's included in the same request.
+        Falls back to software-only stop if this fails.
+        """
+        if not client or not pos:
+            return
+        inst = pos.inst_id
+        sz_str = self._fmt_sz(pos.coin, pos.size)
+        sl_side = "sell" if pos.side == "long" else "buy"
+        sl_px = str(round(pos.stop_price, 4)) if pos.stop_price else None
+        tp_px = str(round(pos.take_price, 4)) if pos.take_price else None
+        if not sl_px and not tp_px:
+            return
+        try:
+            resp = await client.place_algo_order(
+                inst_id=inst, side=sl_side, sz=sz_str, td_mode="cross",
+                pos_side=pos.side,
+                sl_trigger_px=sl_px, sl_ord_px="-1" if sl_px else None,
+                tp_trigger_px=tp_px, tp_ord_px="-1" if tp_px else None,
+                cxl_on_close_pos=True,
+                cl_ord_id=f"ai_sltp_{pos.signal_id}",
+            )
+            if not resp.get("error"):
+                algo_data = resp.get("data") or []
+                if algo_data:
+                    algo_id = str(algo_data[0].get("algoId") or "")
+                    pos.sl_algo_id = algo_id
+                    pos.tp_algo_id = algo_id
+                    print(f"[AI] exchange SL/TP placed {pos.coin} algo={algo_id} sl={sl_px} tp={tp_px}", flush=True)
+                else:
+                    print(f"[AI] exchange SL/TP ack empty {pos.coin}", flush=True)
+            else:
+                print(f"[AI] exchange SL/TP error {pos.coin}: {resp.get('message')}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP exception {pos.coin}: {e}", flush=True)
+
+    async def _cancel_exchange_sl_tp(self, client, pos) -> None:
+        """Cancel the outstanding exchange SL/TP algo order (before close/amend)."""
+        if not client or not pos:
+            return
+        algo_id = pos.sl_algo_id or pos.tp_algo_id
+        if not algo_id:
+            return
+        try:
+            resp = await client.cancel_algo_order(pos.inst_id, algo_id)
+            if not resp.get("error"):
+                print(f"[AI] exchange SL/TP cancelled {pos.coin} algo={algo_id}", flush=True)
+            else:
+                print(f"[AI] exchange SL/TP cancel error {pos.coin}: {resp.get('message')}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP cancel exception {pos.coin}: {e}", flush=True)
+        pos.sl_algo_id = ""
+        pos.tp_algo_id = ""
+
+    async def _amend_exchange_sl(self, client, pos, new_sl_px: float) -> None:
+        """Move the exchange SL order to a new price (trailing / breakeven)."""
+        if not client or not pos or not pos.sl_algo_id:
+            return
+        sl_side = "sell" if pos.side == "long" else "buy"
+        sl_px = str(round(new_sl_px, 4))
+        try:
+            resp = await client.amend_algo_order(
+                inst_id=pos.inst_id, algo_id=pos.sl_algo_id,
+                sl_trigger_px=sl_px, sl_ord_px="-1",
+            )
+            if not resp.get("error"):
+                pos.stop_price = new_sl_px
+                print(f"[AI] exchange SL amended {pos.coin} -> {sl_px}", flush=True)
+            else:
+                msg = resp.get("message", "")
+                if "does not exist" in str(msg).lower() or "filled" in str(msg).lower() or "cancelled" in str(msg).lower():
+                    print(f"[AI] exchange SL amend stale {pos.coin}: {msg}", flush=True)
+                    pos.sl_algo_id = ""
+                else:
+                    print(f"[AI] exchange SL amend error {pos.coin}: {msg}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL amend exception {pos.coin}: {e}", flush=True)
+
     def _ensure_default_stops(self, pos) -> None:
         """Set sane stop/take when they leaked in as 0 (adopted/hydrated position).
 
@@ -2592,9 +2739,9 @@ class AIStrategy:
             act = float(getattr(self.config, "trail_activate_pct", 0.8) or 0)
             lock = float(getattr(self.config, "trail_lock_pct", 0.25) or 0)
             if act > 0 and upl >= act and pos.entry_price:
+                old_stop = pos.stop_price
                 if pos.side == "long":
                     be = pos.entry_price * (1 + lock / 100.0)
-                    # trail under peak
                     trail = (pos.peak_price or px) * (1 - lock / 100.0)
                     new_stop = max(be, trail)
                     if new_stop > pos.stop_price:
@@ -2605,6 +2752,12 @@ class AIStrategy:
                     new_stop = min(be, trail)
                     if new_stop < pos.stop_price:
                         pos.stop_price = new_stop
+                # Amend exchange SL order if stop moved
+                if pos.stop_price != old_stop:
+                    try:
+                        await self._amend_exchange_sl(client, pos, pos.stop_price)
+                    except Exception as e:
+                        print(f"[AI] trail amend SL: {e}", flush=True)
 
             # Hard stop / take first (skip levels that were never set)
             sp = float(pos.stop_price or 0)
