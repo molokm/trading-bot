@@ -1630,37 +1630,6 @@ async def me_dashboard(request: Request):
                     'pnl': float(t.get('pnl', 0) or 0),
                     'account_mode': t.get('account_mode', 'demo'),
                 })
-            if not trades and ai_bot:
-                for t in (ai_bot.get_status() or {}).get('recent_trades', [])[-20:]:
-                    if 'pnl' not in t:
-                        continue
-                    trades.append({
-                        'time': t.get('time', t.get('ts', '')),
-                        'inst': (t.get('symbol', t.get('inst_id', '')) or '').replace('-USDT-SWAP', ''),
-                        'side': t.get('side', ''),
-                        'pnl': float(t.get('pnl', 0) or 0),
-                        'account_mode': t.get('account_mode', 'demo'),
-                    })
-            if not trades:
-                try:
-                    epoch = await get_pnl_epoch()
-                    epoch_ms = 0
-                    if epoch:
-                        from datetime import datetime as _dt, timezone as _tz
-                        epoch_ms = int(_dt.fromisoformat(epoch).replace(tzinfo=_tz.utc).timestamp() * 1000)
-                    ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=20)
-                    for t in ects:
-                        st_sub = str(t.get('sub_type', '') or '')
-                        side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else ''
-                        trades.append({
-                            'time': t.get('close_ts', ''),
-                            'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
-                            'side': side,
-                            'pnl': float(t.get('pnl', 0) or 0),
-                            'account_mode': t.get('account_mode', 'demo'),
-                        })
-                except Exception:
-                    pass
         elif user_id:
             ub = strategy_mgr.get_or_create(str(user_id))
             for bid in (ub.rot_bot_id, ub.imp_bot_id):
@@ -1673,6 +1642,37 @@ async def me_dashboard(request: Request):
                         'pnl': float(t.get('pnl', 0) or 0),
                         'account_mode': 'live',
                     })
+        if not trades and ai_bot:
+            for t in (ai_bot.get_status() or {}).get('recent_trades', [])[-20:]:
+                if 'pnl' not in t:
+                    continue
+                trades.append({
+                    'time': t.get('time', t.get('ts', '')),
+                    'inst': (t.get('symbol', t.get('inst_id', '')) or '').replace('-USDT-SWAP', ''),
+                    'side': t.get('side', ''),
+                    'pnl': float(t.get('pnl', 0) or 0),
+                    'account_mode': t.get('account_mode', 'demo'),
+                })
+        if not trades:
+            try:
+                epoch = await get_pnl_epoch()
+                epoch_ms = 0
+                if epoch:
+                    from datetime import datetime as _dt, timezone as _tz
+                    epoch_ms = int(_dt.fromisoformat(epoch).replace(tzinfo=_tz.utc).timestamp() * 1000)
+                ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=20)
+                for t in ects:
+                    st_sub = str(t.get('sub_type', '') or '')
+                    side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else ''
+                    trades.append({
+                        'time': t.get('close_ts', ''),
+                        'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
+                        'side': side,
+                        'pnl': float(t.get('pnl', 0) or 0),
+                        'account_mode': t.get('account_mode', 'demo'),
+                    })
+            except Exception:
+                pass
     except Exception:
         pass
     trades.sort(key=lambda x: x.get('time', ''), reverse=True)
