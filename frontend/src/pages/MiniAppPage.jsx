@@ -157,7 +157,7 @@ function MiniAppPageInner() {
         <div className="flex items-center gap-1.5">
           <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.65rem] font-bold">
             <button type="button" onClick={() => setMode('demo')} className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}>DEMO</button>
-            <button type="button" onClick={() => setMode('live')} disabled={!data?.live?.connected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)'} ${!data?.live?.connected ? 'opacity-40' : ''}`}>
+            <button type="button" onClick={() => setMode('live')} disabled={!data?.live?.connected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'} ${!data?.live?.connected ? 'opacity-40' : ''}`}>
               {data?.live?.connected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
             </button>
           </div>
@@ -217,10 +217,6 @@ function MiniAppPageInner() {
               <span className="flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LIVE</span>
             </div>
           </Card>
-        )}
-
-        {isLive && !data?.live?.connected && (
-          <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Подключите LIVE ключи OKX в настройках бота</Card>
         )}
 
         <div>

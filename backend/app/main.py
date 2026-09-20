@@ -1743,7 +1743,12 @@ async def me_dashboard(request: Request):
                 pass
     except Exception:
         pass
-    trades.sort(key=lambda x: x.get('time', ''), reverse=True)
+    def _trade_sort_key(t):
+        v = t.get('time', 0)
+        if isinstance(v, str):
+            return v
+        return str(v)
+    trades.sort(key=_trade_sort_key, reverse=True)
     return {'demo': demo, 'live': live, 'trades': trades[:20], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
