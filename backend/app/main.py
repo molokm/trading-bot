@@ -684,7 +684,7 @@ async def startup():
                     await _ensure_live_mirror_client()
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
-                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '300')), execute=_exec)
+                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
@@ -772,7 +772,7 @@ async def startup():
                 max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
                 max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
                 risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
-                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "300")),
+                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "60")),
                 execute=True,
             )
             ai_bot = AIStrategy(
@@ -833,7 +833,7 @@ async def startup():
                     env_ex = os.getenv('AI_EXECUTE', '1').strip().lower()
                     _exec_s = env_ex not in ('0', 'false', 'no', 'off')
                 from app.services.legacy_stubs import AIScaleStrategy, AIScaleConfig
-                scfg = AIScaleConfig(capital=float(os.getenv('AI_SCALE_CAPITAL', '5000')), max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=1, risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '300')), execute=_exec_s, scale_enabled=True, max_adds=2)
+                scfg = AIScaleConfig(capital=float(os.getenv('AI_SCALE_CAPITAL', '5000')), max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=1, risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec_s, scale_enabled=True, max_adds=2)
                 ai_scale_bot = AIScaleStrategy(config=scfg, client_manager=client_manager, db=db, notifier=telegram)
                 ai_scale_bot.start()
                 _positions_cache = None
@@ -1847,7 +1847,7 @@ async def ai_start(data: dict=None):
             max_leverage=float(data.get("max_leverage") or 3),
             max_positions=int(data.get("max_positions") or 1),
             risk_per_trade=float(data.get("risk_per_trade") or 0.02),
-            poll_interval_sec=int(data.get("poll_interval_sec") or 300),
+            poll_interval_sec=int(data.get("poll_interval_sec") or 60),
             provider=provider,
             execute=_exec,
         )
