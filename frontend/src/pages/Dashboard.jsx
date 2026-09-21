@@ -954,7 +954,7 @@ export default function Dashboard({ health, connected, isGuest }) {
 
   // Summary stats for visible trades (closed only for PnL counts)
   const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5)
+    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 40)
     const withPnl = visible.filter(t => t.pnl != null)
     const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
     const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
@@ -1258,18 +1258,21 @@ export default function Dashboard({ health, connected, isGuest }) {
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
-              {t('dash.open_positions')}
-              <span className="ml-auto text-[var(--txt-muted)]">{displayPositions.length}</span>
+              <span>{t('dash.open_positions')}</span>
+              <span className={`ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border ${demoMode ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30'}`}>
+                {demoMode ? 'DEMO' : 'LIVE'}
+              </span>
+              <span className="ml-auto text-[var(--txt-muted)] mono">{displayPositions.length}</span>
             </div>
-            <div className="flex-1 overflow-auto">
+            <div className="flex-1 overflow-auto p-2 space-y-2">
               {loading ? (
                 <div className="flex items-center justify-center py-12"><Loader /></div>
               ) : displayPositions.length === 0 ? (
                 <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
-                <table className="data-table">
+                <>
                   {orphanPositions.length > 0 && (
-                    <div className="mb-2 px-2 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-2xs text-amber-400">
+                    <div className="px-2 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-2xs text-amber-400">
                       {orphanPositions.length} {t('dash.orphan_positions')}{' '}
                       <span className="mono">
                         {orphanPositions.map(op =>
@@ -1278,123 +1281,86 @@ export default function Dashboard({ health, connected, isGuest }) {
                       </span>
                     </div>
                   )}
-                  <thead>
-                    <tr>
-                      <th>{t('dash.pair')}</th>
-                      <th>Bot</th>
-                      <th className="text-center">Mode</th>
-                      <th className="text-right">{t('dash.size')}</th>
-                      <th className="text-right">{t('dash.entry')}</th>
-                      <th className="text-right">{t('dash.mark')}</th>
-                      <th className="text-right">PnL</th>
-                      <th className="text-right">ROE</th>
-                      {isAdmin(isGuest) ? null : <th className="text-right"></th>}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {displayPositions.filter((p) => {
-                      const posSideKey = (p.posSide || 'long').toLowerCase()
-                      const bn = resolveBotName(p)
-                      if (bn === 'Smart Money') return false
-                      return true
-                    }).map((p, i) => {
-                      const upl = parseFloat(p.upl || 0)
-                      const roe = parseFloat(p.uplRatio || 0) * 100
-                      const posId = `${p.instId}_${p.posSide}`
-                      const posSideKey = (p.posSide || 'long').toLowerCase()
-                      const botName = resolveBotName(p)
-                      const accountMode = (p.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
-                      const botBadge = (() => {
-                        const n = String(botName || '')
-                        if (/AI|Discretionary|Scale/i.test(n)) {
-                          return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                        }
-                        if (AI_ONLY_MODE && n) {
-                          return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                        }
-                        if (n === 'Momentum') return { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                        if (n === 'Impulse' || n === 'Impulse 1D') return { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
-                        if (n) return { label: n.slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
-                        return { label: '—', cls: 'text-[var(--txt-muted)]' }
-                      })()
-                      const mgnRatio = parseFloat(p.mgnRatio || 0)
-                      const riskCls = !mgnRatio ? ''
-                        : mgnRatio < 2 ? 'text-[var(--loss)]'
-                        : mgnRatio < 5 ? 'text-[var(--warn)]'
-                        : 'text-[var(--txt-muted)]'
-                      const side = (p.posSide || '').toLowerCase()
-                      const lever = p.lever ? `${p.lever}x` : ''
-                      return (
-                        <tr key={i} style={{
-                          background: upl >= 0
-                            ? 'linear-gradient(90deg, rgba(0,255,136,0.06) 0%, transparent 50%)'
-                            : 'linear-gradient(90deg, rgba(255,51,102,0.06) 0%, transparent 50%)',
-                          boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
-                        }}>
-                          <td className="text-[var(--txt)] font-medium">
-                            <div className="flex flex-col gap-0.5">
-                              <span>{p.instId?.replace('-USDT-SWAP', '')}</span>
-                              <span className="text-2xs text-[var(--txt-muted)] flex items-center gap-1.5">
-                                {side && (
-                                  <span className={side === 'long' ? 'text-[var(--profit)]' : side === 'short' ? 'text-[var(--loss)]' : ''}>
-                                    {side.toUpperCase()}
-                                  </span>
-                                )}
-                                {lever && <span>{lever}</span>}
-                                {mgnRatio > 0 && (
-                                  <span className={riskCls} title={t('dash.margin_ratio_tip')}>
-                                    MR {mgnRatio >= 100 ? mgnRatio.toFixed(0) : mgnRatio.toFixed(1)}
-                                  </span>
-                                )}
-                              </span>
-                            </div>
-                          </td>
-                          <td><span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span></td>
-                          <td className="text-center">
-                            {accountMode === 'live'
-                              ? <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                              : <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
-                            }
-                          </td>
-                          <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
-                          <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
-                          <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
-                          <td className={`text-right mono font-semibold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  {displayPositions.filter((p) => resolveBotName(p) !== 'Smart Money').map((p, i) => {
+                    const upl = parseFloat(p.upl || 0)
+                    const roe = parseFloat(p.uplRatio || 0) * 100
+                    const posId = `${p.instId}_${p.posSide}`
+                    const botName = resolveBotName(p)
+                    const accountMode = (p.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
+                    const side = (p.posSide || 'long').toLowerCase()
+                    const isLong = side !== 'short'
+                    const pair = (p.instId || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+                    const lever = p.lever ? `${p.lever}x` : ''
+                    const entry = parseFloat(p.avgPx || 0)
+                    const mark = parseFloat(p.markPx || 0)
+                    const size = parseFloat(p.pos || 0)
+                    return (
+                      <div
+                        key={posId || i}
+                        className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
+                        style={{
+                          boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}`,
+                        }}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex items-center gap-2 flex-wrap min-w-0">
+                            <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
+                            <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                              {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
+                            </span>
+                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                            {accountMode === 'live' ? (
+                              <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                            ) : (
+                              <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                            )}
+                          </div>
+                          <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                             {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
-                          </td>
-                          <td className={`text-right mono ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {roe.toFixed(2)}%
-                          </td>
+                            <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                              {roe >= 0 ? '+' : ''}{roe.toFixed(2)}%
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
+                          <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
+                          <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                          <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
                           {!isGuest && (
-                            <td className="text-right">
-                              <button
-                                className="btn btn-danger btn-sm"
-                                onClick={() => handleClosePosition(p)}
-                                disabled={closing === posId}
-                              >
-                                {closing === posId ? <Loader /> : <XCircle size={11} />}
-                                {t('dash.close')}
-                              </button>
-                            </td>
+                            <button
+                              type="button"
+                              className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2"
+                              onClick={() => handleClosePosition(p)}
+                              disabled={closing === posId}
+                            >
+                              {closing === posId ? <Loader /> : <XCircle size={11} />}
+                              {t('dash.close')}
+                            </button>
                           )}
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </>
               )}
             </div>
           </div>
 
-          {/* Trades — one row per position */}
+          {/* Trades — open + closed for current account mode only */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
-              {t('dash.trades')}
+              <span>{t('dash.trades')}</span>
+              <span className={`ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border ${demoMode ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30'}`}>
+                {demoMode ? 'DEMO' : 'LIVE'}
+              </span>
               <div className="ml-auto flex gap-1">
-                {['all', 'win', 'loss'].map(f => (
-                  <Chip key={f} active={filterResult === f} onClick={() => setFilterResult(f)}>
-                    {f === 'all' ? t('dash.all') : f === 'win' ? t('dash.profit') : t('dash.loss')}
+                {['all', 'open', 'win', 'loss'].map(f => (
+                  <Chip key={f} active={filterResult === f || (f === 'open' && filterReason === 'open')} onClick={() => {
+                    if (f === 'open') { setFilterReason('open'); setFilterResult('all') }
+                    else { setFilterReason('all'); setFilterResult(f) }
+                  }}>
+                    {f === 'all' ? t('dash.all') : f === 'open' ? 'Открытые' : f === 'win' ? t('dash.profit') : t('dash.loss')}
                   </Chip>
                 ))}
               </div>
@@ -1435,16 +1401,14 @@ export default function Dashboard({ health, connected, isGuest }) {
                     <th>{t('dash.pair')}</th>
                     <th>{t('dash.direction')}</th>
                     <th className="text-right">{t('dash.entry')}</th>
-                    <th className="text-right">{t('dash.mark')}</th>
+                    <th className="text-right">Выход / Марка</th>
                     <th className="text-right">{t('dash.size')}</th>
-                    <th className="text-right">TP1</th>
-                    <th className="text-right">TP2</th>
-                    <th className="text-right">SL</th>
                     <th className="text-right">PnL</th>
+                    <th>Статус</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5).map((tr, i) => {
+                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 40).map((tr, i) => {
                     const isOpen = tr.type === 'open'
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const isLong = tr.side === 'buy'
@@ -1478,9 +1442,9 @@ export default function Dashboard({ health, connected, isGuest }) {
                         } : undefined}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
-                          {tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}
+                          <span className="mr-1">{tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}</span>
                           {botBadge && (
-                            <span className={`ml-1 text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
+                            <span className={`text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
                           )}
                           {trMode === 'live' ? (
                             <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
@@ -1490,61 +1454,46 @@ export default function Dashboard({ health, connected, isGuest }) {
                         </td>
                         <td>
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                            {isLong ? 'L' : 'S'}
+                            {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
                         <td className="text-right mono text-2xs">{tr.entry ? `$${Number(tr.entry).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
                         <td className="text-right mono text-2xs">
-                          {mark > 0 ? (
-                            <span className="text-[var(--txt)]">
-                              ${mark.toLocaleString(undefined, {maximumFractionDigits: 2})}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
                           {isOpen ? (
-                            <span title={`изначально ${tr.size}`}>
-                              <span className="text-[var(--txt)]">{Number(tr.size_remaining || tr.size).toFixed(2)}</span>
-                              {tr.size && tr.size !== tr.size_remaining ? (
-                                <span className="text-[var(--txt-muted)]">/{Number(tr.size).toFixed(2)}</span>
-                              ) : null}
-                            </span>
+                            mark > 0 ? <span className="text-[var(--txt)]">${mark.toLocaleString(undefined, {maximumFractionDigits: 2})}</span> : '—'
+                          ) : tr.exit != null ? (
+                            <span className="text-[var(--txt)]">${Number(tr.exit).toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
                           ) : '—'}
                         </td>
                         <td className="text-right mono text-2xs">
-                          {isOpen && tr.tp1 != null ? (
-                            <span className={`${tp1Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
-                              ${Number(tr.tp1).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp1Hit ? ' ✓' : ''}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen && tr.tp2 != null ? (
-                            <span className={`${tp2Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
-                              ${Number(tr.tp2).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp2Hit ? ' ✓' : ''}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen && tr.stop != null ? (
-                            <span className={`${beHit ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
-                              ${Number(tr.stop).toLocaleString(undefined, {maximumFractionDigits: 2})}{beHit ? ' ✓' : ''}
-                            </span>
-                          ) : (tr.type === 'closed' && tr.exit) ? (
-                            <span className="text-[var(--txt-muted)]">${parseFloat(tr.exit).toLocaleString()}</span>
-                          ) : '—'}
+                          {tr.size != null ? Number(tr.size_remaining != null && isOpen ? tr.size_remaining : tr.size).toFixed(2) : '—'}
                         </td>
                         <td className="text-right">
-                          {!isOpen && tr.pnl != null ? (
+                          {isOpen ? (
+                            upnl != null && !Number.isNaN(upnl) ? (
+                              <span className={`mono text-2xs font-bold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                                {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                              </span>
+                            ) : (
+                              <span className="text-2xs text-[var(--txt-muted)]">—</span>
+                            )
+                          ) : tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
-                          ) : isOpen ? (
-                            <span className={`text-2xs font-medium ${stageInfo.color}`} title={t('dash.open_no_pnl')}>
-                              {stageInfo.label}
-                            </span>
                           ) : (
                             <span className="text-2xs text-[var(--txt-muted)]">—</span>
+                          )}
+                        </td>
+                        <td>
+                          {isOpen ? (
+                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--info)]/15 text-[var(--info)] border border-[var(--info)]/30">
+                              ОТКРЫТА
+                            </span>
+                          ) : (
+                            <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
+                              {stageInfo.label || 'ЗАКРЫТА'}
+                            </span>
                           )}
                         </td>
                       </tr>
