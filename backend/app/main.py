@@ -1552,16 +1552,41 @@ async def me_dashboard(request: Request):
                 pass
             demo = {
                 'running': st.get('running', False),
-                'pnl': round(st.get('lifetime_pnl', 0), 2),
-                'session_pnl': round(st.get('session_pnl', 0), 2),
-                'equity': round(st.get('equity', 0), 2),
+                'pnl': round(float(st.get('lifetime_pnl', 0) or 0), 2),
+                'session_pnl': round(float(st.get('session_pnl', 0) or 0), 2),
+                'equity': round(float(st.get('equity', 0) or 0), 2),
                 'capital': st.get('capital'),
-                'trades': st.get('lifetime_trades', 0),
+                'trades': int(st.get('lifetime_trades', 0) or 0),
                 'win_rate': st.get('win_rate'),
-                'positions': st.get('open_positions', []),
+                'positions': st.get('open_positions', []) or [],
                 'pulse': st.get('pulse') or st.get('description') or '',
                 'model': st.get('model') or (st.get('llm') or {}).get('model') or '',
+                'unrealized': 0.0,
             }
+            # Prefer dashboard PnL engine (same source as main page) for DEMO totals
+            try:
+                # Force demo numbers when showcase is demo-oriented
+                pnl_data = await _compute_pnl()
+                if isinstance(pnl_data, dict):
+                    mode = str(pnl_data.get('account_mode') or _account_mode() or 'demo').lower()
+                    if mode != 'live':
+                        demo['pnl'] = round(float(pnl_data.get('total') or pnl_data.get('strategy_realized') or demo['pnl'] or 0), 2)
+                        demo['session_pnl'] = round(float(pnl_data.get('1d') or demo['session_pnl'] or 0), 2)
+                        demo['trades'] = int(pnl_data.get('trades_counted') or demo['trades'] or 0)
+                        demo['unrealized'] = round(float(pnl_data.get('unrealized') or 0), 2)
+                        if pnl_data.get('win_rate') is not None:
+                            demo['win_rate'] = pnl_data.get('win_rate')
+            except Exception as _pe:
+                print(f'[me/dashboard] demo pnl_engine: {_pe}', flush=True)
+            # Unrealized from open demo positions if still 0
+            if not demo.get('unrealized'):
+                try:
+                    u = 0.0
+                    for op in (demo.get('positions') or []):
+                        u += float(op.get('unrealized_pnl') or op.get('upl') or 0)
+                    demo['unrealized'] = round(u, 2)
+                except Exception:
+                    pass
     except Exception as e:
         demo = {'error': str(e)}
     trades = []
@@ -1615,14 +1640,12 @@ async def me_dashboard(request: Request):
                     'unrealized': round(unrealized, 2),
                     'positions': positions,
                 }
-                try:
-                    pnl_data = await get_pnl()
-                    live['total_pnl'] = round(float(pnl_data.get('total') or 0), 2)
-                    live['session_pnl'] = round(float(pnl_data.get('1d') or 0), 2)
-                    live['trades'] = int(pnl_data.get('trades_counted') or 0)
-                    live['strategy_realized'] = round(float(pnl_data.get('strategy_realized') or pnl_data.get('total') or 0), 2)
-                except Exception:
-                    pass
+                # LIVE PnL from this account's bills only (not DEMO dashboard)
+                live['total_pnl'] = 0.0
+                live['session_pnl'] = 0.0
+                live['trades'] = 0
+                live['strategy_realized'] = 0.0
+
                 try:
                     bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
                     bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
@@ -1657,6 +1680,30 @@ async def me_dashboard(request: Request):
                             'pnl': round(bp, 4),
                             'account_mode': 'live',
                         })
+                    # Aggregate LIVE realized PnL from close bills (subType 5/6)
+                    live_realized = 0.0
+                    live_today = 0.0
+                    from datetime import datetime as _dt, timezone as _tz
+                    _today_start = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    _today_ms = int(_today_start.timestamp() * 1000)
+                    for _tr in trades:
+                        if str(_tr.get('account_mode') or '') != 'live':
+                            continue
+                        try:
+                            live_realized += float(_tr.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            pass
+                        try:
+                            ts = _tr.get('time') or 0
+                            ts_ms = int(ts) if not isinstance(ts, str) else 0
+                            if ts_ms >= _today_ms:
+                                live_today += float(_tr.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            pass
+                    live['total_pnl'] = round(live_realized, 2)
+                    live['strategy_realized'] = live['total_pnl']
+                    live['session_pnl'] = round(live_today, 2)
+                    live['trades'] = wins_n + losses_n
                     _total_t = live.get('trades') or (wins_n + losses_n)
                     live['win_rate'] = round(wins_n / _total_t * 100, 1) if _total_t else None
                     live['wins'] = wins_n

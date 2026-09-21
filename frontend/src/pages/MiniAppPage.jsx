@@ -103,34 +103,62 @@ function MiniAppPageInner() {
 
   const metrics = useMemo(() => {
     if (isLive && data?.live) {
-      return {total: data.live.total_pnl ?? data.live.unrealized ?? 0, today: data.live.session_pnl ?? 0, unreal: data.live.unrealized ?? 0, equity: data.live.equity ?? null, tradesN: data.live.trades ?? 0}
+      const L = data.live
+      return {
+        total: Number(L.total_pnl ?? L.strategy_realized ?? 0),
+        today: Number(L.session_pnl ?? 0),
+        unreal: Number(L.unrealized ?? 0),
+        equity: L.equity ?? null,
+        tradesN: Number(L.trades ?? 0),
+        winRate: L.win_rate,
+      }
     }
     const d = data?.demo || {}
-    return {total: d.pnl ?? 0, today: d.session_pnl ?? 0, unreal: 0, equity: d.equity ?? null, capital: d.capital ?? null, tradesN: d.trades ?? 0}
+    // Unrealized: prefer engine field, else sum positions
+    let unreal = Number(d.unrealized ?? 0)
+    if (!unreal && Array.isArray(d.positions)) {
+      unreal = d.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
+    }
+    return {
+      total: Number(d.pnl ?? 0),
+      today: Number(d.session_pnl ?? 0),
+      unreal,
+      equity: d.equity ?? null,
+      capital: d.capital ?? null,
+      tradesN: Number(d.trades ?? 0),
+      winRate: d.win_rate,
+    }
   }, [isLive, data])
 
   const viewPositions = useMemo(() => {
     const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
     return src.map((p, i) => ({
-      key: `${p.coin || p.symbol || i}-${p.side}`,
+      key: `${p.coin || p.symbol || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
       coin: (p.coin || p.symbol || '').replace('-USDT-SWAP', ''),
-      side: (p.side || 'long').toLowerCase(),
-      size: Number(p.size || p.sz || 0),
+      side: (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long',
+      size: Number(p.size || p.sz || p.size_remaining || 0),
       entry: Number(p.entry_price || p.entry || p.px || 0),
-      mark: Number(p.mark_price || p.mark || 0),
+      mark: Number(p.mark_price || p.mark || p.mark_px || 0),
       upl: Number(p.upl || p.unrealized_pnl || 0),
       lever: Number(p.leverage || p.lever || 0),
+      mode: isLive ? 'live' : 'demo',
     })).filter(p => p.size > 0)
   }, [isLive, data])
 
   const viewTrades = useMemo(() => {
     const all = data?.trades || []
-    const filtered = isLive ? all.filter(t => t.account_mode === 'live') : all.filter(t => t.account_mode !== 'live')
-    return filtered.slice(0, 10).map(t => ({
+    const filtered = isLive
+      ? all.filter(t => String(t.account_mode || '').toLowerCase() === 'live')
+      : all.filter(t => {
+          const m = String(t.account_mode || t.mode || '').toLowerCase()
+          return !m || m === 'demo'
+        })
+    return filtered.slice(0, 15).map(t => ({
       time: t.time || t.timestamp || '',
       inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
       side: (t.side || '').toLowerCase(),
       pnl: Number(t.pnl || 0),
+      mode: isLive ? 'live' : 'demo',
     }))
   }, [data?.trades, isLive])
 
@@ -176,9 +204,9 @@ function MiniAppPageInner() {
             )}
           </div>
           <div className="grid grid-cols-3 gap-2">
-            <Metric label="Всего" value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
+            <Metric label={isLive ? 'Всего LIVE' : 'Всего DEMO'} value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
             <Metric label="Сегодня" value={pnlSign(metrics.today)} className={pnlClass(metrics.today)} />
-            <Metric label="Открыто" value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
+            <Metric label="Нереализ." value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
           </div>
         </Card>
 
@@ -231,11 +259,16 @@ function MiniAppPageInner() {
               {viewPositions.map(p => (
                 <Card key={p.key} className="py-2.5">
                   <div className="flex items-center justify-between gap-2 mb-1">
-                    <div className="flex items-center gap-1.5 min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                       <span className="text-xs font-bold truncate">{p.coin}</span>
                       <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                         {p.side === 'long' ? 'LONG' : 'SHORT'}
                       </span>
+                      {p.mode === 'live' ? (
+                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                      ) : (
+                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                      )}
                     </div>
                     <span className={`text-xs font-bold mono ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
                   </div>
@@ -260,7 +293,15 @@ function MiniAppPageInner() {
                     <div className="flex items-center gap-1.5 min-w-0">
                       {Number(tr.pnl) >= 0 ? <ArrowUpRight size={14} className="text-[var(--profit)] flex-shrink-0" /> : <ArrowDownRight size={14} className="text-[var(--loss)] flex-shrink-0" />}
                       <div className="min-w-0">
-                        <div className="text-xs font-semibold truncate">{tr.inst || '—'} <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span></div>
+                        <div className="text-xs font-semibold truncate">
+                          {tr.inst || '—'}{' '}
+                          <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span>
+                          {tr.mode === 'live' ? (
+                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                          ) : (
+                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <span className={`text-xs font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>{pnlSign(tr.pnl)}</span>
