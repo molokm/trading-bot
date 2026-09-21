@@ -1,7 +1,7 @@
 """Telegram bot command & payments poller for the Pro subscription.
 
 Long-polls Telegram getUpdates and handles:
-  /start, /help, /subscribe_pro, /status       — text commands
+  /start, /help, /subscribe_pro, /status, /stats — text commands
   pre_checkout_query                            — Stars invoice confirmation
   successful_payment                            — activate/extend the Pro
                                                   subscription (mini-app access)
@@ -109,6 +109,11 @@ class TelegramBotPoller:
                 await self._cmd_subscribe(chat_id, "pro")
             elif cmd in ("/status",):
                 await self._cmd_status(chat_id)
+            elif cmd in ("/stats", "/stat", "/statistics"):
+                # optional period: /stats week
+                parts = text.split()
+                period = parts[1].lower() if len(parts) > 1 else "all"
+                await self._cmd_stats(chat_id, period=period)
             elif cmd in ("/tracker",):
                 await self._send_info(chat_id, "results")
             elif cmd == "/about":
@@ -128,8 +133,9 @@ class TelegramBotPoller:
                  {"text": "🔍 Результаты", "callback_data": "info_results"}],
                 [{"text": "💳 Оплата", "callback_data": "info_payment"},
                  {"text": "⚠️ Риски", "callback_data": "info_risks"}],
-                [{"text": "❓ FAQ", "callback_data": "info_faq"},
+                [{"text": "📊 Статистика", "callback_data": "stats_all"},
                  {"text": "ℹ️ О боте", "callback_data": "about"}],
+                [{"text": "❓ FAQ", "callback_data": "info_faq"}],
             ]
         }
 
@@ -261,7 +267,7 @@ class TelegramBotPoller:
             f"{telegram_metrics_block(html=True)}\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
             "AI торгует на <b>вашем</b> счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe_pro · /info · /status · /about · /start"
+            "Команды: /stats · /subscribe_pro · /info · /status · /about · /start"
         )
 
     def _about_text(self) -> str:
@@ -300,9 +306,119 @@ class TelegramBotPoller:
             await self._send_msg(chat_id, self._about_text())
         elif data == "menu":
             await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
+        elif data.startswith("stats_"):
+            period = data[len("stats_"):] or "all"
+            await self._cmd_stats(chat_id, period=period)
         elif data.startswith("info_"):
             section = data[len("info_"):]
             await self._send_info(chat_id, section)
+
+    def _stats_keyboard(self, period: str = "all") -> dict:
+        periods = [
+            ("today", "Сегодня"),
+            ("week", "Неделя"),
+            ("30d", "30д"),
+            ("90d", "90д"),
+            ("all", "Всё"),
+        ]
+        row = []
+        for pid, label in periods:
+            mark = "· " if pid == period else ""
+            row.append({"text": f"{mark}{label}", "callback_data": f"stats_{pid}"})
+        return {
+            "inline_keyboard": [
+                row[:3],
+                row[3:],
+                [{"text": "🔄 Обновить", "callback_data": f"stats_{period}"},
+                 {"text": "🔙 В меню", "callback_data": "menu"}],
+            ]
+        }
+
+    @staticmethod
+    def _fmt_pnl(v) -> str:
+        try:
+            n = float(v or 0)
+        except (TypeError, ValueError):
+            return "—"
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:.2f}"
+
+    async def _cmd_stats(self, chat_id, period: str = "all"):
+        """Live DEMO stats — same engine as web /api/stats."""
+        period = (period or "all").strip().lower()
+        aliases = {
+            "today": "today", "1d": "today", "day": "today", "сегодня": "today",
+            "week": "week", "w": "week", "неделя": "week",
+            "30d": "30d", "month": "30d", "месяц": "30d",
+            "90d": "90d", "quarter": "90d",
+            "all": "all", "всё": "all", "все": "all", "total": "all",
+        }
+        period = aliases.get(period, "all")
+        period_labels = {
+            "today": "сегодня",
+            "week": "неделя (с пн)",
+            "30d": "30 дней",
+            "90d": "90 дней",
+            "all": "всё время",
+        }
+
+        if not self.db:
+            await self._send_msg(chat_id, "⚠️ Статистика временно недоступна (нет БД).")
+            return
+
+        try:
+            from app.services import pnl_engine
+            data = await pnl_engine.compute_stats(
+                self.db,
+                account_mode="demo",
+                ai_only=True,
+                period=period,
+                sync_fn=None,  # avoid blocking TG on OKX; uses latest stored closes
+            )
+        except Exception as e:
+            log.warning("stats cmd error: %s", e)
+            await self._send_msg(chat_id, f"⚠️ Не удалось загрузить статистику: {e}")
+            return
+
+        realized = self._fmt_pnl(data.get("realized_pnl"))
+        trades = int(data.get("trades") or 0)
+        wins = int(data.get("wins") or 0)
+        losses = int(data.get("losses") or 0)
+        wr = data.get("win_rate")
+        pf = data.get("profit_factor")
+        avg_w = self._fmt_pnl(data.get("avg_win"))
+        avg_l = self._fmt_pnl(data.get("avg_loss"))
+        d_from = data.get("from") or "—"
+        d_to = data.get("to") or "—"
+
+        by_coin = data.get("by_coin") or []
+        coin_lines = []
+        for c in by_coin[:6]:
+            coin_lines.append(
+                f"  {c.get('coin')}: <b>{self._fmt_pnl(c.get('pnl'))}</b> $ "
+                f"({c.get('trades', 0)} сд., WR {c.get('win_rate', 0)}%)"
+            )
+        coins_block = "\n".join(coin_lines) if coin_lines else "  нет закрытий"
+
+        pf_s = f"{pf}" if pf is not None else "—"
+        wr_s = f"{wr}%" if wr is not None else "—"
+
+        text = (
+            f"📊 <b>Статистика DEMO · AI</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Период: <b>{period_labels.get(period, period)}</b>\n"
+            f"{d_from} → {d_to}\n\n"
+            f"Realized PnL: <b>{realized} USDT</b>\n"
+            f"Сделок: <b>{trades}</b> · ✅ {wins} / ❌ {losses}\n"
+            f"Win rate: <b>{wr_s}</b> · PF <b>{pf_s}</b>\n"
+            f"Ср. плюс: <b>{avg_w}</b> · Ср. минус: <b>{avg_l}</b>\n\n"
+            f"<b>По монетам</b>\n{coins_block}\n\n"
+            f"<i>Только закрытые сделки · МСК · /stats</i>"
+        )
+        await self._send_msg(
+            chat_id, text,
+            reply_markup=self._stats_keyboard(period),
+        )
 
     async def _cmd_start(self, chat_id):
         await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
@@ -479,6 +595,7 @@ class TelegramBotPoller:
         await self._api("setMyShortDescription", short_description=short[:120])
         await self._api("setMyCommands", commands=[
             {"command": "start", "description": "Главное меню"},
+            {"command": "stats", "description": "Статистика DEMO (PnL, win rate)"},
             {"command": "info", "description": "Как работает AI"},
             {"command": "status", "description": "Подписка и статус"},
             {"command": "tracker", "description": "Живой отчёт"},
