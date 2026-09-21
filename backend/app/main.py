@@ -5486,29 +5486,68 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
             return {'trades': trades[:limit], 'debug': dict(_paired_cache['debug']), 'account_mode': _mode}
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end, mode=_mode)
         trades = resp.get('trades', [])
-        # When in demo mode, also fetch live mirror trades so closed live
-        # positions (account_mode='live') appear in the dashboard trades card.
-        _lc = None
-        try:
-            _lc = live_manager.get_client() if live_manager else None
-        except Exception:
-            _lc = None
-        _has_live_mirror = bool(_lc and not getattr(_lc, 'demo', True) and getattr(_lc, 'has_credentials', lambda: False)())
-        if not _has_live_mirror and db:
-            try:
-                _live_count = await db._fetchone("SELECT count(*) as c FROM trades WHERE account_mode = 'live'")
-                if _live_count and int(_live_count.get('c', 0) or 0) > 0:
-                    _has_live_mirror = True
-            except Exception:
-                pass
-        if _mode == 'demo' and _has_live_mirror:
-            try:
-                _live_resp = await _get_paired_trades_impl(limit=1000, begin=begin, end=end, mode='live')
-                _live_trades = _live_resp.get('trades', [])
-                if _live_trades:
-                    trades = list(trades) + list(_live_trades)
-            except Exception as _e:
-                print(f'[trades/paired] live mirror merge error: {_e}', flush=True)
+        # When in demo mode, also collect live mirror trades from DB + in-memory
+        # _trade_log so that closed live positions appear in the trades card.
+        # We read directly instead of calling _get_paired_trades_impl(mode='live')
+        # because that function reinitialises client_manager and corrupts demo state.
+        if _mode == 'demo' and ai_bot:
+            _live_trades = []
+            # 1) DB trades with account_mode='live'
+            if db:
+                try:
+                    _ai_bid = getattr(ai_bot, 'BOT_ID', AI_BOT_ID)
+                    _live_db = await db.get_trades_multi_bot(
+                        [_ai_bid, f'{_ai_bid}_live'],
+                        limit=500, account_mode='live',
+                    )
+                    for t in (_live_db or []):
+                        bid = t.get('bot_id') or ''
+                        row_mode = (t.get('account_mode') or '').strip().lower()
+                        if row_mode != 'live':
+                            continue
+                        px = float(t.get('px', 0) or 0)
+                        pnl = float(t.get('pnl', 0) or 0)
+                        inst = t.get('inst_id', '')
+                        _live_trades.append({
+                            'time': t.get('timestamp', ''), 'side': t.get('side', ''),
+                            'symbol': inst, 'inst_id': inst,
+                            'ord_id': str(t.get('ord_id', '') or '').strip(),
+                            'entry_price': px, 'exit_price': None,
+                            'pnl': pnl,
+                            'reason': 'open' if pnl == 0 else 'closed',
+                            'pos_side': 'long' if t.get('side') == 'buy' else 'short',
+                            'signal_id': t.get('signal_id', 0),
+                            'bot_id': bid,
+                            'account_mode': 'live', 'account_key': 'live',
+                            'bot': 'AI Discretionary 1H',
+                        })
+                except Exception as _e:
+                    print(f'[trades/paired] live DB read: {_e}', flush=True)
+            # 2) In-memory _trade_log from all bots (live mirror entries)
+            for _bot_key, _bot_obj in [('ai', ai_bot), ('rotation', rotation), ('impulse', impulse), ('validation', validation)]:
+                if not _bot_obj or not getattr(_bot_obj, '_trade_log', None):
+                    continue
+                for t in _bot_obj._trade_log:
+                    if (t.get('account_mode') or '').strip().lower() != 'live':
+                        continue
+                    _live_trades.append({
+                        'time': t.get('time', ''), 'side': t.get('side', ''),
+                        'symbol': t.get('symbol', ''),
+                        'inst_id': t.get('symbol', '') or t.get('inst_id', ''),
+                        'ord_id': str(t.get('ord_id', '') or '').strip(),
+                        'entry_price': t.get('entry_price') or t.get('entry', 0),
+                        'exit_price': t.get('exit_price', None),
+                        'pnl': t.get('pnl', 0),
+                        'reason': t.get('reason', 'open'),
+                        'pos_side': t.get('pos_side', 'long'),
+                        'signal_id': t.get('signal_id', 0),
+                        'bot_id': getattr(_bot_obj, 'BOT_ID', _bot_key),
+                        'account_mode': 'live', 'account_key': 'live',
+                        'bot': t.get('bot') or 'AI Discretionary 1H',
+                    })
+            if _live_trades:
+                trades = list(trades) + _live_trades
+                print(f'[trades/paired] merged {len(_live_trades)} live mirror trades', flush=True)
         _tagged = []
         for _tr in trades:
             if not isinstance(_tr, dict):
@@ -5523,9 +5562,6 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                 else:
                     _tr = {**_tr, 'account_mode': 'live'}
             else:
-                # Keep live mirror trades tagged as 'live' so the frontend
-                # can distinguish them from demo trades (critical for the
-                # openKeys phantom-close filter).
                 if _m not in ('demo', 'live'):
                     _tr = {**_tr, 'account_mode': 'demo'}
             _tagged.append(_tr)
