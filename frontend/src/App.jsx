@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import {
-  LayoutDashboard, Bot, BarChart3, ScrollText, Settings, Users,
+  LayoutDashboard, Bot, ScrollText, Settings, Users,
   TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
@@ -10,7 +10,6 @@ import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
-const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const AdminPage = lazy(() => import('./pages/AdminPage'))
@@ -119,7 +118,6 @@ function AppLayout() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
-    { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
     ...(isAdmin ? [
       { to: '/admin', icon: Users, label: 'Админка' },
@@ -238,7 +236,6 @@ function AppLayout() {
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
           <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
-          <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/admin" element={<AdminPage />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} />} />
