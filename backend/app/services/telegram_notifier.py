@@ -182,15 +182,25 @@ class TelegramNotifier:
             print(f"[TG] resolve_open_message_id: {e}", flush=True)
         return 0
 
-    def fire(self, text: str, parse_mode: str = "HTML") -> None:
+    def fire(self, text: str, parse_mode: str = "HTML", account_mode: str = "demo") -> None:
         """Fire-and-forget send — never blocks the trading loop or raises.
 
-        Trade signals go straight to the bot's owner chat (TELEGRAM_CHAT_ID).
-        There is no separate paid signals channel anymore — signals are free
-        and published in the bot itself."""
-        if not self.configured:
+        Isolation rules:
+        - DEMO (default): owner chat + optional public channel (free signals for all).
+        - LIVE: owner chat ONLY — never channel / never other users.
+        """
+        if not self.token:
             return
-        self._fire_send(self.chat_id, text, parse_mode)
+        mode = (account_mode or "demo").strip().lower()
+        if mode == "live":
+            if self.chat_id:
+                self._fire_send(self.chat_id, text, parse_mode)
+            return
+        # DEMO / unknown → public-safe destinations only
+        if self.chat_id:
+            self._fire_send(self.chat_id, text, parse_mode)
+        if self.channel_id and str(self.channel_id) != str(self.chat_id):
+            self._fire_send(self.channel_id, text, parse_mode)
 
     def _fire_send(self, chat_id: str, text: str, parse_mode: str) -> None:
         try:
@@ -283,18 +293,56 @@ class TelegramNotifier:
         print(f"[TG] send FAILED chat={chat_id} text={text[:80]!r}", flush=True)
         return 0
 
-    async def send_trade(self, text: str, parse_mode: str = "HTML", reply_to_message_id=None) -> int:
-        """Awaitable trade notify; returns Telegram message_id."""
-        if not self.configured:
-            print(
-                f"[TG] send_trade skipped status={self.status} "
-                f"token={'yes' if self.token else 'no'} chat={'yes' if self.chat_id else 'no'}",
-                flush=True,
-            )
+    async def send_trade(
+        self,
+        text: str,
+        parse_mode: str = "HTML",
+        reply_to_message_id=None,
+        account_mode: str = "demo",
+        owner_chat_id: str = "",
+    ) -> int:
+        """Awaitable trade notify; returns Telegram message_id of primary recipient.
+
+        Isolation (hard rules):
+        - account_mode=demo → free shared signals: owner chat + optional channel.
+        - account_mode=live → ONLY the mirror owner (owner_chat_id or TELEGRAM_CHAT_ID).
+          Never the public channel. Never other users' chats.
+        """
+        mode = (account_mode or "demo").strip().lower()
+        if mode == "live":
+            target = str(owner_chat_id or self.chat_id or "").strip()
+            if not self.token or not target:
+                print(
+                    f"[TG] send_trade LIVE skipped token={'yes' if self.token else 'no'} "
+                    f"owner={bool(owner_chat_id)} chat={bool(self.chat_id)}",
+                    flush=True,
+                )
+                return 0
+            mid = await self._send_to(target, text, parse_mode, reply_to_message_id=reply_to_message_id)
+            if not mid:
+                print(f"[TG] send_trade LIVE returned 0 chat_id={target}", flush=True)
+            else:
+                print(f"[TG] send_trade LIVE ok chat_id={target} (private, no channel)", flush=True)
+            return mid
+
+        # DEMO (and default): shared free signals
+        if not self.token:
+            print("[TG] send_trade DEMO skipped: no token", flush=True)
             return 0
-        mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
-        if not mid:
-            print(f"[TG] send_trade returned 0 (check bot can message chat_id={self.chat_id})", flush=True)
+        mid = 0
+        if self.chat_id:
+            mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
+            if not mid:
+                print(f"[TG] send_trade DEMO owner returned 0 chat_id={self.chat_id}", flush=True)
+        # Public free channel — DEMO only, never LIVE
+        if self.channel_id and str(self.channel_id) != str(self.chat_id):
+            try:
+                ch_mid = await self._send_to(self.channel_id, text, parse_mode)
+                print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)
+                if not mid:
+                    mid = ch_mid
+            except Exception as e:
+                print(f"[TG] send_trade DEMO channel error: {e}", flush=True)
         return mid
 
     # ─── Mini App helpers ───

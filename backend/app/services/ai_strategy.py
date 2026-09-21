@@ -1714,13 +1714,17 @@ class AIStrategy:
                 print(f"[AI] db open: {e}", flush=True)
         if self.notifier and getattr(self.notifier, 'configured', True):
             try:
-                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
-                    coin=coin, side=side, price=round(fill_px, 4),
-                    stop=round(stop, 4), size=sz, leverage=lev,
-                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                    account_mode=self._account_mode_tag()[0],
-                    account_key=self._account_mode_tag()[1],
-                ))
+                _tg_mode = self._account_mode_tag()[0]
+                _tg_mid = await self.notifier.send_trade(
+                    self.notifier.open_msg(
+                        coin=coin, side=side, price=round(fill_px, 4),
+                        stop=round(stop, 4), size=sz, leverage=lev,
+                        bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                        account_mode=_tg_mode,
+                        account_key=self._account_mode_tag()[1],
+                    ),
+                    account_mode=_tg_mode if _tg_mode in ("demo", "live") else "demo",
+                )
                 if _tg_mid:
                     pos.tg_message_id = int(_tg_mid)
                     await self.notifier.remember_open_db(
@@ -1929,7 +1933,7 @@ class AIStrategy:
                     account_mode=self._account_mode_tag()[0],
                     account_key=self._account_mode_tag()[1],
                 )
-                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None)
+                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None, account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo")
             except Exception as e:
                 print(f"[AI] TG close: {e}", flush=True)
         del self._positions[coin]
@@ -2148,13 +2152,16 @@ class AIStrategy:
                 print(f"[AI-LIVE] db open: {e}", flush=True)
         if self.notifier and getattr(self.notifier, 'configured', True):
             try:
-                _tg_mid = await self.notifier.send_trade(self.notifier.open_msg(
-                    coin=coin, side=side, price=round(fill_px, 4),
-                    stop=round(stop, 4), size=sz, leverage=lev,
-                    bot_name=self.BOT_NAME + " (LIVE)",
-                    signal_id=pos.signal_id,
-                    account_mode="live", account_key="live",
-                ))
+                _tg_mid = await self.notifier.send_trade(
+                    self.notifier.open_msg(
+                        coin=coin, side=side, price=round(fill_px, 4),
+                        stop=round(stop, 4), size=sz, leverage=lev,
+                        bot_name=self.BOT_NAME + " (LIVE)",
+                        signal_id=pos.signal_id,
+                        account_mode="live", account_key="live",
+                    ),
+                    account_mode="live",
+                )
                 if _tg_mid:
                     pos.tg_message_id = int(_tg_mid)
             except Exception as e:
@@ -2301,6 +2308,7 @@ class AIStrategy:
                 await self.notifier.send_trade(
                     _txt,
                     reply_to_message_id=getattr(pos, "tg_message_id", 0) or None,
+                    account_mode="live",
                 )
             except Exception as e:
                 print(f"[AI-LIVE] TG close: {e}", flush=True)
@@ -2923,7 +2931,10 @@ class AIStrategy:
                             account_mode=self._account_mode_tag()[0],
                             account_key=self._account_mode_tag()[1],
                         )
-                        await self.notifier.send_trade(_txt)
+                        await self.notifier.send_trade(
+                            _txt,
+                            account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo",
+                        )
                     except Exception as _nte:
                         print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
                 self._positions.pop(coin, None)
