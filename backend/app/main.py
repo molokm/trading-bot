@@ -5488,7 +5488,19 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
         trades = resp.get('trades', [])
         # When in demo mode, also fetch live mirror trades so closed live
         # positions (account_mode='live') appear in the dashboard trades card.
-        _has_live_mirror = bool(ai_bot and getattr(ai_bot, '_live_positions', None))
+        _lc = None
+        try:
+            _lc = live_manager.get_client() if live_manager else None
+        except Exception:
+            _lc = None
+        _has_live_mirror = bool(_lc and not getattr(_lc, 'demo', True) and getattr(_lc, 'has_credentials', lambda: False)())
+        if not _has_live_mirror and db:
+            try:
+                _live_count = await db._fetchone("SELECT count(*) as c FROM trades WHERE account_mode = 'live'")
+                if _live_count and int(_live_count.get('c', 0) or 0) > 0:
+                    _has_live_mirror = True
+            except Exception:
+                pass
         if _mode == 'demo' and _has_live_mirror:
             try:
                 _live_resp = await _get_paired_trades_impl(limit=1000, begin=begin, end=end, mode='live')
