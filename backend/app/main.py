@@ -5490,31 +5490,45 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
         # _trade_log so that closed live positions appear in the trades card.
         # We read directly instead of calling _get_paired_trades_impl(mode='live')
         # because that function reinitialises client_manager and corrupts demo state.
-        if _mode == 'demo' and ai_bot:
+        if _mode == 'demo':
             _live_trades = []
-            # 1) DB trades with account_mode='live'
+            _live_positions_count = 0
+            # 1) Check if live mirror is active (has open positions or ever had trades)
+            _lc = None
+            if live_manager:
+                try:
+                    _lc = live_manager.get_client()
+                except Exception:
+                    _lc = None
+            _live_connected = bool(_lc and not getattr(_lc, 'demo', True)
+                                   and getattr(_lc, 'has_credentials', lambda: False)())
+            if _live_connected and ai_bot:
+                _live_positions_count = len(getattr(ai_bot, '_live_positions', {}))
+            # 2) DB trades with account_mode='live'
             if db:
                 try:
-                    _ai_bid = getattr(ai_bot, 'BOT_ID', AI_BOT_ID)
+                    _ai_bid = AI_BOT_ID
                     _live_db = await db.get_trades_multi_bot(
                         [_ai_bid, f'{_ai_bid}_live'],
                         limit=500, account_mode='live',
                     )
+                    print(f'[trades/paired] live DB rows: {len(_live_db or [])} '
+                          f'(bot_ids={[_ai_bid, f"{_ai_bid}_live"]})', flush=True)
                     for t in (_live_db or []):
                         bid = t.get('bot_id') or ''
                         row_mode = (t.get('account_mode') or '').strip().lower()
                         if row_mode != 'live':
                             continue
                         px = float(t.get('px', 0) or 0)
-                        pnl = float(t.get('pnl', 0) or 0)
+                        pnl_val = float(t.get('pnl', 0) or 0)
                         inst = t.get('inst_id', '')
                         _live_trades.append({
                             'time': t.get('timestamp', ''), 'side': t.get('side', ''),
                             'symbol': inst, 'inst_id': inst,
                             'ord_id': str(t.get('ord_id', '') or '').strip(),
                             'entry_price': px, 'exit_price': None,
-                            'pnl': pnl,
-                            'reason': 'open' if pnl == 0 else 'closed',
+                            'pnl': pnl_val,
+                            'reason': t.get('state', '') or ('open' if t.get('state') != 'filled' else 'closed'),
                             'pos_side': 'long' if t.get('side') == 'buy' else 'short',
                             'signal_id': t.get('signal_id', 0),
                             'bot_id': bid,
@@ -5522,14 +5536,16 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                             'bot': 'AI Discretionary 1H',
                         })
                 except Exception as _e:
-                    print(f'[trades/paired] live DB read: {_e}', flush=True)
-            # 2) In-memory _trade_log from all bots (live mirror entries)
+                    print(f'[trades/paired] live DB read error: {_e}', flush=True)
+            # 3) In-memory _trade_log from all bots (live mirror entries)
+            _mem_live = 0
             for _bot_key, _bot_obj in [('ai', ai_bot), ('rotation', rotation), ('impulse', impulse), ('validation', validation)]:
                 if not _bot_obj or not getattr(_bot_obj, '_trade_log', None):
                     continue
                 for t in _bot_obj._trade_log:
                     if (t.get('account_mode') or '').strip().lower() != 'live':
                         continue
+                    _mem_live += 1
                     _live_trades.append({
                         'time': t.get('time', ''), 'side': t.get('side', ''),
                         'symbol': t.get('symbol', ''),
@@ -5545,9 +5561,12 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                         'account_mode': 'live', 'account_key': 'live',
                         'bot': t.get('bot') or 'AI Discretionary 1H',
                     })
+            print(f'[trades/paired] live mirror: connected={_live_connected} '
+                  f'open_pos={_live_positions_count} mem_log={_mem_live} '
+                  f'live_trades_total={len(_live_trades)}', flush=True)
             if _live_trades:
                 trades = list(trades) + _live_trades
-                print(f'[trades/paired] merged {len(_live_trades)} live mirror trades', flush=True)
+                print(f'[trades/paired] merged {len(_live_trades)} live mirror trades into {len(resp.get("trades", []))} demo trades', flush=True)
         _tagged = []
         for _tr in trades:
             if not isinstance(_tr, dict):
@@ -5565,6 +5584,7 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                 if _m not in ('demo', 'live'):
                     _tr = {**_tr, 'account_mode': 'demo'}
             _tagged.append(_tr)
+        _tagged.sort(key=lambda t: (t.get('exit_time') or t.get('entry_time') or t.get('time') or ''), reverse=True)
         trades = _tagged
         resp = {**resp, 'trades': trades, 'account_mode': _mode}
         if trades:
