@@ -83,23 +83,37 @@ export default function StatsPage() {
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setErr('')
-    api.getStats({ period, mode })
-      .then(d => {
-        if (!cancelled) {
-          setData(d || {})
-          setLoading(false)
-        }
-      })
-      .catch(e => {
-        if (!cancelled) {
-          setErr(e?.message || 'Ошибка загрузки')
-          setData(null)
-          setLoading(false)
-        }
-      })
-    return () => { cancelled = true }
+    let first = true
+
+    const load = () => {
+      if (first) {
+        setLoading(true)
+        first = false
+      }
+      setErr('')
+      return api.getStats({ period, mode })
+        .then(d => {
+          if (!cancelled) {
+            setData(d || {})
+            setLoading(false)
+          }
+        })
+        .catch(e => {
+          if (!cancelled) {
+            setErr(e?.message || 'Ошибка загрузки')
+            // keep previous data on refresh errors
+            setLoading(false)
+          }
+        })
+    }
+
+    load()
+    // Auto-refresh so each new closed trade appears without manual reload
+    const id = setInterval(load, 30000)
+    return () => {
+      cancelled = true
+      clearInterval(id)
+    }
   }, [period, mode])
 
   const byCoin = data?.by_coin || []
@@ -121,6 +135,8 @@ export default function StatsPage() {
           <p className="text-sm text-[var(--txt-muted)] mt-0.5">
             {t('stats.subtitle') || 'Доходность демо-счёта AI · только закрытые сделки'}
             {periodLabel ? ` · ${periodLabel}` : ''}
+            {' · '}
+            <span className="text-[var(--txt-muted)]">обновляется каждые 30 с</span>
           </p>
         </div>
         <div className="flex items-center gap-1 flex-wrap">

@@ -292,10 +292,22 @@ async def _rows_from_db_trades(db, ai_only: bool = True, account_mode: str = "de
             continue
         if abs(pnl) < 1e-12:
             continue
-        # skip pure opens without realized pnl already handled
+        # Only realized closes — skip opens / adds / partial fills tagged open
         state = str(r.get("state") or r.get("reason") or "").lower()
-        if state in ("open", "add", "live"):
+        if state in ("open", "add", "live", "opening"):
             continue
+        # Prefer explicit close markers; bare "filled" often is an open fill with fee-as-pnl
+        if state not in ("closed", "close", "closing", "filled_close"):
+            # legacy filled rows: keep only if |pnl| looks like a real close (>= $1)
+            # and not a tiny fee marker
+            try:
+                _pnl_chk = abs(float(r.get("pnl") or 0))
+            except (TypeError, ValueError):
+                _pnl_chk = 0.0
+            if state == "filled" and _pnl_chk < 1.0:
+                continue
+            if state and state not in ("filled", "closed", "close", ""):
+                continue
         ts_raw = r.get("timestamp") or r.get("created_at") or r.get("time") or 0
         ts_ms = _parse_ts_ms(ts_raw)
         if not ts_ms and isinstance(ts_raw, str) and ts_raw:
@@ -659,22 +671,43 @@ async def compute_stats(
         mode = "demo"
         rows = [r for r in rows if str(r.get("account_mode") or "").lower() in ("", "demo")]
 
-    out = aggregate_stats(
-        rows, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
-    )
+    # Always merge DB closes so bot-tagged closes appear immediately
+    # (before OKX bills sync), without double-counting by ord_id.
+    db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
+    merged = list(rows or [])
+    seen = set()
+    for r in merged:
+        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
+        if oid:
+            seen.add(oid)
+    extra = 0
+    for r in db_rows or []:
+        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
+        if oid and oid in seen:
+            continue
+        # synthetic key if no ord_id
+        if not oid:
+            oid = f"db-{r.get('bot_label') or r.get('bot_id')}-{r.get('close_ts') or r.get('pnl')}"
+            if oid in seen:
+                continue
+        seen.add(oid)
+        merged.append(r)
+        extra += 1
 
+    out = aggregate_stats(
+        merged, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
+    )
     if out["trades"] == 0:
-        db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
-        if db_rows:
-            out = aggregate_stats(
-                db_rows, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
-            )
-            out["source"] = "db_trades_fallback"
-        else:
-            out["source"] = "empty"
-    else:
+        out["source"] = "empty"
+    elif extra and rows:
+        out["source"] = "exchange_close_trades+db"
+    elif rows:
         out["source"] = "exchange_close_trades"
+    else:
+        out["source"] = "db_trades_fallback"
 
     out["account_mode"] = mode
     out["active_bots"] = list(AI_ONLY_LABELS) if ai_only else []
+    out["rows_exchange"] = len(rows or [])
+    out["rows_db_extra"] = extra
     return out

@@ -1870,12 +1870,14 @@ class AIStrategy:
         })
         if self.db:
             try:
+                _m, _k = self._account_mode_tag()
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=pos.size, px=fill_px,
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=pos.inst_id, ord_type="market",
                     fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
-                    state="filled", signal_id=signal_id or None,
+                    state="closed", signal_id=signal_id or None,
+                    account_mode=_m, account_key=_k,
                 )
             except Exception as e:
                 print(f"[AI] db close: {e}", flush=True)
@@ -2267,7 +2269,7 @@ class AIStrategy:
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=pos.inst_id, ord_type="market",
                     fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
-                    state="filled", signal_id=signal_id or None,
+                    state="closed", signal_id=signal_id or None,
                     account_mode="live", account_key="live",
                 )
             except Exception as e:

@@ -5326,7 +5326,8 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
             period=period,
             date_from=(date_from or '').strip(),
             date_to=(date_to or '').strip(),
-            sync_fn=None,
+            # Pull new OKX close bills (TTL 60s) so each closed trade appears in stats
+            sync_fn=sync_exchange_close_trades,
         )
     except Exception as e:
         print(f'[stats] error: {e}', flush=True)
