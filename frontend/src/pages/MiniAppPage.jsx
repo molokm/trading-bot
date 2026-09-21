@@ -132,17 +132,23 @@ function MiniAppPageInner() {
 
   const viewPositions = useMemo(() => {
     const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
-    return src.map((p, i) => ({
-      key: `${p.coin || p.symbol || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
-      coin: (p.coin || p.symbol || '').replace('-USDT-SWAP', ''),
-      side: (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long',
-      size: Number(p.size || p.sz || p.size_remaining || 0),
-      entry: Number(p.entry_price || p.entry || p.px || 0),
-      mark: Number(p.mark_price || p.mark || p.mark_px || 0),
-      upl: Number(p.upl || p.unrealized_pnl || 0),
-      lever: Number(p.leverage || p.lever || 0),
-      mode: isLive ? 'live' : 'demo',
-    })).filter(p => p.size > 0)
+    return src.map((p, i) => {
+      const size = Math.abs(Number(p.size || p.sz || p.size_remaining || p.pos || 0))
+      const entry = Number(p.entry_price || p.entry || p.avgPx || p.avg_px || p.px || 0)
+      const mark = Number(p.mark_price || p.mark || p.mark_px || p.markPx || 0)
+      const upl = Number(p.upl || p.unrealized_pnl || 0)
+      return {
+        key: `${p.coin || p.symbol || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
+        coin: (p.coin || p.symbol || p.inst_id || '').replace('-USDT-SWAP', ''),
+        side: (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long',
+        size,
+        entry,
+        mark,
+        upl,
+        lever: Number(p.leverage || p.lever || 0),
+        mode: isLive ? 'live' : 'demo',
+      }
+    }).filter(p => p.size > 0 || Math.abs(p.upl) > 0)
   }, [isLive, data])
 
   const viewTrades = useMemo(() => {
