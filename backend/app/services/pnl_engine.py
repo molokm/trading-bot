@@ -415,3 +415,266 @@ async def compute(
     if ai_only:
         out["active_bots"] = ["AI Discretionary 1H"]
     return out
+
+
+
+def _period_bounds(period: str, now: Optional[datetime] = None, date_from: str = "", date_to: str = ""):
+    """Return (start_date, end_date inclusive) in MSK for a named period."""
+    now = now or datetime.now(timezone.utc)
+    now_msk = now.astimezone(PNL_TZ)
+    today = now_msk.date()
+    period = (period or "all").strip().lower()
+
+    if date_from or date_to:
+        try:
+            d0 = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else datetime.fromisoformat(PNL_EPOCH_ISO).astimezone(PNL_TZ).date()
+        except Exception:
+            d0 = datetime.fromisoformat(PNL_EPOCH_ISO).astimezone(PNL_TZ).date()
+        try:
+            d1 = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today
+        except Exception:
+            d1 = today
+        return d0, d1
+
+    if period in ("today", "1d", "day"):
+        return today, today
+    if period in ("week", "w"):
+        week_start = today - timedelta(days=today.weekday())  # Monday MSK
+        return week_start, today
+    if period in ("7d",):
+        return today - timedelta(days=6), today
+    if period in ("30d", "month"):
+        return today - timedelta(days=29), today
+    if period in ("90d", "quarter"):
+        return today - timedelta(days=89), today
+    # all / default — from epoch
+    ep = datetime.fromisoformat(PNL_EPOCH_ISO).astimezone(PNL_TZ).date()
+    return ep, today
+
+
+def _coin_from_row(r: dict) -> str:
+    inst = str(r.get("inst_id") or r.get("symbol") or r.get("coin") or "")
+    coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "").replace("-USDT", "")
+    if not coin and r.get("coin"):
+        coin = str(r.get("coin"))
+    return (coin or "?").upper()
+
+
+def aggregate_stats(
+    rows: list[dict],
+    *,
+    ai_only: bool = True,
+    period: str = "all",
+    date_from: str = "",
+    date_to: str = "",
+    now: Optional[datetime] = None,
+) -> dict:
+    """Detailed DEMO/LIVE stats: wins/losses, by_coin, equity curve for a period."""
+    now = now or datetime.now(timezone.utc)
+    d0, d1 = _period_bounds(period, now=now, date_from=date_from, date_to=date_to)
+    ep = epoch_ms()
+
+    wins = losses = breakeven = 0
+    sum_win = sum_loss = 0.0
+    total_pnl = 0.0
+    total_fees = 0.0
+    by_coin: dict[str, dict] = {}
+    by_side: dict[str, dict] = {"long": {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0},
+                                 "short": {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0}}
+    daily: dict = {}  # date -> pnl
+    recent: list[dict] = []
+
+    for r in rows or []:
+        try:
+            pnl = float(r.get("pnl") or 0)
+        except (TypeError, ValueError):
+            continue
+        if abs(pnl) < 1e-12:
+            continue
+
+        ts_ms = _parse_ts_ms(r.get("close_ts") or r.get("ts") or r.get("timestamp"))
+        if ts_ms and ts_ms < ep:
+            continue
+
+        bot = resolve_bot(r, ai_only=ai_only)
+        if not bot:
+            continue
+        if ai_only and bot not in AI_ONLY_LABELS:
+            continue
+
+        if ts_ms:
+            try:
+                d = _to_msk_date(ts_ms)
+            except (ValueError, OSError):
+                d = None
+        else:
+            d = None
+        if d is not None and (d < d0 or d > d1):
+            continue
+
+        total_pnl += pnl
+        try:
+            total_fees += abs(float(r.get("fee") or 0))
+        except (TypeError, ValueError):
+            pass
+
+        if pnl > 1e-9:
+            wins += 1
+            sum_win += pnl
+        elif pnl < -1e-9:
+            losses += 1
+            sum_loss += pnl
+        else:
+            breakeven += 1
+
+        coin = _coin_from_row(r)
+        bc = by_coin.setdefault(coin, {"pnl": 0.0, "trades": 0, "wins": 0, "losses": 0})
+        bc["pnl"] += pnl
+        bc["trades"] += 1
+        if pnl > 1e-9:
+            bc["wins"] += 1
+        elif pnl < -1e-9:
+            bc["losses"] += 1
+
+        side = str(r.get("pos_side") or r.get("side") or "").lower()
+        if side in ("buy", "long"):
+            side = "long"
+        elif side in ("sell", "short"):
+            side = "short"
+        else:
+            side = ""
+        if side in by_side:
+            by_side[side]["pnl"] += pnl
+            by_side[side]["trades"] += 1
+            if pnl > 1e-9:
+                by_side[side]["wins"] += 1
+            elif pnl < -1e-9:
+                by_side[side]["losses"] += 1
+
+        if d is not None:
+            daily[d] = daily.get(d, 0.0) + pnl
+
+        recent.append({
+            "coin": coin,
+            "side": side or str(r.get("side") or ""),
+            "pnl": round(pnl, 2),
+            "close_ts": ts_ms or 0,
+            "bot": bot,
+            "inst_id": r.get("inst_id") or "",
+        })
+
+    decided = wins + losses
+    win_rate = round(100.0 * wins / decided, 1) if decided else 0.0
+    avg_win = round(sum_win / wins, 2) if wins else 0.0
+    avg_loss = round(sum_loss / losses, 2) if losses else 0.0
+    profit_factor = round(sum_win / abs(sum_loss), 2) if sum_loss < -1e-9 else (None if sum_win <= 0 else 99.0)
+
+    # Equity curve sorted by date
+    equity_curve = []
+    cum = 0.0
+    for d in sorted(daily.keys()):
+        cum += daily[d]
+        equity_curve.append({
+            "date": d.isoformat(),
+            "pnl": round(daily[d], 2),
+            "cum": round(cum, 2),
+        })
+
+    by_coin_list = [
+        {
+            "coin": k,
+            "pnl": round(v["pnl"], 2),
+            "trades": v["trades"],
+            "wins": v["wins"],
+            "losses": v["losses"],
+            "win_rate": round(100.0 * v["wins"] / (v["wins"] + v["losses"]), 1) if (v["wins"] + v["losses"]) else 0.0,
+        }
+        for k, v in sorted(by_coin.items(), key=lambda x: -abs(x[1]["pnl"]))
+    ]
+
+    for s in by_side.values():
+        s["pnl"] = round(s["pnl"], 2)
+        w, l = s["wins"], s["losses"]
+        s["win_rate"] = round(100.0 * w / (w + l), 1) if (w + l) else 0.0
+
+    recent.sort(key=lambda x: -(x.get("close_ts") or 0))
+    recent = recent[:15]
+
+    return {
+        "period": period or "all",
+        "from": d0.isoformat(),
+        "to": d1.isoformat(),
+        "realized_pnl": round(total_pnl, 2),
+        "trades": wins + losses + breakeven,
+        "wins": wins,
+        "losses": losses,
+        "breakeven": breakeven,
+        "win_rate": win_rate,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "profit_factor": profit_factor,
+        "sum_wins": round(sum_win, 2),
+        "sum_losses": round(sum_loss, 2),
+        "fees": round(total_fees, 2),
+        "by_coin": by_coin_list,
+        "by_side": by_side,
+        "equity_curve": equity_curve,
+        "recent_trades": recent,
+        "pnl_epoch": PNL_EPOCH_ISO,
+        "pnl_tz": "Europe/Moscow",
+        "engine": "pnl_engine_stats_v1",
+    }
+
+
+async def compute_stats(
+    db,
+    *,
+    account_mode: str = "demo",
+    ai_only: bool = True,
+    period: str = "all",
+    date_from: str = "",
+    date_to: str = "",
+    sync_fn: Optional[Callable] = None,
+) -> dict:
+    """Public stats for DEMO showcase (and LIVE for owner — caller enforces)."""
+    await ensure_epoch(db)
+    if sync_fn:
+        try:
+            await sync_fn()
+        except Exception as e:
+            print(f"[pnl_engine] stats sync: {e}", flush=True)
+
+    rows = []
+    try:
+        rows = await db.get_exchange_pnl_timebucket(
+            bot_label=None, account_mode=None, epoch_ms=0,
+        ) or []
+    except Exception as e:
+        print(f"[pnl_engine] stats load: {e}", flush=True)
+
+    mode = (account_mode or "demo").lower()
+    if mode == "live":
+        rows = [r for r in rows if str(r.get("account_mode") or "").lower() == "live"]
+    else:
+        mode = "demo"
+        rows = [r for r in rows if str(r.get("account_mode") or "").lower() in ("", "demo")]
+
+    out = aggregate_stats(
+        rows, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
+    )
+
+    if out["trades"] == 0:
+        db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
+        if db_rows:
+            out = aggregate_stats(
+                db_rows, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
+            )
+            out["source"] = "db_trades_fallback"
+        else:
+            out["source"] = "empty"
+    else:
+        out["source"] = "exchange_close_trades"
+
+    out["account_mode"] = mode
+    out["active_bots"] = list(AI_ONLY_LABELS) if ai_only else []
+    return out

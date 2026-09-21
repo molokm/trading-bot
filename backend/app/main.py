@@ -5301,6 +5301,63 @@ async def admin_reset_trading_stats(data: dict=None):
     print(f'[reset] trading stats wiped epoch={epoch} bots={bot_ids}', flush=True)
     return {'ok': True, 'epoch': epoch, 'bots': bot_ids, 'wipe': wipe, 'message': 'PnL and trade cards reset. Counting from epoch. Open exchange positions unchanged.'}
 
+
+@app.get('/api/stats')
+async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo', date_from: str = '', date_to: str = ''):
+    """Bot performance stats. DEMO is the public showcase; LIVE only for admin/owner.
+
+    Query: period=today|week|7d|30d|90d|all  mode=demo|live  date_from/date_to=YYYY-MM-DD
+    """
+    mode = (mode or 'demo').strip().lower()
+    if mode not in ('demo', 'live'):
+        mode = 'demo'
+    role = validate(get_token(request)) or ''
+    is_admin = role == 'admin'
+    if mode == 'live' and not is_admin:
+        mode = 'demo'
+    period = (period or 'all').strip().lower()
+    if period not in ('today', '1d', 'day', 'week', 'w', '7d', '30d', 'month', '90d', 'quarter', 'all'):
+        period = 'all'
+    try:
+        data = await pnl_engine.compute_stats(
+            db,
+            account_mode=mode,
+            ai_only=bool(AI_ONLY_MODE),
+            period=period,
+            date_from=(date_from or '').strip(),
+            date_to=(date_to or '').strip(),
+            sync_fn=None,
+        )
+    except Exception as e:
+        print(f'[stats] error: {e}', flush=True)
+        import traceback
+        traceback.print_exc()
+        return {
+            'account_mode': mode, 'period': period, 'realized_pnl': 0, 'trades': 0,
+            'wins': 0, 'losses': 0, 'win_rate': 0, 'by_coin': [], 'equity_curve': [],
+            'recent_trades': [], 'error': str(e), 'engine': 'error',
+        }
+    try:
+        unreal = 0.0
+        if mode == 'demo':
+            client = client_manager.get_client() if client_manager else None
+            if client:
+                pos = await client.get_positions(inst_type='SWAP')
+                _pos_rows = [] if (isinstance(pos, dict) and pos.get('error')) else (
+                    (pos.get('data') or []) if isinstance(pos, dict) else (pos or []))
+                for p in _pos_rows:
+                    try:
+                        unreal += float(p.get('upl') or 0)
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+        data['unrealized_pnl'] = round(unreal, 2)
+    except Exception as e:
+        print(f'[stats] unrealized: {e}', flush=True)
+        data['unrealized_pnl'] = 0.0
+    data['live_available'] = bool(is_admin)
+    return data
+
+
 @app.get('/api/pnl/summary')
 async def pnl_summary():
     """Lightweight PnL for dashboard metric cards (cached via get_pnl).

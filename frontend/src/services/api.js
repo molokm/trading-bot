@@ -153,6 +153,12 @@ export const api = {
   pnlReconcile: () => request('/pnl/reconcile'),
   getPnl: () => request('/pnl'),
   getPnlSummary: () => request('/pnl/summary'),
+  getStats: ({ period = 'all', mode = 'demo', date_from = '', date_to = '' } = {}) => {
+    const q = new URLSearchParams({ period, mode });
+    if (date_from) q.set('date_from', date_from);
+    if (date_to) q.set('date_to', date_to);
+    return request(`/stats?${q}`);
+  },
 
   // ── Momentum Strategy ──
   momentumStatus: () => request('/momentum/status'),
