@@ -1578,7 +1578,72 @@ async def me_dashboard(request: Request):
                             demo['win_rate'] = pnl_data.get('win_rate')
             except Exception as _pe:
                 print(f'[me/dashboard] demo pnl_engine: {_pe}', flush=True)
-            # Unrealized from open demo positions if still 0
+            # Prefer live exchange DEMO positions (same source as website dashboard)
+            try:
+                client = client_manager.get_client() if client_manager else None
+                if client:
+                    pos_result = await client.get_positions('SWAP')
+                    raw_pos = pos_result.get('data', []) if isinstance(pos_result, dict) else (pos_result or [])
+                    exch = []
+                    unreal_sum = 0.0
+                    for rp in raw_pos if isinstance(raw_pos, list) else []:
+                        try:
+                            pos_raw = float(rp.get('pos', 0) or 0)
+                        except (TypeError, ValueError):
+                            pos_raw = 0.0
+                        if abs(pos_raw) <= 1e-12:
+                            continue
+                        inst = str(rp.get('instId', '') or '')
+                        coin = inst.split('-')[0] if inst else ''
+                        side = str(rp.get('posSide', '') or '').lower()
+                        if side in ('', 'net'):
+                            side = 'long' if pos_raw > 0 else 'short'
+                        try:
+                            entry = float(rp.get('avgPx', 0) or 0)
+                        except (TypeError, ValueError):
+                            entry = 0.0
+                        try:
+                            mark = float(rp.get('markPx', 0) or 0)
+                        except (TypeError, ValueError):
+                            mark = 0.0
+                        try:
+                            upl = float(rp.get('upl', 0) or 0)
+                        except (TypeError, ValueError):
+                            upl = 0.0
+                        try:
+                            lever = float(rp.get('lever', 0) or 0)
+                        except (TypeError, ValueError):
+                            lever = 0.0
+                        try:
+                            upl_ratio = float(rp.get('uplRatio', 0) or 0)
+                        except (TypeError, ValueError):
+                            upl_ratio = 0.0
+                        unreal_sum += upl
+                        exch.append({
+                            'coin': coin,
+                            'symbol': inst,
+                            'inst_id': inst,
+                            'side': side,
+                            'size': abs(pos_raw),
+                            'pos': abs(pos_raw),
+                            'entry_price': entry,
+                            'avgPx': entry,
+                            'mark_price': mark,
+                            'mark_px': mark,
+                            'markPx': mark,
+                            'upl': round(upl, 2),
+                            'unrealized_pnl': round(upl, 2),
+                            'upl_ratio': upl_ratio,
+                            'leverage': lever,
+                            'lever': lever,
+                            'account_mode': 'demo',
+                        })
+                    if exch:
+                        demo['positions'] = exch
+                        demo['unrealized'] = round(unreal_sum, 2)
+            except Exception as _ex:
+                print(f'[me/dashboard] demo exchange positions: {_ex}', flush=True)
+            # Fallback unrealized from positions list
             if not demo.get('unrealized'):
                 try:
                     u = 0.0

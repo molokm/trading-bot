@@ -132,19 +132,25 @@ function MiniAppPageInner() {
 
   const viewPositions = useMemo(() => {
     const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
+    const CT = { BTC: 0.01, ETH: 0.1, SOL: 1, XRP: 100, DOGE: 1000, BNB: 0.01, ADA: 10, AVAX: 1, LTC: 0.1, BCH: 0.1, TRX: 1000, OKB: 0.1 }
     return src.map((p, i) => {
       const size = Math.abs(Number(p.size || p.sz || p.size_remaining || p.pos || 0))
       const entry = Number(p.entry_price || p.entry || p.avgPx || p.avg_px || p.px || 0)
       const mark = Number(p.mark_price || p.mark || p.mark_px || p.markPx || 0)
       const upl = Number(p.upl || p.unrealized_pnl || 0)
+      const coin = String(p.coin || p.symbol || p.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
+      const ct = CT[coin] || 1
+      const px = mark || entry
+      const notional = size && px ? size * ct * px : 0
       return {
-        key: `${p.coin || p.symbol || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
-        coin: (p.coin || p.symbol || p.inst_id || '').replace('-USDT-SWAP', ''),
+        key: `${coin || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
+        coin,
         side: (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long',
         size,
         entry,
         mark,
         upl,
+        notional,
         lever: Number(p.leverage || p.lever || 0),
         mode: isLive ? 'live' : 'demo',
       }
@@ -278,8 +284,13 @@ function MiniAppPageInner() {
                     </div>
                     <span className={`text-xs font-bold mono ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
                   </div>
-                  <div className="text-[0.65rem] text-[var(--txt-muted)] mono">
-                    ${fmt(p.entry)}{p.lever ? ` · ${fmt(p.lever, 1)}x` : ''}{p.size ? ` · ${fmt(p.size, 3)}` : ''}
+                  <div className="text-[0.65rem] text-[var(--txt-muted)] mono flex flex-wrap gap-x-2 gap-y-0.5">
+                    {p.notional > 0 && <span>Объём <span className="text-[var(--txt)]">${fmt(p.notional, 0)}</span></span>}
+                    {p.entry > 0 && <span>Вход <span className="text-[var(--txt)]">${fmt(p.entry, p.entry >= 100 ? 2 : 4)}</span></span>}
+                    {p.mark > 0 && <span>Марка <span className="text-[var(--txt)]">${fmt(p.mark, p.mark >= 100 ? 2 : 4)}</span></span>}
+                    {p.size > 0 && <span>Контр. <span className="text-[var(--txt)]">{fmt(p.size, 3)}</span></span>}
+                    {p.lever > 0 && <span>{fmt(p.lever, 1)}x</span>}
+                    {!p.entry && !p.mark && !p.notional && <span>—</span>}
                   </div>
                 </Card>
               ))}
