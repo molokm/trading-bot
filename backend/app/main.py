@@ -5486,6 +5486,17 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
             return {'trades': trades[:limit], 'debug': dict(_paired_cache['debug']), 'account_mode': _mode}
         resp = await _get_paired_trades_impl(limit=5000, begin=begin, end=end, mode=_mode)
         trades = resp.get('trades', [])
+        # When in demo mode, also fetch live mirror trades so closed live
+        # positions (account_mode='live') appear in the dashboard trades card.
+        _has_live_mirror = bool(ai_bot and getattr(ai_bot, '_live_positions', None))
+        if _mode == 'demo' and _has_live_mirror:
+            try:
+                _live_resp = await _get_paired_trades_impl(limit=1000, begin=begin, end=end, mode='live')
+                _live_trades = _live_resp.get('trades', [])
+                if _live_trades:
+                    trades = list(trades) + list(_live_trades)
+            except Exception as _e:
+                print(f'[trades/paired] live mirror merge error: {_e}', flush=True)
         _tagged = []
         for _tr in trades:
             if not isinstance(_tr, dict):
@@ -5500,9 +5511,11 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                 else:
                     _tr = {**_tr, 'account_mode': 'live'}
             else:
-                if _m == 'live':
-                    continue
-                _tr = {**_tr, 'account_mode': 'demo'}
+                # Keep live mirror trades tagged as 'live' so the frontend
+                # can distinguish them from demo trades (critical for the
+                # openKeys phantom-close filter).
+                if _m not in ('demo', 'live'):
+                    _tr = {**_tr, 'account_mode': 'demo'}
             _tagged.append(_tr)
         trades = _tagged
         resp = {**resp, 'trades': trades, 'account_mode': _mode}
