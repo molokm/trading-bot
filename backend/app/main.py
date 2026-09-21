@@ -5463,6 +5463,87 @@ _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
 _PNL_TTL = 30
 
+_live_okx_cache: dict = {'ts': 0.0, 'trades': []}
+_LIVE_OKX_TTL = 60.0
+
+async def _fetch_live_okx_trades_direct() -> list:
+    """Fetch live OKX trades directly via live_manager (no _okx_call_account).
+
+    This avoids corrupting client_manager which happens when _okx_call_account
+    is called with mode='live' from a demo server.
+    """
+    now = _time.time()
+    if _live_okx_cache['trades'] and now - _live_okx_cache['ts'] < _LIVE_OKX_TTL:
+        return list(_live_okx_cache['trades'])
+    lc = None
+    try:
+        lc = live_manager.get_client() if live_manager else None
+    except Exception:
+        lc = None
+    if not lc:
+        return []
+    bills_raw = []
+    fills_raw = []
+    try:
+        for attempt in range(3):
+            try:
+                resp = await lc.get_bills(inst_type='SWAP', type='2', limit=100)
+                if resp and not resp.get('error'):
+                    bills_raw = resp.get('data', []) or []
+                    break
+                if resp and '429' in str(resp.get('message', '')):
+                    await asyncio.sleep(1.0 + attempt)
+                    continue
+                break
+            except Exception as e:
+                print(f'[live-okx] bills attempt {attempt}: {e}', flush=True)
+                break
+    except Exception as e:
+        print(f'[live-okx] bills error: {e}', flush=True)
+    try:
+        for attempt in range(3):
+            try:
+                resp = await lc.get_fills_history(inst_type='SWAP', limit=100)
+                if resp and not resp.get('error'):
+                    fills_raw = resp.get('data', []) or []
+                    break
+                if resp and '429' in str(resp.get('message', '')):
+                    await asyncio.sleep(1.0 + attempt)
+                    continue
+                break
+            except Exception as e:
+                print(f'[live-okx] fills attempt {attempt}: {e}', flush=True)
+                break
+    except Exception as e:
+        print(f'[live-okx] fills error: {e}', flush=True)
+    for b in bills_raw:
+        if isinstance(b, dict):
+            b['account_mode'] = 'live'
+            b['_from_okx'] = True
+    for f in fills_raw:
+        if isinstance(f, dict):
+            f['account_mode'] = 'live'
+            f['_from_okx'] = True
+    paired = []
+    if bills_raw:
+        try:
+            paired = _pair_bills(bills_raw)
+        except Exception as e:
+            print(f'[live-okx] pair_bills error: {e}', flush=True)
+    if not paired and fills_raw:
+        try:
+            paired = await _pair_fills(fills_raw)
+        except Exception as e:
+            print(f'[live-okx] pair_fills error: {e}', flush=True)
+    for t in paired:
+        if isinstance(t, dict):
+            t['account_mode'] = 'live'
+            t['account_key'] = 'live'
+    print(f'[live-okx] bills={len(bills_raw)} fills={len(fills_raw)} paired={len(paired)}', flush=True)
+    _live_okx_cache['ts'] = now
+    _live_okx_cache['trades'] = paired
+    return paired
+
 @app.get('/api/trades/paired')
 async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
     """Paired entry+exit trades — all bots, all time, sourced from the DB
@@ -5561,12 +5642,25 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                         'account_mode': 'live', 'account_key': 'live',
                         'bot': t.get('bot') or 'AI Discretionary 1H',
                     })
+            # 4) Direct OKX fetch via live_manager (safe — doesn't corrupt client_manager)
+            _okx_live = []
+            try:
+                _okx_live = await _fetch_live_okx_trades_direct()
+            except Exception as _e:
+                print(f'[trades/paired] live OKX direct fetch error: {_e}', flush=True)
             print(f'[trades/paired] live mirror: connected={_live_connected} '
                   f'open_pos={_live_positions_count} mem_log={_mem_live} '
-                  f'live_trades_total={len(_live_trades)}', flush=True)
-            if _live_trades:
-                trades = list(trades) + _live_trades
-                print(f'[trades/paired] merged {len(_live_trades)} live mirror trades into {len(resp.get("trades", []))} demo trades', flush=True)
+                  f'okx_direct={len(_okx_live)} db={len(_live_trades)}', flush=True)
+            # Dedup: OKX direct is authoritative; DB/memory fill gaps
+            _okx_ord_ids = {str(t.get('ord_id', '')).strip() for t in _okx_live if t.get('ord_id')}
+            for t in _live_trades:
+                oid = str(t.get('ord_id', '')).strip()
+                if oid and oid in _okx_ord_ids:
+                    continue
+                _okx_live.append(t)
+            if _okx_live:
+                trades = list(trades) + _okx_live
+                print(f'[trades/paired] merged {len(_okx_live)} live trades into {len(resp.get("trades", []))} demo trades', flush=True)
         _tagged = []
         for _tr in trades:
             if not isinstance(_tr, dict):
