@@ -261,9 +261,11 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
-  // Drop PnL when switching Demo ↔ Live so cards never keep the other mode's total
+  // Drop PnL + trade log when switching Demo ↔ Live — never mix modes
   useEffect(() => {
     setPnl(null)
+    setTradeLog([])
+    setPositions([])
   }, [demoMode])
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -465,37 +467,44 @@ export default function Dashboard({ health, connected, isGuest }) {
     pnl?.economic_approx
     ?? (strategyRealized + unrealizedPnl + fundingPnl)
   )
-  // Merge demo + live positions into separate rows
+  // Strict mode isolation: show ONLY positions of the active account (demo XOR live)
   const displayPositions = useMemo(() => {
+    const posMode = demoMode ? 'demo' : 'live'
     const result = []
     const resultKeys = new Set()
-    const posMode = demoMode ? 'demo' : 'live'
     for (const p of (positions || [])) {
+      const mode = String(p.account_mode || posMode).toLowerCase()
+      if (mode !== posMode) continue
       const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
+      if (resultKeys.has(key)) continue
       resultKeys.add(key)
-      result.push({ ...p, account_mode: p.account_mode || posMode })
+      result.push({ ...p, account_mode: posMode })
     }
-    for (const lp of (liveStatus?.open_positions || [])) {
-      const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
-      const side = (lp.side || 'long').toLowerCase()
-      const sz = parseFloat(lp.size || 0)
-      if (!sz) continue
-      const instId = lp.symbol || `${coin}-USDT-SWAP`
-      const dedupKey = `${instId}|${side}`
-      if (resultKeys.has(dedupKey)) continue
-      result.push({
-        instId,
-        posSide: side,
-        pos: String(sz),
-        avgPx: String(lp.entry_price || 0),
-        markPx: '',
-        upl: lp.upl ?? '',
-        uplRatio: lp.upl_ratio ?? '',
-        mgnRatio: '',
-        lever: lp.leverage ? String(lp.leverage) : '',
-        account_mode: 'live',
-        coin,
-      })
+    if (!demoMode) {
+      for (const lp of (liveStatus?.open_positions || [])) {
+        const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
+        const side = (lp.side || 'long').toLowerCase()
+        const sz = parseFloat(lp.size || 0)
+        if (!sz) continue
+        const instId = lp.symbol || `${coin}-USDT-SWAP`
+        const dedupKey = `${instId}|${side}`
+        if (resultKeys.has(dedupKey)) continue
+        resultKeys.add(dedupKey)
+        result.push({
+          instId,
+          posSide: side,
+          pos: String(sz),
+          avgPx: String(lp.entry_price || 0),
+          markPx: String(lp.mark_px || lp.markPx || ''),
+          upl: lp.upl ?? '',
+          uplRatio: lp.upl_ratio ?? '',
+          mgnRatio: '',
+          lever: lp.leverage ? String(lp.leverage) : '',
+          account_mode: 'live',
+          bot: lp.bot || 'AI Discretionary 1H',
+          coin,
+        })
+      }
     }
     return result
   }, [positions, liveStatus?.open_positions, demoMode])
@@ -647,50 +656,61 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
-    const combined = [...tradeLog]
+    const want = demoMode ? 'demo' : 'live'
+    const combined = (tradeLog || []).filter((t) => {
+      const m = String(t.account_mode || t.mode || '').toLowerCase()
+      if (!m) return demoMode
+      return m === want
+    })
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog])
+  }, [tradeLog, demoMode])
 
-  // Map instId|side → bot name for badge resolution on exchange positions
+  // Map instId|side → bot name for badge resolution (AI-only product)
   const botMap = useMemo(() => {
     const m = {}
     const addPositions = (list, name) => {
       for (const p of (list || [])) {
-        const inst = p.inst_id || p.instId || ''
+        const inst = p.inst_id || p.instId || (p.coin ? `${String(p.coin).toUpperCase()}-USDT-SWAP` : '')
+        if (!inst) continue
         const sideKey = (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
         m[`${inst}|${sideKey}`] = name
+        const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+        if (coin) m[`${coin}|${sideKey}`] = name
       }
+    }
+    if (AI_ONLY_MODE) {
+      addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+      return m
     }
     addPositions(momentumStatus?.open_positions, 'Momentum')
     addPositions(impulseStatus?.open_positions, 'Impulse 1D')
     addPositions(validationStatus?.open_positions, 'Validation')
     addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
-    // Scale last — overwrites Discretionary if both claim same inst|side
-    addPositions(aiScaleStatus?.open_positions, 'AI Discretionary 1H')
     addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
     addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
     return m
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
 
   const resolveBotName = (p) => {
     const posSideKey = (p.posSide || p.side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
     const inst = p.instId || p.inst_id || ''
     const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
-    // Scale memory ALWAYS wins over Discretionary / stale API bot
     const key = `${inst}|${posSideKey}`
-    let fromMap = botMap[key] || ''
-    let raw = p.bot || ''
-    if (String(fromMap).includes('Scale') || String(raw).includes('Scale')) {
-      return 'AI Discretionary 1H'
-    }
-    const retired = /impulse|validation|macd|momentum|vwap/i.test(String(raw))
+    const coinKey = coin ? `${coin}|${posSideKey}` : ''
+    const fromMap = botMap[key] || botMap[coinKey] || ''
     if (fromMap) return fromMap
-    if (retired && AI_ONLY_MODE) return ''
+    let raw = String(p.bot || '')
+    if (/scale|discretionary|ai\b/i.test(raw)) return 'AI Discretionary 1H'
+    if (AI_ONLY_MODE) {
+      if (/impulse|validation|macd|momentum|vwap|smart|умн|scalp/i.test(raw)) return 'AI Discretionary 1H'
+      if (aiStatus?.running && (inst || coin)) return 'AI Discretionary 1H'
+      return raw || 'AI Discretionary 1H'
+    }
     return raw || ''
   }
 
@@ -798,27 +818,22 @@ export default function Dashboard({ health, connected, isGuest }) {
       return false
     }
 
-    // 1a. Bot-owned opens — only if still open on THIS mode's exchange account
-    for (const p of (momentumStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Momentum')
-    }
-    for (const p of (impulseStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Impulse 1D')
-    }
-    for (const p of (validationStatus?.open_positions || [])) {
-      if (isOnExchange(p)) pushOpen(p, 'Validation')
-    }
+    // 1a. Bot-owned opens (AI only) — scoped to current account mode
+    const modeTag = demoMode ? 'demo' : 'live'
     for (const p of (aiStatus?.open_positions || [])) {
-      pushOpen(p, 'AI Discretionary 1H')
+      const pMode = String(p.account_mode || modeTag).toLowerCase()
+      if (pMode !== modeTag) continue
+      pushOpen({ ...p, account_mode: modeTag }, 'AI Discretionary 1H')
     }
-    for (const p of (liveStatus?.open_positions || [])) {
-      const alreadyInAi = (aiStatus?.open_positions || []).some(
-        op => (op.coin || op.inst_id || '').toUpperCase() === (p.coin || p.inst_id || '').toUpperCase()
-          && (op.side || op.pos_side || '').toLowerCase() === (p.side || p.pos_side || '').toLowerCase()
-      )
-      if (!alreadyInAi) pushOpen(p, 'AI Discretionary 1H')
+    if (!demoMode) {
+      for (const p of (liveStatus?.open_positions || [])) {
+        const alreadyInAi = (aiStatus?.open_positions || []).some(
+          op => (op.coin || op.inst_id || '').toUpperCase() === (p.coin || p.inst_id || '').toUpperCase()
+            && (op.side || op.pos_side || '').toLowerCase() === (p.side || p.pos_side || '').toLowerCase()
+        )
+        if (!alreadyInAi) pushOpen({ ...p, account_mode: 'live' }, 'AI Discretionary 1H')
+      }
     }
-    // Smart Money opens/trades live only on /smart-money — not on main dashboard
 
     // 1b. Exchange positions not yet in bot memory (prevents missing open row)
     for (const p of (positions || [])) {
@@ -827,37 +842,18 @@ export default function Dashboard({ health, connected, isGuest }) {
       const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
       const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
       let hint = p.bot || botMap[posKey] || ''
-      if (!hint) {
+      if (AI_ONLY_MODE) {
+        hint = 'AI Discretionary 1H'
+      } else if (!hint) {
         const coin = (p.instId || '').replace('-USDT-SWAP', '')
-        for (const op of (aiScaleStatus?.open_positions || [])) {
+        for (const op of (aiStatus?.open_positions || [])) {
           if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
-            hint = 'AI Scale-In 1H'
+            hint = 'AI Discretionary 1H'
             break
           }
         }
-        if (!hint) {
-          for (const op of (aiStatus?.open_positions || [])) {
-            if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
-              // Prefer Scale if it also lists this coin
-              const sclHas = (aiScaleStatus?.open_positions || []).some(
-                s => String(s.coin || '').toUpperCase() === coin.toUpperCase()
-              )
-              hint = sclHas ? 'AI Scale-In 1H' : 'AI Discretionary 1H'
-              break
-            }
-          }
-        }
-      }
-      // Force Scale badge if Scale status holds this coin
-      {
-        const coin = (p.instId || p.inst_id || '').replace('-USDT-SWAP', '')
-        const sclHas = (aiScaleStatus?.open_positions || []).some(
-          op => String(op.coin || '').toUpperCase() === String(coin).toUpperCase()
-        )
-        if (sclHas) hint = 'AI Scale-In 1H'
       }
       if (hint === 'Smart Money') continue
-      const exchMode = demoMode ? 'demo' : 'live'
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
@@ -867,9 +863,9 @@ export default function Dashboard({ health, connected, isGuest }) {
         size: posSz,
         size_remaining: posSz,
         upl: p.upl,
-        bot: hint || '',
-        account_mode: p.account_mode || exchMode,
-      }, hint || 'Exchange')
+        bot: hint || 'AI Discretionary 1H',
+        account_mode: modeTag,
+      }, hint || 'AI Discretionary 1H')
     }
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
@@ -887,6 +883,14 @@ export default function Dashboard({ health, connected, isGuest }) {
         const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
         if (openKeys.has(`${inst}|${sideKey}|${trMode}`)) continue
       }
+      const closedMode = (tr.account_mode || tr.mode || '').toLowerCase() || (demoMode ? 'demo' : 'live')
+      if (closedMode !== (demoMode ? 'demo' : 'live')) continue
+      let closedBot = tr.bot || ''
+      if (AI_ONLY_MODE) {
+        closedBot = 'AI Discretionary 1H'
+      } else if (!closedBot || /scale/i.test(String(closedBot))) {
+        closedBot = closedBot || 'AI Discretionary 1H'
+      }
       rows.push({
         type: 'closed',
         time: tr.exit_time || tr.entry_time || tr.time || '',
@@ -898,8 +902,8 @@ export default function Dashboard({ health, connected, isGuest }) {
         pnl: parseFloat(tr.pnl || 0),
         reason: r,
         stage: null,
-        bot: tr.bot,
-        account_mode: (tr.account_mode || tr.mode || '').toLowerCase() || (demoMode ? 'demo' : 'live'),
+        bot: closedBot,
+        account_mode: closedMode,
       })
     }
 
@@ -1299,22 +1303,20 @@ export default function Dashboard({ health, connected, isGuest }) {
                       const posId = `${p.instId}_${p.posSide}`
                       const posSideKey = (p.posSide || 'long').toLowerCase()
                       const botName = resolveBotName(p)
-                      const accountMode = (p.account_mode || '').toLowerCase()
-                      const botBadge = botName === 'Momentum'
-                        ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                        : (botName === 'Impulse' || botName === 'Impulse 1D')
-                        ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
-                        : botName === 'AI Scale-In 1H' || botName === 'AI Scale-In'
-                        ? { label: 'SCL', cls: 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30' }
-                        : botName === 'Validation' || botName === 'MACD+Donchian Validation'
-                        ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
-                        : botName === 'AI Discretionary 1H'
-                        ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                        : botName === 'Smart Money'
-                        ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
-                        : botName
-                        ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
-                        : { label: '—', cls: 'text-[var(--txt-muted)]' }
+                      const accountMode = (p.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
+                      const botBadge = (() => {
+                        const n = String(botName || '')
+                        if (/AI|Discretionary|Scale/i.test(n)) {
+                          return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                        }
+                        if (AI_ONLY_MODE && n) {
+                          return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                        }
+                        if (n === 'Momentum') return { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
+                        if (n === 'Impulse' || n === 'Impulse 1D') return { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
+                        if (n) return { label: n.slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
+                        return { label: '—', cls: 'text-[var(--txt-muted)]' }
+                      })()
                       const mgnRatio = parseFloat(p.mgnRatio || 0)
                       const riskCls = !mgnRatio ? ''
                         : mgnRatio < 2 ? 'text-[var(--loss)]'
@@ -1453,21 +1455,17 @@ export default function Dashboard({ health, connected, isGuest }) {
                     const stageInfo = isOpen
                       ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
                       : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
-                    const botBadge = tr.bot === 'Momentum'
-                      ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      : (tr.bot === 'AI Scale-In 1H' || tr.bot === 'AI Scale-In')
-                      ? { label: 'SCL', cls: 'bg-fuchsia-500/20 text-fuchsia-400 border border-fuchsia-500/30' }
-                      : (tr.bot === 'Impulse 1D' || tr.bot === 'Impulse')
-                        ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
-                        : tr.bot === 'MACD+Donchian Validation' || tr.bot === 'Validation'
-                          ? { label: 'MAC', cls: 'bg-purple-500/20 text-purple-400 border border-purple-500/30' }
-                          : tr.bot === 'AI Discretionary 1H'
-                            ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                            : tr.bot === 'Smart Money'
-                              ? { label: 'OBI', cls: 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30' }
-                              : tr.bot
-                                ? { label: String(tr.bot).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)]' }
-                                : null
+                    const botBadge = (() => {
+                      const n = String(tr.bot || '')
+                      if (/AI|Discretionary|Scale/i.test(n) || (AI_ONLY_MODE && n)) {
+                        return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
+                      }
+                      if (n === 'Momentum') return { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
+                      if (n === 'Impulse 1D' || n === 'Impulse') return { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
+                      if (n) return { label: n.slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)]' }
+                      return AI_ONLY_MODE ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' } : null
+                    })()
+                    const trMode = String(tr.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
                     const mark = parseFloat(tr.mark || 0)
                     const upnl = parseFloat(tr.unrealized_pnl || 0)
                     return (
@@ -1484,10 +1482,9 @@ export default function Dashboard({ health, connected, isGuest }) {
                           {botBadge && (
                             <span className={`ml-1 text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
                           )}
-                          {(tr.account_mode || '').toLowerCase() === 'live' && (
+                          {trMode === 'live' ? (
                             <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                          )}
-                          {(tr.account_mode || '').toLowerCase() === 'demo' && (
+                          ) : (
                             <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                           )}
                         </td>
