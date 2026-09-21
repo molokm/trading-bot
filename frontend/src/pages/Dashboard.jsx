@@ -1327,7 +1327,7 @@ export default function Dashboard({ health, connected, isGuest }) {
               <Zap size={13} className="text-[var(--profit)]" />
               <span>{t('dash.open_positions')}</span>
               <span className="ml-auto flex items-center gap-2 text-[var(--txt-muted)] mono text-2xs">
-                <span className="text-blue-400">DEMO {demoPositions.length}</span>
+                <span className="text-[var(--txt-secondary)]">DEMO {demoPositions.length}</span>
                 <span className="text-[var(--profit)]">LIVE {mirrorPositions.length}</span>
               </span>
             </div>
@@ -1352,20 +1352,20 @@ export default function Dashboard({ health, connected, isGuest }) {
                   return (
                     <div
                       key={posId || i}
-                      className={`rounded-lg border bg-[var(--surface)] px-3 py-2.5 ${mode === 'live' ? 'border-[var(--profit)]/25' : 'border-[var(--border)]'}`}
-                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}
+                      className={`pos-card ${mode === 'live' ? 'pos-live' : ''}`}
+                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'var(--profit)' : 'var(--loss)'}` }}
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap min-w-0">
                           <span className="font-semibold text-[var(--txt)] text-sm">{pair || '—'}</span>
-                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
                             {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
                           </span>
-                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                          <span className="badge badge-ai">AI</span>
                           {mode === 'live' ? (
-                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                            <span className="badge badge-live">LIVE</span>
                           ) : (
-                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                            <span className="badge badge-demo">DEMO</span>
                           )}
                         </div>
                         <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
@@ -1434,15 +1434,15 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
                           {pair || '—'}
-                          <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                          <span className="badge badge-ai ml-1">AI</span>
                           {mode === 'live' ? (
-                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                            <span className="badge badge-live ml-1">LIVE</span>
                           ) : (
-                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                            <span className="badge badge-demo ml-1">DEMO</span>
                           )}
                         </td>
                         <td>
-                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                          <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
                             {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>

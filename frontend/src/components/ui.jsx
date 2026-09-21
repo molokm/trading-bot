@@ -53,7 +53,7 @@ export function MetricCard({ label, value, change, changeType, tip, mono = true,
   )
 }
 
-/* ═══════ Enhanced Metric Card — modern design with gradients ═══════ */
+/* ═══════ Enhanced Metric Card — same surface system as MetricCard ═══════ */
 export function EnhancedMetricCard({ 
   label, 
   value, 
@@ -69,71 +69,42 @@ export function EnhancedMetricCard({
 }) {
   const isPositive = changeType === 'positive'
   const isNegative = changeType === 'negative'
-  
-  const gradientClass = isPositive 
-    ? 'from-[var(--profit)]/5 to-transparent' 
-    : isNegative 
-    ? 'from-[var(--loss)]/5 to-transparent'
-    : 'from-[var(--info)]/5 to-transparent'
-  
-  const borderClass = isPositive
-    ? 'border-[var(--profit)]/20 hover:border-[var(--profit)]/40'
+  const valueColor = isPositive
+    ? 'text-[var(--profit)]'
     : isNegative
-    ? 'border-[var(--loss)]/20 hover:border-[var(--loss)]/40'
-    : 'border-[var(--border)] hover:border-[var(--border-hover)]'
-  
+    ? 'text-[var(--loss)]'
+    : 'text-[var(--txt)]'
   const iconColor = isPositive
     ? 'text-[var(--profit)]'
     : isNegative
     ? 'text-[var(--loss)]'
-    : 'text-[var(--info)]'
+    : 'text-[var(--txt-muted)]'
 
   return (
-    <div 
-      className={`
-        relative overflow-hidden rounded-xl border ${borderClass}
-        bg-gradient-to-br ${gradientClass} backdrop-blur-sm
-        p-4 transition-all duration-300 hover:scale-[1.02] hover:shadow-lg
-        ${className || ''}
-      `}
-    >
-      {/* Animated background gradient */}
-      <div className="absolute inset-0 bg-gradient-to-br from-white/[0.02] to-transparent opacity-0 hover:opacity-100 transition-opacity duration-500" />
-      
-      <div className="relative z-10">
-        {/* Header */}
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            {Icon && <Icon size={16} className={`${iconColor} opacity-80`} />}
-            <span className="text-xs font-medium text-[var(--txt-secondary)] uppercase tracking-wider">
-              {label}
-            </span>
-            {tip && <Tip text={tip} />}
-          </div>
-          {sparkData && sparkData.length > 1 && (
-            <SparklineSvg data={sparkData} width={48} height={16} />
-          )}
+    <div className={`metric-card ${className || ''}`}>
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {Icon && <Icon size={13} className={`${iconColor} flex-shrink-0 opacity-70`} />}
+          <span className="label truncate">{label}</span>
+          {tip && <Tip text={tip} />}
         </div>
-
-        {/* Value */}
-        <div className="flex items-baseline gap-3 mb-2">
-          <span className={`text-2xl font-bold ${mono ? 'mono' : ''} text-[var(--txt)]`}>
-            {value}
-          </span>
-          {change != null && (
-            <span className={`text-sm font-semibold ${isPositive ? 'text-[var(--profit)]' : isNegative ? 'text-[var(--loss)]' : 'text-[var(--txt-secondary)]'}`}>
-              {isPositive ? '↗' : isNegative ? '↘' : '→'} {change}
-            </span>
-          )}
-        </div>
-
-        {/* Subtitle or trend */}
-        {(subtitle || trend) && (
-          <div className="text-xs text-[var(--txt-muted)]">
-            {subtitle || trend}
-          </div>
+        {sparkData && sparkData.length > 1 && (
+          <SparklineSvg data={sparkData} width={44} height={14} />
         )}
       </div>
+      <div className={`value ${mono ? 'mono' : ''} ${valueColor}`}>{value}</div>
+      {(subtitle || trend || change != null) && (
+        <div className="flex items-center gap-2 mt-1">
+          {change != null && (
+            <span className={`change ${isPositive ? 'text-[var(--profit)]' : isNegative ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+              {change}
+            </span>
+          )}
+          {(subtitle || trend) && (
+            <span className="text-2xs text-[var(--txt-muted)] truncate">{subtitle || trend}</span>
+          )}
+        </div>
+      )}
     </div>
   )
 }

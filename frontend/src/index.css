@@ -204,14 +204,13 @@ body {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--info) 0%, #6a55ef 100%);
+  background: var(--info);
   color: #fff;
   border-color: transparent;
   font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 8px 24px -8px rgba(139, 124, 255, 0.55);
-  transform: translateY(-1px);
+  filter: brightness(1.08);
 }
 
 .btn-danger {
@@ -827,4 +826,94 @@ input[type="checkbox"] {
 .metric-card:hover {
   transform: translateY(-2px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+
+/* ═══════════════════════════════════════════
+   Unified badges & type scale
+   ═══════════════════════════════════════════ */
+
+.text-2xs {
+  font-size: 0.65rem;
+  line-height: 1.25;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.badge-ai {
+  background: var(--info-dim);
+  color: var(--info);
+  border-color: rgba(139, 124, 255, 0.28);
+}
+.badge-demo {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.28);
+}
+.badge-live {
+  background: var(--profit-dim);
+  color: var(--profit);
+  border-color: rgba(22, 199, 132, 0.28);
+}
+.badge-long {
+  background: var(--profit-dim);
+  color: var(--profit);
+}
+.badge-short {
+  background: var(--loss-dim);
+  color: var(--loss);
+}
+
+.panel-header {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.metric-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  transition: border-color 0.15s ease;
+}
+.metric-card:hover {
+  border-color: var(--border-hover);
+}
+.metric-card .label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--txt-muted);
+}
+.metric-card .value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--txt);
+  margin-top: 2px;
+}
+.metric-card .change {
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+/* Position card — light, consistent */
+.pos-card {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 12px;
+}
+.pos-card.pos-live {
+  border-color: rgba(22, 199, 132, 0.22);
 }
