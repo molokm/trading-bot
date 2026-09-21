@@ -244,7 +244,7 @@ function DashBotPanel({
 }
 
 export default function Dashboard({ health, connected, isGuest }) {
-  const demoMode = true
+  const demoMode = health?.demo !== false
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
