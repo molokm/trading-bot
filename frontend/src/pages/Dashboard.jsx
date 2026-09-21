@@ -558,8 +558,11 @@ export default function Dashboard({ health, connected, isGuest }) {
     return result
   }, [liveStatus?.open_positions])
 
-  // Backward-compat alias used in a few places
-  const displayPositions = demoMode ? demoPositions : [...demoPositions, ...mirrorPositions]
+  // One list for the single «Открытые позиции» panel — DEMO + MIRROR with badges
+  const displayPositions = useMemo(
+    () => [...demoPositions, ...mirrorPositions],
+    [demoPositions, mirrorPositions]
+  )
   const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
@@ -718,24 +721,21 @@ export default function Dashboard({ health, connected, isGuest }) {
     return combined
   }, [tradeLog])
 
-  const demoClosedTrades = useMemo(() =>
-    allTrades.filter(t => {
-      const m = String(t.account_mode || t.mode || '').toLowerCase()
-      if (m && m !== 'demo') return false
-      const r = (t.reason || '').toLowerCase()
-      if (r === 'open' || r === 'add') return false
-      return true
-    })
-  , [allTrades])
-
-  const mirrorClosedTrades = useMemo(() =>
-    allTrades.filter(t => {
-      if (String(t.account_mode || t.mode || '').toLowerCase() !== 'live') return false
+  // Closed trades for the single «Сделки» panel — DEMO + LIVE, badge per row
+  const closedTradesForTable = useMemo(() => {
+    return allTrades.filter(t => {
       const r = (t.reason || t.state || '').toLowerCase()
-      if (r === 'open' || r === 'add') return false
+      if (r === 'open' || r === 'add' || r === 'tp1' || r === 'partial_tp') return false
       return true
+    }).map(t => {
+      const m = String(t.account_mode || t.mode || '').toLowerCase()
+      return {
+        ...t,
+        account_mode: m === 'live' ? 'live' : 'demo',
+        bot: t.bot || 'AI Discretionary 1H',
+      }
     })
-  , [allTrades])
+  }, [allTrades])
 
   // Map instId|side → bot name for badge resolution (AI-only product)
   const botMap = useMemo(() => {
@@ -1321,24 +1321,27 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* ═══ DEMO open positions ═══ */}
+          {/* Open Positions — DEMO + LIVE in one panel */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
-              <Zap size={13} className="text-blue-400" />
-              <span>Открытые · DEMO</span>
-              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/30">DEMO</span>
-              <span className="ml-auto text-[var(--txt-muted)] mono">{demoPositions.length}</span>
+              <Zap size={13} className="text-[var(--profit)]" />
+              <span>{t('dash.open_positions')}</span>
+              <span className="ml-auto flex items-center gap-2 text-[var(--txt-muted)] mono text-2xs">
+                <span className="text-blue-400">DEMO {demoPositions.length}</span>
+                <span className="text-[var(--profit)]">LIVE {mirrorPositions.length}</span>
+              </span>
             </div>
             <div className="flex-1 overflow-auto p-2 space-y-2">
               {loading ? (
-                <div className="flex items-center justify-center py-8"><Loader /></div>
-              ) : demoPositions.length === 0 ? (
-                <EmptyState icon={Zap} text="Нет открытых позиций DEMO" sub="Сигналы бота на демо-счёте" />
+                <div className="flex items-center justify-center py-12"><Loader /></div>
+              ) : displayPositions.length === 0 ? (
+                <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
-                demoPositions.map((p, i) => {
+                displayPositions.map((p, i) => {
                   const upl = parseFloat(p.upl || 0)
                   const roe = parseFloat(p.uplRatio || 0) * 100
-                  const posId = `${p.instId}_${p.posSide}_demo`
+                  const mode = String(p.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+                  const posId = `${p.instId}_${p.posSide}_${mode}`
                   const side = (p.posSide || 'long').toLowerCase()
                   const isLong = side !== 'short'
                   const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
@@ -1347,20 +1350,29 @@ export default function Dashboard({ health, connected, isGuest }) {
                   const mark = parseFloat(p.markPx || 0)
                   const size = parseFloat(p.pos || 0)
                   return (
-                    <div key={posId || i} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
-                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}>
+                    <div
+                      key={posId || i}
+                      className={`rounded-lg border bg-[var(--surface)] px-3 py-2.5 ${mode === 'live' ? 'border-[var(--profit)]/25' : 'border-[var(--border)]'}`}
+                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}
+                    >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap min-w-0">
-                          <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
+                          <span className="font-semibold text-[var(--txt)] text-sm">{pair || '—'}</span>
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                             {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
                           </span>
                           <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
-                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          {mode === 'live' ? (
+                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                          ) : (
+                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          )}
                         </div>
                         <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                           {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
-                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{roe >= 0 ? '+' : ''}{roe.toFixed(2)}%</div>
+                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {roe >= 0 ? '+' : ''}{roe.toFixed(2)}%
+                          </div>
                         </div>
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
@@ -1375,67 +1387,15 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* ═══ MIRROR open positions ═══ */}
-          <div className="panel flex-1 flex flex-col min-h-0 !border-[var(--profit)]/25">
-            <div className="panel-header">
-              <Wifi size={13} className="text-[var(--profit)]" />
-              <span>Открытые · ЗЕРКАЛО</span>
-              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30">LIVE</span>
-              <span className="ml-auto text-[var(--txt-muted)] mono">{mirrorPositions.length}</span>
-            </div>
-            <div className="flex-1 overflow-auto p-2 space-y-2">
-              {!liveStatus?.connected ? (
-                <EmptyState icon={WifiOff} text="Зеркало не подключено" sub="Подключите LIVE-ключи в админке" />
-              ) : mirrorPositions.length === 0 ? (
-                <EmptyState icon={Zap} text="Нет открытых позиций зеркала" sub="Зеркало копирует сигналы бота на live-счёт" />
-              ) : (
-                mirrorPositions.map((p, i) => {
-                  const upl = parseFloat(p.upl || 0)
-                  const roe = parseFloat(p.uplRatio || 0) * 100
-                  const posId = `${p.instId}_${p.posSide}_live`
-                  const side = (p.posSide || 'long').toLowerCase()
-                  const isLong = side !== 'short'
-                  const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-                  const lever = p.lever ? `${p.lever}x` : ''
-                  const entry = parseFloat(p.avgPx || 0)
-                  const mark = parseFloat(p.markPx || 0)
-                  const size = parseFloat(p.pos || 0)
-                  return (
-                    <div key={posId || i} className="rounded-lg border border-[var(--profit)]/20 bg-[var(--profit)]/5 px-3 py-2.5"
-                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}>
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 flex-wrap min-w-0">
-                          <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
-                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                            {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
-                          </span>
-                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
-                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                        </div>
-                        <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                          {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
-                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{roe >= 0 ? '+' : ''}{roe.toFixed(2)}%</div>
-                        </div>
-                      </div>
-                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
-                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
-                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                      </div>
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          </div>
-
-          {/* ═══ DEMO trades ═══ */}
+          {/* Trades — DEMO + LIVE in one panel */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
-              <Activity size={13} className="text-blue-400" />
-              <span>Сделки · DEMO</span>
-              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/30">DEMO</span>
-              <span className="ml-auto text-[var(--txt-muted)] mono">{demoClosedTrades.length}</span>
+              <Activity size={13} className="text-accent-purple" />
+              <span>{t('dash.trades')}</span>
+              <span className="ml-auto flex items-center gap-2 text-[var(--txt-muted)] mono text-2xs">
+                <span className="text-blue-400">DEMO {closedTradesForTable.filter(t => t.account_mode !== 'live').length}</span>
+                <span className="text-[var(--profit)]">LIVE {closedTradesForTable.filter(t => t.account_mode === 'live').length}</span>
+              </span>
             </div>
             <div className="flex-1 overflow-auto">
               <table className="data-table">
@@ -1451,26 +1411,39 @@ export default function Dashboard({ health, connected, isGuest }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {demoClosedTrades.slice(0, 30).map((tr, i) => {
+                  {closedTradesForTable.slice(0, 40).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
-                    const pair = (tr.symbol || tr.inst_id || '').replace('-USDT-SWAP', '')
-                    const reason = (tr.reason || 'closed').toLowerCase()
+                    const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
+                    const reason = (tr.reason || tr.state || 'closed').toLowerCase()
+                    const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
-                      <tr key={`demo_${tr.ord_id || i}_${tr.time || i}`}>
+                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
                           {pair || '—'}
                           <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
-                          <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          {mode === 'live' ? (
+                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                          ) : (
+                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          )}
                         </td>
                         <td>
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                             {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">{(tr.entry_px ?? tr.entry) != null && (tr.entry_px ?? tr.entry) !== '' ? `$${Number(tr.entry_px ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
-                        <td className="text-right mono text-2xs">{(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== '' ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
+                        <td className="text-right mono text-2xs">
+                          {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
+                            ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                            : '—'}
+                        </td>
+                        <td className="text-right mono text-2xs">
+                          {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
+                            ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                            : '—'}
+                        </td>
                         <td className="text-right">
                           {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
@@ -1488,76 +1461,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                   })}
                 </tbody>
               </table>
-              {demoClosedTrades.length === 0 && <EmptyState icon={ScrollText} text="Нет сделок DEMO" />}
-            </div>
-          </div>
-
-          {/* ═══ MIRROR trades ═══ */}
-          <div className="panel flex-1 flex flex-col min-h-0 !border-[var(--profit)]/25">
-            <div className="panel-header">
-              <Activity size={13} className="text-[var(--profit)]" />
-              <span>Сделки · ЗЕРКАЛО</span>
-              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30">LIVE</span>
-              <span className="ml-auto text-[var(--txt-muted)] mono">{mirrorClosedTrades.length}</span>
-            </div>
-            <div className="flex-1 overflow-auto">
-              {!liveStatus?.connected ? (
-                <EmptyState icon={WifiOff} text="Зеркало не подключено" />
-              ) : (
-                <>
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Время</th>
-                        <th>Пара</th>
-                        <th>Напр.</th>
-                        <th className="text-right">Вход</th>
-                        <th className="text-right">Выход</th>
-                        <th className="text-right">PnL</th>
-                        <th>Статус</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {mirrorClosedTrades.slice(0, 30).map((tr, i) => {
-                        const pnlVal = parseFloat(tr.pnl || 0)
-                        const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
-                        const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
-                        const reason = (tr.reason || tr.state || 'closed').toLowerCase()
-                        return (
-                          <tr key={`live_${tr.ord_id || i}_${tr.time || i}`}>
-                            <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
-                            <td className="text-[var(--txt)] font-medium whitespace-nowrap">
-                              {pair || '—'}
-                              <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
-                              <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                            </td>
-                            <td>
-                              <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                                {isLong ? 'LONG' : 'SHORT'}
-                              </span>
-                            </td>
-                            <td className="text-right mono text-2xs">{(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== '' ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
-                            <td className="text-right mono text-2xs">{(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== '' ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
-                            <td className="text-right">
-                              {tr.pnl != null ? (
-                                <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                                  {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
-                                </span>
-                              ) : '—'}
-                            </td>
-                            <td>
-                              <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
-                                {reason === 'open' ? 'ОТКРЫТА' : reason}
-                              </span>
-                            </td>
-                          </tr>
-                        )
-                      })}
-                    </tbody>
-                  </table>
-                  {mirrorClosedTrades.length === 0 && <EmptyState icon={ScrollText} text="Нет сделок зеркала" />}
-                </>
-              )}
+              {closedTradesForTable.length === 0 && <EmptyState icon={ScrollText} text={t('dash.no_trades')} />}
             </div>
           </div>
 
