@@ -489,62 +489,43 @@ export default function Dashboard({ health, connected, isGuest }) {
   )
   // DEMO positions (bot showcase) + MIRROR positions (live mirror) — always both
   const demoPositions = useMemo(() => {
-    const byKey = new Map()
-    const put = (key, row) => {
-      const prev = byKey.get(key)
-      if (!prev) { byKey.set(key, row); return }
-      // Merge: prefer non-empty numeric fields from either source
-      const merged = { ...prev, ...row }
-      const num = (a, b) => {
-        const x = parseFloat(a)
-        const y = parseFloat(b)
-        if (x && !Number.isNaN(x)) return String(a)
-        if (y && !Number.isNaN(y)) return String(b)
-        return a ?? b ?? ''
-      }
-      merged.pos = num(prev.pos, row.pos)
-      merged.avgPx = num(prev.avgPx, row.avgPx)
-      merged.markPx = num(prev.markPx, row.markPx)
-      if (prev.upl === '' || prev.upl == null || prev.upl === 0) merged.upl = row.upl ?? prev.upl
-      if (row.upl != null && row.upl !== '') merged.upl = row.upl
-      byKey.set(key, merged)
-    }
+    const result = []
+    const keys = new Set()
     for (const p of (positions || [])) {
       const mode = String(p.account_mode || 'demo').toLowerCase()
+      // When API is in live-view, positions may be live — skip them here
       if (mode === 'live') continue
-      const side = (p.posSide || 'long').toLowerCase()
-      const key = `${p.instId || ''}|${side}`
-      put(key, {
-        ...p,
-        pos: p.pos ?? p.size ?? p.sz ?? '',
-        avgPx: p.avgPx ?? p.avg_px ?? p.entry_price ?? '',
-        markPx: p.markPx ?? p.mark_px ?? p.last ?? '',
-        account_mode: 'demo',
-        bot: p.bot || 'AI Discretionary 1H',
-      })
+      const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
+      if (keys.has(key)) continue
+      keys.add(key)
+      result.push({ ...p, account_mode: 'demo', bot: p.bot || 'AI Discretionary 1H' })
     }
+    // Also from AI bot memory (demo account)
     for (const op of (aiStatus?.open_positions || [])) {
-      if (String(op.account_mode || '').toLowerCase() === 'live') continue
       const coin = (op.coin || '').toUpperCase()
       if (!coin) continue
       const side = (op.side || op.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
       const instId = op.inst_id || op.instId || `${coin}-USDT-SWAP`
       const key = `${instId}|${side}`
-      put(key, {
+      if (keys.has(key)) continue
+      // Skip if this is clearly a live-only memory
+      if (String(op.account_mode || '').toLowerCase() === 'live') continue
+      keys.add(key)
+      result.push({
         instId,
         posSide: side,
-        pos: String(op.size ?? op.size_remaining ?? op.sz ?? 0),
-        avgPx: String(op.entry_price ?? op.entry ?? 0),
-        markPx: String(op.mark_px ?? op.mark ?? op.markPx ?? ''),
+        pos: String(op.size || op.size_remaining || 0),
+        avgPx: String(op.entry_price || op.entry || 0),
+        markPx: String(op.mark_px || op.mark || ''),
         upl: op.unrealized_pnl ?? op.upl ?? '',
         uplRatio: op.upl_ratio ?? '',
-        lever: op.leverage ? String(op.leverage) : (op.lever ? String(op.lever) : ''),
+        lever: op.leverage ? String(op.leverage) : '',
         account_mode: 'demo',
         bot: 'AI Discretionary 1H',
         coin,
       })
     }
-    return [...byKey.values()]
+    return result
   }, [positions, aiStatus?.open_positions])
 
   const mirrorPositions = useMemo(() => {
@@ -1357,23 +1338,17 @@ export default function Dashboard({ health, connected, isGuest }) {
                 <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
                 displayPositions.map((p, i) => {
-                  const upl = parseFloat(p.upl || p.unrealized_pnl || 0)
-                  let roe = parseFloat(p.uplRatio || p.upl_ratio || 0)
-                  if (Math.abs(roe) <= 1 && Math.abs(roe) > 0) roe = roe * 100 // OKX ratio 0.01 = 1%
+                  const upl = parseFloat(p.upl || 0)
+                  const roe = parseFloat(p.uplRatio || 0) * 100
                   const mode = String(p.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                   const posId = `${p.instId}_${p.posSide}_${mode}`
-                  const side = (p.posSide || p.side || 'long').toLowerCase()
+                  const side = (p.posSide || 'long').toLowerCase()
                   const isLong = side !== 'short'
                   const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-                  const lever = (p.lever || p.leverage) ? `${p.lever || p.leverage}x` : ''
-                  const entry = parseFloat(p.avgPx || p.avg_px || p.entry_price || p.entry || 0) || 0
-                  const mark = parseFloat(p.markPx || p.mark_px || p.last || p.mark || 0) || 0
-                  const size = Math.abs(parseFloat(p.pos || p.size || p.sz || p.size_remaining || 0) || 0)
-                  // Contract value (OKX SWAP): rough notional = size * ctVal * mark
-                  const CT = { BTC: 0.01, ETH: 0.1, SOL: 1, XRP: 100, DOGE: 1000, BNB: 0.01, ADA: 10, AVAX: 1, LTC: 0.1, BCH: 0.1, TRX: 1000, OKB: 0.1 }
-                  const ctVal = CT[String(pair).toUpperCase()] || 1
-                  const px = mark || entry
-                  const notional = size && px ? size * ctVal * px : 0
+                  const lever = p.lever ? `${p.lever}x` : ''
+                  const entry = parseFloat(p.avgPx || 0)
+                  const mark = parseFloat(p.markPx || 0)
+                  const size = parseFloat(p.pos || 0)
                   return (
                     <div
                       key={posId || i}
@@ -1401,10 +1376,9 @@ export default function Dashboard({ health, connected, isGuest }) {
                         </div>
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
-                        <span>Контр. <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
-                        <span>Объём <span className="text-[var(--txt)]">{notional ? `$${notional.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</span></span>
-                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: entry >= 100 ? 2 : 4 })}` : '—'}</span></span>
-                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: mark >= 100 ? 2 : 4 })}` : '—'}</span></span>
+                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
+                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
                         {!isGuest && mode === 'demo' && (
                           <button
                             type="button"
