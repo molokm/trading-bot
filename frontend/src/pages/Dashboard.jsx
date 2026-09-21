@@ -1379,6 +1379,18 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
                         <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
                         <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        {!isGuest && mode === 'demo' && (
+                          <button
+                            type="button"
+                            className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2 inline-flex items-center gap-1"
+                            onClick={() => handleClosePosition(p)}
+                            disabled={closing === posId}
+                            title={t('dash.close')}
+                          >
+                            {closing === posId ? <Loader /> : <XCircle size={11} />}
+                            {t('dash.close')}
+                          </button>
+                        )}
                       </div>
                     </div>
                   )
