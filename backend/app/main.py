@@ -383,13 +383,30 @@ async def startup():
         print(f'[startup] live mirror creds: source={_lm_source} key={('yes' if _lm_key else 'no')}', flush=True)
         if _lm_key and _lm_secret and _lm_pass:
             try:
-                await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
-                lc_check = live_manager.get_client() if live_manager else None
-                if lc_check and (not getattr(lc_check, 'demo', True)):
-                    print('[startup] live mirror client ready', flush=True)
-                else:
-                    live_manager = OKXClientManager.new_instance()
-                    print('[startup] live mirror init rejected (demo=true), cleared', flush=True)
+                # Auto-enable mirror after redeploy unless user explicitly disconnected
+                try:
+                    _en = await db.get_setting('live_mirror_enabled') if db else None
+                    _en_l = str(_en or '').strip().lower()
+                    if _en_l in ('0', 'false', 'no', 'off'):
+                        print('[startup] live mirror: keys present but disabled by user — skip auto-start', flush=True)
+                    else:
+                        if _en_l not in ('1', 'true', 'yes', 'on'):
+                            await db.set_setting('live_mirror_enabled', '1')
+                            print('[startup] live mirror: enabled flag set to 1 (auto after redeploy)', flush=True)
+                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
+                        lc_check = live_manager.get_client() if live_manager else None
+                        if lc_check and (not getattr(lc_check, 'demo', True)):
+                            print('[startup] live mirror client ready', flush=True)
+                        else:
+                            live_manager = OKXClientManager.new_instance()
+                            print('[startup] live mirror init rejected (demo=true), cleared', flush=True)
+                except Exception as _en_e:
+                    print(f'[startup] live mirror enable/init: {_en_e}', flush=True)
+                    try:
+                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
+                        print('[startup] live mirror client ready (fallback init)', flush=True)
+                    except Exception as e2:
+                        print(f'[startup] live mirror init: {e2}', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror init: {e}', flush=True)
         else:
@@ -716,9 +733,12 @@ async def startup():
                 print(f'[startup]   AI Discretionary RUNNING (auto) execute={_exec} capital={ai_cfg.capital} symbols={_syms} mode={("DEMO" if _demo else "LIVE")}', flush=True)
                 try:
                     ok_m = await _ensure_live_mirror_client()
+                    _wire_ai_live_cb(ai_bot)
                     _slog(f'live mirror after AI start: {ok_m}')
+                    print(f'[startup] live mirror after AI: {ok_m}', flush=True)
                 except Exception as _me:
                     _slog(f'live mirror attach error: {_me}')
+                    print(f'[startup] live mirror attach error: {_me}', flush=True)
         else:
             _slog(f'SKIPPED: auto-start off')
             print(f'[startup]   AI Discretionary skipped (auto-start off: bots={_bots_auto_start} ai={_ai_auto} force={_ai_force} user_stopped={_user_stopped})', flush=True)
@@ -800,20 +820,39 @@ async def startup():
             print(f"[startup] AI retry failed: {e}", flush=True)
 
     async def _live_mirror_heal():
-        """Re-bind live mirror after restart / idle disconnect every 60s."""
-        for _ in range(5):
-            await asyncio.sleep(8)
+        """Re-bind live mirror after redeploy; keep alive every 60s if enabled."""
+        for attempt in range(8):
+            await asyncio.sleep(5 if attempt == 0 else 8)
             try:
+                # If keys exist and user never disconnected, ensure enabled=1
+                try:
+                    en = await db.get_setting('live_mirror_enabled') if db else None
+                    en_l = str(en or '').strip().lower()
+                    if en_l not in ('0', 'false', 'no', 'off'):
+                        k = await db.get_setting('live_mirror_key') if db else None
+                        if not k:
+                            # try encrypted path already loaded
+                            k = _live_key
+                        if k and en_l not in ('1', 'true', 'yes', 'on'):
+                            await db.set_setting('live_mirror_enabled', '1')
+                            print('[startup] live mirror heal: auto-enabled (keys present)', flush=True)
+                except Exception as _fe:
+                    print(f'[startup] live mirror heal flag: {_fe}', flush=True)
                 ok = await _ensure_live_mirror_client()
                 if ok:
-                    print('[startup] live mirror heal: OK', flush=True)
+                    if ai_bot:
+                        _wire_ai_live_cb(ai_bot)
+                    print(f'[startup] live mirror heal: OK (attempt {attempt + 1})', flush=True)
                     break
+                print(f'[startup] live mirror heal: not ready (attempt {attempt + 1})', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror heal: {e}', flush=True)
         while True:
             await asyncio.sleep(60)
             try:
-                await _ensure_live_mirror_client()
+                ok = await _ensure_live_mirror_client()
+                if ok and ai_bot:
+                    _wire_ai_live_cb(ai_bot)
             except Exception as e:
                 print(f'[LIVE] heal loop: {e}', flush=True)
 
@@ -3223,7 +3262,7 @@ def _wire_ai_live_cb(bot) -> None:
         return
     try:
         bot._live_ensure_cb = _ensure_live_mirror_client
-        if live_manager is not None and getattr(bot, 'live_client_manager', None) is None:
+        if live_manager is not None:
             bot.live_client_manager = live_manager
     except Exception as e:
         print(f'[LIVE] wire cb: {e}', flush=True)
