@@ -395,11 +395,31 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [trades, pnlData] = await Promise.all([
+      const [trades, liveTr, pnlData] = await Promise.all([
         api.getPairedTrades(50).catch(() => null),
+        api.liveTrades().catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
-      if (trades) setTradeLog(trades.trades || [])
+      const demoRows = trades?.trades || []
+      const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
+        ...t,
+        account_mode: 'live',
+        inst_id: t.inst_id || t.symbol,
+        entry_px: t.entry_px ?? t.entry_price ?? t.entry,
+        exit_px: t.exit_px ?? t.exit_price ?? t.exit,
+        bot: t.bot || 'AI Discretionary 1H',
+      }))
+      // Merge: demo from paired + live from mirror endpoint (tag live)
+      const byKey = new Map()
+      for (const t of demoRows) {
+        const k = `${t.ord_id || t.entry_ord_id || ''}|${t.inst_id}|${t.exit_time || t.time}|demo`
+        byKey.set(k, { ...t, account_mode: t.account_mode || 'demo' })
+      }
+      for (const t of liveRows) {
+        const k = `${t.ord_id || ''}|${t.inst_id || t.symbol}|${t.time || t.exit_time}|live`
+        byKey.set(k, t)
+      }
+      setTradeLog([...byKey.values()])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         // ONLY accept pnl_engine payloads — never bot-status seeds
         const src = String(pnlData.source || '')
@@ -467,47 +487,79 @@ export default function Dashboard({ health, connected, isGuest }) {
     pnl?.economic_approx
     ?? (strategyRealized + unrealizedPnl + fundingPnl)
   )
-  // Strict mode isolation: show ONLY positions of the active account (demo XOR live)
-  const displayPositions = useMemo(() => {
-    const posMode = demoMode ? 'demo' : 'live'
+  // DEMO positions (bot showcase) + MIRROR positions (live mirror) — always both
+  const demoPositions = useMemo(() => {
     const result = []
-    const resultKeys = new Set()
+    const keys = new Set()
     for (const p of (positions || [])) {
-      const mode = String(p.account_mode || posMode).toLowerCase()
-      if (mode !== posMode) continue
+      const mode = String(p.account_mode || 'demo').toLowerCase()
+      // When API is in live-view, positions may be live — skip them here
+      if (mode === 'live') continue
       const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
-      if (resultKeys.has(key)) continue
-      resultKeys.add(key)
-      result.push({ ...p, account_mode: posMode })
+      if (keys.has(key)) continue
+      keys.add(key)
+      result.push({ ...p, account_mode: 'demo', bot: p.bot || 'AI Discretionary 1H' })
     }
-    if (!demoMode) {
-      for (const lp of (liveStatus?.open_positions || [])) {
-        const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
-        const side = (lp.side || 'long').toLowerCase()
-        const sz = parseFloat(lp.size || 0)
-        if (!sz) continue
-        const instId = lp.symbol || `${coin}-USDT-SWAP`
-        const dedupKey = `${instId}|${side}`
-        if (resultKeys.has(dedupKey)) continue
-        resultKeys.add(dedupKey)
-        result.push({
-          instId,
-          posSide: side,
-          pos: String(sz),
-          avgPx: String(lp.entry_price || 0),
-          markPx: String(lp.mark_px || lp.markPx || ''),
-          upl: lp.upl ?? '',
-          uplRatio: lp.upl_ratio ?? '',
-          mgnRatio: '',
-          lever: lp.leverage ? String(lp.leverage) : '',
-          account_mode: 'live',
-          bot: lp.bot || 'AI Discretionary 1H',
-          coin,
-        })
-      }
+    // Also from AI bot memory (demo account)
+    for (const op of (aiStatus?.open_positions || [])) {
+      const coin = (op.coin || '').toUpperCase()
+      if (!coin) continue
+      const side = (op.side || op.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+      const instId = op.inst_id || op.instId || `${coin}-USDT-SWAP`
+      const key = `${instId}|${side}`
+      if (keys.has(key)) continue
+      // Skip if this is clearly a live-only memory
+      if (String(op.account_mode || '').toLowerCase() === 'live') continue
+      keys.add(key)
+      result.push({
+        instId,
+        posSide: side,
+        pos: String(op.size || op.size_remaining || 0),
+        avgPx: String(op.entry_price || op.entry || 0),
+        markPx: String(op.mark_px || op.mark || ''),
+        upl: op.unrealized_pnl ?? op.upl ?? '',
+        uplRatio: op.upl_ratio ?? '',
+        lever: op.leverage ? String(op.leverage) : '',
+        account_mode: 'demo',
+        bot: 'AI Discretionary 1H',
+        coin,
+      })
     }
     return result
-  }, [positions, liveStatus?.open_positions, demoMode])
+  }, [positions, aiStatus?.open_positions])
+
+  const mirrorPositions = useMemo(() => {
+    const result = []
+    const keys = new Set()
+    for (const lp of (liveStatus?.open_positions || [])) {
+      const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
+      const side = (lp.side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+      const sz = parseFloat(lp.size || 0)
+      if (!sz && sz !== 0) continue
+      if (!coin && !lp.symbol) continue
+      const instId = lp.symbol || `${coin}-USDT-SWAP`
+      const key = `${instId}|${side}`
+      if (keys.has(key)) continue
+      keys.add(key)
+      result.push({
+        instId,
+        posSide: side,
+        pos: String(sz || lp.size || 0),
+        avgPx: String(lp.entry_price || 0),
+        markPx: String(lp.mark_px || lp.markPx || ''),
+        upl: lp.upl ?? lp.unrealized_pnl ?? '',
+        uplRatio: lp.upl_ratio ?? '',
+        lever: lp.leverage ? String(lp.leverage) : '',
+        account_mode: 'live',
+        bot: lp.bot || 'AI Discretionary 1H',
+        coin,
+      })
+    }
+    return result
+  }, [liveStatus?.open_positions])
+
+  // Backward-compat alias used in a few places
+  const displayPositions = demoMode ? demoPositions : [...demoPositions, ...mirrorPositions]
   const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
@@ -656,19 +708,34 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
-    const want = demoMode ? 'demo' : 'live'
-    const combined = (tradeLog || []).filter((t) => {
-      const m = String(t.account_mode || t.mode || '').toLowerCase()
-      if (!m) return demoMode
-      return m === want
-    })
+    // Keep full log; UI splits DEMO vs MIRROR below
+    const combined = [...(tradeLog || [])]
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog, demoMode])
+  }, [tradeLog])
+
+  const demoClosedTrades = useMemo(() =>
+    allTrades.filter(t => {
+      const m = String(t.account_mode || t.mode || '').toLowerCase()
+      if (m && m !== 'demo') return false
+      const r = (t.reason || '').toLowerCase()
+      if (r === 'open' || r === 'add') return false
+      return true
+    })
+  , [allTrades])
+
+  const mirrorClosedTrades = useMemo(() =>
+    allTrades.filter(t => {
+      if (String(t.account_mode || t.mode || '').toLowerCase() !== 'live') return false
+      const r = (t.reason || t.state || '').toLowerCase()
+      if (r === 'open' || r === 'add') return false
+      return true
+    })
+  , [allTrades])
 
   // Map instId|side → bot name for badge resolution (AI-only product)
   const botMap = useMemo(() => {
@@ -1254,256 +1321,246 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* Open Positions */}
+          {/* ═══ DEMO open positions ═══ */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
-              <Zap size={13} className="text-[var(--profit)]" />
-              <span>{t('dash.open_positions')}</span>
-              <span className={`ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border ${demoMode ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30'}`}>
-                {demoMode ? 'DEMO' : 'LIVE'}
-              </span>
-              <span className="ml-auto text-[var(--txt-muted)] mono">{displayPositions.length}</span>
+              <Zap size={13} className="text-blue-400" />
+              <span>Открытые · DEMO</span>
+              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/30">DEMO</span>
+              <span className="ml-auto text-[var(--txt-muted)] mono">{demoPositions.length}</span>
             </div>
             <div className="flex-1 overflow-auto p-2 space-y-2">
               {loading ? (
-                <div className="flex items-center justify-center py-12"><Loader /></div>
-              ) : displayPositions.length === 0 ? (
-                <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
+                <div className="flex items-center justify-center py-8"><Loader /></div>
+              ) : demoPositions.length === 0 ? (
+                <EmptyState icon={Zap} text="Нет открытых позиций DEMO" sub="Сигналы бота на демо-счёте" />
               ) : (
-                <>
-                  {orphanPositions.length > 0 && (
-                    <div className="px-2 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-2xs text-amber-400">
-                      {orphanPositions.length} {t('dash.orphan_positions')}{' '}
-                      <span className="mono">
-                        {orphanPositions.map(op =>
-                          `${(op.instId || '').replace('-USDT-SWAP', '')} ${(op.posSide || '').toUpperCase()}`
-                        ).join(' · ')}
-                      </span>
-                    </div>
-                  )}
-                  {displayPositions.filter((p) => resolveBotName(p) !== 'Smart Money').map((p, i) => {
-                    const upl = parseFloat(p.upl || 0)
-                    const roe = parseFloat(p.uplRatio || 0) * 100
-                    const posId = `${p.instId}_${p.posSide}`
-                    const botName = resolveBotName(p)
-                    const accountMode = (p.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
-                    const side = (p.posSide || 'long').toLowerCase()
-                    const isLong = side !== 'short'
-                    const pair = (p.instId || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-                    const lever = p.lever ? `${p.lever}x` : ''
-                    const entry = parseFloat(p.avgPx || 0)
-                    const mark = parseFloat(p.markPx || 0)
-                    const size = parseFloat(p.pos || 0)
-                    return (
-                      <div
-                        key={posId || i}
-                        className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
-                        style={{
-                          boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}`,
-                        }}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex items-center gap-2 flex-wrap min-w-0">
-                            <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
-                            <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                              {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
-                            </span>
-                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
-                            {accountMode === 'live' ? (
-                              <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                            ) : (
-                              <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
-                            )}
-                          </div>
-                          <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
-                            <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                              {roe >= 0 ? '+' : ''}{roe.toFixed(2)}%
-                            </div>
-                          </div>
+                demoPositions.map((p, i) => {
+                  const upl = parseFloat(p.upl || 0)
+                  const roe = parseFloat(p.uplRatio || 0) * 100
+                  const posId = `${p.instId}_${p.posSide}_demo`
+                  const side = (p.posSide || 'long').toLowerCase()
+                  const isLong = side !== 'short'
+                  const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+                  const lever = p.lever ? `${p.lever}x` : ''
+                  const entry = parseFloat(p.avgPx || 0)
+                  const mark = parseFloat(p.markPx || 0)
+                  const size = parseFloat(p.pos || 0)
+                  return (
+                    <div key={posId || i} className="rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2.5"
+                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                          <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                            {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
+                          </span>
+                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                         </div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
-                          <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
-                          <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                          <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                          {!isGuest && (
-                            <button
-                              type="button"
-                              className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2"
-                              onClick={() => handleClosePosition(p)}
-                              disabled={closing === posId}
-                            >
-                              {closing === posId ? <Loader /> : <XCircle size={11} />}
-                              {t('dash.close')}
-                            </button>
-                          )}
+                        <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                          {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{roe >= 0 ? '+' : ''}{roe.toFixed(2)}%</div>
                         </div>
                       </div>
-                    )
-                  })}
-                </>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
+                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
+                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                      </div>
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>
 
-          {/* Trades — open + closed for current account mode only */}
+          {/* ═══ MIRROR open positions ═══ */}
+          <div className="panel flex-1 flex flex-col min-h-0 !border-[var(--profit)]/25">
+            <div className="panel-header">
+              <Wifi size={13} className="text-[var(--profit)]" />
+              <span>Открытые · ЗЕРКАЛО</span>
+              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30">LIVE</span>
+              <span className="ml-auto text-[var(--txt-muted)] mono">{mirrorPositions.length}</span>
+            </div>
+            <div className="flex-1 overflow-auto p-2 space-y-2">
+              {!liveStatus?.connected ? (
+                <EmptyState icon={WifiOff} text="Зеркало не подключено" sub="Подключите LIVE-ключи в админке" />
+              ) : mirrorPositions.length === 0 ? (
+                <EmptyState icon={Zap} text="Нет открытых позиций зеркала" sub="Зеркало копирует сигналы бота на live-счёт" />
+              ) : (
+                mirrorPositions.map((p, i) => {
+                  const upl = parseFloat(p.upl || 0)
+                  const roe = parseFloat(p.uplRatio || 0) * 100
+                  const posId = `${p.instId}_${p.posSide}_live`
+                  const side = (p.posSide || 'long').toLowerCase()
+                  const isLong = side !== 'short'
+                  const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+                  const lever = p.lever ? `${p.lever}x` : ''
+                  const entry = parseFloat(p.avgPx || 0)
+                  const mark = parseFloat(p.markPx || 0)
+                  const size = parseFloat(p.pos || 0)
+                  return (
+                    <div key={posId || i} className="rounded-lg border border-[var(--profit)]/20 bg-[var(--profit)]/5 px-3 py-2.5"
+                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.5)' : 'rgba(255,51,102,0.5)'}` }}>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                          <span className="font-semibold text-[var(--txt)] text-sm">{pair}</span>
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                            {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
+                          </span>
+                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                          <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                        </div>
+                        <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                          {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{roe >= 0 ? '+' : ''}{roe.toFixed(2)}%</div>
+                        </div>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
+                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
+                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                      </div>
+                    </div>
+                  )
+                })
+              )}
+            </div>
+          </div>
+
+          {/* ═══ DEMO trades ═══ */}
           <div className="panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
-              <Activity size={13} className="text-accent-purple" />
-              <span>{t('dash.trades')}</span>
-              <span className={`ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border ${demoMode ? 'bg-blue-500/10 text-blue-400 border-blue-500/30' : 'bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30'}`}>
-                {demoMode ? 'DEMO' : 'LIVE'}
-              </span>
-              <div className="ml-auto flex gap-1">
-                {['all', 'open', 'win', 'loss'].map(f => (
-                  <Chip key={f} active={filterResult === f || (f === 'open' && filterReason === 'open')} onClick={() => {
-                    if (f === 'open') { setFilterReason('open'); setFilterResult('all') }
-                    else { setFilterReason('all'); setFilterResult(f) }
-                  }}>
-                    {f === 'all' ? t('dash.all') : f === 'open' ? 'Открытые' : f === 'win' ? t('dash.profit') : t('dash.loss')}
-                  </Chip>
-                ))}
-              </div>
+              <Activity size={13} className="text-blue-400" />
+              <span>Сделки · DEMO</span>
+              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/30">DEMO</span>
+              <span className="ml-auto text-[var(--txt-muted)] mono">{demoClosedTrades.length}</span>
             </div>
-            {activeTrades.length > 0 && (
-              <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.shown')} <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.total_pnl')} <span className={`mono font-bold ${pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{pnlTotal >= 0 ? '+' : ''}{pnlTotal.toFixed(2)}</span>
-                  {pnlByBot.length > 0 && (
-                    <span className="ml-1 text-[0.6rem] text-[var(--txt-muted)]">
-                      {pnlByBot.map((b, i) => (
-                        <span key={b.name} className={i > 0 ? 'ml-1.5' : ''}>
-                          <span className="text-[var(--txt-secondary)]">{b.name}:</span>{' '}
-                          <span className={`mono font-medium ${b.val >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {b.val >= 0 ? '+' : ''}{b.val.toFixed(2)}
-                          </span>
-                        </span>
-                      ))}
-                    </span>
-                  )}
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.win_count')} <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.loss_count')} <span className="mono text-[var(--loss)] font-medium">{tradesSummary.losses}</span>
-                </span>
-              </div>
-            )}
             <div className="flex-1 overflow-auto">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>{t('dash.time')}</th>
-                    <th>{t('dash.pair')}</th>
-                    <th>{t('dash.direction')}</th>
-                    <th className="text-right">{t('dash.entry')}</th>
-                    <th className="text-right">Выход / Марка</th>
-                    <th className="text-right">{t('dash.size')}</th>
+                    <th>Время</th>
+                    <th>Пара</th>
+                    <th>Напр.</th>
+                    <th className="text-right">Вход</th>
+                    <th className="text-right">Выход</th>
                     <th className="text-right">PnL</th>
                     <th>Статус</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 40).map((tr, i) => {
-                    const isOpen = tr.type === 'open'
+                  {demoClosedTrades.slice(0, 30).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
-                    const isLong = tr.side === 'buy'
-                    // Level status: SL moved to BE once breakeven hits; TP1/TP2 hit when partial closes
-                    const beHit = isOpen && !!tr.breakeven
-                    const tp1Hit = isOpen && (tr.stage === 'partial' || tr.stage === 'trailing' || tr.stage === 'tp1_done' || tr.stage === 'tp2_done' || !!tr.partial_done)
-                    const tp2Hit = isOpen && (tr.stage === 'trailing' || tr.stage === 'tp2_done')
-                    const stageInfo = isOpen
-                      ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
-                      : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
-                    const botBadge = (() => {
-                      const n = String(tr.bot || '')
-                      if (/AI|Discretionary|Scale/i.test(n) || (AI_ONLY_MODE && n)) {
-                        return { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' }
-                      }
-                      if (n === 'Momentum') return { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      if (n === 'Impulse 1D' || n === 'Impulse') return { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
-                      if (n) return { label: n.slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)]' }
-                      return AI_ONLY_MODE ? { label: 'AI', cls: 'bg-orange-500/20 text-orange-400 border border-orange-500/30' } : null
-                    })()
-                    const trMode = String(tr.account_mode || (demoMode ? 'demo' : 'live')).toLowerCase()
-                    const mark = parseFloat(tr.mark || 0)
-                    const upnl = parseFloat(tr.unrealized_pnl || 0)
+                    const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
+                    const pair = (tr.symbol || tr.inst_id || '').replace('-USDT-SWAP', '')
+                    const reason = (tr.reason || 'closed').toLowerCase()
                     return (
-                      <tr key={`${tr.type}_${tr.inst_id || tr.symbol}_${i}`}
-                        style={isOpen ? {
-                          background: isLong
-                            ? 'linear-gradient(90deg, rgba(0,255,136,0.04) 0%, transparent 40%)'
-                            : 'linear-gradient(90deg, rgba(255,51,102,0.04) 0%, transparent 40%)',
-                          boxShadow: `inset 2px 0 0 ${isLong ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
-                        } : undefined}>
-                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.time)}</td>
+                      <tr key={`demo_${tr.ord_id || i}_${tr.time || i}`}>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
-                          <span className="mr-1">{tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}</span>
-                          {botBadge && (
-                            <span className={`text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
-                          )}
-                          {trMode === 'live' ? (
-                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                          ) : (
-                            <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
-                          )}
+                          {pair || '—'}
+                          <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                          <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                         </td>
                         <td>
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                             {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">{tr.entry ? `$${Number(tr.entry).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen ? (
-                            mark > 0 ? <span className="text-[var(--txt)]">${mark.toLocaleString(undefined, {maximumFractionDigits: 2})}</span> : '—'
-                          ) : tr.exit != null ? (
-                            <span className="text-[var(--txt)]">${Number(tr.exit).toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {tr.size != null ? Number(tr.size_remaining != null && isOpen ? tr.size_remaining : tr.size).toFixed(2) : '—'}
-                        </td>
+                        <td className="text-right mono text-2xs">{(tr.entry_px ?? tr.entry) != null && (tr.entry_px ?? tr.entry) !== '' ? `$${Number(tr.entry_px ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
+                        <td className="text-right mono text-2xs">{(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== '' ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
                         <td className="text-right">
-                          {isOpen ? (
-                            upnl != null && !Number.isNaN(upnl) ? (
-                              <span className={`mono text-2xs font-bold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                                {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
-                              </span>
-                            ) : (
-                              <span className="text-2xs text-[var(--txt-muted)]">—</span>
-                            )
-                          ) : tr.pnl != null ? (
+                          {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
-                          ) : (
-                            <span className="text-2xs text-[var(--txt-muted)]">—</span>
-                          )}
+                          ) : '—'}
                         </td>
                         <td>
-                          {isOpen ? (
-                            <span className="text-2xs font-bold px-1.5 py-0.5 rounded bg-[var(--info)]/15 text-[var(--info)] border border-[var(--info)]/30">
-                              ОТКРЫТА
-                            </span>
-                          ) : (
-                            <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
-                              {stageInfo.label || 'ЗАКРЫТА'}
-                            </span>
-                          )}
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
+                            {reason === 'open' ? 'ОТКРЫТА' : reason}
+                          </span>
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {activeTrades.length === 0 && <EmptyState icon={ScrollText} text={t('dash.no_trades')} />}
+              {demoClosedTrades.length === 0 && <EmptyState icon={ScrollText} text="Нет сделок DEMO" />}
             </div>
           </div>
+
+          {/* ═══ MIRROR trades ═══ */}
+          <div className="panel flex-1 flex flex-col min-h-0 !border-[var(--profit)]/25">
+            <div className="panel-header">
+              <Activity size={13} className="text-[var(--profit)]" />
+              <span>Сделки · ЗЕРКАЛО</span>
+              <span className="ml-2 text-2xs font-bold px-1.5 py-0.5 rounded border bg-[var(--profit)]/10 text-[var(--profit)] border-[var(--profit)]/30">LIVE</span>
+              <span className="ml-auto text-[var(--txt-muted)] mono">{mirrorClosedTrades.length}</span>
+            </div>
+            <div className="flex-1 overflow-auto">
+              {!liveStatus?.connected ? (
+                <EmptyState icon={WifiOff} text="Зеркало не подключено" />
+              ) : (
+                <>
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Время</th>
+                        <th>Пара</th>
+                        <th>Напр.</th>
+                        <th className="text-right">Вход</th>
+                        <th className="text-right">Выход</th>
+                        <th className="text-right">PnL</th>
+                        <th>Статус</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {mirrorClosedTrades.slice(0, 30).map((tr, i) => {
+                        const pnlVal = parseFloat(tr.pnl || 0)
+                        const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
+                        const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
+                        const reason = (tr.reason || tr.state || 'closed').toLowerCase()
+                        return (
+                          <tr key={`live_${tr.ord_id || i}_${tr.time || i}`}>
+                            <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
+                            <td className="text-[var(--txt)] font-medium whitespace-nowrap">
+                              {pair || '—'}
+                              <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-orange-500/20 text-orange-400 border border-orange-500/30">AI</span>
+                              <span className="ml-1 text-2xs font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                            </td>
+                            <td>
+                              <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                                {isLong ? 'LONG' : 'SHORT'}
+                              </span>
+                            </td>
+                            <td className="text-right mono text-2xs">{(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== '' ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
+                            <td className="text-right mono text-2xs">{(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== '' ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</td>
+                            <td className="text-right">
+                              {tr.pnl != null ? (
+                                <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                                  {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
+                                </span>
+                              ) : '—'}
+                            </td>
+                            <td>
+                              <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
+                                {reason === 'open' ? 'ОТКРЫТА' : reason}
+                              </span>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                  {mirrorClosedTrades.length === 0 && <EmptyState icon={ScrollText} text="Нет сделок зеркала" />}
+                </>
+              )}
+            </div>
+          </div>
+
         </div>
 
                 {/* ═══ RIGHT — Filters + Bots ═══ */}
