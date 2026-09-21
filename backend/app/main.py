@@ -1714,72 +1714,162 @@ async def me_dashboard(request: Request):
             live = {'connected': False, 'error': str(e)}
     else:
         live = {'connected': False}
+    # ── DEMO closed trades (always for mini-app DEMO tab) ──
     try:
-        has_demo_trades = False
-        if role == 'admin' and user_id is None:
-            rows = await db.get_trades(limit=20)
-            for t in rows:
-                trades.append({
-                    'time': t.get('timestamp', ''),
-                    'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
-                    'side': t.get('side', ''),
-                    'pnl': float(t.get('pnl', 0) or 0),
-                    'account_mode': t.get('account_mode', 'demo'),
-                })
-                has_demo_trades = True
-        elif user_id:
-            ub = strategy_mgr.get_or_create(str(user_id))
-            for bid in (ub.rot_bot_id, ub.imp_bot_id):
-                rows = await db.get_trades(bot_id=bid, limit=20)
-                for t in rows:
-                    trades.append({
-                        'time': t.get('timestamp', ''),
-                        'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
-                        'side': t.get('side', ''),
-                        'pnl': float(t.get('pnl', 0) or 0),
-                        'account_mode': 'live',
-                    })
-        if not has_demo_trades and ai_bot:
-            for t in (ai_bot.get_status() or {}).get('recent_trades', [])[-20:]:
-                if 'pnl' not in t:
-                    continue
-                trades.append({
-                    'time': t.get('time', t.get('ts', '')),
-                    'inst': (t.get('symbol', t.get('inst_id', '')) or '').replace('-USDT-SWAP', ''),
-                    'side': t.get('side', ''),
-                    'pnl': float(t.get('pnl', 0) or 0),
-                    'account_mode': t.get('account_mode', 'demo'),
-                })
-                has_demo_trades = True
-        if not has_demo_trades:
+        _demo_keys = set()
+        def _add_demo_trade(row):
             try:
-                epoch = await get_pnl_epoch()
-                epoch_ms = 0
-                if epoch:
-                    from datetime import datetime as _dt, timezone as _tz
-                    epoch_ms = int(_dt.fromisoformat(epoch).replace(tzinfo=_tz.utc).timestamp() * 1000)
-                ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=20)
-                for t in ects:
-                    st_sub = str(t.get('sub_type', '') or '')
-                    side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else ''
-                    trades.append({
-                        'time': t.get('close_ts', ''),
-                        'inst': (t.get('inst_id', '') or '').replace('-USDT-SWAP', ''),
-                        'side': side,
-                        'pnl': float(t.get('pnl', 0) or 0),
-                        'account_mode': t.get('account_mode', 'demo'),
+                pnl = float(row.get('pnl') or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            # Skip pure opens with zero pnl and no exit
+            reason = str(row.get('reason') or '').lower()
+            if reason in ('open', 'add') and abs(pnl) < 1e-9:
+                return
+            inst = (row.get('inst') or row.get('inst_id') or row.get('symbol') or '')
+            inst = str(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+            ts = row.get('time') or row.get('timestamp') or row.get('close_ts') or row.get('ts') or ''
+            key = f"{ts}|{inst}|{pnl:.4f}|demo"
+            if key in _demo_keys:
+                return
+            _demo_keys.add(key)
+            trades.append({
+                'time': ts,
+                'inst': inst,
+                'side': row.get('side') or '',
+                'pnl': round(pnl, 4),
+                'account_mode': 'demo',
+                'reason': reason or 'closed',
+            })
+
+        # 1) DB trades for AI bot (account_mode=demo)
+        try:
+            for bid in ('ai_strategy', 'AI Discretionary 1H', getattr(ai_bot, 'BOT_ID', None) if ai_bot else None):
+                if not bid:
+                    continue
+                rows = await db.get_trades(bot_id=bid, limit=50, account_mode='demo')
+                for t in rows:
+                    _add_demo_trade({
+                        'time': t.get('timestamp') or t.get('time'),
+                        'inst_id': t.get('inst_id'),
+                        'side': t.get('side'),
+                        'pnl': t.get('pnl'),
+                        'reason': t.get('reason') or 'closed',
                     })
-            except Exception:
-                pass
-    except Exception:
-        pass
+            # Also unscoped demo rows (legacy)
+            rows_all = await db.get_trades(limit=50, account_mode='demo')
+            for t in rows_all:
+                _add_demo_trade({
+                    'time': t.get('timestamp') or t.get('time'),
+                    'inst_id': t.get('inst_id'),
+                    'side': t.get('side'),
+                    'pnl': t.get('pnl'),
+                    'reason': t.get('reason') or 'closed',
+                })
+        except Exception as _e:
+            print(f'[me/dashboard] demo db trades: {_e}', flush=True)
+
+        # 2) exchange_close_trades (synced from OKX demo bills)
+        try:
+            epoch = await get_pnl_epoch()
+            epoch_ms = 0
+            if epoch:
+                from datetime import datetime as _dt, timezone as _tz
+                try:
+                    epoch_ms = int(_dt.fromisoformat(str(epoch).replace('Z', '+00:00')).timestamp() * 1000)
+                except Exception:
+                    epoch_ms = 0
+            ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=50)
+            for t in ects:
+                am = str(t.get('account_mode') or 'demo').lower()
+                if am == 'live':
+                    continue
+                st_sub = str(t.get('sub_type', '') or '')
+                side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else (t.get('side') or '')
+                _add_demo_trade({
+                    'time': t.get('close_ts') or t.get('timestamp'),
+                    'inst_id': t.get('inst_id'),
+                    'side': side,
+                    'pnl': t.get('pnl'),
+                    'reason': 'closed',
+                })
+        except Exception as _e:
+            print(f'[me/dashboard] demo exchange closes: {_e}', flush=True)
+
+        # 3) AI bot in-memory trade log / recent_trades
+        if ai_bot:
+            try:
+                st = ai_bot.get_status() or {}
+                for t in list(st.get('recent_trades') or [])[-30:]:
+                    am = str(t.get('account_mode') or 'demo').lower()
+                    if am == 'live':
+                        continue
+                    _add_demo_trade({
+                        'time': t.get('time') or t.get('ts') or t.get('exit_time'),
+                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
+                        'side': t.get('side'),
+                        'pnl': t.get('pnl'),
+                        'reason': t.get('reason') or 'closed',
+                    })
+                log = getattr(ai_bot, '_trade_log', None) or []
+                for t in list(log)[-30:]:
+                    am = str(t.get('account_mode') or 'demo').lower()
+                    if am == 'live':
+                        continue
+                    _add_demo_trade({
+                        'time': t.get('time') or t.get('exit_time') or t.get('ts'),
+                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
+                        'side': t.get('side'),
+                        'pnl': t.get('pnl'),
+                        'reason': t.get('reason') or 'closed',
+                    })
+            except Exception as _e:
+                print(f'[me/dashboard] demo ai log: {_e}', flush=True)
+
+        # 4) Paired trades API path (same as dashboard) — DEMO only
+        try:
+            from app.services.pnl_engine import build_pnl_from_rows  # may not exist
+        except Exception:
+            pass
+        try:
+            # Showcase OKX bills via existing helper if available
+            if 'client_manager' in dir() or client_manager is not None:
+                cm = client_manager
+                client = cm.get_client() if cm else None
+                if client and getattr(client, 'demo', True):
+                    try:
+                        bills_resp = await client.get_bills(inst_type='SWAP', limit=50)
+                        bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
+                        for b in bill_data:
+                            sub = str(b.get('subType', '') or '')
+                            if sub not in ('5', '6'):
+                                continue
+                            try:
+                                bp = float(b.get('pnl') or 0)
+                            except (TypeError, ValueError):
+                                bp = 0.0
+                            inst = str(b.get('instId', '') or '')
+                            side_val = 'sell' if sub == '5' else 'buy'
+                            _add_demo_trade({
+                                'time': b.get('ts') or '',
+                                'inst_id': inst,
+                                'side': side_val,
+                                'pnl': bp,
+                                'reason': 'closed',
+                            })
+                    except Exception as _e:
+                        print(f'[me/dashboard] demo okx bills: {_e}', flush=True)
+        except Exception as _e:
+            print(f'[me/dashboard] demo bills outer: {_e}', flush=True)
+    except Exception as e:
+        print(f'[me/dashboard] demo trades block: {e}', flush=True)
     def _trade_sort_key(t):
         v = t.get('time', 0)
         if isinstance(v, str):
             return v
         return str(v)
     trades.sort(key=_trade_sort_key, reverse=True)
-    return {'demo': demo, 'live': live, 'trades': trades[:20], 'role': role, 'user_id': user_id}
+    return {'demo': demo, 'live': live, 'trades': trades[:40], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
 async def ai_status():
