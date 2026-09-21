@@ -468,16 +468,23 @@ export default function Dashboard({ health, connected, isGuest }) {
   // Merge demo + live positions into separate rows
   const displayPositions = useMemo(() => {
     const result = []
+    const resultKeys = new Set()
+    const posMode = demoMode ? 'demo' : 'live'
     for (const p of (positions || [])) {
-      result.push({ ...p, account_mode: 'demo' })
+      const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
+      resultKeys.add(key)
+      result.push({ ...p, account_mode: p.account_mode || posMode })
     }
     for (const lp of (liveStatus?.open_positions || [])) {
       const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
       const side = (lp.side || 'long').toLowerCase()
       const sz = parseFloat(lp.size || 0)
       if (!sz) continue
+      const instId = lp.symbol || `${coin}-USDT-SWAP`
+      const dedupKey = `${instId}|${side}`
+      if (resultKeys.has(dedupKey)) continue
       result.push({
-        instId: lp.symbol || `${coin}-USDT-SWAP`,
+        instId,
         posSide: side,
         pos: String(sz),
         avgPx: String(lp.entry_price || 0),
@@ -491,7 +498,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       })
     }
     return result
-  }, [positions, liveStatus?.open_positions])
+  }, [positions, liveStatus?.open_positions, demoMode])
   const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
   // Active strategy labels (only running bots contribute to dashboard PnL)
   const activeBotNames = (() => {
@@ -850,7 +857,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         if (sclHas) hint = 'AI Scale-In 1H'
       }
       if (hint === 'Smart Money') continue
-      if (!hint) continue
+      const exchMode = demoMode ? 'demo' : 'live'
       pushOpen({
         ...p,
         inst_id: p.instId || p.inst_id,
@@ -860,9 +867,9 @@ export default function Dashboard({ health, connected, isGuest }) {
         size: posSz,
         size_remaining: posSz,
         upl: p.upl,
-        bot: hint,
-        account_mode: 'demo',
-      }, hint)
+        bot: hint || '',
+        account_mode: p.account_mode || exchMode,
+      }, hint || 'Exchange')
     }
 
     // 2. Closed — paired log only; skip opens still on exchange and partials
