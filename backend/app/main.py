@@ -1753,11 +1753,10 @@ async def me_dashboard(request: Request):
                 try:
                     bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
                     bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
-                    wins_n = 0
-                    losses_n = 0
-                    _seen_winloss = set()
+                    # Group fills by ordId → one closed trade per order
+                    by_ord: dict = {}
                     for b in bill_data:
-                        oid = str(b.get('ordId', '') or '')
+                        oid = str(b.get('ordId', '') or '').strip()
                         sub = str(b.get('subType', '') or '')
                         if sub not in ('5', '6'):
                             continue
@@ -1769,20 +1768,35 @@ async def me_dashboard(request: Request):
                             bts = int(b.get('ts') or 0)
                         except (TypeError, ValueError):
                             bts = 0
-                        if oid and oid not in _seen_winloss:
-                            _seen_winloss.add(oid)
-                            if bp > 0:
-                                wins_n += 1
-                            elif bp < 0:
-                                losses_n += 1
-                        inst = str(b.get('instId', '') or '')
-                        side_val = 'sell' if sub == '5' else 'buy'
+                        if not oid:
+                            oid = f"live-{bts}-{b.get('instId')}"
+                        if oid not in by_ord:
+                            by_ord[oid] = {
+                                'pnl': 0.0, 'ts': bts,
+                                'inst': str(b.get('instId', '') or ''),
+                                'side': 'sell' if sub == '5' else 'buy',
+                            }
+                        by_ord[oid]['pnl'] += bp
+                        if bts >= by_ord[oid]['ts']:
+                            by_ord[oid]['ts'] = bts
+                            by_ord[oid]['side'] = 'sell' if sub == '5' else 'buy'
+                    wins_n = 0
+                    losses_n = 0
+                    for oid, g in by_ord.items():
+                        bp = float(g['pnl'])
+                        if bp > 0:
+                            wins_n += 1
+                        elif bp < 0:
+                            losses_n += 1
+                        inst = str(g['inst']).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
                         trades.append({
-                            'time': bts,
-                            'inst': inst.replace('-USDT-SWAP', ''),
-                            'side': side_val,
+                            'time': g['ts'],
+                            'inst': inst,
+                            'side': g['side'],
                             'pnl': round(bp, 4),
                             'account_mode': 'live',
+                            'ord_id': oid,
+                            'reason': 'closed',
                         })
                     # Aggregate LIVE realized PnL from close bills (subType 5/6)
                     live_realized = 0.0
@@ -1818,161 +1832,268 @@ async def me_dashboard(request: Request):
             live = {'connected': False, 'error': str(e)}
     else:
         live = {'connected': False}
-    # ── DEMO closed trades (always for mini-app DEMO tab) ──
+    # ── Closed trades for mini-app (DEMO + LIVE), strict dedupe ──
+    # Problem before: multiple sources (DB × bot_ids, bills, AI log, exchange_close)
+    # produced near-identical rows with different timestamp formats → duplicates.
+    # LIVE only showed raw bill fills without grouping by ordId → too few/odd counts.
     try:
-        _demo_keys = set()
-        def _add_demo_trade(row):
+        def _norm_ts(raw) -> int:
+            """Normalize to ms epoch int (0 if unknown)."""
+            if raw is None or raw == '':
+                return 0
+            try:
+                if isinstance(raw, (int, float)):
+                    ts = int(raw)
+                else:
+                    s = str(raw).strip()
+                    if s.isdigit():
+                        ts = int(s)
+                    else:
+                        from datetime import datetime, timezone as _tz
+                        ts = int(datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp() * 1000)
+                if 0 < ts < 10_000_000_000:
+                    ts *= 1000
+                return ts if ts > 0 else 0
+            except Exception:
+                return 0
+
+        def _norm_coin(inst) -> str:
+            s = str(inst or '').upper()
+            return s.replace('-USDT-SWAP', '').replace('-USD-SWAP', '').replace('-USDT', '').strip()
+
+        def _dedupe_key(t: dict) -> str:
+            oid = str(t.get('ord_id') or '').strip()
+            if oid:
+                return f"ord:{oid}|{t.get('account_mode') or 'demo'}"
+            ts = _norm_ts(t.get('time'))
+            # bucket to 1-minute to absorb format drift between sources
+            bucket = (ts // 60000) if ts else 0
+            try:
+                pnl_r = round(float(t.get('pnl') or 0), 2)
+            except (TypeError, ValueError):
+                pnl_r = 0.0
+            return f"fb:{bucket}|{_norm_coin(t.get('inst'))}|{pnl_r}|{t.get('account_mode') or 'demo'}"
+
+        seen_keys = set()
+        def _push_trade(row: dict):
             try:
                 pnl = float(row.get('pnl') or 0)
             except (TypeError, ValueError):
-                pnl = 0.0
-            # Skip pure opens with zero pnl and no exit
+                return
+            # Skip pure opens / zero noise
             reason = str(row.get('reason') or '').lower()
-            if reason in ('open', 'add') and abs(pnl) < 1e-9:
+            if reason in ('open', 'add', 'opening') and abs(pnl) < 1.0:
                 return
-            inst = (row.get('inst') or row.get('inst_id') or row.get('symbol') or '')
-            inst = str(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-            ts = row.get('time') or row.get('timestamp') or row.get('close_ts') or row.get('ts') or ''
-            key = f"{ts}|{inst}|{pnl:.4f}|demo"
-            if key in _demo_keys:
+            if abs(pnl) < 1e-9:
                 return
-            _demo_keys.add(key)
-            trades.append({
-                'time': ts,
-                'inst': inst,
-                'side': row.get('side') or '',
+            mode = str(row.get('account_mode') or 'demo').lower()
+            if mode not in ('demo', 'live'):
+                mode = 'demo'
+            entry = {
+                'time': _norm_ts(row.get('time') or row.get('close_ts') or row.get('ts') or row.get('timestamp')),
+                'inst': _norm_coin(row.get('inst') or row.get('inst_id') or row.get('symbol') or row.get('coin')),
+                'side': str(row.get('side') or ''),
                 'pnl': round(pnl, 4),
-                'account_mode': 'demo',
+                'account_mode': mode,
                 'reason': reason or 'closed',
-            })
+                'ord_id': str(row.get('ord_id') or row.get('ordId') or '').strip(),
+            }
+            k = _dedupe_key(entry)
+            if k in seen_keys:
+                return
+            seen_keys.add(k)
+            trades.append(entry)
 
-        # 1) DB trades for AI bot (account_mode=demo)
+        # ── DEMO: prefer exchange_close_trades (authoritative closes) ──
         try:
-            for bid in ('ai_strategy', 'AI Discretionary 1H', getattr(ai_bot, 'BOT_ID', None) if ai_bot else None):
-                if not bid:
-                    continue
-                rows = await db.get_trades(bot_id=bid, limit=50, account_mode='demo')
-                for t in rows:
-                    _add_demo_trade({
-                        'time': t.get('timestamp') or t.get('time'),
+            from app.services.pnl_engine import epoch_ms as _ep_ms
+            _ep = _ep_ms()
+        except Exception:
+            _ep = 0
+        try:
+            if hasattr(db, 'get_exchange_close_trades_detail'):
+                ects = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=200)
+                for t in ects or []:
+                    am = str(t.get('account_mode') or 'demo').lower()
+                    if am not in ('', 'demo'):
+                        continue
+                    _push_trade({
+                        'time': t.get('close_ts') or t.get('ts'),
                         'inst_id': t.get('inst_id'),
-                        'side': t.get('side'),
+                        'side': t.get('side') or '',
                         'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
+                        'reason': 'closed',
+                        'account_mode': 'demo',
+                        'ord_id': t.get('ord_id'),
                     })
-            # Also unscoped demo rows (legacy)
-            rows_all = await db.get_trades(limit=50, account_mode='demo')
-            for t in rows_all:
-                _add_demo_trade({
-                    'time': t.get('timestamp') or t.get('time'),
-                    'inst_id': t.get('inst_id'),
-                    'side': t.get('side'),
-                    'pnl': t.get('pnl'),
-                    'reason': t.get('reason') or 'closed',
-                })
+        except Exception as _e:
+            print(f'[me/dashboard] demo exchange_close: {_e}', flush=True)
+
+        # DEMO supplement: DB closed rows (state=closed) if still sparse
+        try:
+            demo_count = sum(1 for x in trades if x.get('account_mode') == 'demo')
+            if demo_count < 5:
+                for bid in ('ai_strategy', 'ai_discretionary'):
+                    rows = await db.get_trades(bot_id=bid, limit=80, account_mode='demo')
+                    for t in (rows or []):
+                        st = str(t.get('state') or '').lower()
+                        if st not in ('closed', 'close', 'filled'):
+                            continue
+                        try:
+                            if abs(float(t.get('pnl') or 0)) < 1.0 and st == 'filled':
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        _push_trade({
+                            'time': t.get('timestamp') or t.get('time'),
+                            'inst_id': t.get('inst_id'),
+                            'side': t.get('side'),
+                            'pnl': t.get('pnl'),
+                            'reason': 'closed' if st in ('closed', 'close') else (t.get('reason') or 'closed'),
+                            'account_mode': 'demo',
+                            'ord_id': t.get('ord_id'),
+                        })
         except Exception as _e:
             print(f'[me/dashboard] demo db trades: {_e}', flush=True)
 
-        # 2) exchange_close_trades (synced from OKX demo bills)
+        # DEMO: AI in-memory closed log (only closes)
         try:
-            epoch = await get_pnl_epoch()
-            epoch_ms = 0
-            if epoch:
-                from datetime import datetime as _dt, timezone as _tz
-                try:
-                    epoch_ms = int(_dt.fromisoformat(str(epoch).replace('Z', '+00:00')).timestamp() * 1000)
-                except Exception:
-                    epoch_ms = 0
-            ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=50)
-            for t in ects:
-                am = str(t.get('account_mode') or 'demo').lower()
-                if am == 'live':
-                    continue
-                st_sub = str(t.get('sub_type', '') or '')
-                side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else (t.get('side') or '')
-                _add_demo_trade({
-                    'time': t.get('close_ts') or t.get('timestamp'),
-                    'inst_id': t.get('inst_id'),
-                    'side': side,
-                    'pnl': t.get('pnl'),
-                    'reason': 'closed',
-                })
+            if ai_bot and hasattr(ai_bot, '_trade_log'):
+                for t in list(getattr(ai_bot, '_trade_log') or [])[-80:]:
+                    if str(t.get('account_mode') or 'demo').lower() == 'live':
+                        continue
+                    reason = str(t.get('reason') or '').lower()
+                    if reason in ('open', 'add'):
+                        continue
+                    _push_trade({
+                        'time': t.get('time') or t.get('ts'),
+                        'inst': t.get('coin') or t.get('symbol') or t.get('inst_id'),
+                        'side': t.get('side'),
+                        'pnl': t.get('pnl'),
+                        'reason': reason or 'closed',
+                        'account_mode': 'demo',
+                        'ord_id': t.get('ord_id') or '',
+                    })
         except Exception as _e:
-            print(f'[me/dashboard] demo exchange closes: {_e}', flush=True)
+            print(f'[me/dashboard] demo ai log: {_e}', flush=True)
 
-        # 3) AI bot in-memory trade log / recent_trades
-        if ai_bot:
+        # ── LIVE: group OKX bills by ordId (one row per close order) ──
+        # (live client block already ran; re-fetch bills only if live connected and few live rows)
+        live_n = sum(1 for x in trades if x.get('account_mode') == 'live')
+        if live.get('connected') and live_n < 3:
             try:
-                st = ai_bot.get_status() or {}
-                for t in list(st.get('recent_trades') or [])[-30:]:
-                    am = str(t.get('account_mode') or 'demo').lower()
-                    if am == 'live':
-                        continue
-                    _add_demo_trade({
-                        'time': t.get('time') or t.get('ts') or t.get('exit_time'),
-                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
-                        'side': t.get('side'),
-                        'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
-                    })
-                log = getattr(ai_bot, '_trade_log', None) or []
-                for t in list(log)[-30:]:
-                    am = str(t.get('account_mode') or 'demo').lower()
-                    if am == 'live':
-                        continue
-                    _add_demo_trade({
-                        'time': t.get('time') or t.get('exit_time') or t.get('ts'),
-                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
-                        'side': t.get('side'),
-                        'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
-                    })
+                client = None
+                if role == 'admin' and user_id is None:
+                    client = live_manager.get_client() if live_manager else None
+                elif user_id:
+                    client = await _user_okx_client(str(user_id))
+                if client:
+                    bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
+                    bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
+                    by_ord: dict = {}
+                    for b in bill_data or []:
+                        sub = str(b.get('subType', '') or '')
+                        if sub not in ('5', '6'):
+                            continue
+                        oid = str(b.get('ordId', '') or '').strip()
+                        if not oid:
+                            oid = f"ts-{b.get('ts')}-{b.get('instId')}"
+                        try:
+                            bp = float(b.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        try:
+                            bts = int(b.get('ts') or 0)
+                        except (TypeError, ValueError):
+                            bts = 0
+                        if oid not in by_ord:
+                            by_ord[oid] = {
+                                'pnl': 0.0, 'ts': bts, 'inst': b.get('instId', ''),
+                                'side': 'sell' if sub == '5' else 'buy',
+                            }
+                        by_ord[oid]['pnl'] += bp
+                        if bts >= by_ord[oid]['ts']:
+                            by_ord[oid]['ts'] = bts
+                    # replace any partial live fills already appended with grouped ones
+                    trades = [x for x in trades if x.get('account_mode') != 'live']
+                    seen_keys = {k for k in seen_keys if not k.endswith('|live') and not k.startswith('ord:') or '|demo' in k}
+                    # rebuild seen from remaining demo trades
+                    seen_keys = set()
+                    for x in trades:
+                        seen_keys.add(_dedupe_key(x))
+                    for oid, g in by_ord.items():
+                        _push_trade({
+                            'time': g['ts'],
+                            'inst_id': g['inst'],
+                            'side': g['side'],
+                            'pnl': g['pnl'],
+                            'reason': 'closed',
+                            'account_mode': 'live',
+                            'ord_id': oid,
+                        })
+                    # refresh live aggregates from grouped closes
+                    wins_n = losses_n = 0
+                    live_realized = 0.0
+                    for _tr in trades:
+                        if _tr.get('account_mode') != 'live':
+                            continue
+                        try:
+                            bp = float(_tr.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        live_realized += bp
+                        if bp > 0:
+                            wins_n += 1
+                        elif bp < 0:
+                            losses_n += 1
+                    live['total_pnl'] = round(live_realized, 2)
+                    live['strategy_realized'] = live['total_pnl']
+                    live['trades'] = wins_n + losses_n
+                    _total_t = wins_n + losses_n
+                    live['win_rate'] = round(wins_n / _total_t * 100, 1) if _total_t else None
+                    live['wins'] = wins_n
+                    live['losses'] = losses_n
             except Exception as _e:
-                print(f'[me/dashboard] demo ai log: {_e}', flush=True)
+                print(f'[me/dashboard] live bills regroup: {_e}', flush=True)
 
-        # 4) Paired trades API path (same as dashboard) — DEMO only
-        try:
-            from app.services.pnl_engine import build_pnl_from_rows  # may not exist
-        except Exception:
-            pass
-        try:
-            # Showcase OKX bills via existing helper if available
-            if 'client_manager' in dir() or client_manager is not None:
-                cm = client_manager
-                client = cm.get_client() if cm else None
-                if client and getattr(client, 'demo', True):
+        # If LIVE already appended ungrouped fills earlier, collapse them now
+        live_rows = [x for x in trades if x.get('account_mode') == 'live']
+        if live_rows and any(not x.get('ord_id') for x in live_rows):
+            pass  # already handled when regroup runs
+        elif live_rows:
+            # Collapse multiple fills with same ord_id
+            by_o: dict = {}
+            rest = [x for x in trades if x.get('account_mode') != 'live']
+            for x in live_rows:
+                oid = x.get('ord_id') or f"fb-{x.get('time')}-{x.get('inst')}-{x.get('pnl')}"
+                if oid not in by_o:
+                    by_o[oid] = dict(x)
+                else:
                     try:
-                        bills_resp = await client.get_bills(inst_type='SWAP', limit=50)
-                        bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
-                        for b in bill_data:
-                            sub = str(b.get('subType', '') or '')
-                            if sub not in ('5', '6'):
-                                continue
-                            try:
-                                bp = float(b.get('pnl') or 0)
-                            except (TypeError, ValueError):
-                                bp = 0.0
-                            inst = str(b.get('instId', '') or '')
-                            side_val = 'sell' if sub == '5' else 'buy'
-                            _add_demo_trade({
-                                'time': b.get('ts') or '',
-                                'inst_id': inst,
-                                'side': side_val,
-                                'pnl': bp,
-                                'reason': 'closed',
-                            })
-                    except Exception as _e:
-                        print(f'[me/dashboard] demo okx bills: {_e}', flush=True)
-        except Exception as _e:
-            print(f'[me/dashboard] demo bills outer: {_e}', flush=True)
+                        by_o[oid]['pnl'] = round(float(by_o[oid].get('pnl') or 0) + float(x.get('pnl') or 0), 4)
+                    except (TypeError, ValueError):
+                        pass
+                    if _norm_ts(x.get('time')) >= _norm_ts(by_o[oid].get('time')):
+                        by_o[oid]['time'] = x.get('time')
+            trades = rest + list(by_o.values())
     except Exception as e:
-        print(f'[me/dashboard] demo trades block: {e}', flush=True)
+        print(f'[me/dashboard] trades block: {e}', flush=True)
+        import traceback
+        traceback.print_exc()
+
     def _trade_sort_key(t):
         v = t.get('time', 0)
-        if isinstance(v, str):
-            return v
-        return str(v)
+        try:
+            return int(v) if not isinstance(v, str) else int(v) if str(v).isdigit() else 0
+        except Exception:
+            return 0
     trades.sort(key=_trade_sort_key, reverse=True)
+    # Cap per mode so DEMO tab is full and LIVE is not starved
+    demo_tr = [x for x in trades if x.get('account_mode') == 'demo'][:30]
+    live_tr = [x for x in trades if x.get('account_mode') == 'live'][:30]
+    trades = demo_tr + live_tr
+    trades.sort(key=_trade_sort_key, reverse=True)
+
     return {'demo': demo, 'live': live, 'trades': trades[:40], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')

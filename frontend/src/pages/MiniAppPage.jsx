@@ -165,7 +165,25 @@ function MiniAppPageInner() {
           const m = String(t.account_mode || t.mode || '').toLowerCase()
           return !m || m === 'demo'
         })
-    return filtered.slice(0, 15).map(t => ({
+    // Client-side dedupe (ord_id or time+inst+pnl)
+    const seen = new Set()
+    const unique = []
+    for (const t of filtered) {
+      const oid = String(t.ord_id || '').trim()
+      let key
+      if (oid) key = `o:${oid}`
+      else {
+        const ts = String(t.time || '')
+        const inst = String(t.inst || t.symbol || '').replace(/-USDT-SWAP/i, '')
+        const pnl = Number(t.pnl || 0).toFixed(2)
+        key = `f:${ts}|${inst}|${pnl}`
+      }
+      if (seen.has(key)) continue
+      seen.add(key)
+      unique.push(t)
+    }
+    return unique.slice(0, 20).map(t => ({
+
       time: t.time || t.timestamp || '',
       inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
       side: (t.side || '').toLowerCase(),
