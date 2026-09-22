@@ -1754,6 +1754,25 @@ async def me_dashboard(request: Request):
                     bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
                     bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
                     # Group fills by ordId → one closed trade per order
+
+                    def _pos_dir_from_bill(b, sub: str) -> str:
+                        """Return long/short for a close bill (not order buy/sell)."""
+                        ps = str(b.get('posSide') or b.get('pos_side') or '').lower()
+                        if ps in ('long', 'short'):
+                            return ps
+                        # OKX order side on close: sell = closing long, buy = closing short
+                        side = str(b.get('side') or '').lower()
+                        if side in ('sell', 'sell_order'):
+                            return 'long'
+                        if side in ('buy', 'buy_order'):
+                            return 'short'
+                        # subType 5 often close long in some mappings — prefer side above
+                        if sub == '5':
+                            return 'long'
+                        if sub == '6':
+                            return 'short'
+                        return ''
+
                     by_ord: dict = {}
                     for b in bill_data:
                         oid = str(b.get('ordId', '') or '').strip()
@@ -1770,16 +1789,18 @@ async def me_dashboard(request: Request):
                             bts = 0
                         if not oid:
                             oid = f"live-{bts}-{b.get('instId')}"
+                        pos_dir = _pos_dir_from_bill(b, sub)
                         if oid not in by_ord:
                             by_ord[oid] = {
                                 'pnl': 0.0, 'ts': bts,
                                 'inst': str(b.get('instId', '') or ''),
-                                'side': 'sell' if sub == '5' else 'buy',
+                                'side': pos_dir or 'long',
                             }
                         by_ord[oid]['pnl'] += bp
                         if bts >= by_ord[oid]['ts']:
                             by_ord[oid]['ts'] = bts
-                            by_ord[oid]['side'] = 'sell' if sub == '5' else 'buy'
+                            if pos_dir:
+                                by_ord[oid]['side'] = pos_dir
                     wins_n = 0
                     losses_n = 0
                     for oid, g in by_ord.items():
@@ -1875,6 +1896,25 @@ async def me_dashboard(request: Request):
             return f"fb:{bucket}|{_norm_coin(t.get('inst'))}|{pnl_r}|{t.get('account_mode') or 'demo'}"
 
         seen_keys = set()
+        def _norm_side(row: dict) -> str:
+            """Position direction long/short — never leave raw buy/sell on closes."""
+            ps = str(row.get('pos_side') or row.get('posSide') or row.get('pos_side') or '').lower()
+            if ps in ('long', 'short'):
+                return ps
+            s = str(row.get('side') or '').lower()
+            if s in ('long', 'buy'):
+                # buy on open = long; buy on close = was short — use reason
+                reason = str(row.get('reason') or '').lower()
+                if reason in ('closed', 'close', 'closing', 'sl', 'tp', 'trail', 'manual_close', 'rotation'):
+                    return 'short' if s == 'buy' else ('long' if s == 'sell' else s)
+                return 'long' if s in ('long', 'buy') else 'short'
+            if s in ('short', 'sell'):
+                reason = str(row.get('reason') or '').lower()
+                if reason in ('closed', 'close', 'closing', 'sl', 'tp', 'trail', 'manual_close', 'rotation'):
+                    return 'long' if s == 'sell' else ('short' if s == 'buy' else s)
+                return 'short'
+            return s
+
         def _push_trade(row: dict):
             try:
                 pnl = float(row.get('pnl') or 0)
@@ -1892,7 +1932,7 @@ async def me_dashboard(request: Request):
             entry = {
                 'time': _norm_ts(row.get('time') or row.get('close_ts') or row.get('ts') or row.get('timestamp')),
                 'inst': _norm_coin(row.get('inst') or row.get('inst_id') or row.get('symbol') or row.get('coin')),
-                'side': str(row.get('side') or ''),
+                'side': _norm_side(row),
                 'pnl': round(pnl, 4),
                 'account_mode': mode,
                 'reason': reason or 'closed',
@@ -1968,7 +2008,8 @@ async def me_dashboard(request: Request):
                     _push_trade({
                         'time': t.get('time') or t.get('ts'),
                         'inst': t.get('coin') or t.get('symbol') or t.get('inst_id'),
-                        'side': t.get('side'),
+                        'side': t.get('pos_side') or t.get('side'),
+                        'pos_side': t.get('pos_side') or '',
                         'pnl': t.get('pnl'),
                         'reason': reason or 'closed',
                         'account_mode': 'demo',

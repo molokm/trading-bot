@@ -182,14 +182,21 @@ function MiniAppPageInner() {
       seen.add(key)
       unique.push(t)
     }
-    return unique.slice(0, 20).map(t => ({
-
-      time: t.time || t.timestamp || '',
-      inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
-      side: (t.side || '').toLowerCase(),
-      pnl: Number(t.pnl || 0),
-      mode: isLive ? 'live' : 'demo',
-    }))
+    return unique.slice(0, 20).map(t => {
+      let side = String(t.side || t.pos_side || '').toLowerCase()
+      // Normalize buy/sell leftovers → position direction
+      if (side === 'buy') side = 'long'
+      if (side === 'sell') side = 'short'
+      if (side !== 'long' && side !== 'short') side = side || '—'
+      return {
+        time: t.time || t.timestamp || '',
+        inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
+        side,
+        sideLabel: side === 'long' ? 'LONG' : side === 'short' ? 'SHORT' : side,
+        pnl: Number(t.pnl || 0),
+        mode: isLive ? 'live' : 'demo',
+      }
+    })
   }, [data?.trades, isLive])
 
   if (loading) {
@@ -330,7 +337,9 @@ function MiniAppPageInner() {
                       <div className="min-w-0">
                         <div className="text-xs font-semibold truncate">
                           {tr.inst || '—'}{' '}
-                          <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span>
+                          <span className={`font-bold text-[0.65rem] ${tr.side === 'long' ? 'text-[var(--profit)]' : tr.side === 'short' ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+                            {tr.sideLabel || tr.side || '—'}
+                          </span>
                           {tr.mode === 'live' ? (
                             <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
                           ) : (
