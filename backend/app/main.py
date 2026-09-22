@@ -2047,14 +2047,25 @@ async def me_dashboard(request: Request):
                             bts = int(b.get('ts') or 0)
                         except (TypeError, ValueError):
                             bts = 0
+                        ps = str(b.get('posSide') or '').lower()
+                        if ps not in ('long', 'short'):
+                            oside = str(b.get('side') or '').lower()
+                            # close sell → was long; close buy → was short
+                            if oside == 'sell':
+                                ps = 'long'
+                            elif oside == 'buy':
+                                ps = 'short'
+                            else:
+                                ps = 'long' if sub == '5' else 'short'
                         if oid not in by_ord:
                             by_ord[oid] = {
                                 'pnl': 0.0, 'ts': bts, 'inst': b.get('instId', ''),
-                                'side': 'sell' if sub == '5' else 'buy',
+                                'side': ps,
                             }
                         by_ord[oid]['pnl'] += bp
                         if bts >= by_ord[oid]['ts']:
                             by_ord[oid]['ts'] = bts
+                            by_ord[oid]['side'] = ps
                     # replace any partial live fills already appended with grouped ones
                     trades = [x for x in trades if x.get('account_mode') != 'live']
                     seen_keys = {k for k in seen_keys if not k.endswith('|live') and not k.startswith('ord:') or '|demo' in k}
