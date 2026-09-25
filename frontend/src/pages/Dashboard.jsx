@@ -1082,10 +1082,10 @@ export default function Dashboard({ health, connected, isGuest }) {
 
   // LIVE numbers for dual DEMO/LIVE metric display
   const liveConnected = !!(liveStatus?.connected)
-  const liveUnreal = Number(liveStatus?.unrealized ?? 0)
+  const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
   const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
   const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
-  const liveTotal = Number(liveStatus?.total_pnl ?? liveStatus?.strategy_realized ?? 0)
+  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
   const liveEquity = Number(liveStatus?.equity ?? 0)
 
   const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {

@@ -1820,28 +1820,40 @@ async def me_dashboard(request: Request):
                             'reason': 'closed',
                         })
                     # Aggregate LIVE realized PnL from close bills (subType 5/6)
+                    # Today / week by Moscow calendar (same as demo dashboard)
                     live_realized = 0.0
                     live_today = 0.0
-                    from datetime import datetime as _dt, timezone as _tz
-                    _today_start = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    live_week = 0.0
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    _msk = _tz(_td(hours=3))
+                    _now = _dt.now(_msk)
+                    _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    _week_start = _today_start - _td(days=_today_start.weekday())
                     _today_ms = int(_today_start.timestamp() * 1000)
+                    _week_ms = int(_week_start.timestamp() * 1000)
                     for _tr in trades:
                         if str(_tr.get('account_mode') or '') != 'live':
                             continue
                         try:
-                            live_realized += float(_tr.get('pnl') or 0)
+                            bp = float(_tr.get('pnl') or 0)
                         except (TypeError, ValueError):
-                            pass
+                            bp = 0.0
+                        live_realized += bp
                         try:
                             ts = _tr.get('time') or 0
                             ts_ms = int(ts) if not isinstance(ts, str) else 0
                             if ts_ms >= _today_ms:
-                                live_today += float(_tr.get('pnl') or 0)
+                                live_today += bp
+                            if ts_ms >= _week_ms:
+                                live_week += bp
                         except (TypeError, ValueError):
                             pass
                     live['total_pnl'] = round(live_realized, 2)
                     live['strategy_realized'] = live['total_pnl']
                     live['session_pnl'] = round(live_today, 2)
+                    live['pnl_1d'] = live['session_pnl']
+                    live['week'] = round(live_week, 2)
+                    live['pnl_week'] = live['week']
                     live['trades'] = wins_n + losses_n
                     _total_t = live.get('trades') or (wins_n + losses_n)
                     live['win_rate'] = round(wins_n / _total_t * 100, 1) if _total_t else None
@@ -2614,10 +2626,24 @@ async def live_status():
     positions_out = []
     unrealized = 0.0
     realized = 0.0
+    realized_today = 0.0
+    realized_week = 0.0
     lifetime_trades = 0
     wins = 0
     fees = 0.0
     capital = 0.0
+    # MSK day / week bounds for session + week realized
+    try:
+        from datetime import datetime, timezone, timedelta
+        _msk = timezone(timedelta(hours=3))
+        _now_msk = datetime.now(_msk)
+        _today_start = _now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+        _week_start = _today_start - timedelta(days=_today_start.weekday())  # Monday
+        _today_ms = int(_today_start.timestamp() * 1000)
+        _week_ms = int(_week_start.timestamp() * 1000)
+    except Exception:
+        _today_ms = 0
+        _week_ms = 0
     try:
         if db:
             raw_cap = await db.get_setting('live_mirror_capital')
@@ -2789,6 +2815,14 @@ async def live_status():
                     lifetime_trades += 1
                     if bp > 0:
                         wins += 1
+                    try:
+                        bts = int(b.get('ts') or 0)
+                    except (TypeError, ValueError):
+                        bts = 0
+                    if bts and _today_ms and bts >= _today_ms:
+                        realized_today += bp
+                    if bts and _week_ms and bts >= _week_ms:
+                        realized_week += bp
                 debug['bills_n'] = len(seen)
                 after = str(data[-1].get('billId') or '')
                 if len(data) < 100 or not after:
@@ -2814,7 +2848,8 @@ async def live_status():
             flush=True,
         )
 
-    total_pnl = round(float(realized) + float(unrealized), 2)
+    # total = realized only (not + UPL). Today/week by MSK calendar.
+    total_pnl = round(float(realized), 2)
     win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else None
     _result = {
         'connected': connected,
@@ -2822,8 +2857,13 @@ async def live_status():
         'equity': round(float(equity or 0), 2),
         'capital': round(float(capital or 0), 2),
         'total_pnl': total_pnl,
+        'strategy_realized': total_pnl,
         'unrealized_pnl': round(float(unrealized), 2),
-        'session_pnl': round(float(realized), 2),
+        'unrealized': round(float(unrealized), 2),
+        'session_pnl': round(float(realized_today), 2),
+        'pnl_1d': round(float(realized_today), 2),
+        'week': round(float(realized_week), 2),
+        'pnl_week': round(float(realized_week), 2),
         'lifetime_trades': int(lifetime_trades),
         'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
