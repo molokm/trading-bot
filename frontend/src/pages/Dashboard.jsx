@@ -1080,6 +1080,40 @@ export default function Dashboard({ health, connected, isGuest }) {
   const pnlSource = pnl?.source || ''
   const fundingNote = Number(pnl?.funding || 0)
 
+  // LIVE numbers for dual DEMO/LIVE metric display
+  const liveConnected = !!(liveStatus?.connected)
+  const liveUnreal = Number(liveStatus?.unrealized ?? 0)
+  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
+  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
+  const liveTotal = Number(liveStatus?.total_pnl ?? liveStatus?.strategy_realized ?? 0)
+  const liveEquity = Number(liveStatus?.equity ?? 0)
+
+  const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
+    const one = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n)) return '—'
+      const abs = Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      if (!forceSigned && n === 0) return `$${abs}`
+      return `${n >= 0 ? '+' : '−'}$${abs}`
+    }
+    const cls = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n) || n === 0) return 'text-[var(--txt-secondary)]'
+      return n > 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+    }
+    return (
+      <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
+        <span className={cls(demoVal)} title="Демо">{one(demoVal)}</span>
+        <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
+        <span className={liveConnected ? cls(liveVal) : 'text-[var(--txt-muted)]'} title="Лайф">
+          {liveConnected ? one(liveVal) : '—'}
+        </span>
+      </span>
+    )
+  }
+
+
+
   const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
   const fmtTime = (ts) => fmtTs(ts, locale)
@@ -1224,47 +1258,53 @@ export default function Dashboard({ health, connected, isGuest }) {
         <EnhancedMetricCard
           className="metric-hide-mobile max-md:hidden"
           label={t('dash.balance')}
-          value={totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}
+          value={
+            <span className="inline-flex items-baseline gap-0.5 mono">
+              <span title="Демо">{totalEquity ? `$${Number(totalEquity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</span>
+              <span className="text-[var(--txt-muted)] text-[0.85em]">/</span>
+              <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
+                {liveConnected && liveEquity ? `$${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+              </span>
+            </span>
+          }
           icon={Wallet}
           mono
-          tip={t('dash.balance_tip')}
+          tip={`${t('dash.balance_tip')} · демо / лайф`}
           sparkData={sparkData[0]}
-          subtitle={demoMode ? 'Demo Account' : 'Live Account'}
+          subtitle="демо / лайф"
         />
         <EnhancedMetricCard
           label={t('dash.unrealized')}
-          value={unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
+          value={dualPnlNode(unrealizedPnl, liveUnreal)}
           changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
           icon={Activity}
           mono
-          tip={t('dash.unrealized_tip')}
+          tip={`${t('dash.unrealized_tip')} · демо / лайф`}
           sparkData={sparkData[1]}
         />
         <EnhancedMetricCard
           label={t('dash.pnl_day')}
-          value={pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
+          value={dualPnlNode(pnlDay, liveToday)}
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
           icon={pnlDay >= 0 ? TrendingUp : TrendingDown}
           mono
-          tip={`${t('dash.pnl_day_tip')} (${pnlTz}, только активные боты)`}
+          tip={`${t('dash.pnl_day_tip')} · демо / лайф`}
           sparkData={sparkData[2]}
         />
         <EnhancedMetricCard
           label={t('dash.pnl_week')}
-          value={pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
+          value={dualPnlNode(pnlWeek, liveWeek)}
           changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
           icon={BarChart3}
           mono
-          tip={t('dash.pnl_week_tip')}
+          tip={`${t('dash.pnl_week_tip')} · демо / лайф`}
           sparkData={sparkData[3]}
         />
         <EnhancedMetricCard
           label={t('dash.total_pnl')}
           value={
             <div className="flex flex-col gap-0.5">
-              <span className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-                {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
-              </span>
+              <span>{dualPnlNode(pnlTotal, liveTotal)}</span>
               {pnlByBot.length > 0 && (
                 <div className="max-md:hidden text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (

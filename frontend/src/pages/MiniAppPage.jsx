@@ -24,6 +24,18 @@ function pnlSign(v) {
   return (n > 0 ? '+$' : '-$') + fmt(Math.abs(n))
 }
 
+function dualPnl(demoVal, liveVal, liveConnected) {
+  const left = pnlSign(demoVal)
+  const right = liveConnected ? pnlSign(liveVal) : '—'
+  return (
+    <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
+      <span className={pnlClass(demoVal)} title="Демо">{left}</span>
+      <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
+      <span className={liveConnected ? pnlClass(liveVal) : 'text-[var(--txt-muted)]'} title="Лайф">{right}</span>
+    </span>
+  )
+}
+
 function withTimeout(promise, ms = 15000) {
   return new Promise((resolve, reject) => {
     const id = setTimeout(() => reject(new Error('timeout')), ms)
@@ -102,33 +114,29 @@ function MiniAppPageInner() {
   const isLive = mode === 'live' && data?.live?.connected
 
   const metrics = useMemo(() => {
-    if (isLive && data?.live) {
-      const L = data.live
-      return {
-        total: Number(L.total_pnl ?? L.strategy_realized ?? 0),
-        today: Number(L.session_pnl ?? 0),
-        unreal: Number(L.unrealized ?? 0),
-        equity: L.equity ?? null,
-        tradesN: Number(L.trades ?? 0),
-        winRate: L.win_rate,
-      }
-    }
     const d = data?.demo || {}
-    // Unrealized: prefer engine field, else sum positions
+    const L = data?.live || {}
     let unreal = Number(d.unrealized ?? 0)
     if (!unreal && Array.isArray(d.positions)) {
       unreal = d.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
     }
     return {
+      // DEMO
       total: Number(d.pnl ?? 0),
       today: Number(d.session_pnl ?? 0),
       unreal,
       equity: d.equity ?? null,
-      capital: d.capital ?? null,
       tradesN: Number(d.trades ?? 0),
       winRate: d.win_rate,
+      // LIVE
+      liveConnected: !!L.connected,
+      liveTotal: Number(L.total_pnl ?? L.strategy_realized ?? 0),
+      liveToday: Number(L.session_pnl ?? 0),
+      liveUnreal: Number(L.unrealized ?? 0),
+      liveEquity: L.equity != null ? Number(L.equity) : null,
+      liveTradesN: Number(L.trades ?? 0),
     }
-  }, [isLive, data])
+  }, [data])
 
   const viewPositions = useMemo(() => {
     const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
@@ -245,21 +253,25 @@ function MiniAppPageInner() {
         {/* 2×2 metrics */}
         <div className="flex-shrink-0 grid grid-cols-2 gap-1.5">
           <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
-            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Нереализ.</div>
-            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.unreal)}`}>{pnlSign(metrics.unreal)}</div>
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Нереализ. <span className="normal-case opacity-70">демо/лайф</span></div>
+            <div className="text-[0.95rem] font-bold leading-tight">{dualPnl(metrics.unreal, metrics.liveUnreal, metrics.liveConnected)}</div>
           </div>
           <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
-            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сегодня</div>
-            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.today)}`}>{pnlSign(metrics.today)}</div>
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сегодня <span className="normal-case opacity-70">демо/лайф</span></div>
+            <div className="text-[0.95rem] font-bold leading-tight">{dualPnl(metrics.today, metrics.liveToday, metrics.liveConnected)}</div>
           </div>
           <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
-            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сумма PnL</div>
-            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.total)}`}>{pnlSign(metrics.total)}</div>
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сумма <span className="normal-case opacity-70">демо/лайф</span></div>
+            <div className="text-[0.95rem] font-bold leading-tight">{dualPnl(metrics.total, metrics.liveTotal, metrics.liveConnected)}</div>
           </div>
           <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
-            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">{metrics.equity != null ? 'Equity' : 'Сделок'}</div>
-            <div className="text-[1.05rem] font-bold mono leading-tight text-[var(--txt)]">
-              {metrics.equity != null ? `$${fmt(metrics.equity, 0)}` : metrics.tradesN}
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Equity <span className="normal-case opacity-70">демо/лайф</span></div>
+            <div className="text-[0.95rem] font-bold mono leading-tight text-[var(--txt)]">
+              <span title="Демо">{metrics.equity != null ? `$${fmt(metrics.equity, 0)}` : '—'}</span>
+              <span className="text-[var(--txt-muted)] mx-0.5">/</span>
+              <span title="Лайф" className={metrics.liveConnected ? '' : 'text-[var(--txt-muted)]'}>
+                {metrics.liveConnected && metrics.liveEquity != null ? `$${fmt(metrics.liveEquity, 0)}` : '—'}
+              </span>
             </div>
           </div>
         </div>
