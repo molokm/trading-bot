@@ -60,7 +60,7 @@ export default function LoginPage({ onLogin }) {
   }
 
   return (
-    <div className="relative min-h-screen flex items-center justify-center p-4 overflow-hidden">
+    <div className="relative min-h-[100dvh] flex items-center justify-center p-4 overflow-hidden" style={{ paddingTop: "max(1rem, env(safe-area-inset-top))", paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}>
       {/* Animated background gradient */}
       <div className="absolute inset-0 login-bg-anim" />
       <div className="relative panel w-full max-w-sm" style={{ maxWidth: 380 }}>

@@ -917,3 +917,71 @@ input[type="checkbox"] {
 .pos-card.pos-live {
   border-color: rgba(22, 199, 132, 0.22);
 }
+
+
+/* ═══════════════════════════════════════════
+   iOS Home Screen / PWA standalone
+   ═══════════════════════════════════════════ */
+
+html, body, #root {
+  height: 100%;
+  max-height: 100dvh;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  /* Prevent iOS rubber-band on the whole page */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.app-shell {
+  /* Use dynamic viewport so address bar chrome doesn't break layout */
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+}
+
+.app-header {
+  /* Status bar / notch when added to Home Screen (black-translucent) */
+  padding-top: env(safe-area-inset-top, 0px);
+  min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+  height: auto;
+  box-sizing: border-box;
+}
+
+.app-main {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+/* Standalone (Add to Home Screen) — slightly tighter mobile chrome */
+@media (display-mode: standalone) {
+  .app-header {
+    /* already padded via safe-area */
+  }
+  .mobile-bottom-nav {
+    /* home indicator */
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Larger touch targets on phones */
+@media (max-width: 767px) {
+  .mobile-bottom-nav__item {
+    min-height: 44px;
+    padding: 8px 4px;
+  }
+  .btn-icon {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+/* Prevent accidental pull-to-refresh when scrolling cards */
+.app-main {
+  overscroll-behavior-y: contain;
+}

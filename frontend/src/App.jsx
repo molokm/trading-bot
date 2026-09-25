@@ -128,9 +128,9 @@ function AppLayout() {
   ]
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--bg)] overflow-hidden">
+    <div className="app-shell h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] overflow-hidden">
       {/* ═══ HEADER ═══ */}
-      <header className="flex items-center justify-between px-5 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
+      <header className="app-header flex items-center justify-between px-4 sm:px-5 border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
         {/* Left: Logo + Nav */}
         <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
@@ -233,7 +233,7 @@ function AppLayout() {
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
+      <main className="app-main flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
