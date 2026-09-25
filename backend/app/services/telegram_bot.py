@@ -1,7 +1,7 @@
 """Telegram bot command & payments poller for the Pro subscription.
 
 Long-polls Telegram getUpdates and handles:
-  /start, /help, /subscribe_pro, /status       — text commands
+  /start, /help, /subscribe_pro, /status, /stats — text commands
   pre_checkout_query                            — Stars invoice confirmation
   successful_payment                            — activate/extend the Pro
                                                   subscription (mini-app access)
@@ -24,6 +24,13 @@ from typing import Optional
 import httpx
 
 from .telegram_notifier import TelegramNotifier
+from .strategy_cards import (
+    telegram_metrics_block,
+    telegram_profile_description,
+    telegram_short_description,
+    strategy_versions_line,
+    cagr_range_str,
+)
 
 log = logging.getLogger("telegram_bot")
 
@@ -102,6 +109,11 @@ class TelegramBotPoller:
                 await self._cmd_subscribe(chat_id, "pro")
             elif cmd in ("/status",):
                 await self._cmd_status(chat_id)
+            elif cmd in ("/stats", "/stat", "/statistics"):
+                # optional period: /stats week
+                parts = text.split()
+                period = parts[1].lower() if len(parts) > 1 else "all"
+                await self._cmd_stats(chat_id, period=period)
             elif cmd in ("/tracker",):
                 await self._send_info(chat_id, "results")
             elif cmd == "/about":
@@ -121,8 +133,9 @@ class TelegramBotPoller:
                  {"text": "🔍 Результаты", "callback_data": "info_results"}],
                 [{"text": "💳 Оплата", "callback_data": "info_payment"},
                  {"text": "⚠️ Риски", "callback_data": "info_risks"}],
-                [{"text": "❓ FAQ", "callback_data": "info_faq"},
+                [{"text": "📊 Статистика", "callback_data": "stats_all"},
                  {"text": "ℹ️ О боте", "callback_data": "about"}],
+                [{"text": "❓ FAQ", "callback_data": "info_faq"}],
             ]
         }
 
@@ -145,31 +158,32 @@ class TelegramBotPoller:
             "overview": (
                 "📚 <b>Как это работает</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Это алгоритмический трейдер: бот торгует фьючерсами на OKX по дневным "
-                "свечам, сам находит сигналы, открывает позиции, ставит стопы и закрывает "
-                "сделки. Вам ничего не нужно делать вручную — только наблюдать за результатом.\n\n"
-                "📡 <b>Сигналы</b> — каждая сделка публикуется прямо в этом боте, бесплатно.\n"
-                "🚀 <b>Pro</b> — бот торгует на вашем счёте OKX, управление через мини-ап\n\n"
-                "Подробнее — в разделах ниже."
+                "AI смотрит на рынок каждые 2 минуты и решает: открыть, закрыть или "
+                "подождать. Никакого ручного кликания — бот всё делает сам.\n\n"
+                "Торгует BTC, ETH, SOL, XRP на фьючерсах OKX, следит за стопами "
+                "и риском.\n\n"
+                "📡 <b>Сигналы</b> — сделки публикуются здесь бесплатно.\n"
+                "🚀 <b>Pro</b> — AI торгует на <b>вашем</b> счёте OKX через мини-ап.\n\n"
+                "Подробнее: /about · /status"
             ),
             "signals": (
                 "📡 <b>Бесплатные сигналы</b>\n"
                 "━━━━━━━━━━━━━━━\n"
                 "<b>Теперь бесплатно и прямо в этом боте.</b>\n\n"
-                "• Каждая сделка бота публикуется здесь автоматически\n"
+                "• Каждая сделка AI публикуется здесь автоматически\n"
                 "• Цена входа, стоп-лосс, тейк и итоговый результат\n"
                 "• Направление (лонг/шорт) и текущие открытые позиции\n\n"
                 "Никакой оплаты и отдельного канала не нужно — следите за "
                 "сигналами прямо здесь.\n\n"
-                "Хотите, чтобы бот торговал на вашем счёте? → 🚀 Pro: /subscribe_pro"
+                "Хотите, чтобы AI торговал на вашем счёте? → 🚀 Pro: /subscribe_pro"
             ),
             "pro": (
                 f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Те же стратегии торгуют <b>на вашем счёте OKX</b> полностью автоматически.\n\n"
+                "AI торгует на <b>вашем счёте OKX</b> полностью автоматически.\n\n"
                 "<b>Что вы получаете:</b>\n"
                 "• Подключаете свои ключи OKX (шифруются на сервере)\n"
-                "• Запускаете ботов в один тап в мини-апе\n"
+                "• Запускаете AI в один тап в мини-апе\n"
                 "• Бот сам открывает/закрывает сделки, ставит стопы и ведёт риск\n"
                 "• Статистика и управление — в мини-апе в Telegram\n\n"
                 "<b>Требования:</b>\n"
@@ -179,19 +193,12 @@ class TelegramBotPoller:
                 "Оплатить: /subscribe_pro или кнопкой в меню."
             ),
             "results": (
-                "🔍 <b>Результаты и проверка</b>\n"
+                "🔍 <b>Результаты</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Мы публикуем честные цифры и не прячем их:\n\n"
-                "• Стратегии проверены на реальных свечах OKX (нативные 1D, 10 монет, "
-                "2023–2026) и дополнительно провалидированы walk-forward (вне выборки)\n"
-                "• Результаты подтверждены <b>независимым бэктест-движком (Backtrader)</b> "
-                "на реальных биржевых данных\n"
-                "• Ориентиры бэктестов: CAGR ~55–65% в год, win rate ~51–59%, "
-                "<b>0 ликвидаций</b>, управляемая просадка\n"
-                "• Живые результаты бота видны на странице трекера\n\n"
-                "Главное: результаты можно <b>проверить самостоятельно</b> — скрипты "
-                "верификации лежат в открытом репозитории проекта.\n\n"
-                "Живой отчёт: /tracker"
+                "Живые сделки и PnL — в мини-апе и на дашборде.\n\n"
+                f"{telegram_metrics_block(html=True)}\n\n"
+                "Прошлые результаты не гарантируют будущую доходность.\n\n"
+                "Отчёт: мини-ап и дашборд"
             ),
             "payment": (
                 "💳 <b>Оплата Pro</b>\n"
@@ -202,7 +209,7 @@ class TelegramBotPoller:
                 "<b>Как оплатить:</b>\n"
                 "1. Нажмите «Оплатить» под счётом (кнопка Pro)\n"
                 "2. Подтвердите оплату Stars\n"
-                "3. Откройте мини-ап через кнопку меню — подключите счёт и запустите ботов\n\n"
+                "3. Откройте мини-ап через кнопку меню — подключите счёт и запустите AI\n\n"
                 "<b>Продление:</b> срок подписки складывается при каждой оплате.\n\n"
                 f"Тариф: Pro — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n\n"
                 "📡 Сигналы — бесплатно, прямо в этом боте."
@@ -232,7 +239,7 @@ class TelegramBotPoller:
                 "<b>Можно ли отменить подписку?</b>\n"
                 "Да — просто не продлевайте после истечения срока.\n\n"
                 "<b>Что после оплаты Pro?</b>\n"
-                "Открываете мини-ап, подключаете ключи OKX и запускаете ботов одной кнопкой.\n\n"
+                "Открываете мини-ап, подключаете ключи OKX и запускаете AI одной кнопкой.\n\n"
                 "<b>Почему не обещаете +1000%?</b>\n"
                 "Потому что это ложь. Мы даём реальные цифры и защиту капитала."
             ),
@@ -245,43 +252,38 @@ class TelegramBotPoller:
 
     def _menu_text(self) -> str:
         return (
-            "🤖 <b>Ваш личный алгоритмический трейдер</b>\n"
+            "🤖 <b>COPIX — ваш AI-трейдер на OKX</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "Мы не обещаем космос — тот, кто обещает +1000% в месяц, врёт.\n"
-            "Наша цель проще и честнее: <b>реальная доходность при минимальных рисках</b>.\n\n"
-            "Бот сам торгует фьючерсами на OKX по двум проверенным стратегиям — "
-            "открывает, ведёт и закрывает позиции за вас, без эмоций.\n\n"
-            "🛡️ <b>Риски — главный приоритет</b>\n"
-            "• Жёсткий стоп на каждую сделку, безубыток, частичный тейк\n"
-            "• За всю историю бэктестов — <b>0 ликвидаций</b>\n"
-            "• Просадка управляемая, а не «всё или ничего»\n\n"
-            "📊 <b>Честные ожидания</b> (бэктест 2023–2026)\n"
-            "• Доходность — <b>CAGR ~55–65% в год</b>, а не «x10 за месяц»\n"
-            "• Win rate ~51–59%: не угадываем каждую сделку — даём стабильное преимущество\n"
-            "• Подтверждено независимым бэктест-движком (Backtrader)\n\n"
-            "📡 <b>Сигналы</b> — бесплатно, каждая сделка публикуется прямо здесь.\n\n"
+            "Пока вы отдыхаете, AI анализирует рынок и торгует.\n"
+            "BTC, ETH, SOL, XRP — круглосуточно, без эмоций и без сна.\n\n"
+            "📡 <b>Бесплатно</b> — каждая сделка публикуется здесь, прямо в боте.\n"
+            "🚀 <b>Pro</b> — AI торгует на <b>вашем</b> счёте OKX. "
+            "Подключите ключи в мини-апе — и всё, бот делает остальное.\n\n"
+            "🛡️ <b>Риск под контролем</b>\n"
+            "• Лимит риска на сделку и число позиций\n"
+            "• Умеренное плечо, стопы и автоматический выход\n"
+            "• Цель — без ликвидаций при штатных настройках\n\n"
+            "📊 <b>Честно</b>\n"
+            f"{telegram_metrics_block(html=True)}\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
-            "Бот торгует на вашем счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe_pro · /info · /status · /about"
+            "AI торгует на <b>вашем</b> счёте OKX, управление — в мини-апе.\n\n"
+            "Команды: /stats · /subscribe_pro · /info · /status · /about · /start"
         )
 
     def _about_text(self) -> str:
         return (
-            "📈 <b>О боте</b>\n"
+            "📈 <b>Как это работает</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "• <b>Стратегии:</b> Momentum Rotation (до 2 позиций) + Impulse 1D (до 3)\n"
-            "• <b>Таймфрейм:</b> дневные свечи, 10 монет\n"
-            "• <b>Защита капитала:</b> стоп-лоссы, трейлинг, безубыток, частичный тейк — "
-            "всё автоматически; 0 ликвидаций за всю историю бэктестов\n"
-            "• <b>Честная позиция:</b> мы не обещаем космической доходности. Реальные "
-            "ориентиры — CAGR ~55–65% в год (бэктест 2023–2026) при управляемой просадке\n"
-            "• <b>Проверяемость:</b> результаты на реальных свечах OKX (нативные 1D), "
-            "воспроизводятся скриптами из открытого репозитория и подтверждены независимым "
-            "бэктест-движком (Backtrader)\n"
-            "• <b>Прозрачность:</b> живые результаты — в мини-апе и на странице трекера\n\n"
-            "Живой отчёт: /tracker\n\n"
-            "⚠️ Прошлые результаты не гарантируют будущей доходности. Торговля "
-            "фьючерсами с плечом — высокорисковый инструмент; возможны убыточные периоды."
+            "AI анализирует рынок каждые 2 минуты, оценивает тренды, "
+            "импульс и риски — и принимает решение: открыть, закрыть или держать.\n\n"
+            "• <b>Что делает:</b> торгует BTC, ETH, SOL, XRP на OKX (USDT-SWAP)\n"
+            "• <b>Как решает:</b> LLM-модель + индикаторы — фильтр входа и выхода\n"
+            "• <b>Защита:</b> лимит риска, стопы, умеренное плечо, контроль позиций\n"
+            f"{telegram_metrics_block(html=True)}\n"
+            "• <b>Прозрачность:</b> сделки и PnL — в мини-апе и на дашборде\n\n"
+            "Отчёт: мини-ап и дашборд\n\n"
+            "⚠️ Прошлые и текущие результаты не гарантируют будущей доходности. "
+            "Торговля фьючерсами с плечом — высокий риск."
         )
 
     async def _cmd_about(self, chat_id):
@@ -304,9 +306,119 @@ class TelegramBotPoller:
             await self._send_msg(chat_id, self._about_text())
         elif data == "menu":
             await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
+        elif data.startswith("stats_"):
+            period = data[len("stats_"):] or "all"
+            await self._cmd_stats(chat_id, period=period)
         elif data.startswith("info_"):
             section = data[len("info_"):]
             await self._send_info(chat_id, section)
+
+    def _stats_keyboard(self, period: str = "all") -> dict:
+        periods = [
+            ("today", "Сегодня"),
+            ("week", "Неделя"),
+            ("30d", "30д"),
+            ("90d", "90д"),
+            ("all", "Всё"),
+        ]
+        row = []
+        for pid, label in periods:
+            mark = "· " if pid == period else ""
+            row.append({"text": f"{mark}{label}", "callback_data": f"stats_{pid}"})
+        return {
+            "inline_keyboard": [
+                row[:3],
+                row[3:],
+                [{"text": "🔄 Обновить", "callback_data": f"stats_{period}"},
+                 {"text": "🔙 В меню", "callback_data": "menu"}],
+            ]
+        }
+
+    @staticmethod
+    def _fmt_pnl(v) -> str:
+        try:
+            n = float(v or 0)
+        except (TypeError, ValueError):
+            return "—"
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:.2f}"
+
+    async def _cmd_stats(self, chat_id, period: str = "all"):
+        """Live DEMO stats — same engine as web /api/stats."""
+        period = (period or "all").strip().lower()
+        aliases = {
+            "today": "today", "1d": "today", "day": "today", "сегодня": "today",
+            "week": "week", "w": "week", "неделя": "week",
+            "30d": "30d", "month": "30d", "месяц": "30d",
+            "90d": "90d", "quarter": "90d",
+            "all": "all", "всё": "all", "все": "all", "total": "all",
+        }
+        period = aliases.get(period, "all")
+        period_labels = {
+            "today": "сегодня",
+            "week": "неделя (с пн)",
+            "30d": "30 дней",
+            "90d": "90 дней",
+            "all": "всё время",
+        }
+
+        if not self.db:
+            await self._send_msg(chat_id, "⚠️ Статистика временно недоступна (нет БД).")
+            return
+
+        try:
+            from app.services import pnl_engine
+            data = await pnl_engine.compute_stats(
+                self.db,
+                account_mode="demo",
+                ai_only=True,
+                period=period,
+                sync_fn=None,  # avoid blocking TG on OKX; uses latest stored closes
+            )
+        except Exception as e:
+            log.warning("stats cmd error: %s", e)
+            await self._send_msg(chat_id, f"⚠️ Не удалось загрузить статистику: {e}")
+            return
+
+        realized = self._fmt_pnl(data.get("realized_pnl"))
+        trades = int(data.get("trades") or 0)
+        wins = int(data.get("wins") or 0)
+        losses = int(data.get("losses") or 0)
+        wr = data.get("win_rate")
+        pf = data.get("profit_factor")
+        avg_w = self._fmt_pnl(data.get("avg_win"))
+        avg_l = self._fmt_pnl(data.get("avg_loss"))
+        d_from = data.get("from") or "—"
+        d_to = data.get("to") or "—"
+
+        by_coin = data.get("by_coin") or []
+        coin_lines = []
+        for c in by_coin[:6]:
+            coin_lines.append(
+                f"  {c.get('coin')}: <b>{self._fmt_pnl(c.get('pnl'))}</b> $ "
+                f"({c.get('trades', 0)} сд., WR {c.get('win_rate', 0)}%)"
+            )
+        coins_block = "\n".join(coin_lines) if coin_lines else "  нет закрытий"
+
+        pf_s = f"{pf}" if pf is not None else "—"
+        wr_s = f"{wr}%" if wr is not None else "—"
+
+        text = (
+            f"📊 <b>Статистика DEMO · AI</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Период: <b>{period_labels.get(period, period)}</b>\n"
+            f"{d_from} → {d_to}\n\n"
+            f"Realized PnL: <b>{realized} USDT</b>\n"
+            f"Сделок: <b>{trades}</b> · ✅ {wins} / ❌ {losses}\n"
+            f"Win rate: <b>{wr_s}</b> · PF <b>{pf_s}</b>\n"
+            f"Ср. плюс: <b>{avg_w}</b> · Ср. минус: <b>{avg_l}</b>\n\n"
+            f"<b>По монетам</b>\n{coins_block}\n\n"
+            f"<i>Только закрытые сделки · МСК · /stats</i>"
+        )
+        await self._send_msg(
+            chat_id, text,
+            reply_markup=self._stats_keyboard(period),
+        )
 
     async def _cmd_start(self, chat_id):
         await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
@@ -426,7 +538,7 @@ class TelegramBotPoller:
         await self._send_msg(
             chat_id,
             "Откройте мини-ап через кнопку меню или "
-            "https://t.me/<yourbot>/app — подключите ключи OKX и запустите ботов.",
+            "https://t.me/<yourbot>/app — подключите ключи OKX и запустите AI.",
         )
 
     # ─── Lifecycle ───
@@ -473,27 +585,22 @@ class TelegramBotPoller:
         description; without this call it keeps the old strategy text forever.
         """
         desc = (
-            "Алгоритмический трейдер: Momentum Rotation + Impulse 1D на OKX.\n"
-            "Дневные свечи, 10 монет, жёсткие стопы, трейлинг, 0 ликвидаций.\n"
-            "Бэктест 2023–2026 (нативные 1D, независимый движок Backtrader): "
-            "CAGR ~55–65% в год.\n"
-            "📡 Сигналы — бесплатно прямо в боте.\n"
-            "🚀 Pro — боты торгуют на вашем счёте OKX: /subscribe_pro"
+            telegram_profile_description()
+            + "\n📡 Сигналы AI — бесплатно в боте."
+            + "\n🚀 Pro — AI на вашем счёте OKX: /subscribe_pro"
         )
-        short = (
-            "Сигналы бесплатно · Pro — торговые боты на вашем OKX "
-            "(Momentum + Impulse). Бэктест CAGR ~55–65%."
-        )
-        await self._api("setMyName", name="Rotation Trade Bot")
-        await self._api("setMyDescription", description=desc)
-        await self._api("setMyShortDescription", short_description=short)
+        short = telegram_short_description()
+        await self._api("setMyName", name="COPIX AI Trader")
+        await self._api("setMyDescription", description=desc[:512])
+        await self._api("setMyShortDescription", short_description=short[:120])
         await self._api("setMyCommands", commands=[
             {"command": "start", "description": "Главное меню"},
-            {"command": "info", "description": "Как это работает"},
-            {"command": "status", "description": "Статус ботов"},
+            {"command": "stats", "description": "Статистика DEMO (PnL, win rate)"},
+            {"command": "info", "description": "Как работает AI"},
+            {"command": "status", "description": "Подписка и статус"},
             {"command": "tracker", "description": "Живой отчёт"},
-            {"command": "about", "description": "О боте"},
-            {"command": "subscribe_pro", "description": "Pro-тариф"},
+            {"command": "about", "description": "Как работает AI-трейдер"},
+            {"command": "subscribe_pro", "description": "Pro — AI на вашем OKX"},
         ])
 
     async def _poll_loop(self):

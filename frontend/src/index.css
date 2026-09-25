@@ -204,14 +204,13 @@ body {
 }
 
 .btn-primary {
-  background: linear-gradient(135deg, var(--info) 0%, #6a55ef 100%);
+  background: var(--info);
   color: #fff;
   border-color: transparent;
   font-weight: 600;
 }
 .btn-primary:hover:not(:disabled) {
-  box-shadow: 0 8px 24px -8px rgba(139, 124, 255, 0.55);
-  transform: translateY(-1px);
+  filter: brightness(1.08);
 }
 
 .btn-danger {
@@ -788,4 +787,361 @@ input[type="checkbox"] {
 .mobile-bottom-nav__item.is-active {
   color: var(--info);
   background: var(--info-dim);
+}
+
+/* ═══════════════════════════════════════════
+   Skeleton Loader — shimmer animation
+   ═══════════════════════════════════════════ */
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--surface) 0%,
+    var(--surface-raised) 20%,
+    var(--surface) 40%,
+    var(--surface) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  opacity: 0.7;
+}
+
+/* ═══════════════════════════════════════════
+   Enhanced Metric Cards — smooth transitions
+   ═══════════════════════════════════════════ */
+
+.metric-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+
+/* ═══════════════════════════════════════════
+   Unified badges & type scale
+   ═══════════════════════════════════════════ */
+
+.text-2xs {
+  font-size: 0.65rem;
+  line-height: 1.25;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.badge-ai {
+  background: var(--info-dim);
+  color: var(--info);
+  border-color: rgba(139, 124, 255, 0.28);
+}
+.badge-demo {
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border-color: rgba(59, 130, 246, 0.28);
+}
+.badge-live {
+  background: var(--profit-dim);
+  color: var(--profit);
+  border-color: rgba(22, 199, 132, 0.28);
+}
+.badge-long {
+  background: var(--profit-dim);
+  color: var(--profit);
+}
+.badge-short {
+  background: var(--loss-dim);
+  color: var(--loss);
+}
+
+.panel-header {
+  font-family: 'Inter', system-ui, sans-serif;
+}
+
+.metric-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  transition: border-color 0.15s ease;
+}
+.metric-card:hover {
+  border-color: var(--border-hover);
+}
+.metric-card .label {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--txt-muted);
+}
+.metric-card .value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--txt);
+  margin-top: 2px;
+}
+.metric-card .change {
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+/* Position card — light, consistent */
+.pos-card {
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: 10px 12px;
+}
+.pos-card.pos-live {
+  border-color: rgba(22, 199, 132, 0.22);
+}
+
+
+/* ═══════════════════════════════════════════
+   iOS Home Screen / PWA standalone
+   ═══════════════════════════════════════════ */
+
+html, body, #root {
+  height: 100%;
+  max-height: 100dvh;
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  /* Prevent iOS rubber-band on the whole page */
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.app-shell {
+  /* Use dynamic viewport so address bar chrome doesn't break layout */
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+}
+
+.app-header {
+  /* Status bar / notch when added to Home Screen (black-translucent) */
+  padding-top: env(safe-area-inset-top, 0px);
+  min-height: calc(var(--header-h) + env(safe-area-inset-top, 0px));
+  height: auto;
+  box-sizing: border-box;
+}
+
+.app-main {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+}
+
+/* Standalone (Add to Home Screen) — slightly tighter mobile chrome */
+@media (display-mode: standalone) {
+  .app-header {
+    /* already padded via safe-area */
+  }
+  .mobile-bottom-nav {
+    /* home indicator */
+    padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Larger touch targets on phones */
+@media (max-width: 767px) {
+  .mobile-bottom-nav__item {
+    min-height: 44px;
+    padding: 8px 4px;
+  }
+  .btn-icon {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+/* Prevent accidental pull-to-refresh when scrolling cards */
+.app-main {
+  overscroll-behavior-y: contain;
+}
+
+
+/* metric-label: no truncation */
+.metric-card .label,
+.metric-card .metric-label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.25;
+  word-break: break-word;
+  max-width: 100%;
+}
+.metric-card .flex.items-center.gap-1\.5.min-w-0 {
+  flex-wrap: wrap;
+}
+
+
+/* ═══════════════════════════════════════════
+   Mobile one-screen dashboard
+   Pattern: account snapshot → positions → last trades
+   (fintech mobile: density without scrolling)
+   ═══════════════════════════════════════════ */
+
+@media (max-width: 767px) {
+  .dash-root {
+    padding: 8px 10px !important;
+    gap: 8px !important;
+  }
+
+  .dash-status-strip {
+    display: none !important; /* noise off the first screen */
+  }
+
+  .dash-metrics {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 6px !important;
+  }
+
+  .dash-metrics .metric-card {
+    padding: 8px 10px !important;
+    gap: 2px !important;
+    border-radius: 10px;
+  }
+  .dash-metrics .metric-card .label {
+    font-size: 0.58rem !important;
+    letter-spacing: 0.04em;
+  }
+  .dash-metrics .metric-card .value {
+    font-size: 1.05rem !important;
+    line-height: 1.15 !important;
+    margin-top: 0 !important;
+  }
+  .dash-metrics .metric-card svg {
+    display: none !important; /* hide sparklines + icons for density */
+  }
+  .dash-metrics .metric-card .change,
+  .dash-metrics .metric-hide-mobile {
+    display: none !important;
+  }
+
+  .dash-main-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    overflow: hidden !important;
+  }
+
+  .dash-left {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    overflow: hidden !important;
+  }
+
+  .dash-right-panel {
+    display: none !important; /* bots page has full bot card */
+  }
+
+  .dash-panel {
+    border-radius: 10px !important;
+  }
+  .dash-panel .panel-header {
+    padding: 8px 10px !important;
+    font-size: 0.68rem !important;
+    letter-spacing: 0.04em;
+  }
+
+  .dash-positions {
+    flex: 1 1 42% !important;
+    min-height: 0 !important;
+    max-height: none !important;
+  }
+  .dash-positions .pos-card {
+    padding: 6px 8px !important;
+  }
+  .dash-positions .pos-card + .pos-card {
+    margin-top: 4px;
+  }
+
+  .dash-trades {
+    flex: 0 0 auto !important;
+    max-height: none !important;
+  }
+  .dash-trades .panel-body,
+  .dash-trades .flex-1 {
+    max-height: none !important;
+  }
+  .dash-trades table {
+    font-size: 0.7rem;
+  }
+  .dash-trades th,
+  .dash-trades td {
+    padding: 5px 6px !important;
+  }
+  /* Hide low-priority columns on phone */
+  .dash-trades .col-hide-mobile {
+    display: none !important;
+  }
+  .dash-trades .row-hide-mobile {
+    display: none !important;
+  }
+
+  .dash-ai-strip {
+    display: flex !important;
+    flex-direction: column !important;
+  }
+}
+
+
+@media (min-width: 768px) {
+  .dash-ai-strip {
+    display: none !important;
+  }
+}
+
+
+/* Mobile header density */
+@media (max-width: 767px) {
+  .app-header {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    min-height: calc(44px + env(safe-area-inset-top, 0px));
+  }
+  .app-header .btn-icon {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}
+
+
+/* dual-pnl mobile density */
+@media (max-width: 767px) {
+  .dash-metrics .metric-card .value {
+    font-size: 0.92rem !important;
+  }
 }

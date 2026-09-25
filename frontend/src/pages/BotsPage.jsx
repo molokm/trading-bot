@@ -1,161 +1,15 @@
-import React, { useState, useEffect, useCallback, useRef, useMemo, forwardRef } from 'react'
-import {
-  Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
-  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Brain, Play, Square, Edit3, TrendingUp, Zap, Clock, RotateCcw,
+  ShieldCheck, BadgeCheck, CheckCircle2, Award, FlaskConical, Bot,
+  Link, Unlink, AlertTriangle, Wifi, WifiOff, Target
 } from 'lucide-react'
 import { api } from '../services/api'
-import { SliderPanel, Tip, StatusBadge, ConfirmDialog, getStrategyDesc, Loader } from '../components/ui'
+import { Tip, StatusBadge, ConfirmDialog, Loader } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-const SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
+/** Stage-3: AI Discretionary + Live mirror only (legacy bots removed). */
 
-/** Coins the validation bot trades (MACD+Donchian universe, 10 coins like Momentum/Impulse) */
-const VALIDATION_SYMBOL_OPTIONS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
-
-/** Params that map 1:1 to RotationConfig on the backend */
-const ROTATION_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'breakeven_pct', 'partial_tp_pct', 'partial_tp_ratio',
-  'trail_atr_mult', 'adx_min', 'min_hold_days', 'max_leverage',
-]
-
-const PARAM_BASE = {
-  capital:            { min: 500, max: 100000, step: 500, unit: '$' },
-  top_k:              { min: 1, max: 4, step: 1, unit: '' },
-  risk_per_trade:     { min: 0.5, max: 20, step: 0.5, unit: '%', asPercent: true },
-  poll_interval_sec:  { min: 60, max: 900, step: 60, unitKey: 'bots.param.poll_interval_sec.unit', unit: 's' },
-  breakeven_pct:      { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
-  partial_tp_pct:     { min: 1, max: 20, step: 0.5, unit: '%', asPercent: true },
-  partial_tp_ratio:   { min: 20, max: 100, step: 5, unit: '%', asPercent: true },
-  trail_atr_mult:     { min: 0.2, max: 2, step: 0.1, unit: '×ATR' },
-  adx_min:            { min: 10, max: 40, step: 1, unit: '' },
-  min_hold_days:      { min: 1, max: 14, step: 1, unit: 'd' },
-  max_leverage:       { min: 1, max: 5, step: 0.5, unit: 'x' },
-}
-
-const DEFAULT_MOM_CONFIG = {
-  capital: 10000, top_k: 2, risk_per_trade: 0.14, poll_interval_sec: 300,
-  breakeven_pct: 0.05, partial_tp_pct: 0.08, partial_tp_ratio: 0.5,
-  trail_atr_mult: 0.2, adx_min: 29, min_hold_days: 11, max_leverage: 2,
-}
-
-/** Params that map 1:1 to ImpulseConfig on the backend */
-const IMPULSE_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'entry_roc', 'max_adds', 'cooldown_bars',
-  'sl_atr_mult', 'sl_atr_mult_short', 'trail_atr_mult', 'trail_atr_mult_short',
-  'tp1_atr', 'tp1_frac', 'tp2_atr', 'tp2_frac', 'max_hold_bars', 'max_leverage',
-]
-
-/** Impulse uses its own ranges (shares keys with momentum but different scale) */
-const IMPULSE_PARAM_BASE = {
-  ...PARAM_BASE,
-  entry_roc:            { min: 1, max: 8, step: 0.5, unit: '%' },
-  max_adds:             { min: 0, max: 4, step: 1, unit: '' },
-  cooldown_bars:        { min: 0, max: 15, step: 1, unit: 'd' },
-  sl_atr_mult:          { min: 2, max: 10, step: 0.5, unit: '×ATR' },
-  sl_atr_mult_short:    { min: 2, max: 10, step: 0.5, unit: '×ATR' },
-  trail_atr_mult:       { min: 3, max: 15, step: 0.5, unit: '×ATR' },
-  trail_atr_mult_short: { min: 3, max: 15, step: 0.5, unit: '×ATR' },
-  tp1_atr:              { min: 1, max: 6, step: 0.5, unit: '×ATR' },
-  tp1_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
-  tp2_atr:              { min: 3, max: 12, step: 0.5, unit: '×ATR' },
-  tp2_frac:             { min: 10, max: 70, step: 5, unit: '%', asPercent: true },
-  max_hold_bars:        { min: 5, max: 90, step: 1, unit: 'd' },
-  max_leverage:         { min: 1, max: 5, step: 0.5, unit: 'x' },
-}
-
-const DEFAULT_IMP_CONFIG = {
-  capital: 10000, top_k: 4, risk_per_trade: 0.10, poll_interval_sec: 300,
-  entry_roc: 4.0, max_adds: 2, cooldown_bars: 5,
-  sl_atr_mult: 5.0, sl_atr_mult_short: 5.0,
-  trail_atr_mult: 8.0, trail_atr_mult_short: 8.0,
-  tp1_atr: 2.0, tp1_frac: 0.3, tp2_atr: 6.0, tp2_frac: 0.3,
-  max_hold_bars: 30, max_leverage: 3.0,
-}
-
-/** Params the validation bot accepts via /api/validation/start */
-const VALIDATION_PARAMS = [
-  'capital', 'top_k', 'risk_per_trade', 'poll_interval_sec',
-  'donchian_n', 'tp_pct', 'tp_ratio', 'tp2_pct', 'be_pct',
-  'chandelier_atr', 'max_hold_days', 'max_leverage', 'allocation_pct',
-]
-
-/** Validation ranges (MACD+Donchian) on a small budget */
-const VALIDATION_PARAM_BASE = {
-  ...PARAM_BASE,
-  capital:          { min: 50, max: 5000, step: 50, unit: '$' },
-  top_k:            { min: 1, max: 4, step: 1, unit: '' },
-  risk_per_trade:   { min: 1, max: 30, step: 1, unit: '%', asPercent: true },
-  donchian_n:       { min: 5, max: 30, step: 1, unit: 'd' },
-  tp_pct:           { min: 2, max: 20, step: 0.5, unit: '%', asPercent: true },
-  tp_ratio:         { min: 10, max: 60, step: 5, unit: '%', asPercent: true },
-  tp2_pct:          { min: 3, max: 30, step: 0.5, unit: '%', asPercent: true },
-  be_pct:           { min: 0.5, max: 10, step: 0.5, unit: '%', asPercent: true },
-  chandelier_atr:   { min: 2, max: 8, step: 0.5, unit: '×ATR' },
-  max_hold_days:    { min: 1, max: 10, step: 1, unit: 'd' },
-  max_leverage:     { min: 1, max: 3, step: 0.5, unit: 'x' },
-  allocation_pct:   { min: 5, max: 100, step: 5, unit: '%', asPercent: true },
-}
-
-const DEFAULT_VAL_CONFIG = {
-  capital: 300, top_k: 4, risk_per_trade: 0.14, poll_interval_sec: 300,
-  donchian_n: 15, tp_pct: 0.08, tp_ratio: 0.3, tp2_pct: 0.10,
-  be_pct: 0.015, chandelier_atr: 4.0, max_hold_days: 3, max_leverage: 1,
-  allocation_pct: 0.15,
-}
-
-// Независимый бэктест (Backtrader, нативные 1D OKX) — по каждой стратегии
-const MOM_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+34.0%' },
-    { year: '2024', ret: '+41.4%' },
-    { year: '2025', ret: '+14.3%' },
-    { year: '2026', ret: '+113.6%' },
-  ],
-  summary: { cagr: '59.8%', dd: '51.8%' },
-}
-const IMP_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+108.9%' },
-    { year: '2024', ret: '+102.1%' },
-    { year: '2025', ret: '-6.3%' },
-    { year: '2026', ret: '+25.7%' },
-  ],
-  summary: { cagr: '63.5%', dd: '36.5%' },
-}
-const VAL_BACKTEST = {
-  years: [
-    { year: '2023', ret: '+62.0%' },
-    { year: '2024', ret: '+120.3%' },
-    { year: '2025', ret: '-28.6%' },
-    { year: '2026', ret: '-38.3%' },
-  ],
-  summary: { cagr: '17.7%', dd: '62.1%' },
-}
-
-function getParamMeta(t, base = PARAM_BASE) {
-  const result = {}
-  for (const key of Object.keys(base)) {
-    const b = base[key]
-    result[key] = {
-      ...b,
-      label: t(`bots.param.${key}.label`),
-      tip: t(`bots.param.${key}.tip`),
-      unit: b.unitKey ? t(b.unitKey) : b.unit,
-    }
-  }
-  return result
-}
-
-function toDisplay(raw, meta) {
-  if (raw == null || Number.isNaN(raw)) return meta.min
-  return meta.asPercent ? +(raw * 100).toFixed(2) : raw
-}
-
-function fromDisplay(display, meta) {
-  return meta.asPercent ? display / 100 : display
-}
+const AI_SYMBOLS = ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']
 
 function BotSparkline({ botId, pnl }) {
   const points = useMemo(() => {
@@ -243,6 +97,122 @@ function RiskMeter({ percentValue }) {
   )
 }
 
+function ManagedPill({ statusMode, managed, apiAlive, lastActivity, heartbeatMaxAge, t }) {
+  if (statusMode !== 'live') return null
+  let color, label
+  if (!apiAlive) {
+    color = 'var(--txt-muted)'
+    label = t('bots.managed_offline')
+  } else if (managed) {
+    color = 'var(--profit)'
+    label = t('bots.managed_yes')
+  } else {
+    color = 'var(--loss)'
+    label = t('bots.managed_no')
+  }
+
+  let lastStr = ''
+  if (lastActivity) {
+    const ts = Date.parse(lastActivity)
+    if (!Number.isNaN(ts)) {
+      const mins = Math.max(0, Math.floor((Date.now() - ts) / 60000))
+      lastStr = mins < 1 ? '<1м' : `${mins}м`
+    }
+  }
+
+  const stale = apiAlive && heartbeatMaxAge && lastActivity &&
+    (Date.now() - Date.parse(lastActivity)) > heartbeatMaxAge * 1000
+
+  return (
+    <div className="flex items-center gap-1.5" style={{ color }} title={lastActivity ? `${t('bots.managed_last_activity')}: ${lastActivity}` : t('bots.managed_tip')}>
+      <span className="relative flex h-2 w-2 flex-shrink-0">
+        <span className="absolute inline-flex h-full w-full rounded-full opacity-50 animate-ping" style={{ background: color }} />
+        <span className={`relative inline-flex rounded-full h-2 w-2 ${stale ? 'animate-pulse' : ''}`} style={{ background: color }} />
+      </span>
+      <span className="text-[0.6rem] font-semibold whitespace-nowrap">{label}</span>
+      {lastStr && <span className="text-[0.55rem] opacity-70 whitespace-nowrap">{lastStr}</span>}
+      <Tip text={t('bots.managed_tip')} />
+    </div>
+  )
+}
+
+function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
+  const [remaining, setRemaining] = useState(null)
+  const ref = useRef(null)
+
+  useEffect(() => {
+    if (!nextTickAt) { setRemaining(null); return }
+    const tick = () => {
+      const diff = Math.max(0, Math.floor((Date.parse(nextTickAt) - Date.now()) / 1000))
+      setRemaining(diff)
+    }
+    tick()
+    ref.current = setInterval(tick, 1000)
+    return () => clearInterval(ref.current)
+  }, [nextTickAt])
+
+  if (remaining === null) return null
+  const pct = pollIntervalSec ? Math.round(((pollIntervalSec - remaining) / pollIntervalSec) * 100) : 0
+
+  return (
+    <div className="flex items-center gap-2 text-[0.6rem] text-[var(--txt-muted)]">
+      <Clock size={11} className="flex-shrink-0 opacity-60" />
+      <span>След. проверка: <span className="mono font-semibold text-[var(--txt)]">{remaining}с</span></span>
+      <div className="flex-1 h-1 rounded-full bg-[var(--bg)] overflow-hidden max-w-[60px]">
+        <div className="h-full rounded-full bg-[var(--info)] transition-all duration-1000" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function CompactSignals({ signals, t }) {
+  if (!signals || signals.length === 0) return null
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1.5 text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
+        <Target size={10} />
+        <span>{t('bots.top_signals') || 'Сигналы на вход'}</span>
+      </div>
+      <div className="grid grid-cols-1 gap-1">
+        {signals.map((s, i) => {
+          const isLong = s.side === 'long'
+          const scorePct = Math.round((s.score || 0) * 100)
+          const alignPct = Math.round((s.align_score || 0) * 100)
+          const fp = s.filters_passed ?? 10
+          const ft = s.filters_total ?? 10
+          const blocked = s.blocked_reason
+          return (
+            <div key={s.coin + i} className="flex items-center gap-1.5 p-1.5 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
+              <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3 text-center">#{i + 1}</span>
+              <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                {isLong ? 'L' : 'S'}
+              </span>
+              <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+              <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
+              <div className="flex-1" />
+              {blocked ? (
+                <span className="text-[0.48rem] px-1 py-px rounded bg-[var(--warn)]/15 text-[var(--warn)] font-medium truncate max-w-[80px]" title={blocked}>
+                  {blocked.replace(/_/g, ' ')}
+                </span>
+              ) : (
+                <span className="text-[0.5rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
+              )}
+              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
+              <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+                <div className="h-full rounded-full" style={{
+                  width: `${scorePct}%`,
+                  backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                }} />
+              </div>
+              <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 function PerfTile({ label, value, tone = 'neutral' }) {
   const color = tone === 'profit' ? 'text-[var(--profit)]' : tone === 'loss' ? 'text-[var(--loss)]' : 'text-[var(--txt)]'
   return (
@@ -253,13 +223,168 @@ function PerfTile({ label, value, tone = 'neutral' }) {
   )
 }
 
+function LiveMirrorCard({
+  connected, liveStatus, loading,
+  liveKey, setLiveKey, liveSecret, setLiveSecret, livePass, setLivePass,
+  liveCapital, setLiveCapital,
+  onConnect, onDisconnect, isGuest, t,
+}) {
+  const [showForm, setShowForm] = useState(false)
+  if (isGuest) return null
+  const livePnl = Number(liveStatus?.total_pnl ?? 0)
+  const liveUnrealized = Number(liveStatus?.unrealized_pnl ?? 0)
+  const liveTrades = liveStatus?.lifetime_trades ?? 0
+  const liveWinRate = liveStatus?.win_rate
+  const liveEquity = Number(liveStatus?.equity ?? 0)
+  const allocated = Number(liveStatus?.capital ?? liveCapital ?? 0)
+  const liveOpen = liveStatus?.open_positions || []
+
+  if (!connected) {
+    return (
+      <div className="panel flex flex-col border-dashed border-[var(--warn)]/40 bg-[var(--warn)]/5">
+        <div className="px-4 py-3 border-b border-[var(--border)]">
+          <div className="flex items-center gap-2">
+            <WifiOff size={14} className="text-[var(--warn)]" />
+            <span className="text-sm font-bold text-[var(--txt)]">LIVE Mirror</span>
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--warn)]/15 text-[var(--warn)] font-semibold">OFF</span>
+          </div>
+          <div className="text-2xs text-[var(--txt-muted)] mt-1">Подключите LIVE-аккаунт для зеркальной торговли</div>
+        </div>
+        <div className="p-4 space-y-3">
+          {!showForm ? (
+            <button className="btn btn-primary btn-sm w-full" onClick={() => setShowForm(true)}>
+              <Link size={12} /> Подключить LIVE
+            </button>
+          ) : (
+            <div className="space-y-2">
+              <input type="text" placeholder="API Key" value={liveKey}
+                onChange={e => setLiveKey(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <input type="password" placeholder="Secret Key" value={liveSecret}
+                onChange={e => setLiveSecret(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <input type="password" placeholder="Passphrase" value={livePass}
+                onChange={e => setLivePass(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <input type="number" min="10" step="1" placeholder="Капитал зеркала, USDT (мин. 10)"
+                value={liveCapital}
+                onChange={e => setLiveCapital(e.target.value)}
+                className="w-full px-2.5 py-1.5 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+              />
+              <div className="text-2xs text-[var(--txt-muted)]">Сумма, которую бот может использовать на LIVE (не весь счёт)</div>
+              <div className="flex gap-1.5">
+                <button className="btn btn-ghost btn-sm flex-1" onClick={() => { setShowForm(false); setLiveKey(''); setLiveSecret(''); setLivePass(''); setLiveCapital('') }}>
+                  Отмена
+                </button>
+                <button className="btn btn-primary btn-sm flex-1"
+                  onClick={onConnect} disabled={loading || !liveKey || !liveSecret || !livePass || !(Number(liveCapital) >= 10)}>
+                  {loading ? <Loader /> : <><Link size={11} /> Подключить</>}
+                </button>
+              </div>
+              <div className="flex items-start gap-1.5 mt-1">
+                <AlertTriangle size={11} className="text-[var(--warn)] flex-shrink-0 mt-0.5" />
+                <span className="text-2xs text-[var(--txt-muted)] leading-snug">
+                  Бот будет торговать на DEMO и LIVE одновременно. Закрытие/стоп на LIVE — зеркальное с DEMO.
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="panel flex flex-col border-[var(--profit)]/30 bg-[var(--profit)]/5">
+      <div className="px-4 py-3 border-b border-[var(--border)]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Wifi size={14} className="text-[var(--profit)]" />
+            <span className="text-sm font-bold text-[var(--txt)]">LIVE Mirror</span>
+            <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/15 text-[var(--profit)] font-semibold">ON</span>
+          </div>
+          {!isGuest && (
+            <button className="btn btn-ghost btn-sm text-[var(--loss)]" onClick={onDisconnect} disabled={loading}>
+              {loading ? <Loader /> : <><Unlink size={11} /> Отключить</>}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="p-4 space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+          <PerfTile label="Капитал" value={`$${allocated > 0 ? allocated.toFixed(0) : '—'}`} tone="neutral" />
+          <PerfTile label="Equity" value={`$${liveEquity.toFixed(0)}`} tone="neutral" />
+          <PerfTile label="PnL" value={`${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)}`} tone={livePnl >= 0 ? 'profit' : 'loss'} />
+          <PerfTile label="Нереализ." value={`${liveUnrealized >= 0 ? '+' : ''}${liveUnrealized.toFixed(2)}`} tone={liveUnrealized >= 0 ? 'profit' : 'loss'} />
+          <PerfTile label="Сделок" value={liveTrades} />
+          <PerfTile label="WR" value={liveWinRate != null ? `${liveWinRate}%` : '—'} />
+        </div>
+        {liveOpen.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-2xs text-[var(--txt-muted)] font-medium">{t('dash.open_positions')} (LIVE)</div>
+            {liveOpen.map((p, i) => {
+              const isLong = p.side !== 'short'
+              const upl = Number(p.upl ?? 0)
+              const uplPct = Number(p.upl_ratio ?? 0) * 100
+              const mark = Number(p.mark_px || 0)
+              return (
+                <div key={i} className="p-2 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                      <span className="text-xs font-bold text-[var(--txt)]">{p.coin}</span>
+                      {p.leverage ? <span className="text-2xs text-[var(--txt-muted)]">x{p.leverage}</span> : null}
+                    </div>
+                    <div className="text-right">
+                      <div className={`mono text-2xs font-bold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                      </div>
+                      <div className={`text-2xs mono ${upl >= 0 ? 'text-[var(--profit)] opacity-70' : 'text-[var(--loss)] opacity-70'}`}>
+                        {uplPct >= 0 ? '+' : ''}{uplPct.toFixed(2)}%
+                      </div>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1 text-2xs">
+                    <div>
+                      <div className="text-[var(--txt-muted)]">вх</div>
+                      <div className="mono text-[var(--txt)]">{Number(p.entry_price).toFixed(4)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">сейчас</div>
+                      <div className="mono text-[var(--txt)]">{mark > 0 ? mark.toFixed(4) : '—'}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">SL</div>
+                      <div className="mono text-[var(--loss)]">{Number(p.stop_price).toFixed(4)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[var(--txt-muted)]">TP</div>
+                      <div className="mono text-[var(--profit)]">{Number(p.take_price).toFixed(4)}</div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function BotCard({
   id, name, stratId, version, icon: Icon, accentDim, accentTxt,
   statusMode, statusLabel, coins, description, tags = [],
   tagline, backtest,
   pnl, trades, winRate, sparklinePnl, startedAt,
   openPositions = [], onToggle, onReset, onEdit,
+  managed, lastActivity, heartbeatMaxAge, apiAlive,
   isGuest, loading, t,
+  capitalValue, onCapitalChange, showCapital,
+  nextTickAt, pollIntervalSec, topSignals,
 }) {
   const pnlStr = `$${pnl >= 0 ? '+' : ''}${Number(pnl || 0).toFixed(2)}`
   return (
@@ -281,7 +406,17 @@ function BotCard({
               <div className="text-2xs text-[var(--txt-muted)] mono">{stratId}</div>
             </div>
           </div>
-          <StatusBadge mode={statusMode} label={statusLabel} />
+          <div className="flex flex-col items-end gap-1.5">
+            <StatusBadge mode={statusMode} label={statusLabel} />
+            <ManagedPill
+              statusMode={statusMode}
+              managed={managed}
+              apiAlive={apiAlive}
+              lastActivity={lastActivity}
+              heartbeatMaxAge={heartbeatMaxAge}
+              t={t}
+            />
+          </div>
         </div>
       </div>
 
@@ -307,6 +442,16 @@ function BotCard({
             <PerfTile label={t('bots.win_rate')} value={winRate != null ? `${winRate}%` : '—'} />
             <PerfTile label={t('bots.open_count')} value={openPositions.length} />
           </div>
+          {statusMode === 'live' && nextTickAt && (
+            <div className="mt-2">
+              <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+            </div>
+          )}
+          {topSignals && topSignals.length > 0 && (
+            <div className="mt-2">
+              <CompactSignals signals={topSignals} t={t} />
+            </div>
+          )}
         </div>
 
         {/* Open positions */}
@@ -316,15 +461,22 @@ function BotCard({
             {openPositions.map((p, i) => {
               const isLong = p.side !== 'short'
               const upnl = parseFloat(p.unrealized_pnl || 0)
+              const stop = p.stop ?? p.stop_price
+              const entry = p.entry ?? p.entry_price
               return (
-                <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                  <div className="flex items-center gap-1.5">
+                <div key={i} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
                     <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
                     <span className="text-[var(--txt)] font-medium">{p.coin}</span>
                   </div>
-                  <span className={`mono font-semibold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
-                  </span>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {entry != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(entry).toFixed(4)}</span>}
+                    {stop != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_sl')} {Number(stop).toFixed(4)}</span>}
+                    {p.tp1 != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{t('bots.pos_tp')} {Number(p.tp1).toFixed(4)}</span>}
+                    <span className={`mono font-semibold flex-shrink-0 ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                    </span>
+                  </div>
                 </div>
               )
             })}
@@ -374,7 +526,22 @@ function BotCard({
         {/* ─── Actions ─── */}
         {!isGuest && (
           <div className="flex gap-1.5 pt-1 mt-auto">
-            <button
+            
+            {showCapital && statusMode !== 'live' && (
+              <div className="flex items-center gap-2 mr-auto min-w-0">
+                <label className="text-[0.65rem] text-[var(--txt-muted)] whitespace-nowrap">Сумма, $</label>
+                <input
+                  type="number"
+                  min={100}
+                  step={100}
+                  value={capitalValue ?? ''}
+                  onChange={(e) => onCapitalChange?.(Number(e.target.value))}
+                  className="w-28 px-2 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)] text-xs mono"
+                  title="Капитал для торговли бота в Live"
+                />
+              </div>
+            )}
+<button
               className={`btn btn-sm flex-1 ${statusMode === 'live' ? 'btn-danger' : 'btn-primary'}`}
               onClick={onToggle}
               disabled={loading}
@@ -390,201 +557,122 @@ function BotCard({
   )
 }
 
-function loadSavedConfig(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key)
-    if (!raw) return fallback
-    return { ...fallback, ...JSON.parse(raw) }
-  } catch {
-    return fallback
-  }
-}
-
 export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
-  const strategyDesc = getStrategyDesc(t)
-
-  const [momentumStatus, setMomentumStatus] = useState(null)
-  const [momLoading, setMomLoading] = useState(false)
-  const [impulseStatus, setImpulseStatus] = useState(null)
-  const [impLoading, setImpLoading] = useState(false)
-  const [valStatus, setValStatus] = useState(null)
-  const [valLoading, setValLoading] = useState(false)
+  const [aiStatus, setAiStatus] = useState(null)
+  const [aiLoading, setAiLoading] = useState(false)
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [liveLoading, setLiveLoading] = useState(false)
+  const [liveKey, setLiveKey] = useState('')
+  const [liveCapital, setLiveCapital] = useState('')
+  const [liveSecret, setLiveSecret] = useState('')
+  const [livePass, setLivePass] = useState('')
+  const [aiCapital, setAiCapital] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem('ai_live_capital') || '10000')
+      return Number.isFinite(v) && v >= 100 ? v : 10000
+    } catch {
+      return 10000
+    }
+  })
+  const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
-  const [sliderOpen, setSliderOpen] = useState(false)
-  const [editingBot, setEditingBot] = useState(null) // 'momentum' | 'impulse' | 'validation'
-  const [saving, setSaving] = useState(false)
-  const formRef = useRef(null)
-
-  const [momLocal, setMomLocal] = useState(() => loadSavedConfig('bot_config_momentum', {
-    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
-    config: DEFAULT_MOM_CONFIG,
-  }))
-
-  const [impLocal, setImpLocal] = useState(() => loadSavedConfig('bot_config_impulse', {
-    symbols: ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC'],
-    config: DEFAULT_IMP_CONFIG,
-  }))
-
-  const [valLocal, setValLocal] = useState(() => loadSavedConfig('bot_config_validation', {
-    symbols: [...VALIDATION_SYMBOL_OPTIONS],
-    config: DEFAULT_VAL_CONFIG,
-  }))
 
   const refreshStatus = useCallback(async () => {
-    try {
-      const m = await api.momentumStatus().catch(() => null)
-      if (m) {
-        setMomentumStatus(m)
-        if (m.config) {
-          setMomLocal(prev => ({
-            symbols: m.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickRotationParams(m.config) },
-          }))
-        }
-      }
-    } catch { /* ignore */ }
-    try {
-      const i = await api.impulseStatus().catch(() => null)
-      if (i) {
-        setImpulseStatus(i)
-        if (i.config) {
-          setImpLocal(prev => ({
-            symbols: i.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickParams(i.config, IMPULSE_PARAMS) },
-          }))
-        }
-      }
-    } catch { /* ignore */ }
-    try {
-      const v = await api.validationStatus().catch(() => null)
-      if (v) {
-        setValStatus(v)
-        if (v.config) {
-          setValLocal(prev => ({
-            symbols: v.config.symbols || prev.symbols,
-            config: { ...prev.config, ...pickParams(v.config, VALIDATION_PARAMS) },
-          }))
-        }
-      }
-    } catch { /* ignore */ }
+    const [a, ls] = await Promise.all([
+      api.aiStatus().catch(() => null),
+      api.liveStatus().catch(() => null),
+    ])
+    if (a) setAiStatus(a)
+    if (ls) setLiveStatus(ls)
+    setApiAlive(!!a)
   }, [])
 
   useEffect(() => {
     refreshStatus()
-    const id = setInterval(refreshStatus, 10000)
+    const id = setInterval(refreshStatus, 30000)
     return () => clearInterval(id)
   }, [connected, refreshStatus])
 
-  const momToggle = async () => {
-    setMomLoading(true)
+  const aiToggle = async () => {
+    setAiLoading(true)
     try {
-      if (momentumStatus?.running) {
-        await api.momentumStop()
+      if (aiStatus?.running) {
+        await api.aiStop()
       } else {
-        await api.momentumStart({
-          symbols: momLocal.symbols,
-          ...momLocal.config,
-          leverage: momLocal.config.max_leverage,
+        const cap = Math.max(100, Number(aiCapital) || 10000)
+        try { localStorage.setItem('ai_live_capital', String(cap)) } catch {}
+        await api.aiStart({
+          capital: cap,
+          provider: 'groq',
+          execute: true,
+          max_positions: 1,
+          symbols: AI_SYMBOLS,
         })
       }
       await refreshStatus()
     } catch (e) { alert(e.message) }
-    setMomLoading(false)
+    setAiLoading(false)
   }
 
-  const impToggle = async () => {
-    setImpLoading(true)
-    try {
-      if (impulseStatus?.running) {
-        await api.impulseStop()
-      } else {
-        await api.impulseStart({
-          symbols: impLocal.symbols,
-          ...impLocal.config,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setImpLoading(false)
-  }
-
-  const valToggle = async () => {
-    setValLoading(true)
-    try {
-      if (valStatus?.running) {
-        await api.validationStop()
-      } else {
-        await api.validationStart({
-          symbols: valLocal.symbols,
-          ...valLocal.config,
-        })
-      }
-      await refreshStatus()
-    } catch (e) { alert(e.message) }
-    setValLoading(false)
-  }
-
-  const handleSave = (botData) => {
-    setSaving(true)
-    const payload = { symbols: botData.symbols, config: botData.config }
-    if (editingBot === 'momentum') {
-      setMomLocal(payload)
-      localStorage.setItem('bot_config_momentum', JSON.stringify(payload))
-    } else if (editingBot === 'impulse') {
-      setImpLocal(payload)
-      localStorage.setItem('bot_config_impulse', JSON.stringify(payload))
-    } else if (editingBot === 'validation') {
-      setValLocal(payload)
-      localStorage.setItem('bot_config_validation', JSON.stringify(payload))
+  const liveConnect = async () => {
+    const cap = Number(liveCapital)
+    if (!(cap >= 10)) {
+      alert('Укажите капитал зеркала (мин. $10)')
+      return
     }
-    setTimeout(() => {
-      setSaving(false)
-      setSliderOpen(false)
-      setEditingBot(null)
-    }, 200)
+    if (!liveKey?.trim() || !liveSecret?.trim() || !livePass?.trim()) {
+      alert('Заполните API Key, Secret и Passphrase')
+      return
+    }
+    setLiveLoading(true)
+    try {
+      const res = await api.liveConnect({
+        key: liveKey.trim(),
+        secret: liveSecret.trim(),
+        passphrase: livePass.trim(),
+        confirm: 'LIVE',
+        capital: cap,
+      })
+      setLiveKey(''); setLiveSecret(''); setLivePass(''); setLiveCapital('')
+      // Optimistic UI — status may lag one poll
+      setLiveStatus((prev) => ({
+        ...(prev || {}),
+        connected: true,
+        enabled: true,
+        capital: res?.capital ?? cap,
+        equity: res?.equity ?? (prev?.equity || 0),
+      }))
+      await refreshStatus()
+    } catch (e) {
+      alert(e?.message || String(e) || 'Не удалось подключить LIVE')
+    } finally {
+      setLiveLoading(false)
+    }
   }
 
-  const momRunning = !!momentumStatus?.running
-  const momStartedAt = momentumStatus?.started_at ? Date.parse(momentumStatus.started_at) : null
+    const liveDisconnect = async () => {
+    setLiveLoading(true)
+    try {
+      await api.liveDisconnect()
+      setLiveStatus({
+        connected: false,
+        enabled: false,
+        equity: 0,
+        capital: 0,
+        total_pnl: 0,
+        unrealized_pnl: 0,
+        open_positions: [],
+        lifetime_trades: 0,
+      })
+      await refreshStatus()
+    } catch (e) { alert(e.message) }
+    setLiveLoading(false)
+  }
 
-  const momCfg = momentumStatus?.config
-  const momTags = [
-    ...(momCfg?.symbols?.length ? [`${momCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: momCfg?.top_k || 2 }),
-    ...(momCfg?.max_leverage ? [t('bots.tag_leverage', { x: momCfg.max_leverage })] : []),
-    t('bots.tag_regime'),
-    t('bots.tag_trailing'),
-    t('bots.tag_roi'),
-  ]
-
-  const impRunning = !!impulseStatus?.running
-  const impStartedAt = impulseStatus?.started_at ? Date.parse(impulseStatus.started_at) : null
-
-  const valRunning = !!valStatus?.running
-  const valStartedAt = valStatus?.started_at ? Date.parse(valStatus.started_at) : null
-
-  const valCfg = valStatus?.config
-  const valTags = [
-    ...(valCfg?.symbols?.length ? [`${valCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: valCfg?.top_k || 4 }),
-    ...(valCfg?.max_leverage ? [t('bots.tag_leverage', { x: valCfg.max_leverage })] : []),
-    t('bots.tag_breakout'),
-    t('bots.tag_partial_tp'),
-  ]
-
-  const impCfg = impulseStatus?.config
-  const impTags = [
-    ...(impCfg?.symbols?.length ? [`${impCfg.symbols.length} монет`] : []),
-    t('bots.tag_timeframe'),
-    t('bots.tag_positions', { n: impCfg?.top_k || 4 }),
-    ...(impCfg?.max_leverage ? [t('bots.tag_leverage', { x: impCfg.max_leverage })] : []),
-    t('bots.tag_pyramid'),
-    t('bots.tag_cascade_tp'),
-    t('bots.tag_trailing'),
-  ]
+const aiRunning = !!aiStatus?.running
+  const aiStartedAt = aiStatus?.started_at ? Date.parse(aiStatus.started_at) : null
+  const coins = aiStatus?.symbols || aiStatus?.config?.symbols || AI_SYMBOLS
 
   return (
     <div className="h-full flex flex-col p-4 gap-4 overflow-auto">
@@ -604,135 +692,71 @@ export default function BotsPage({ connected, isGuest }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
         <BotCard
-          id="momentum"
-          name={t('dash.momentum_bot')}
-          stratId="momentum_rotation"
-          version={momentumStatus?.version}
-          icon={TrendingUp}
-          accentDim="bg-[var(--info-dim)]"
-          accentTxt="text-[var(--info)]"
-          statusMode={momRunning ? 'live' : 'stopped'}
-          statusLabel={momRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={momentumStatus?.config?.symbols || momLocal.symbols}
-          description={momentumStatus?.description || strategyDesc.momentum}
-          tags={momTags}
-          tagline={t('bots.tagline')}
-          backtest={MOM_BACKTEST}
-          pnl={momentumStatus?.total_pnl || 0}
-          trades={momentumStatus?.total_trades || 0}
-          winRate={momentumStatus?.win_rate}
-          sparklinePnl={momentumStatus?.total_pnl || 0}
-          startedAt={momRunning ? momStartedAt : null}
-          openPositions={momentumStatus?.open_positions || []}
-          onToggle={momToggle}
-          onEdit={() => { setEditingBot('momentum'); setSliderOpen(true) }}
+          id="ai"
+          name="AI Discretionary 1H"
+          stratId="ai_strategy"
+          version={aiStatus?.version}
+          icon={Brain}
+          accentDim="bg-[var(--accent-dim)]"
+          accentTxt="text-[var(--accent)]"
+          statusMode={aiRunning ? 'live' : 'stopped'}
+          statusLabel={aiRunning ? t('bots.status_running') : t('bots.status_stopped')}
+          coins={coins}
+          description={
+            aiStatus?.pulse
+            || aiStatus?.description
+            || t('bots.ai_desc')
+            || 'AI Discretionary — LLM анализирует рынок и открывает/закрывает позиции.'
+          }
+          tags={[
+            aiStatus?.model || aiStatus?.llm?.model || 'LLM',
+            '1H',
+            aiStatus?.execute ? 'execute' : 'signals',
+          ]}
+          tagline={coins.join(' · ')}
+          pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+          trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
+          winRate={aiStatus?.win_rate}
+          sparklinePnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+          startedAt={aiRunning ? aiStartedAt : null}
+          openPositions={aiStatus?.open_positions || []}
+          managed={aiStatus?.running}
+          lastActivity={aiStatus?.last_activity}
+          heartbeatMaxAge={(aiStatus?.config?.poll_interval_sec || 300) * 3}
+          apiAlive={apiAlive}
+          nextTickAt={aiStatus?.health?.next_tick_at}
+          pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
+          topSignals={aiStatus?.top_signals}
+          onToggle={aiToggle}
           isGuest={isGuest}
-          loading={momLoading}
+          loading={aiLoading}
           t={t}
+          showCapital={!aiRunning}
+          capitalValue={aiCapital}
+          onCapitalChange={(v) => setAiCapital(v)}
         />
 
-        <BotCard
-          id="impulse"
-          name={t('docs.strat_impulse_title')}
-          stratId={impulseStatus?.strategy || 'impulse_1d'}
-          version={impulseStatus?.version}
-          icon={Zap}
-          accentDim="bg-[var(--profit-dim)]"
-          accentTxt="text-[var(--profit)]"
-          statusMode={impRunning ? 'live' : 'stopped'}
-          statusLabel={impRunning ? t('bots.status_running') : t('bots.status_stopped')}
-          coins={impulseStatus?.config?.symbols || impLocal.symbols}
-          description={impulseStatus?.description || strategyDesc.impulse}
-          tags={impTags}
-          tagline={t('bots.tagline_impulse')}
-          backtest={IMP_BACKTEST}
-          pnl={impulseStatus?.total_pnl || 0}
-          trades={impulseStatus?.total_trades || 0}
-          winRate={impulseStatus?.win_rate}
-          sparklinePnl={impulseStatus?.total_pnl || 0}
-          startedAt={impRunning ? impStartedAt : null}
-          openPositions={impulseStatus?.open_positions || []}
-          onToggle={impToggle}
-          onReset={() => {
-            if (window.confirm('Сбросить историю сделок Impulse 1D?')) {
-              api.impulseReset().then(refreshStatus).catch(e => alert(e.message))
-            }
-          }}
-          onEdit={() => { setEditingBot('impulse'); setSliderOpen(true) }}
+        <LiveMirrorCard
+          connected={!!liveStatus?.connected && liveStatus?.enabled !== false}
+          liveStatus={liveStatus}
+          loading={liveLoading}
+          liveKey={liveKey} setLiveKey={setLiveKey}
+          liveSecret={liveSecret} setLiveSecret={setLiveSecret}
+          livePass={livePass} setLivePass={setLivePass}
+          liveCapital={liveCapital} setLiveCapital={setLiveCapital}
+          onConnect={liveConnect}
+          onDisconnect={liveDisconnect}
           isGuest={isGuest}
-          loading={impLoading}
           t={t}
         />
-
-        {!isGuest && (
-          <BotCard
-            id="validation"
-            name={t('dash.validation_bot')}
-            stratId={valStatus?.strategy || 'macd_donchian_validation'}
-            version={valStatus?.version}
-            icon={FlaskConical}
-            accentDim="bg-[var(--warn-dim)]"
-            accentTxt="text-[var(--warn)]"
-            statusMode={valRunning ? 'live' : 'stopped'}
-            statusLabel={valRunning ? t('bots.status_running') : t('bots.status_stopped')}
-            coins={valStatus?.config?.symbols || valLocal.symbols}
-            description={valStatus?.description || t('bots.validation_desc')}
-            tags={valTags}
-            tagline={t('bots.tagline_validation')}
-            backtest={VAL_BACKTEST}
-            pnl={valStatus?.total_pnl || 0}
-            trades={valStatus?.total_trades || 0}
-            winRate={valStatus?.win_rate}
-            sparklinePnl={valStatus?.total_pnl || 0}
-            startedAt={valRunning ? valStartedAt : null}
-            openPositions={valStatus?.open_positions || []}
-            onToggle={valToggle}
-            onReset={() => {
-              if (window.confirm(t('bots.validation_reset_confirm'))) {
-                api.validationReset().then(refreshStatus).catch(e => alert(e.message))
-              }
-            }}
-            onEdit={() => { setEditingBot('validation'); setSliderOpen(true) }}
-            isGuest={isGuest}
-            loading={valLoading}
-            t={t}
-          />
-        )}
       </div>
-
-      <SliderPanel
-        open={sliderOpen}
-        onClose={() => { setSliderOpen(false); setEditingBot(null) }}
-        title={`${t('bots.edit')} ${
-          editingBot === 'impulse' ? t('docs.strat_impulse_title')
-          : editingBot === 'validation' ? t('dash.validation_bot')
-          : 'Momentum'
-        }`}
-        footer={
-          <>
-            <button className="btn btn-ghost" onClick={() => { setSliderOpen(false); setEditingBot(null) }}>{t('bots.cancel')}</button>
-            <button className="btn btn-primary" onClick={() => formRef.current?.requestSubmit()} disabled={saving}>
-              {saving ? <Loader /> : <><Zap size={13} /> {t('bots.save')}</>}
-            </button>
-          </>
-        }
-      >
-        <BotConfigForm
-          ref={formRef}
-          botType={editingBot}
-          symbols={editingBot === 'impulse' ? impLocal.symbols : editingBot === 'validation' ? valLocal.symbols : momLocal.symbols}
-          config={editingBot === 'impulse' ? impLocal.config : editingBot === 'validation' ? valLocal.config : momLocal.config}
-          onSave={handleSave}
-        />
-      </SliderPanel>
 
       <ConfirmDialog
         open={confirmStopAll}
         onClose={() => setConfirmStopAll(false)}
         onConfirm={async () => {
-          try { await api.momentumStop() } catch {}
-          try { await api.impulseStop() } catch {}
-          try { await api.validationStop() } catch {}
+          try { await api.aiStop() } catch {}
+          try { await api.liveDisconnect() } catch {}
           await refreshStatus()
           setConfirmStopAll(false)
         }}
@@ -744,151 +768,3 @@ export default function BotsPage({ connected, isGuest }) {
     </div>
   )
 }
-
-function pickRotationParams(cfg) {
-  const out = {}
-  for (const key of ROTATION_PARAMS) {
-    if (cfg[key] != null) out[key] = cfg[key]
-  }
-  if (cfg.leverage != null && out.max_leverage == null) out.max_leverage = cfg.leverage
-  return out
-}
-
-function pickParams(cfg, keys) {
-  const out = {}
-  for (const key of keys) {
-    if (cfg[key] != null) out[key] = cfg[key]
-  }
-  return out
-}
-
-const BotConfigForm = forwardRef(function BotConfigForm({ botType, symbols, config, onSave }, ref) {
-  const { t } = useTranslation()
-  const isImpulse = botType === 'impulse'
-  const isValidation = botType === 'validation'
-  const defaultConfig = isImpulse ? DEFAULT_IMP_CONFIG : isValidation ? DEFAULT_VAL_CONFIG : DEFAULT_MOM_CONFIG
-  const PARAM_LIST = isImpulse ? IMPULSE_PARAMS : isValidation ? VALIDATION_PARAMS : ROTATION_PARAMS
-  const PARAM_META = useMemo(() => getParamMeta(t, isImpulse ? IMPULSE_PARAM_BASE : isValidation ? VALIDATION_PARAM_BASE : PARAM_BASE), [t, isImpulse, isValidation])
-
-  const [form, setForm] = useState({
-    symbols: symbols?.length ? [...symbols] : (isValidation ? [...VALIDATION_SYMBOL_OPTIONS] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']),
-    config: { ...defaultConfig, ...config },
-  })
-
-  useEffect(() => {
-    setForm({
-      symbols: symbols?.length ? [...symbols] : (isValidation ? [...VALIDATION_SYMBOL_OPTIONS] : ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']),
-      config: { ...defaultConfig, ...config },
-    })
-  }, [botType, symbols, config])
-
-  const handleSubmit = (e) => {
-    e.preventDefault()
-    onSave(form)
-  }
-
-  const updateConfig = (key, val) => {
-    setForm(f => ({ ...f, config: { ...f.config, [key]: val } }))
-  }
-
-  return (
-    <form ref={ref} onSubmit={handleSubmit} className="space-y-5">
-      <div className="flex items-center gap-2 p-2.5 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-        {isImpulse
-          ? <Zap size={14} className="text-[var(--profit)]" />
-          : isValidation
-            ? <FlaskConical size={14} className="text-[var(--warn)]" />
-            : <TrendingUp size={14} className="text-[var(--info)]" />}
-        <div>
-          <div className="text-xs font-semibold text-[var(--txt)]">
-            {isImpulse ? t('docs.strat_impulse_title') : isValidation ? t('dash.validation_bot') : t('dash.momentum_bot')}
-          </div>
-          <div className="text-2xs text-[var(--txt-muted)]">
-            {isImpulse ? 'impulse_1d' : isValidation ? 'macd_donchian_validation' : 'momentum_rotation'}
-          </div>
-        </div>
-      </div>
-
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
-          {t('bots.coins_label')} <Tip text={t('bots.coins_tip')} />
-        </label>
-        <div className="flex flex-wrap gap-2 mt-2">
-          {(isValidation ? VALIDATION_SYMBOL_OPTIONS : SYMBOL_OPTIONS).map(s => {
-            const active = form.symbols.includes(s)
-            return (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setForm(f => ({
-                  ...f,
-                  symbols: active
-                    ? (f.symbols.length > 1 ? f.symbols.filter(x => x !== s) : f.symbols)
-                    : [...f.symbols, s],
-                }))}
-                className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-                  active
-                    ? 'border-[var(--info)] bg-[var(--info-dim)] text-[var(--info)]'
-                    : 'border-[var(--border)] text-[var(--txt-muted)] hover:border-[var(--border-hover)]'
-                }`}
-              >
-                {s}/USDT
-              </button>
-            )
-          })}
-        </div>
-      </div>
-
-      <div>
-        <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider mb-3 block">{t('bots.params')}</label>
-        <div className="space-y-4">
-          {PARAM_LIST.map(key => {
-            const meta = PARAM_META[key]
-            if (!meta) return null
-            const rawVal = form.config[key] ?? (meta.asPercent ? meta.min / 100 : meta.min)
-            const displayVal = toDisplay(rawVal, meta)
-            return (
-              <div key={key}>
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs text-[var(--txt-secondary)] flex items-center gap-1">
-                    {meta.label}
-                    <Tip text={meta.tip} />
-                  </span>
-                  <span className="mono text-xs font-semibold text-[var(--txt)]">{displayVal}{meta.unit}</span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="range"
-                    min={meta.min}
-                    max={meta.max}
-                    step={meta.step}
-                    value={displayVal}
-                    onChange={e => updateConfig(key, fromDisplay(parseFloat(e.target.value), meta))}
-                    className="flex-1"
-                  />
-                  <input
-                    type="number"
-                    className="w-20 text-right mono"
-                    value={displayVal}
-                    onChange={e => {
-                      const v = parseFloat(e.target.value)
-                      if (!isNaN(v)) updateConfig(key, fromDisplay(v, meta))
-                    }}
-                    step={meta.step}
-                    min={meta.min}
-                    max={meta.max}
-                  />
-                </div>
-                {key === 'risk_per_trade' && <RiskMeter percentValue={displayVal} />}
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      <p className="text-2xs text-[var(--txt-muted)]">
-        {t('bots.config_apply_hint')}
-      </p>
-    </form>
-  )
-})

@@ -2,10 +2,11 @@ import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
-  Clock, Bot, FlaskConical
+  Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert, Wifi, WifiOff,
+  Target
 } from 'lucide-react'
 import { api } from '../services/api'
-import { MetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader } from '../components/ui'
+import { MetricCard, EnhancedMetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader, Skeleton, SkeletonMetricCard } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 import { fmtTs } from '../utils/time'
 
@@ -13,6 +14,9 @@ const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX'
 
 // Coins the bot actively trades — shown as live price cards on the dashboard
 const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
+/** AI product mode — Discretionary + optional Scale-In on dashboard */
+const AI_ONLY_MODE = true
+
 
 /* ═══════ Animated Value — smooth colour transition ═══════ */
 function AnimatedValue({ children, className = '' }) {
@@ -50,7 +54,197 @@ function isAdmin(isGuest) {
 }
 
 /* ═══════ Dashboard ═══════ */
-export default function Dashboard({ health, connected, isGuest, demoMode }) {
+
+/** Unified bot panel on Dashboard (same layout for Discretionary & Scale-In). */
+function TopSignals({ signals, t }) {
+  if (!signals || signals.length === 0) return null
+  return (
+    <div className="panel flex-shrink-0">
+      <div className="panel-header">
+        <Target size={13} className="text-[var(--accent)]" />
+        <span className="flex-1 truncate text-xs font-bold">{t('dash.top_signals') || 'Сигналы на вход'}</span>
+      </div>
+      <div className="p-2 space-y-1">
+        {signals.map((s, i) => {
+          const isLong = s.side === 'long'
+          const scorePct = Math.round((s.score || 0) * 100)
+          const alignPct = Math.round((s.align_score || 0) * 100)
+          const fp = s.filters_passed ?? 10
+          const ft = s.filters_total ?? 10
+          const blocked = s.blocked_reason
+          return (
+            <div key={s.coin + i} className="flex items-center gap-2 p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]">
+              <span className="text-[0.6rem] font-bold text-[var(--txt-muted)] w-4 text-center">#{i + 1}</span>
+              <span className={`px-1 py-0.5 rounded text-[0.6rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                {isLong ? 'L' : 'S'}
+              </span>
+              <span className="text-xs font-semibold text-[var(--txt)] mono">{s.coin}</span>
+              <div className="flex-1" />
+              <div className="flex items-center gap-1.5 text-[0.6rem] text-[var(--txt-muted)]">
+                <span>{t('dash.regime') || 'Режим'}: <span className="text-[var(--txt)] mono">{s.regime}</span></span>
+                <span>ADX: <span className="text-[var(--txt)] mono">{s.adx}</span></span>
+                {s.change_pct != null && (
+                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)'}>
+                    {s.change_pct >= 0 ? '+' : ''}{s.change_pct}%
+                  </span>
+                )}
+              </div>
+              {blocked ? (
+                <span className="text-[0.5rem] px-1 py-px rounded bg-[var(--warn)]/15 text-[var(--warn)] font-medium" title={blocked}>
+                  {blocked.replace(/_/g, ' ')}
+                </span>
+              ) : (
+                <span className="text-[0.55rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
+              )}
+              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
+              <div className="w-12 h-1.5 rounded-full bg-[var(--border)] overflow-hidden flex-shrink-0">
+                <div className="h-full rounded-full transition-all" style={{
+                  width: `${scorePct}%`,
+                  backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                }} />
+              </div>
+              <span className="mono text-[0.65rem] font-bold text-[var(--txt)] w-8 text-right">{scorePct}%</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
+  const [remaining, setRemaining] = useState(null)
+  useEffect(() => {
+    if (!nextTickAt) { setRemaining(null); return }
+    const tick = () => setRemaining(Math.max(0, Math.floor((Date.parse(nextTickAt) - Date.now()) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [nextTickAt])
+  if (remaining === null) return null
+  const pct = pollIntervalSec ? Math.round(((pollIntervalSec - remaining) / pollIntervalSec) * 100) : 0
+  return (
+    <div className="flex items-center gap-2 text-[0.6rem] text-[var(--txt-muted)]">
+      <Clock size={11} className="flex-shrink-0 opacity-60" />
+      <span>След. проверка: <span className="mono font-semibold text-[var(--txt)]">{remaining}с</span></span>
+      <div className="flex-1 h-1 rounded-full bg-[var(--bg)] overflow-hidden max-w-[60px]">
+        <div className="h-full rounded-full bg-[var(--info)] transition-all duration-1000" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+    </div>
+  )
+}
+
+function DashBotPanel({
+  title, version, running, loading, accent = 'text-[var(--accent)]',
+  pnl, trades, winRate, openCount, model, capital, pulse, tagline,
+  isGuest, onStart, onStop, startLabel, t,
+  nextTickAt, pollIntervalSec, topSignals,
+}) {
+  const pnlN = Number(pnl ?? 0)
+  const pnlCls = pnlN >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+  return (
+    <div className="panel flex-shrink-0">
+      <div className="panel-header">
+        <Bot size={13} className={accent} />
+        <span className="flex-1 truncate">{title}</span>
+        {loading && !running && (
+          <span className="text-2xs text-[var(--warn)] mr-1">…</span>
+        )}
+        {version && (
+          <span className="text-2xs text-[var(--txt-muted)] mono mr-1">{version}</span>
+        )}
+        {running
+          ? <StatusBadge mode="live" label={t('dash.running')} />
+          : <StatusBadge mode="stopped" label={t('dash.stopped')} />}
+      </div>
+      <div className="p-3 space-y-2.5 text-2xs">
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">PnL</div>
+            <div className={`mono font-semibold ${pnlCls}`}>
+              {pnlN >= 0 ? '+' : ''}{pnlN.toFixed(2)}
+            </div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Сделок</div>
+            <div className="mono font-semibold">{trades ?? 0}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">WR</div>
+            <div className="mono font-semibold">{winRate != null ? `${winRate}%` : '—'}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Поз.</div>
+            <div className="mono font-semibold">{openCount ?? 0}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[var(--txt-muted)]">
+          {model && <span>Модель: <span className="text-[var(--txt)] mono">{model}</span></span>}
+          {capital != null && <span>Капитал: <span className="text-[var(--txt)] mono">${Number(capital).toLocaleString()}</span></span>}
+          {tagline && <span className="w-full text-[11px]">{tagline}</span>}
+        </div>
+        {running && nextTickAt && (
+          <div className="pt-1">
+            <NextTickCountdown nextTickAt={nextTickAt} pollIntervalSec={pollIntervalSec} />
+          </div>
+        )}
+        {running && topSignals && topSignals.length > 0 && (
+          <div className="space-y-1 pt-1">
+            <div className="flex items-center gap-1.5 text-[0.6rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
+              <Target size={9} />
+              <span>{t('dash.top_signals') || 'Сигналы на вход'}</span>
+            </div>
+            {topSignals.map((s, i) => {
+              const isLong = s.side === 'long'
+              const scorePct = Math.round((s.score || 0) * 100)
+              const alignPct = Math.round((s.align_score || 0) * 100)
+              return (
+                <div key={s.coin + i} className="flex items-center gap-1.5 py-0.5">
+                  <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
+                  <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                    {isLong ? 'L' : 'S'}
+                  </span>
+                  <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+                  <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
+                  <div className="flex-1" />
+                  <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
+                  <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+                    <div className="h-full rounded-full" style={{
+                      width: `${scorePct}%`,
+                      backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                    }} />
+                  </div>
+                  <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+        {(pulse) && (
+          <div className="p-2 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-28 overflow-y-auto text-[11px] leading-relaxed text-[var(--txt)] whitespace-pre-wrap break-words">
+            {pulse}
+          </div>
+        )}
+        {!isGuest && (
+          <div className="flex flex-col gap-1.5 pt-0.5">
+            {running ? (
+              <button type="button" className="btn btn-danger btn-sm w-full" onClick={onStop}>
+                <Square size={12} /> {t('dash.stop_bot')}
+              </button>
+            ) : (
+              <button type="button" className="btn btn-primary btn-sm w-full" onClick={onStart}>
+                <Play size={12} /> {startLabel || t('dash.start')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function Dashboard({ health, connected, isGuest }) {
+  const demoMode = health?.demo !== false
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
   const [ticker, setTicker] = useState(null)
@@ -59,10 +253,28 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   const [momentumTrades, setMomentumTrades] = useState([])
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
+  const [aiStatus, setAiStatus] = useState(null)
+  const [liveStatus, setLiveStatus] = useState(null)
+  const [aiScaleStatus, setAiScaleStatus] = useState(null)
+  const [smartMoneyStatus, setSmartMoneyStatus] = useState(null)
+  const [vwapRevStatus, setVwapRevStatus] = useState(null)
+  const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
+  // Drop PnL + trade log when switching Demo ↔ Live — never mix modes
+  useEffect(() => {
+    setPnl(null)
+    setTradeLog([])
+    setPositions([])
+  }, [demoMode])
   const [closing, setClosing] = useState(null)
   const [loading, setLoading] = useState(true)
+  const [dataFreshAt, setDataFreshAt] = useState(null)
+  const [reconcileOpen, setReconcileOpen] = useState(false)
+  const [reconcileLoading, setReconcileLoading] = useState(false)
+  const [reconcileResult, setReconcileResult] = useState(null)
+  const [reconcileError, setReconcileError] = useState('')
+
 
   // Filters
   const [filterPair, setFilterPair] = useState('Все')
@@ -103,60 +315,153 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   }, [momentumStatus?.started_at])
 
   useEffect(() => {
-    loadData()
-    const interval = setInterval(loadData, 10000)
+    loadData({ fastOnly: false })
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      loadData({ fastOnly: false })
+    }, 30000)
     return () => clearInterval(interval)
-  }, [connected])
+  }, [connected, demoMode])
 
-  // Skip polling while the tab is hidden — frees the (throttled) server
-  // instance and avoids piling up requests in the background.
   useEffect(() => {
-    const onVis = () => { if (!document.hidden) loadData() }
+    const onVis = () => { if (!document.hidden) loadData({ fastOnly: true }) }
+    const onMode = () => { loadData({ fastOnly: false }) }
     document.addEventListener('visibilitychange', onVis)
-    return () => document.removeEventListener('visibilitychange', onVis)
-  }, [connected])
+    window.addEventListener('trading-mode-changed', onMode)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('trading-mode-changed', onMode)
+    }
+  }, [connected, demoMode])
 
-  async function loadData() {
+  async function loadData(opts = {}) {
     if (!connected) { setLoading(false); return }
-    if (document.hidden) return
-    // Fast tier — renders immediately; the slow tier below fills in when ready.
+    if (document.hidden && !opts.force) return
+    
+    const isLive = !demoMode
     try {
-      const [pf, pos, tk, momStatus, impStatus, valStatus, priceTickers] = await Promise.all([
-        api.getPortfolio().catch(() => null),
-        api.getPositions('SWAP').catch(() => null),
-        api.getTicker('BTC-USDT-SWAP').catch(() => null),
-        api.momentumStatus().catch(() => null),
-        api.impulseStatus().catch(() => null),
-        api.validationStatus().catch(() => null),
-        api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
-      ])
-      if (pf) setPortfolio(pf)
-      if (pos) setPositions(pos.positions || [])
-      if (tk) setTicker(tk)
-      if (momStatus) setMomentumStatus(momStatus)
-      if (impStatus) setImpulseStatus(impStatus)
-      if (valStatus) setValidationStatus(valStatus)
-      if (priceTickers?.tickers) {
-        const byCoin = {}
-        priceTickers.tickers.forEach(tp => {
-          const id = (tp.instId || '').replace('-USDT-SWAP', '')
-          if (id) byCoin[id] = tp
-        })
-        setTickers(byCoin)
+      if (isLive) {
+        const [pf, pos, aiSt] = await Promise.all([
+          api.getPortfolio().catch(() => null),
+          api.getPositions('SWAP').catch(() => null),
+          api.aiStatus().catch(() => null),
+        ])
+        if (pf) setPortfolio(pf)
+        if (pos) setPositions(pos.positions || [])
+        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+        setLoading(false)
+
+        // Background: tickers + live status
+        const [priceTickers, liveSt] = await Promise.all([
+          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+          api.liveStatus().catch(() => null),
+        ])
+        if (liveSt) setLiveStatus(liveSt)
+        if (priceTickers?.tickers) {
+          const byCoin = {}
+          priceTickers.tickers.forEach(tp => {
+            const id = (tp.instId || '').replace('-USDT-SWAP', '')
+            if (id) byCoin[id] = tp
+          })
+          setTickers(byCoin)
+        }
+      } else {
+        const [pf, pos, tk, aiSt, priceTickers, liveSt] = await Promise.all([
+          api.getPortfolio().catch(() => null),
+          api.getPositions('SWAP').catch(() => null),
+          api.getTicker('BTC-USDT-SWAP').catch(() => null),
+          api.aiStatus().catch(() => null),
+          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
+          api.liveStatus().catch(() => null),
+        ])
+        if (pf) setPortfolio(pf)
+        if (pos) setPositions(pos.positions || [])
+        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+        if (tk) setTicker(tk)
+        if (liveSt) setLiveStatus(liveSt)
+        if (priceTickers?.tickers) {
+          const byCoin = {}
+          priceTickers.tickers.forEach(tp => {
+            const id = (tp.instId || '').replace('-USDT-SWAP', '')
+            if (id) byCoin[id] = tp
+          })
+          setTickers(byCoin)
+        }
+        setLoading(false)
       }
-      setLoading(false)
     } catch { setLoading(false) }
+    if (opts.fastOnly) return
+
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [momTrades, trades, pnlData] = await Promise.all([
-        api.momentumTrades(30).catch(() => null),
+      const [trades, liveTr, pnlData] = await Promise.all([
         api.getPairedTrades(50).catch(() => null),
-        api.getPnl().catch(() => null),
+        api.liveTrades().catch(() => null),
+        api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
-      if (momTrades) setMomentumTrades(momTrades.trades || [])
-      if (trades) setTradeLog(trades.trades || [])
-      if (pnlData) setPnl(pnlData)
+      const demoRows = trades?.trades || []
+      const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
+        ...t,
+        account_mode: 'live',
+        inst_id: t.inst_id || t.symbol,
+        entry_px: t.entry_px ?? t.entry_price ?? t.entry,
+        exit_px: t.exit_px ?? t.exit_price ?? t.exit,
+        bot: t.bot || 'AI Discretionary 1H',
+      }))
+      // Merge: demo from paired + live from mirror endpoint (tag live)
+      const byKey = new Map()
+      for (const t of demoRows) {
+        const k = `${t.ord_id || t.entry_ord_id || ''}|${t.inst_id}|${t.exit_time || t.time}|demo`
+        byKey.set(k, { ...t, account_mode: t.account_mode || 'demo' })
+      }
+      for (const t of liveRows) {
+        const k = `${t.ord_id || ''}|${t.inst_id || t.symbol}|${t.time || t.exit_time}|live`
+        byKey.set(k, t)
+      }
+      setTradeLog([...byKey.values()])
+      if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
+        // ONLY accept pnl_engine payloads — never bot-status seeds
+        const src = String(pnlData.source || '')
+        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
+        if (okSrc || pnlData.pnl_epoch) {
+          const wantMode = demoMode ? 'demo' : 'live'
+          const gotMode = String(pnlData.account_mode || '').toLowerCase()
+          // Ignore payload from the other account mode
+          if (gotMode && gotMode !== wantMode) {
+            console.warn('[pnl] ignore mismatched mode', gotMode, 'want', wantMode)
+          } else {
+            setPnl(prev => {
+              const newTot = Math.abs(Number(pnlData.total ?? 0))
+              const oldTot = Math.abs(Number(prev?.total ?? 0))
+              const newSrc = String(pnlData.source || '')
+              const prevMode = String(prev?.account_mode || '').toLowerCase()
+              // Zero on purpose when live has no closes — do not keep demo total
+              if (prevMode && prevMode !== wantMode) {
+                return { ...pnlData, account_mode: gotMode || wantMode }
+              }
+              if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
+                return prev
+              }
+              return { ...pnlData, account_mode: gotMode || wantMode }
+            })
+          }
+        }
+      } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
+        const sd = health.sm_diag
+        setPnl({
+          total: Number(sd.pnl_total ?? 0),
+          '1d': Number(sd.pnl_1d ?? 0),
+          week: Number(sd.pnl_week ?? 0),
+          '7d': Number(sd.pnl_week ?? 0),
+          '30d': Number(sd.pnl_total ?? 0),
+          unrealized: Number(sd.pnl_unrealized ?? 0),
+          per_bot: sd.pnl_per_bot || {},
+          per_bot_all: sd.pnl_per_bot || {},
+          source: sd.pnl_source || 'health_fallback',
+        })
+      }
+      setDataFreshAt(Date.now())
     } catch {}
   }
 
@@ -167,145 +472,522 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
   }
   const btcChange = ticker ? change24hPct(ticker).toFixed(2) : '0.00'
   const totalEquity = portfolio ? portfolio.totalEqUsd || 0 : 0
-  const unrealizedPnl = pnl?.unrealized || 0
-  const pnlTotal = pnl?.total || 0
-  const pnlDay = pnl?.['1d'] || 0
-  const pnlWeek = pnl?.week || 0
-  const pnlMonth = pnl?.['30d'] || 0
+  // Prefer sum of live OKX position rows (same source as the positions table).
+  // /api/pnl.unrealized is a slower cached path and can disagree with the table.
+  const unrealizedFromPositions = positions.reduce(
+    (s, p) => s + (parseFloat(p.upl) || 0), 0
+  )
+  const unrealizedPnl = positions.length > 0
+    ? unrealizedFromPositions
+    : (pnl?.unrealized || 0)
+  const fundingPnl = Number(pnl?.funding ?? 0)
+  // economic mixes account funding with strategy realized — show both explicitly
+  const strategyRealized = Number(pnl?.strategy_realized ?? pnl?.total ?? 0)
+  const economicPnl = Number(
+    pnl?.economic_approx
+    ?? (strategyRealized + unrealizedPnl + fundingPnl)
+  )
+  // DEMO positions (bot showcase) + MIRROR positions (live mirror) — always both
+  const demoPositions = useMemo(() => {
+    const result = []
+    const keys = new Set()
+    for (const p of (positions || [])) {
+      const mode = String(p.account_mode || 'demo').toLowerCase()
+      // When API is in live-view, positions may be live — skip them here
+      if (mode === 'live') continue
+      const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
+      if (keys.has(key)) continue
+      keys.add(key)
+      result.push({ ...p, account_mode: 'demo', bot: p.bot || 'AI Discretionary 1H' })
+    }
+    // Also from AI bot memory (demo account)
+    for (const op of (aiStatus?.open_positions || [])) {
+      const coin = (op.coin || '').toUpperCase()
+      if (!coin) continue
+      const side = (op.side || op.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+      const instId = op.inst_id || op.instId || `${coin}-USDT-SWAP`
+      const key = `${instId}|${side}`
+      if (keys.has(key)) continue
+      // Skip if this is clearly a live-only memory
+      if (String(op.account_mode || '').toLowerCase() === 'live') continue
+      keys.add(key)
+      result.push({
+        instId,
+        posSide: side,
+        pos: String(op.size || op.size_remaining || 0),
+        avgPx: String(op.entry_price || op.entry || 0),
+        markPx: String(op.mark_px || op.mark || ''),
+        upl: op.unrealized_pnl ?? op.upl ?? '',
+        uplRatio: op.upl_ratio ?? '',
+        lever: op.leverage ? String(op.leverage) : '',
+        account_mode: 'demo',
+        bot: 'AI Discretionary 1H',
+        coin,
+      })
+    }
+    return result
+  }, [positions, aiStatus?.open_positions])
+
+  const mirrorPositions = useMemo(() => {
+    const result = []
+    const keys = new Set()
+    for (const lp of (liveStatus?.open_positions || [])) {
+      const coin = (lp.coin || lp.symbol || '').replace('-USDT-SWAP', '').toUpperCase()
+      const side = (lp.side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+      const sz = parseFloat(lp.size || 0)
+      if (!sz && sz !== 0) continue
+      if (!coin && !lp.symbol) continue
+      const instId = lp.symbol || `${coin}-USDT-SWAP`
+      const key = `${instId}|${side}`
+      if (keys.has(key)) continue
+      keys.add(key)
+      result.push({
+        instId,
+        posSide: side,
+        pos: String(sz || lp.size || 0),
+        avgPx: String(lp.entry_price || 0),
+        markPx: String(lp.mark_px || lp.markPx || ''),
+        upl: lp.upl ?? lp.unrealized_pnl ?? '',
+        uplRatio: lp.upl_ratio ?? '',
+        lever: lp.leverage ? String(lp.leverage) : '',
+        account_mode: 'live',
+        bot: lp.bot || 'AI Discretionary 1H',
+        coin,
+      })
+    }
+    return result
+  }, [liveStatus?.open_positions])
+
+  // One list for the single «Открытые позиции» panel — DEMO + MIRROR with badges
+  const displayPositions = useMemo(
+    () => [...demoPositions, ...mirrorPositions],
+    [demoPositions, mirrorPositions]
+  )
+  const pnlTz = pnl?.pnl_tz || pnl?.timezone || 'Europe/Moscow'
+  // Active strategy labels (only running bots contribute to dashboard PnL)
+  const activeBotNames = (() => {
+    const names = []
+    if (AI_ONLY_MODE) {
+      if (aiStatus?.running) names.push('AI Discretionary 1H')
+      return names
+    }
+    if (momentumStatus?.running) names.push('Momentum')
+    if (impulseStatus?.running) names.push('Impulse 1D', 'Impulse')
+    if (validationStatus?.running) names.push('MACD+Donchian Validation', 'Validation')
+    if (aiStatus?.running) names.push('AI Discretionary 1H')
+    if (smartMoneyStatus?.running) names.push('Умные деньги', 'Smart Money')
+    if (vwapRevStatus?.running) names.push('VWAP Mean Reversion')
+    return names
+  })()
+  const isActiveBotTrade = (t) => {
+    if (!activeBotNames.length) return true // none running → show nothing filtered below
+    const b = String(t.bot || t.bot_name || '').trim()
+    if (!b) return false
+    return activeBotNames.some(n => b === n || b.includes(n) || n.includes(b))
+  }
+  // Realized windows: prefer /api/pnl (server already filters active); fallback tradeLog
+  const sumClosedSince = (msBack) => {
+    const cutoff = Date.now() - msBack
+    let s = 0
+    for (const t of (tradeLog || [])) {
+      const reason = String(t.reason || '').toLowerCase()
+      if (reason === 'open' || reason === 'add') continue
+      if (t.pnl == null || t.pnl === '') continue
+      if (!isActiveBotTrade(t)) continue
+      const ts = t.exit_time || t.time || t.timestamp || ''
+      if (!ts) continue
+      const ms = Date.parse(ts)
+      if (!Number.isFinite(ms) || ms < cutoff) continue
+      s += Number(t.pnl) || 0
+    }
+    return s
+  }
+  // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
+  const wantPnlMode = demoMode ? 'demo' : 'live'
+  const pnlModeOk = (() => {
+    const m = String(pnl?.account_mode || '').toLowerCase()
+    // Live: require explicit live — missing mode = treat as not ready (show 0)
+    if (!demoMode) return m === 'live'
+    // Demo: demo or untagged legacy payload
+    return !m || m === 'demo'
+  })()
+  const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+  const scalePnlResolved = 0
+  const discTradesResolved = (() => {
+    if (!pnlModeOk) return 0
+    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
+    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
+  })()
+  const pnlTotal = (() => {
+    if (!pnlModeOk) return 0
+    if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
+      return Number(pnl.total)
+    }
+    if (AI_ONLY_MODE) return discPnlResolved
+    if (pnl && pnl.total != null) return Number(pnl.total)
+    return discPnlResolved + scalePnlResolved
+  })()
+  const pnlDay = (() => {
+    if (!pnlModeOk) return 0
+    if (pnl && pnl['1d'] != null) return Number(pnl['1d'])
+    return 0
+  })()
+  const pnlWeek = (() => {
+    if (!pnlModeOk) return 0
+    if (pnl && pnl.week != null) return Number(pnl.week)
+    return 0
+  })()
+  const pnlMonth = (() => {
+    if (pnl && pnl['30d'] != null && (pnl.active_bots || []).length) return Number(pnl['30d'])
+    if (pnl && Number(pnl['30d'] ?? 0) !== 0) return Number(pnl['30d'])
+    if (!activeBotNames.length) return 0
+    return sumClosedSince(30 * 86400000)
+  })()
 
   // Per-strategy realized PnL breakdown (from /api/pnl per_bot)
   const botNameMap = {
     rotation_strategy: 'Momentum',
     momentum_strategy: 'Momentum',
+    Momentum: 'Momentum',
     impulse_strategy: 'Impulse 1D',
+    'Impulse 1D': 'Impulse 1D',
     validation_strategy: 'MACD+Donchian Validation',
+    'MACD+Donchian Validation': 'MACD+Donchian Validation',
+    ai_strategy: 'AI Discretionary 1H',
+    'AI Discretionary 1H': 'AI Discretionary 1H',
+    ai_scale_strategy: 'AI Scale-In 1H',
+    'AI Scale-In 1H': 'AI Scale-In 1H',
+    orderbook_scalp: 'Order Book Scalp',
+    smart_money: 'Умные деньги',
+    'Умные деньги': 'Умные деньги',
   }
   const pnlByBot = useMemo(() => {
     const per = pnl?.per_bot || {}
-    return Object.entries(per)
-      .map(([bid, val]) => ({ name: botNameMap[bid] || bid, val }))
-      .sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
+    const rows = []
+    if (AI_ONLY_MODE) {
+      if (!pnlModeOk) {
+        rows.push({ name: 'AI Discretionary 1H', val: 0 })
+        return rows
+      }
+      rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
+      return rows
+    }
+    for (const [bid, val] of Object.entries(per)) {
+      const name = botNameMap[bid] || bid
+      if (name === 'Unassigned' || name === 'Прочее / без стратегии') continue
+      rows.push({ name, val: Number(val || 0) })
+    }
+    return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
   }, [pnl])
 
-    // Raw trades from DB + bot log (used as source for activeTrades)
+  // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
+  const momentumCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per.Momentum != null) return Number(per.Momentum)
+    if (per.rotation_strategy != null) return Number(per.rotation_strategy)
+    if (per.momentum_strategy != null) return Number(per.momentum_strategy)
+    return Number(momentumStatus?.total_pnl ?? 0)
+  }, [pnl, momentumStatus?.total_pnl])
+  const impulseCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['Impulse 1D'] != null) return Number(per['Impulse 1D'])
+    if (per.impulse_strategy != null) return Number(per.impulse_strategy)
+    return Number(impulseStatus?.total_pnl ?? 0)
+  }, [pnl, impulseStatus?.total_pnl])
+  const validationCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['MACD+Donchian Validation'] != null) return Number(per['MACD+Donchian Validation'])
+    if (per.validation_strategy != null) return Number(per.validation_strategy)
+    return Number(validationStatus?.total_pnl ?? 0)
+  }, [pnl, validationStatus?.total_pnl])
+
+  const aiCardPnl = useMemo(() => {
+    const per = pnl?.per_bot || {}
+    if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
+    if (per.ai_strategy != null) return Number(per.ai_strategy)
+    return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
+
+    // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
+  // Local momentumTrades previously injected phantom closes not on OKX / History.
   const allTrades = useMemo(() => {
-    const combined = [...tradeLog]
-    const pairedKeys = new Set(tradeLog.map(t => `${t.inst_id}_${t.entry_time}_${t.exit_time}`))
-    for (const mt of momentumTrades) {
-      const key = `${mt.symbol}_${mt.time}_${mt.time}`
-      if (pairedKeys.has(key)) continue
-      // Full close trade with both prices (in-memory)
-      if (mt.entry_price && mt.exit_price) {
-        const isLongClose = (mt.pos_side === 'long' && mt.side === 'sell')
-                           || (mt.pos_side === 'short' && mt.side === 'buy')
-        if (!isLongClose && mt.pos_side) continue
-        combined.push({
-          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
-          side: mt.pos_side === 'short' ? 'sell' : 'buy',
-          entry_px: mt.entry_price, exit_px: mt.exit_price,
-          pnl: mt.pnl, reason: mt.reason || '', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      // DB-restored close trade (pnl!=0 but may lack entry_price)
-      } else if (mt.pnl != null && parseFloat(mt.pnl) !== 0 && !mt.entry) {
-        combined.push({
-          entry_time: mt.time, exit_time: mt.time, inst_id: mt.symbol,
-          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: mt.entry || null, exit_px: mt.exit_price || null,
-          pnl: mt.pnl, reason: mt.reason || 'closed', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      // Entry / open trade
-      } else if (mt.reason === 'open' || (mt.entry && !mt.exit_price)) {
-        combined.push({
-          entry_time: mt.time, exit_time: null, inst_id: mt.symbol,
-          side: (mt.pos_side === 'short' || mt.side === 'sell') ? 'sell' : 'buy',
-          entry_px: mt.entry, exit_px: null, pnl: null, reason: 'open', signal_id: mt.ord_id,
-          bot: mt.bot,
-        })
-      }
-    }
+    // Keep full log; UI splits DEMO vs MIRROR below
+    const combined = [...(tradeLog || [])]
     combined.sort((a, b) => {
       const ta = a.exit_time || a.entry_time || ''
       const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
-  }, [tradeLog, momentumTrades])
+  }, [tradeLog])
 
-  // Active trades — one row per position (open from live status, closed from trade log)
+  // Closed trades for the single «Сделки» panel — DEMO + LIVE, badge per row
+  const closedTradesForTable = useMemo(() => {
+    return allTrades.filter(t => {
+      const r = (t.reason || t.state || '').toLowerCase()
+      if (r === 'open' || r === 'add' || r === 'tp1' || r === 'partial_tp') return false
+      return true
+    }).map(t => {
+      const m = String(t.account_mode || t.mode || '').toLowerCase()
+      return {
+        ...t,
+        account_mode: m === 'live' ? 'live' : 'demo',
+        bot: t.bot || 'AI Discretionary 1H',
+      }
+    })
+  }, [allTrades])
+
+  // Map instId|side → bot name for badge resolution (AI-only product)
+  const botMap = useMemo(() => {
+    const m = {}
+    const addPositions = (list, name) => {
+      for (const p of (list || [])) {
+        const inst = p.inst_id || p.instId || (p.coin ? `${String(p.coin).toUpperCase()}-USDT-SWAP` : '')
+        if (!inst) continue
+        const sideKey = (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long'
+        m[`${inst}|${sideKey}`] = name
+        const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+        if (coin) m[`${coin}|${sideKey}`] = name
+      }
+    }
+    if (AI_ONLY_MODE) {
+      addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+      return m
+    }
+    addPositions(momentumStatus?.open_positions, 'Momentum')
+    addPositions(impulseStatus?.open_positions, 'Impulse 1D')
+    addPositions(validationStatus?.open_positions, 'Validation')
+    addPositions(aiStatus?.open_positions, 'AI Discretionary 1H')
+    addPositions(smartMoneyStatus?.open_positions, 'Умные деньги')
+    addPositions(vwapRevStatus?.open_positions, 'VWAP Mean Reversion')
+    return m
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions, vwapRevStatus?.open_positions])
+
+  const resolveBotName = (p) => {
+    const posSideKey = (p.posSide || p.side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+    const inst = p.instId || p.inst_id || ''
+    const coin = String(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
+    const key = `${inst}|${posSideKey}`
+    const coinKey = coin ? `${coin}|${posSideKey}` : ''
+    const fromMap = botMap[key] || botMap[coinKey] || ''
+    if (fromMap) return fromMap
+    let raw = String(p.bot || '')
+    if (/scale|discretionary|ai\b/i.test(raw)) return 'AI Discretionary 1H'
+    if (AI_ONLY_MODE) {
+      if (/impulse|validation|macd|momentum|vwap|smart|умн|scalp/i.test(raw)) return 'AI Discretionary 1H'
+      if (aiStatus?.running && (inst || coin)) return 'AI Discretionary 1H'
+      return raw || 'AI Discretionary 1H'
+    }
+    return raw || ''
+  }
+
+  const isOwnedBot = (bn) => {
+    if (!bn) return false
+    const n = String(bn).toLowerCase()
+    return n.includes('momentum') || n.includes('impulse') || n.includes('validation')
+      || n.includes('macd') || n.includes('ai') || n.includes('умн') || n.includes('smart')
+      || n.includes('vwap') || n.includes('scalp')
+  }
+
+  // Exchange positions with no strategy owner (manual / lost bot state)
+  const orphanPositions = useMemo(() => {
+    const managedKeys = new Set(Object.keys(botMap || {}))
+    const addStatus = (arr) => {
+      for (const op of (arr || [])) {
+        const inst = op.inst_id || op.instId || (op.coin ? `${op.coin}-USDT-SWAP` : '')
+        const side = (op.side || op.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+        if (inst) managedKeys.add(`${inst}|${side}`)
+      }
+    }
+    addStatus(momentumStatus?.open_positions)
+    addStatus(impulseStatus?.open_positions)
+    addStatus(validationStatus?.open_positions)
+    addStatus(aiStatus?.open_positions)
+    addStatus(aiScaleStatus?.open_positions)
+    addStatus(smartMoneyStatus?.open_positions)
+    return (positions || []).filter((p) => {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) return false
+      const posSideKey = (p.posSide || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+      const key = `${p.instId || ''}|${posSideKey}`
+      const bn = p.bot || botMap[key] || ''
+      if (isOwnedBot(bn)) return false
+      if (managedKeys.has(key)) return false
+      return true
+    })
+  }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions])
+
+  // Active trades — open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
     const rows = []
-    const tp1Pct = momentumStatus?.config?.tp1_pct || 0.015
+    const openKeys = new Set() // inst|side to avoid double rows
 
-    // 1. Open positions — live data from bot status (updates in-place on TP1/SL1)
-    const allOpen = [
-      ...(momentumStatus?.open_positions || []).map(p => ({ ...p, bot: 'Momentum' })),
-      ...(impulseStatus?.open_positions || []).map(p => ({ ...p, bot: 'Impulse 1D' })),
-      ...(validationStatus?.open_positions || []).map(p => ({ ...p, bot: 'Validation' })),
-    ]
-    for (const p of allOpen) {
-      const isLong = p.side !== 'short'
+    const pushOpen = (p, botHint) => {
+      const inst = p.inst_id || p.instId || p.symbol || ''
+      const coin = (p.coin || inst.replace('-USDT-SWAP', '') || '').replace('-USDT-SWAP', '')
+      const sideRaw = (p.side || p.posSide || p.pos_side || 'long').toLowerCase()
+      const isLong = sideRaw !== 'short' && sideRaw !== 'sell'
+      const sideKey = isLong ? 'long' : 'short'
+      const mode = (p.account_mode || '').toLowerCase() || (demoMode ? 'demo' : 'live')
+      const key = `${inst}|${sideKey}|${mode}`
+      if (openKeys.has(key)) return
+      openKeys.add(key)
+      const entry = parseFloat(p.entry_price ?? p.entry ?? p.avgPx ?? 0) || 0
+      const mark = parseFloat(p.mark_px ?? p.markPx ?? p.last ?? 0) || 0
+      const size = parseFloat(p.size_original ?? p.size ?? p.pos ?? 0) || 0
+      const sizeRem = parseFloat(p.size_remaining ?? p.size ?? p.pos ?? size) || size
       rows.push({
         type: 'open',
-        time: p.opened_at || '',
-        symbol: p.symbol,
-        inst_id: p.inst_id || p.symbol,
+        time: p.opened_at || p.time || p.cTime || '',
+        symbol: coin || p.symbol,
+        inst_id: inst,
         side: isLong ? 'buy' : 'sell',
-        pos_side: p.side,
-        entry: p.entry_price ?? p.entry,
-        stop: p.stop_price ?? p.stop,
-        tp1: p.tp1,
-        tp2: p.tp2,
-        be: p.be_price ?? (isLong ? (p.entry_price ?? p.entry) * 0.999 : (p.entry_price ?? p.entry) * 1.001),
-        mark: p.mark_px,
-        size: p.size_original ?? p.size,
-        size_remaining: p.size_remaining ?? p.size,
-        stage: p.stage,
+        pos_side: sideKey,
+        entry: entry || null,
+        stop: p.stop_price ?? p.stop ?? null,
+        tp1: p.tp1 ?? null,
+        tp2: p.tp2 ?? null,
+        be: p.be_price ?? (entry ? (isLong ? entry * 0.999 : entry * 1.001) : null),
+        mark: mark || null,
+        size: size,
+        size_remaining: sizeRem,
+        stage: p.stage || (p.breakeven ? 'trailing' : (p.partial_done ? 'partial' : 'initial')),
         pos_mode: p.pos_mode,
-        breakeven: p.breakeven,
-        partial_done: p.partial_done,
-        unrealized_pnl: p.unrealized_pnl,
+        breakeven: !!p.breakeven,
+        partial_done: !!p.partial_done,
+        unrealized_pnl: p.unrealized_pnl != null ? p.unrealized_pnl : (parseFloat(p.upl) || null),
         pnl: null,
         reason: 'open',
-        bot: p.bot,
+        bot: botHint || p.bot || '',
+        account_mode: mode,
       })
     }
 
-    // 2. Closed trades — from combined trade log, skip 'open' and 'tp1' (partial closes)
-    for (const t of allTrades) {
-      const r = (t.reason || '').toLowerCase()
-      if (r === 'open') continue   // covered by live positions above
-      if (r === 'tp1') continue    // partial close — position row updates in-place
+    // Exchange keys for CURRENT mode only (API positions are mode-scoped)
+    const exchangeKeys = new Set()
+    for (const p of (positions || [])) {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) continue
+      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
+      const inst = p.instId || p.inst_id || ''
+      if (inst) exchangeKeys.add(`${inst}|${posSide}`)
+      const coin = (inst || '').replace('-USDT-SWAP', '')
+      if (coin) exchangeKeys.add(`${coin}|${posSide}`)
+    }
+
+    const isOnExchange = (p) => {
+      if (!exchangeKeys.size) return false
+      const coin = (p.coin || p.symbol || '').toUpperCase()
+      const inst = (p.inst_id || p.instId || (coin ? `${coin}-USDT-SWAP` : '')).toUpperCase()
+      const side = (p.side || p.pos_side || 'long').toLowerCase() === 'short' ? 'short' : 'long'
+      if (coin && exchangeKeys.has(`${coin}|${side}`)) return true
+      if (inst && exchangeKeys.has(`${inst}|${side}`)) return true
+      return false
+    }
+
+    // 1a. Bot-owned opens (AI only) — scoped to current account mode
+    const modeTag = demoMode ? 'demo' : 'live'
+    for (const p of (aiStatus?.open_positions || [])) {
+      const pMode = String(p.account_mode || modeTag).toLowerCase()
+      if (pMode !== modeTag) continue
+      pushOpen({ ...p, account_mode: modeTag }, 'AI Discretionary 1H')
+    }
+    if (!demoMode) {
+      for (const p of (liveStatus?.open_positions || [])) {
+        const alreadyInAi = (aiStatus?.open_positions || []).some(
+          op => (op.coin || op.inst_id || '').toUpperCase() === (p.coin || p.inst_id || '').toUpperCase()
+            && (op.side || op.pos_side || '').toLowerCase() === (p.side || p.pos_side || '').toLowerCase()
+        )
+        if (!alreadyInAi) pushOpen({ ...p, account_mode: 'live' }, 'AI Discretionary 1H')
+      }
+    }
+
+    // 1b. Exchange positions not yet in bot memory (prevents missing open row)
+    for (const p of (positions || [])) {
+      const posSz = Math.abs(parseFloat(p.pos || p.size || 0))
+      if (!posSz) continue
+      const posSide = (p.posSide || p.side || 'net').toLowerCase() === 'short' ? 'short' : 'long'
+      const posKey = `${p.instId || p.inst_id || ''}|${posSide}`
+      let hint = p.bot || botMap[posKey] || ''
+      if (AI_ONLY_MODE) {
+        hint = 'AI Discretionary 1H'
+      } else if (!hint) {
+        const coin = (p.instId || '').replace('-USDT-SWAP', '')
+        for (const op of (aiStatus?.open_positions || [])) {
+          if ((op.coin || '').toUpperCase() === coin.toUpperCase()) {
+            hint = 'AI Discretionary 1H'
+            break
+          }
+        }
+      }
+      if (hint === 'Smart Money') continue
+      pushOpen({
+        ...p,
+        inst_id: p.instId || p.inst_id,
+        side: posSide,
+        entry_price: parseFloat(p.avgPx || p.avg_px || 0),
+        mark_px: parseFloat(p.markPx || p.last || 0),
+        size: posSz,
+        size_remaining: posSz,
+        upl: p.upl,
+        bot: hint || 'AI Discretionary 1H',
+        account_mode: modeTag,
+      }, hint || 'AI Discretionary 1H')
+    }
+
+    // 2. Closed — paired log only; skip opens still on exchange and partials
+    for (const tr of allTrades) {
+      if (tr.bot === 'Smart Money') continue
+      const r = (tr.reason || '').toLowerCase()
+      if (r === 'open' || r === 'add') continue
+      if (r === 'tp1' || r === 'partial_tp' || r === 'partial_tp2') continue
+      const inst = tr.inst_id || tr.symbol || ''
+      // Hide phantom "closed" while the SAME instrument+side is still open on
+      // OKX/bots (a false close of the still-open position). Side-aware so real
+      // historical closes of the other direction are still shown.
+      if (inst) {
+        const sideKey = (tr.side || '').toLowerCase() === 'sell' ? 'short' : 'long'
+        const trMode = (tr.account_mode || tr.mode || '').toLowerCase()
+        if (openKeys.has(`${inst}|${sideKey}|${trMode}`)) continue
+      }
+      const closedMode = (tr.account_mode || tr.mode || '').toLowerCase() || (demoMode ? 'demo' : 'live')
+      if (closedMode !== (demoMode ? 'demo' : 'live')) continue
+      let closedBot = tr.bot || ''
+      if (AI_ONLY_MODE) {
+        closedBot = 'AI Discretionary 1H'
+      } else if (!closedBot || /scale/i.test(String(closedBot))) {
+        closedBot = closedBot || 'AI Discretionary 1H'
+      }
       rows.push({
         type: 'closed',
-        time: t.exit_time || t.entry_time || '',
-        symbol: t.inst_id?.replace('-USDT-SWAP', '') || '',
-        inst_id: t.inst_id,
-        side: t.side,
-        entry: t.entry_px,
-        exit: t.exit_px,
-        pnl: parseFloat(t.pnl || 0),
+        time: tr.exit_time || tr.entry_time || tr.time || '',
+        symbol: (inst || '').replace('-USDT-SWAP', ''),
+        inst_id: inst,
+        side: tr.side,
+        entry: tr.entry_px ?? tr.entry,
+        exit: tr.exit_px ?? tr.exit_price,
+        pnl: parseFloat(tr.pnl || 0),
         reason: r,
         stage: null,
-        bot: t.bot,
+        bot: closedBot,
+        account_mode: closedMode,
       })
     }
 
-    // Open first (sorted by time desc), then closed
     rows.sort((a, b) => {
       if (a.type === 'open' && b.type !== 'open') return -1
       if (a.type !== 'open' && b.type === 'open') return 1
       return (b.time || '').localeCompare(a.time || '')
     })
     return rows
-  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, allTrades])
+  }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, liveStatus?.open_positions, positions, allTrades, botMap, demoMode])
 
   // Keep allTrades for summary stats (closed only)
   const closedTrades = useMemo(() =>
     allTrades.filter(t => {
       const r = (t.reason || '').toLowerCase()
-      return r !== 'open' && r !== 'tp1'
+      if (r === 'open' || r === 'tp1') return false
+      return true
     })
   , [allTrades])
 
@@ -339,7 +1021,7 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
 
   // Summary stats for visible trades (closed only for PnL counts)
   const tradesSummary = useMemo(() => {
-    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5)
+    const visible = (filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 40)
     const withPnl = visible.filter(t => t.pnl != null)
     const totalPnl = withPnl.reduce((s, t) => s + parseFloat(t.pnl || 0), 0)
     const wins = withPnl.filter(t => parseFloat(t.pnl || 0) >= 0).length
@@ -366,18 +1048,78 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
     const posId = `${p.instId}_${p.posSide}`
     setClosing(posId)
     try {
-      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross')
+      const account = p.account_mode === 'live' ? 'live' : 'demo'
+      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross', account)
       loadData()
     } catch (e) { alert(t('dash.error') + e.message) }
     finally { setClosing(null) }
   }
+
+  const handleReconcile = async () => {
+    setReconcileOpen(true)
+    setReconcileLoading(true)
+    setReconcileError('')
+    setReconcileResult(null)
+    try {
+      const r = await api.pnlReconcile()
+      setReconcileResult(r)
+    } catch (e) {
+      setReconcileError(e.message || String(e))
+    } finally {
+      setReconcileLoading(false)
+    }
+  }
+
+  // UX badges (Phase 5)
+  const dataAgeSec = dataFreshAt ? Math.floor((Date.now() - dataFreshAt) / 1000) : null
+  const dataStale = dataAgeSec != null && dataAgeSec > 90
+  const llmErr = String(aiStatus?.last_llm_error || aiStatus?.llm_error || aiStatus?.last_decision?.error || '')
+  const llmRateLimited = /429|rate.?limit|TPD|tokens per day/i.test(llmErr)
+  const llmSoftError = Boolean(llmErr) && !llmRateLimited
+  const claimMissing = (orphanPositions || []).length > 0
+  const pnlSource = pnl?.source || ''
+  const fundingNote = Number(pnl?.funding || 0)
+
+  // LIVE numbers for dual DEMO/LIVE metric display
+  const liveConnected = !!(liveStatus?.connected)
+  const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
+  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
+  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
+  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
+  const liveEquity = Number(liveStatus?.equity ?? 0)
+
+  const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
+    const one = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n)) return '—'
+      const abs = Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      if (!forceSigned && n === 0) return `$${abs}`
+      return `${n >= 0 ? '+' : '−'}$${abs}`
+    }
+    const cls = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n) || n === 0) return 'text-[var(--txt-secondary)]'
+      return n > 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+    }
+    return (
+      <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
+        <span className={cls(demoVal)} title="Демо">{one(demoVal)}</span>
+        <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
+        <span className={liveConnected ? cls(liveVal) : 'text-[var(--txt-muted)]'} title="Лайф">
+          {liveConnected ? one(liveVal) : '—'}
+        </span>
+      </span>
+    )
+  }
+
+
 
   const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
   const fmtTime = (ts) => fmtTs(ts, locale)
 
   return (
-    <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
+    <div className="dash-root h-full flex flex-col p-4 gap-3 overflow-hidden">
 
       {!connected && (
         <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--loss)]/30 bg-[var(--loss-dim)] text-2xs text-[var(--loss)]">
@@ -386,60 +1128,185 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         </div>
       )}
 
+      {/* ═══ Status strip (Phase 5 UX) ═══ */}
+      <div className="dash-status-strip flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
+        <span
+          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border ${
+            !connected
+              ? 'border-[var(--loss)]/40 bg-[var(--loss-dim)] text-[var(--loss)]'
+              : dataStale
+                ? 'border-[var(--warn)]/40 bg-[var(--warn-dim)] text-[var(--warn)]'
+                : 'border-[var(--border)] bg-[var(--surface)] text-[var(--txt-muted)]'
+          }`}
+          title={dataFreshAt ? `Обновлено ${new Date(dataFreshAt).toLocaleTimeString()}` : 'Нет данных'}
+        >
+          <Clock size={11} />
+          {!connected ? 'Нет связи' : dataStale ? `Данные устарели · ${dataAgeSec}с` : dataAgeSec != null ? `Свежие · ${dataAgeSec}с` : 'Загрузка…'}
+        </span>
+
+        {llmRateLimited && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--warn)]/40 bg-[var(--warn-dim)] text-[var(--warn)]" title={llmErr.slice(0, 200)}>
+            <AlertTriangle size={11} />
+            LLM: лимит запросов
+          </span>
+        )}
+        {llmSoftError && !llmRateLimited && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--warn)]/30 bg-[var(--warn-dim)] text-[var(--txt-secondary)]" title={llmErr.slice(0, 200)}>
+            <AlertTriangle size={11} />
+            LLM: сбой
+          </span>
+        )}
+
+        {claimMissing && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--loss)]/40 bg-[var(--loss-dim)] text-[var(--loss)]" title="Позиции на бирже без claim стратегии">
+            <ShieldAlert size={11} />
+            Без стратегии: {orphanPositions.length}
+          </span>
+        )}
+
+        {pnlSource && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Источник расчёта PnL">
+            PnL: {String(pnlSource).slice(0, 24)}
+            {pnl?.pnl_tz ? ` · ${pnl.pnl_tz}` : ''}
+          </span>
+        )}
+
+        {fundingNote !== 0 && (
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Funding — уровень аккаунта, не фильтр стратегий">
+            Funding (acc): {fundingNote >= 0 ? '+' : ''}{fmt(fundingNote)}
+          </span>
+        )}
+
+        {!isGuest && (
+          <button
+            type="button"
+            onClick={handleReconcile}
+            className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-2xs font-semibold border border-[var(--border)] bg-[var(--surface)] text-[var(--txt-secondary)] hover:border-[var(--info)] hover:text-[var(--info)] active:opacity-80"
+            title="Сверить strategy PnL с bills OKX"
+          >
+            <RefreshCw size={12} className={reconcileLoading ? 'animate-spin' : ''} />
+            Сверка OKX
+          </button>
+        )}
+      </div>
+
+      {/* Reconcile panel */}
+      {reconcileOpen && (
+        <div className="flex-shrink-0 rounded-xl border border-[var(--border)] bg-[var(--surface)] p-3 text-2xs space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="font-semibold text-[var(--txt)]">Сверка PnL с OKX</span>
+            <button type="button" className="text-[var(--txt-muted)] hover:text-[var(--txt)]" onClick={() => setReconcileOpen(false)}>Закрыть</button>
+          </div>
+          {reconcileLoading && <div className="text-[var(--txt-muted)]">Запрос bills / positions…</div>}
+          {reconcileError && <div className="text-[var(--loss)]">{reconcileError}</div>}
+          {reconcileResult && !reconcileLoading && (() => {
+            const d = reconcileResult.dashboard || {}
+            const strategy = Number(d.realized_tagged ?? reconcileResult.dashboard_total ?? 0)
+            const okxTrade = Number(reconcileResult.okx_trade_pnl ?? 0)
+            const tagged = Number(reconcileResult.okx_tagged_pnl ?? 0)
+            const untagged = Number(reconcileResult.okx_untagged_pnl ?? 0)
+            const gap = Number(
+              reconcileResult.gap_tagged
+              ?? reconcileResult.gap
+              ?? (tagged - strategy)
+            )
+            const fund = Number(d.funding ?? reconcileResult.funding ?? 0)
+            const uplD = Number(d.unrealized ?? 0)
+            const uplO = Number(reconcileResult.okx_upl ?? reconcileResult.unrealized_okx ?? 0)
+            return (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Strategy realized</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(strategy)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">OKX tagged bills</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(tagged)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Untagged OKX</div>
+                <div className="mono font-semibold text-[var(--txt)]">{fmt(untagged)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Gap (tagged − strategy)</div>
+                <div className={`mono font-semibold ${gap >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                  {fmt(gap)}
+                </div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">UPL dash / OKX</div>
+                <div className="mono text-[var(--txt)]">{fmt(uplD)} / {fmt(uplO)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)]">
+                <div className="text-[var(--txt-muted)]">Funding (account)</div>
+                <div className="mono text-[var(--txt)]">{fmt(fund)}</div>
+              </div>
+              <div className="p-2 rounded-lg bg-[var(--bg)] col-span-2">
+                <div className="text-[var(--txt-muted)]">Статус</div>
+                <div className={`font-semibold ${reconcileResult.ok ? 'text-[var(--profit)]' : 'text-[var(--warn)]'}`}>
+                  {reconcileResult.ok ? 'Согласовано' : 'Есть расхождения — проверьте untagged / claims'}
+                </div>
+              </div>
+            </div>
+            )
+          })()}
+        </div>
+      )}
+
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
-      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-        <MetricCard
+      <div data-tour="metrics" className="dash-metrics flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+        <EnhancedMetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.balance')}
-          value={<AnimatedValue>{totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}</AnimatedValue>}
-          mono
-          tip={t('dash.balance_tip')}
-          sparkData={sparkData[0]}
-        />
-        <MetricCard
-          label={t('dash.unrealized')}
           value={
-            <AnimatedValue className={unrealizedPnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
-            </AnimatedValue>
+            <span className="inline-flex items-baseline gap-0.5 mono">
+              <span title="Демо">{totalEquity ? `$${Number(totalEquity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</span>
+              <span className="text-[var(--txt-muted)] text-[0.85em]">/</span>
+              <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
+                {liveConnected && liveEquity ? `$${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+              </span>
+            </span>
           }
-          changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
+          icon={Wallet}
           mono
-          tip={t('dash.unrealized_tip')}
+          tip={`${t('dash.balance_tip')} · демо / лайф`}
+          sparkData={sparkData[0]}
+          subtitle="демо / лайф"
+        />
+        <EnhancedMetricCard
+          label={t('dash.unrealized')}
+          value={dualPnlNode(unrealizedPnl, liveUnreal)}
+          changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
+          icon={Activity}
+          mono
+          tip={`${t('dash.unrealized_tip')} · демо / лайф`}
           sparkData={sparkData[1]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.pnl_day')}
-          value={
-            <AnimatedValue className={pnlDay >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
-            </AnimatedValue>
-          }
+          value={dualPnlNode(pnlDay, liveToday)}
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
+          icon={pnlDay >= 0 ? TrendingUp : TrendingDown}
           mono
-          tip={t('dash.pnl_day_tip')}
+          tip={`${t('dash.pnl_day_tip')} · демо / лайф`}
           sparkData={sparkData[2]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.pnl_week')}
-          value={
-            <AnimatedValue className={pnlWeek >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-              {pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
-            </AnimatedValue>
-          }
+          value={dualPnlNode(pnlWeek, liveWeek)}
           changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
+          icon={BarChart3}
           mono
-          tip={t('dash.pnl_week_tip')}
+          tip={`${t('dash.pnl_week_tip')} · демо / лайф`}
           sparkData={sparkData[3]}
         />
-        <MetricCard
+        <EnhancedMetricCard
           label={t('dash.total_pnl')}
           value={
             <div className="flex flex-col gap-0.5">
-              <AnimatedValue className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-                {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
-              </AnimatedValue>
+              <span>{dualPnlNode(pnlTotal, liveTotal)}</span>
               {pnlByBot.length > 0 && (
-                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
+                <div className="max-md:hidden text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (
                     <div key={b.name} className="flex items-center gap-1">
                       <span className="text-[var(--txt-secondary)]">{b.name}:</span>
@@ -453,11 +1320,13 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
             </div>
           }
           changeType={pnlTotal >= 0 ? 'positive' : 'negative'}
+          icon={pnlTotal >= 0 ? ArrowUpRight : ArrowDownRight}
           mono
           tip={t('dash.total_pnl_tip')}
           sparkData={sparkData[4]}
         />
         <MetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.positions_count')}
           value={<AnimatedValue>{positions.length}</AnimatedValue>}
           mono
@@ -466,565 +1335,291 @@ export default function Dashboard({ health, connected, isGuest, demoMode }) {
         />
       </div>
 
-      {/* ═══ Цены — компактная панель ═══ */}
-      <div className="panel flex-shrink-0">
-        <div className="panel-header">
-          <span className="text-[var(--txt-muted)]">{t('dash.prices')}</span>
-          <Tip text={t('dash.prices_tip')} />
+      {/* ═══ MAIN GRID 65/35 ═══ */}
+
+      {/* Mobile: AI status + Russian pulse (same text as bot card) */}
+      <div className="dash-ai-strip flex-shrink-0 flex-col gap-1 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+        <div className="flex items-center justify-between gap-2 w-full">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${aiStatus?.running ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+            <span className="text-[0.7rem] font-semibold text-[var(--txt)] truncate">AI Discretionary</span>
+            <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${aiStatus?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+              {aiStatus?.running ? 'ВКЛ' : 'ВЫКЛ'}
+            </span>
+          </div>
+          <div className={`mono text-[0.75rem] font-bold flex-shrink-0 ${discPnlResolved >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+            {discPnlResolved >= 0 ? '+' : ''}{Number(discPnlResolved || 0).toFixed(2)}
+          </div>
         </div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5">
-          {PRICE_COINS.map((coin) => {
-            const tk = coin === 'BTC' ? ticker : tickers[coin]
-            const price = tk ? parseFloat(tk.last) : 0
-            const change = tk ? change24hPct(tk) : 0
-            const isUp = change >= 0
-            const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
-            const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
-            return (
-              <span key={coin} className="flex items-center gap-1.5 py-1 coin-ticker">
-                <span className="text-xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
-                <span className="text-xs mono text-[var(--txt)]">{priceStr}</span>
-                <span className={`text-2xs mono ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{changeStr}</span>
-              </span>
-            )
-          })}
-        </div>
+        {(aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason) && (
+          <p className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
+            {aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
+          </p>
+        )}
       </div>
 
-      {/* ═══ MAIN GRID 65/35 ═══ */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
+      <div className="dash-main-grid flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
         {/* ═══ LEFT — Positions + Trades ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
+        <div className="dash-left flex flex-col gap-3 min-h-0 overflow-hidden">
 
-          {/* Open Positions */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          {/* Open Positions — DEMO + LIVE in one panel */}
+          <div className="dash-positions dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
-              {t('dash.open_positions')}
-              <span className="ml-auto text-[var(--txt-muted)]">{positions.length}</span>
+              <span>{t('dash.open_positions')}</span>
+              <span className="ml-auto flex items-center gap-2 text-[var(--txt-muted)] mono text-2xs">
+                <span className="text-[var(--txt-secondary)]">DEMO {demoPositions.length}</span>
+                <span className="text-[var(--profit)]">LIVE {mirrorPositions.length}</span>
+              </span>
             </div>
-            <div className="flex-1 overflow-auto">
+            <div className="flex-1 overflow-auto p-2 space-y-2">
               {loading ? (
                 <div className="flex items-center justify-center py-12"><Loader /></div>
-              ) : positions.length === 0 ? (
+              ) : displayPositions.length === 0 ? (
                 <EmptyState icon={Zap} text={t('dash.no_positions')} sub={t('dash.positions_hint')} />
               ) : (
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>{t('dash.pair')}</th>
-                      <th>Bot</th>
-                      <th className="text-right">{t('dash.size')}</th>
-                      <th className="text-right">{t('dash.entry')}</th>
-                      <th className="text-right">{t('dash.mark')}</th>
-                      <th className="text-right">PnL</th>
-                      <th className="text-right">ROE</th>
-                      {isAdmin(isGuest) ? null : <th className="text-right"></th>}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {positions.map((p, i) => {
-                      const upl = parseFloat(p.upl || 0)
-                      const roe = parseFloat(p.uplRatio || 0) * 100
-                      const posId = `${p.instId}_${p.posSide}`
-                      const botName = p.bot || ''
-                      const botBadge = botName === 'Momentum'
-                        ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                        : botName === 'Impulse'
-                        ? { label: 'IMP', cls: 'bg-violet-500/20 text-violet-400 border border-violet-500/30' }
-                        : botName
-                        ? { label: String(botName).slice(0, 3).toUpperCase(), cls: 'bg-white/10 text-[var(--txt-secondary)] border border-white/10' }
-                        : { label: '—', cls: 'text-[var(--txt-muted)]' }
-                      const mgnRatio = parseFloat(p.mgnRatio || 0)
-                      const riskCls = !mgnRatio ? ''
-                        : mgnRatio < 2 ? 'text-[var(--loss)]'
-                        : mgnRatio < 5 ? 'text-[var(--warn)]'
-                        : 'text-[var(--txt-muted)]'
-                      const side = (p.posSide || '').toLowerCase()
-                      const lever = p.lever ? `${p.lever}x` : ''
-                      return (
-                        <tr key={i} style={{
-                          background: upl >= 0
-                            ? 'linear-gradient(90deg, rgba(0,255,136,0.06) 0%, transparent 50%)'
-                            : 'linear-gradient(90deg, rgba(255,51,102,0.06) 0%, transparent 50%)',
-                          boxShadow: `inset 2px 0 0 ${upl >= 0 ? 'rgba(0,255,136,0.4)' : 'rgba(255,51,102,0.4)'}`,
-                        }}>
-                          <td className="text-[var(--txt)] font-medium">
-                            <div className="flex flex-col gap-0.5">
-                              <span>{p.instId?.replace('-USDT-SWAP', '')}</span>
-                              <span className="text-2xs text-[var(--txt-muted)] flex items-center gap-1.5">
-                                {side && (
-                                  <span className={side === 'long' ? 'text-[var(--profit)]' : side === 'short' ? 'text-[var(--loss)]' : ''}>
-                                    {side.toUpperCase()}
-                                  </span>
-                                )}
-                                {lever && <span>{lever}</span>}
-                                {mgnRatio > 0 && (
-                                  <span className={riskCls} title={t('dash.margin_ratio_tip')}>
-                                    MR {mgnRatio >= 100 ? mgnRatio.toFixed(0) : mgnRatio.toFixed(1)}
-                                  </span>
-                                )}
-                              </span>
-                            </div>
-                          </td>
-                          <td><span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span></td>
-                          <td className="text-right mono">{parseFloat(p.pos).toFixed(3)}</td>
-                          <td className="text-right mono">${parseFloat(p.avgPx).toLocaleString()}</td>
-                          <td className="text-right mono">${parseFloat(p.markPx).toLocaleString()}</td>
-                          <td className={`text-right mono font-semibold ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
-                          </td>
-                          <td className={`text-right mono ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {roe.toFixed(2)}%
-                          </td>
-                          {!isGuest && (
-                            <td className="text-right">
-                              <button
-                                className="btn btn-danger btn-sm"
-                                onClick={() => handleClosePosition(p)}
-                                disabled={closing === posId}
-                              >
-                                {closing === posId ? <Loader /> : <XCircle size={11} />}
-                                {t('dash.close')}
-                              </button>
-                            </td>
+                displayPositions.map((p, i) => {
+                  const upl = parseFloat(p.upl || 0)
+                  const roe = parseFloat(p.uplRatio || 0) * 100
+                  const mode = String(p.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+                  const posId = `${p.instId}_${p.posSide}_${mode}`
+                  const side = (p.posSide || 'long').toLowerCase()
+                  const isLong = side !== 'short'
+                  const pair = (p.instId || p.coin || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+                  const lever = p.lever ? `${p.lever}x` : ''
+                  const entry = parseFloat(p.avgPx || 0)
+                  const mark = parseFloat(p.markPx || 0)
+                  const size = parseFloat(p.pos || 0)
+                  return (
+                    <div
+                      key={posId || i}
+                      className={`pos-card ${mode === 'live' ? 'pos-live' : ''}`}
+                      style={{ boxShadow: `inset 3px 0 0 ${upl >= 0 ? 'var(--profit)' : 'var(--loss)'}` }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 flex-wrap min-w-0">
+                          <span className="font-semibold text-[var(--txt)] text-sm">{pair || '—'}</span>
+                          <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
+                            {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
+                          </span>
+                          <span className="badge badge-ai">AI</span>
+                          {mode === 'live' ? (
+                            <span className="badge badge-live">LIVE</span>
+                          ) : (
+                            <span className="badge badge-demo">DEMO</span>
                           )}
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                        </div>
+                        <div className={`text-right mono font-bold text-sm ${upl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                          {upl >= 0 ? '+' : ''}{upl.toFixed(2)}
+                          <div className={`text-2xs font-medium ${roe >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                            {roe >= 0 ? '+' : ''}{roe.toFixed(2)}%
+                          </div>
+                        </div>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
+                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
+                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        {!isGuest && mode === 'demo' && (
+                          <button
+                            type="button"
+                            className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2 inline-flex items-center gap-1"
+                            onClick={() => handleClosePosition(p)}
+                            disabled={closing === posId}
+                            title={t('dash.close')}
+                          >
+                            {closing === posId ? <Loader /> : <XCircle size={11} />}
+                            {t('dash.close')}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })
               )}
             </div>
           </div>
 
-          {/* Trades — one row per position */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          {/* Trades — DEMO + LIVE; mobile shows last 3 */}
+          <div className="dash-trades dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
-              {t('dash.trades')}
-              <div className="ml-auto flex gap-1">
-                {['all', 'win', 'loss'].map(f => (
-                  <Chip key={f} active={filterResult === f} onClick={() => setFilterResult(f)}>
-                    {f === 'all' ? t('dash.all') : f === 'win' ? t('dash.profit') : t('dash.loss')}
-                  </Chip>
-                ))}
-              </div>
+              <span>{t('dash.trades')}</span>
+              <span className="ml-auto flex items-center gap-2 text-[var(--txt-muted)] mono text-2xs">
+                <span className="text-blue-400">DEMO {closedTradesForTable.filter(t => t.account_mode !== 'live').length}</span>
+                <span className="text-[var(--profit)]">LIVE {closedTradesForTable.filter(t => t.account_mode === 'live').length}</span>
+              </span>
             </div>
-            {activeTrades.length > 0 && (
-              <div className="flex items-center gap-4 px-4 py-2 text-2xs bg-[var(--bg)] border-b border-[var(--border)]">
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.shown')} <span className="mono text-[var(--txt)] font-medium">{tradesSummary.count}</span>
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.total_pnl')} <span className={`mono font-bold ${pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{pnlTotal >= 0 ? '+' : ''}{pnlTotal.toFixed(2)}</span>
-                  {pnlByBot.length > 0 && (
-                    <span className="ml-1 text-[0.6rem] text-[var(--txt-muted)]">
-                      {pnlByBot.map((b, i) => (
-                        <span key={b.name} className={i > 0 ? 'ml-1.5' : ''}>
-                          <span className="text-[var(--txt-secondary)]">{b.name}:</span>{' '}
-                          <span className={`mono font-medium ${b.val >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                            {b.val >= 0 ? '+' : ''}{b.val.toFixed(2)}
-                          </span>
-                        </span>
-                      ))}
-                    </span>
-                  )}
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.win_count')} <span className="mono text-[var(--profit)] font-medium">{tradesSummary.wins}</span>
-                </span>
-                <span className="text-[var(--txt-muted)]">
-                  {t('dash.loss_count')} <span className="mono text-[var(--loss)] font-medium">{tradesSummary.losses}</span>
-                </span>
-              </div>
-            )}
             <div className="flex-1 overflow-auto">
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>{t('dash.time')}</th>
-                    <th>{t('dash.pair')}</th>
-                    <th>{t('dash.direction')}</th>
-                    <th className="text-right">{t('dash.entry')}</th>
-                    <th className="text-right">{t('dash.mark')}</th>
-                    <th className="text-right">{t('dash.size')}</th>
-                    <th className="text-right">TP1</th>
-                    <th className="text-right">TP2</th>
-                    <th className="text-right">SL</th>
+                    <th>Время</th>
+                    <th>Пара</th>
+                    <th>Напр.</th>
+                    <th className="text-right col-hide-mobile">Вход</th>
+                    <th className="text-right col-hide-mobile">Выход</th>
                     <th className="text-right">PnL</th>
+                    <th className="col-hide-mobile">Статус</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(filteredTrades.length > 0 ? filteredTrades : activeTrades).slice(0, 5).map((tr, i) => {
-                    const isOpen = tr.type === 'open'
+                  {closedTradesForTable.slice(0, 40).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
-                    const isLong = tr.side === 'buy'
-                    // Level status: SL moved to BE once breakeven hits; TP1/TP2 hit when partial closes
-                    const beHit = isOpen && !!tr.breakeven
-                    const tp1Hit = isOpen && (tr.stage === 'partial' || tr.stage === 'trailing' || tr.stage === 'tp1_done' || tr.stage === 'tp2_done' || !!tr.partial_done)
-                    const tp2Hit = isOpen && (tr.stage === 'trailing' || tr.stage === 'tp2_done')
-                    const stageInfo = isOpen
-                      ? (STAGE_MAP[tr.stage] || { label: tr.stage, color: 'text-[var(--txt-muted)]' })
-                      : (REASON_MAP[tr.reason] || { label: tr.reason || '-', color: 'text-[var(--txt-muted)]' })
-                    const botBadge = tr.bot === 'Momentum'
-                      ? { label: 'MOM', cls: 'bg-blue-500/20 text-blue-400 border border-blue-500/30' }
-                      : tr.bot === 'Impulse 1D'
-                        ? { label: 'IMP', cls: 'bg-green-500/20 text-green-400 border border-green-500/30' }
-                        : null
-                    const mark = parseFloat(tr.mark || 0)
-                    const upnl = parseFloat(tr.unrealized_pnl || 0)
+                    const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
+                    const isLong = sideRaw === 'long' || sideRaw === 'buy'
+                    const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
+                    const reason = (tr.reason || tr.state || 'closed').toLowerCase()
+                    const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
-                      <tr key={`${tr.type}_${tr.inst_id || tr.symbol}_${i}`}
-                        style={isOpen ? {
-                          background: isLong
-                            ? 'linear-gradient(90deg, rgba(0,255,136,0.04) 0%, transparent 40%)'
-                            : 'linear-gradient(90deg, rgba(255,51,102,0.04) 0%, transparent 40%)',
-                          boxShadow: `inset 2px 0 0 ${isLong ? 'rgba(0,255,136,0.3)' : 'rgba(255,51,102,0.3)'}`,
-                        } : undefined}>
-                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.time)}</td>
+                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`} className={i >= 3 ? 'row-hide-mobile' : undefined}>
+                        <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
-                          {tr.symbol || tr.inst_id?.replace('-USDT-SWAP', '') || '-'}
-                          {botBadge && (
-                            <span className={`ml-1 text-2xs font-bold px-1 py-0.5 rounded ${botBadge.cls}`}>{botBadge.label}</span>
+                          {pair || '—'}
+                          <span className="badge badge-ai ml-1">AI</span>
+                          {mode === 'live' ? (
+                            <span className="badge badge-live ml-1">LIVE</span>
+                          ) : (
+                            <span className="badge badge-demo ml-1">DEMO</span>
                           )}
                         </td>
                         <td>
-                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                            {isLong ? 'L' : 'S'}
+                          <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
+                            {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">{tr.entry ? `$${Number(tr.entry).toLocaleString(undefined, {maximumFractionDigits: 2})}` : '—'}</td>
-                        <td className="text-right mono text-2xs">
-                          {mark > 0 ? (
-                            <span className="text-[var(--txt)]">
-                              ${mark.toLocaleString(undefined, {maximumFractionDigits: 2})}
-                            </span>
-                          ) : '—'}
+                        <td className="text-right mono text-2xs col-hide-mobile">
+                          {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
+                            ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                            : '—'}
                         </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen ? (
-                            <span title={`изначально ${tr.size}`}>
-                              <span className="text-[var(--txt)]">{Number(tr.size_remaining || tr.size).toFixed(2)}</span>
-                              {tr.size && tr.size !== tr.size_remaining ? (
-                                <span className="text-[var(--txt-muted)]">/{Number(tr.size).toFixed(2)}</span>
-                              ) : null}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen && tr.tp1 != null ? (
-                            <span className={`${tp1Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
-                              ${Number(tr.tp1).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp1Hit ? ' ✓' : ''}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen && tr.tp2 != null ? (
-                            <span className={`${tp2Hit ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
-                              ${Number(tr.tp2).toLocaleString(undefined, {maximumFractionDigits: 2})}{tp2Hit ? ' ✓' : ''}
-                            </span>
-                          ) : '—'}
-                        </td>
-                        <td className="text-right mono text-2xs">
-                          {isOpen && tr.stop != null ? (
-                            <span className={`${beHit ? 'text-[var(--warn)]' : 'text-[var(--loss)]'}`}>
-                              ${Number(tr.stop).toLocaleString(undefined, {maximumFractionDigits: 2})}{beHit ? ' ✓' : ''}
-                            </span>
-                          ) : (tr.type === 'closed' && tr.exit) ? (
-                            <span className="text-[var(--txt-muted)]">${parseFloat(tr.exit).toLocaleString()}</span>
-                          ) : '—'}
+                        <td className="text-right mono text-2xs col-hide-mobile">
+                          {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
+                            ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                            : '—'}
                         </td>
                         <td className="text-right">
                           {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
-                          ) : isOpen && upnl !== 0 ? (
-                            <span className={`mono text-2xs font-bold ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                              {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
-                            </span>
-                          ) : (
-                            <span className={`text-2xs font-medium ${stageInfo.color}`}>{stageInfo.label}</span>
-                          )}
+                          ) : '—'}
+                        </td>
+                        <td className="col-hide-mobile">
+                          <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
+                            {reason === 'open' ? 'ОТКРЫТА' : reason}
+                          </span>
                         </td>
                       </tr>
                     )
                   })}
                 </tbody>
               </table>
-              {activeTrades.length === 0 && <EmptyState icon={ScrollText} text={t('dash.no_trades')} />}
+              {closedTradesForTable.length === 0 && <EmptyState icon={ScrollText} text={t('dash.no_trades')} />}
             </div>
           </div>
+
         </div>
 
                 {/* ═══ RIGHT — Filters + Bots ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
+        <div className="dash-right-panel flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
-          {/* Filter Chips */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Filter size={13} className="text-[var(--info)]" />
-              {t('dash.filters')}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="text-2xs text-[var(--txt-muted)] mb-1">{t('dash.instrument')}</div>
-              <div className="flex flex-wrap gap-1">
-                {PAIRS.map(p => (
-                  <Chip key={p} active={filterPair === p} onClick={() => setFilterPair(p)}>{p === 'Все' ? t('dash.all') : p}</Chip>
-                ))}
-              </div>
-              <div className="text-2xs text-[var(--txt-muted)] mb-1 mt-3">{t('dash.exit_reason')}</div>
-              <div className="flex flex-wrap gap-1">
-                {[{ k: 'all', l: t('dash.all') }, { k: 'tp', l: 'TP' }, { k: 'sl', l: 'SL' }, { k: 'trail', l: 'Trail' }, { k: 'breakeven', l: 'BE' }, { k: 'manual', l: 'Manual' }].map(r => (
-                  <Chip key={r.k} active={filterReason === r.k} onClick={() => setFilterReason(r.k)}>{r.l}</Chip>
-                ))}
-              </div>
-            </div>
-          </div>
 
-          {/* ─── Momentum Bot ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Bot size={13} className="text-[var(--info)]" />
-              <span className="flex-1">{t('dash.momentum_bot')}</span>
-              {momentumStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--info)] uppercase tracking-wide mr-1">
-                  {momentumStatus.version}
-                </span>
-              )}
-              {momentumStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!momentumStatus?.running && momentumStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              {momentumStatus?.running ? (
-                <>
-                  <div className="grid grid-cols-4 gap-1.5">
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(momentumStatus.config?.capital || 10000).toLocaleString()}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                      <div className={`mono text-xs font-bold mt-0.5 ${momentumStatus.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                        ${momentumStatus.total_pnl >= 0 ? '+' : ''}{(momentumStatus.total_pnl || 0).toFixed(2)}
-                      </div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{momentumStatus.open_positions?.length || 0}/{momentumStatus.config?.max_positions || 2}</div>
-                    </div>
-                    <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                      <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                      <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{momentumStatus.config?.max_leverage || 1}</div>
+          <DashBotPanel
+            title="AI Discretionary 1H"
+            version={aiStatus?.version}
+            running={!!aiStatus?.running}
+            loading={!aiStatus}
+            accent="text-[var(--accent)]"
+            pnl={discPnlResolved}
+            trades={discTradesResolved}
+            winRate={aiStatus?.win_rate}
+            openCount={(aiStatus?.open_positions || []).length}
+            model={aiStatus?.model || aiStatus?.llm?.model}
+            capital={aiStatus?.capital ?? aiStatus?.config?.capital}
+            pulse={aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
+            tagline={aiStatus?.config?.symbols ? (aiStatus.config.symbols || []).join(' · ') : 'BTC · ETH · SOL · XRP'}
+            isGuest={isGuest}
+            t={t}
+            nextTickAt={aiStatus?.health?.next_tick_at}
+            pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
+            topSignals={aiStatus?.top_signals}
+            startLabel={`${t('dash.start')} AI`}
+            onStart={async () => {
+              try {
+                await api.aiStart({ capital: 10000, provider: 'groq', execute: true })
+                loadData()
+              } catch (e) { alert(e.message) }
+            }}
+            onStop={async () => {
+              try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
+            }}
+          />
+
+          {/* ─── LIVE Mirror Panel ─── */}
+          {liveStatus?.connected && (
+            <div className="panel !border-[var(--profit)]/30 !bg-[var(--profit)]/5">
+              <div className="px-3 py-2 border-b border-[var(--border)] flex items-center gap-2">
+                <Wifi size={13} className="text-[var(--profit)]" />
+                <span className="text-xs font-bold text-[var(--txt)]">LIVE Mirror</span>
+                <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--profit)]/15 text-[var(--profit)] font-semibold">ON</span>
+              </div>
+              <div className="p-3 space-y-2 text-2xs">
+                <div className="grid grid-cols-4 gap-1.5">
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">PnL</div>
+                    <div className={`mono font-semibold ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{Number(liveStatus?.total_pnl ?? 0).toFixed(2)}
                     </div>
                   </div>
-                  {momentumStatus.open_positions?.length > 0 && (
-                    <div className="space-y-1">
-                      {momentumStatus.open_positions.map((p, i) => {
-                        const isLong = p.side !== 'short'
-                        return (
-                          <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                            <div className="flex items-center gap-1.5">
-                              <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                              <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                            </div>
-                            <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                              {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                            </span>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">Сделок</div>
+                    <div className="mono font-semibold">{liveStatus?.lifetime_trades ?? 0}</div>
+                  </div>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">WR</div>
+                    <div className="mono font-semibold">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                  </div>
+                  <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+                    <div className="text-[var(--txt-muted)]">Equity</div>
+                    <div className="mono font-semibold">${Number(liveStatus?.equity ?? 0).toFixed(0)}</div>
+                  </div>
+                </div>
+                {(liveStatus?.open_positions || []).length > 0 && (
+                  <div className="space-y-1 mt-1">
+                    <div className="text-2xs text-[var(--txt-muted)] font-medium">LIVE позиции</div>
+                    {liveStatus.open_positions.map((p, i) => {
+                      const isLong = p.side !== 'short'
+                      return (
+                        <div key={i} className="flex items-center justify-between gap-2 p-1.5 rounded bg-[var(--bg)]">
+                          <div className="flex items-center gap-1.5">
+                            <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                            <span className="text-[var(--txt)] font-medium">{p.coin}</span>
                           </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {!isGuest && (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.momentumStop(); loadData() } catch (e) { alert(e.message) } }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  )}
-                </>
-              ) : (
-                <div className="text-center py-4">
-                  <p className="text-xs text-[var(--txt-muted)] mb-2">{t('dash.bot_not_running')}</p>
-                  {!isGuest && (
-                    <button className="btn btn-primary btn-sm" onClick={async () => { try { await api.momentumStart({}); loadData() } catch (e) { alert(e.message) } }}>
-                      <Play size={12} /> {t('dash.start')}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* ─── Impulse 1D Bot ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <Zap size={13} className="text-[var(--profit)]" />
-              <span className="flex-1">{t('dash.impulse_bot')}</span>
-              {impulseStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--profit)] uppercase tracking-wide mr-1">
-                  {impulseStatus.version}
-                </span>
-              )}
-              {impulseStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!impulseStatus?.running && impulseStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-4 gap-1.5">
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(impulseStatus?.config?.capital || 10000).toLocaleString?.()}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${impulseStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${impulseStatus?.total_pnl >= 0 ? '+' : ''}{(impulseStatus?.total_pnl || 0).toFixed(2)}
-                  </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{impulseStatus?.open_positions?.length || 0}/{impulseStatus?.config?.top_k || 4}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{impulseStatus?.config?.max_leverage || 1}</div>
-                </div>
-              </div>
-              {impulseStatus?.open_positions?.length > 0 && (
-                <div className="space-y-1">
-                  {impulseStatus.open_positions.map((p, i) => {
-                    const isLong = p.side !== 'short'
-                    return (
-                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
+                          <div className="flex items-center gap-2">
+                            <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry_price).toFixed(4)}</span>
+                            <span className="mono text-[0.6rem] text-[var(--txt-muted)]">SL {Number(p.stop_price).toFixed(4)}</span>
+                          </div>
                         </div>
-                        <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                          {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              {!isGuest && (
-                <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.impulseStop(); loadData() } catch (e) { alert(e.message) } }}>
-                  <Square size={12} /> {t('dash.stop_bot')}
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* ─── Validation Bot ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <FlaskConical size={13} className="text-[var(--warn)]" />
-              <span className="flex-1">{t('dash.validation_bot')}</span>
-              {validationStatus?.version && (
-                <span className="text-[0.62rem] font-semibold mono text-[var(--warn)] uppercase tracking-wide mr-1">
-                  {validationStatus.version}
-                </span>
-              )}
-              {validationStatus?.running && <StatusBadge mode="live" label={t('dash.running')} />}
-              {!validationStatus?.running && validationStatus && <StatusBadge mode="stopped" label={t('dash.stopped')} />}
-            </div>
-            <div className="p-3 space-y-2">
-              <div className="grid grid-cols-4 gap-1.5">
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.budget')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">${(validationStatus?.config?.capital || 300).toLocaleString?.()}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">PnL</div>
-                  <div className={`mono text-xs font-bold mt-0.5 ${validationStatus?.total_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                    ${validationStatus?.total_pnl >= 0 ? '+' : ''}{(validationStatus?.total_pnl || 0).toFixed(2)}
+                      )
+                    })}
                   </div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.positions')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--txt)] mt-0.5">{validationStatus?.open_positions?.length || 0}/{validationStatus?.config?.top_k || 4}</div>
-                </div>
-                <div className="p-1.5 rounded-md bg-[var(--bg)]">
-                  <div className="text-2xs text-[var(--txt-muted)]">{t('dash.leverage')}</div>
-                  <div className="mono text-xs font-semibold text-[var(--info)] mt-0.5">×{validationStatus?.config?.max_leverage || 1}</div>
-                </div>
-              </div>
-              {validationStatus?.open_positions?.length > 0 && (
-                <div className="space-y-1">
-                  {validationStatus.open_positions.map((p, i) => {
-                    const isLong = p.side !== 'short'
-                    return (
-                      <div key={i} className="flex items-center justify-between text-2xs p-1.5 rounded bg-[var(--bg)]">
-                        <div className="flex items-center gap-1.5">
-                          <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
-                          <span className="text-[var(--txt)] font-medium">{p.symbol}</span>
-                        </div>
-                        <span className={`mono font-semibold ${p.unrealized_pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                          {p.unrealized_pnl >= 0 ? '+' : ''}{p.unrealized_pnl?.toFixed(2)}
-                        </span>
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-              {!isGuest && (
-                <>
-                  {validationStatus?.running ? (
-                    <button className="btn btn-danger btn-sm w-full" onClick={async () => { try { await api.validationStop(); loadData() } catch (e) { alert(e.message) } }}>
-                      <Square size={12} /> {t('dash.stop_bot')}
-                    </button>
-                  ) : (
-                    <button className="btn btn-primary btn-sm w-full" onClick={async () => { try { await api.validationStart({}); loadData() } catch (e) { alert(e.message) } }}>
-                      <Play size={12} /> {t('dash.start')}
-                    </button>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* ─── Market Data ─── */}
-          <div className="panel flex-shrink-0">
-            <div className="panel-header">
-              <BarChart3 size={13} className="text-[var(--info)]" />
-              BTC-USDT
-              {ticker && (
-                <span className={`ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-2xs font-bold ${
-                  parseFloat(btcChange) >= 0
-                    ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                    : 'bg-[var(--loss-dim)] text-[var(--loss)]'
-                }`}>
-                  {parseFloat(btcChange) >= 0 ? '▲' : '▼'} {parseFloat(btcChange) >= 0 ? '+' : '-'}{Math.abs(parseFloat(btcChange)).toFixed(2)}%
-                </span>
-              )}
-            </div>
-            <div className="p-3">
-              {ticker && (
-                <div className="flex items-center justify-between mb-2.5 pb-2 border-b border-[var(--border)]">
-                  <span className="text-2xs text-[var(--txt-muted)] uppercase tracking-wide">{t('dash.trend')}</span>
-                  <Sparkline data={btcSparkData} />
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-2xs">
-                {ticker ? [
-                  { l: t('dash.last'), v: `$${parseFloat(ticker.last).toLocaleString()}`, c: 'text-[var(--txt)]' },
-                  { l: t('dash.bid'), v: `$${parseFloat(ticker.bid).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: t('dash.ask'), v: `$${parseFloat(ticker.ask).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                  { l: t('dash.high_24h'), v: `$${parseFloat(ticker.high24h).toLocaleString()}`, c: 'text-[var(--profit)]' },
-                  { l: t('dash.low_24h'), v: `$${parseFloat(ticker.low24h).toLocaleString()}`, c: 'text-[var(--loss)]' },
-                ].map(item => (
-                  <div key={item.l} className="flex justify-between">
-                    <span className="text-[var(--txt-muted)]">{item.l}</span>
-                    <span className={`mono font-medium ${item.c}`}>{item.v}</span>
-                  </div>
-                )) : (
-                  <span className="text-[var(--txt-muted)] col-span-2 text-center py-2">{t('dash.no_data')}</span>
                 )}
               </div>
             </div>
-          </div>
+          )}
+
+          {!liveStatus?.connected && liveStatus && (
+            <div className="panel border-dashed border-[var(--border)] bg-transparent">
+              <div className="px-3 py-2 flex items-center gap-2">
+                <WifiOff size={13} className="text-[var(--txt-muted)]" />
+                <span className="text-xs text-[var(--txt-muted)]">LIVE Mirror отключён</span>
+              </div>
+            </div>
+          )}
+
+
         </div>
       </div>
     </div>
