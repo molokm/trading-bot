@@ -985,3 +985,18 @@ body {
 .app-main {
   overscroll-behavior-y: contain;
 }
+
+
+/* metric-label: no truncation */
+.metric-card .label,
+.metric-card .metric-label {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  line-height: 1.25;
+  word-break: break-word;
+  max-width: 100%;
+}
+.metric-card .flex.items-center.gap-1\.5.min-w-0 {
+  flex-wrap: wrap;
+}
