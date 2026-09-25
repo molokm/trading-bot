@@ -1113,8 +1113,10 @@ body {
 
   .dash-ai-strip {
     display: flex !important;
+    flex-direction: column !important;
   }
 }
+
 
 @media (min-width: 768px) {
   .dash-ai-strip {

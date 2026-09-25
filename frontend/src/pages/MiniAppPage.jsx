@@ -264,17 +264,29 @@ function MiniAppPageInner() {
           </div>
         </div>
 
-        {/* AI status strip */}
-        <div className="flex-shrink-0 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${demoOn || isLive ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
-            <Bot size={12} className="text-[var(--txt-muted)] flex-shrink-0" />
-            <span className="text-[0.7rem] font-semibold truncate">AI Discretionary</span>
-            <span className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded ${demoOn || (isLive && data?.live) ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
-              {isLive ? (data?.live?.connected ? 'LIVE' : 'OFF') : (demoOn ? 'ON' : 'OFF')}
-            </span>
+        {/* AI status + Russian pulse */}
+        <div className="flex-shrink-0 flex flex-col gap-1 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${demoOn || isLive ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+              <Bot size={12} className="text-[var(--txt-muted)] flex-shrink-0" />
+              <span className="text-[0.7rem] font-semibold truncate">AI Discretionary</span>
+              <span className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded ${demoOn || (isLive && data?.live) ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+                {isLive ? (data?.live?.connected ? 'ЛАЙФ' : 'ВЫКЛ') : (demoOn ? 'ВКЛ' : 'ВЫКЛ')}
+              </span>
+            </div>
+            <span className={`mono text-[0.75rem] font-bold flex-shrink-0 ${pnlClass(metrics.total)}`}>{pnlSign(metrics.total)}</span>
           </div>
-          <span className={`mono text-[0.75rem] font-bold flex-shrink-0 ${pnlClass(metrics.total)}`}>{pnlSign(metrics.total)}</span>
+          {(data?.demo?.pulse || data?.demo?.description) && !isLive && (
+            <p className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
+              {data.demo.pulse || data.demo.description}
+            </p>
+          )}
+          {isLive && (data?.demo?.pulse || data?.live?.pulse) && (
+            <p className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
+              {data?.live?.pulse || data?.demo?.pulse || data?.demo?.description}
+            </p>
+          )}
         </div>
 
         {/* Positions */}

@@ -1297,18 +1297,25 @@ export default function Dashboard({ health, connected, isGuest }) {
 
       {/* ═══ MAIN GRID 65/35 ═══ */}
 
-      {/* Mobile: compact AI status (full card is on /bots) */}
-      <div className="dash-ai-strip flex-shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
-        <div className="flex items-center gap-2 min-w-0">
-          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${aiStatus?.running ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
-          <span className="text-[0.7rem] font-semibold text-[var(--txt)] truncate">AI Discretionary</span>
-          <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${aiStatus?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
-            {aiStatus?.running ? 'ON' : 'OFF'}
-          </span>
+      {/* Mobile: AI status + Russian pulse (same text as bot card) */}
+      <div className="dash-ai-strip flex-shrink-0 flex-col gap-1 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+        <div className="flex items-center justify-between gap-2 w-full">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${aiStatus?.running ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+            <span className="text-[0.7rem] font-semibold text-[var(--txt)] truncate">AI Discretionary</span>
+            <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${aiStatus?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+              {aiStatus?.running ? 'ВКЛ' : 'ВЫКЛ'}
+            </span>
+          </div>
+          <div className={`mono text-[0.75rem] font-bold flex-shrink-0 ${discPnlResolved >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+            {discPnlResolved >= 0 ? '+' : ''}{Number(discPnlResolved || 0).toFixed(2)}
+          </div>
         </div>
-        <div className={`mono text-[0.75rem] font-bold ${discPnlResolved >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-          {discPnlResolved >= 0 ? '+' : ''}{Number(discPnlResolved || 0).toFixed(2)}
-        </div>
+        {(aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason) && (
+          <p className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
+            {aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
+          </p>
+        )}
       </div>
 
       <div className="dash-main-grid flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
