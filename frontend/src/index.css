@@ -1000,3 +1000,138 @@ body {
 .metric-card .flex.items-center.gap-1\.5.min-w-0 {
   flex-wrap: wrap;
 }
+
+
+/* ═══════════════════════════════════════════
+   Mobile one-screen dashboard
+   Pattern: account snapshot → positions → last trades
+   (fintech mobile: density without scrolling)
+   ═══════════════════════════════════════════ */
+
+@media (max-width: 767px) {
+  .dash-root {
+    padding: 8px 10px !important;
+    gap: 8px !important;
+  }
+
+  .dash-status-strip {
+    display: none !important; /* noise off the first screen */
+  }
+
+  .dash-metrics {
+    grid-template-columns: 1fr 1fr !important;
+    gap: 6px !important;
+  }
+
+  .dash-metrics .metric-card {
+    padding: 8px 10px !important;
+    gap: 2px !important;
+    border-radius: 10px;
+  }
+  .dash-metrics .metric-card .label {
+    font-size: 0.58rem !important;
+    letter-spacing: 0.04em;
+  }
+  .dash-metrics .metric-card .value {
+    font-size: 1.05rem !important;
+    line-height: 1.15 !important;
+    margin-top: 0 !important;
+  }
+  .dash-metrics .metric-card svg {
+    display: none !important; /* hide sparklines + icons for density */
+  }
+  .dash-metrics .metric-card .change,
+  .dash-metrics .metric-hide-mobile {
+    display: none !important;
+  }
+
+  .dash-main-grid {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    overflow: hidden !important;
+  }
+
+  .dash-left {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+    min-height: 0 !important;
+    flex: 1 1 auto !important;
+    overflow: hidden !important;
+  }
+
+  .dash-right-panel {
+    display: none !important; /* bots page has full bot card */
+  }
+
+  .dash-panel {
+    border-radius: 10px !important;
+  }
+  .dash-panel .panel-header {
+    padding: 8px 10px !important;
+    font-size: 0.68rem !important;
+    letter-spacing: 0.04em;
+  }
+
+  .dash-positions {
+    flex: 1 1 42% !important;
+    min-height: 0 !important;
+    max-height: none !important;
+  }
+  .dash-positions .pos-card {
+    padding: 6px 8px !important;
+  }
+  .dash-positions .pos-card + .pos-card {
+    margin-top: 4px;
+  }
+
+  .dash-trades {
+    flex: 0 0 auto !important;
+    max-height: none !important;
+  }
+  .dash-trades .panel-body,
+  .dash-trades .flex-1 {
+    max-height: none !important;
+  }
+  .dash-trades table {
+    font-size: 0.7rem;
+  }
+  .dash-trades th,
+  .dash-trades td {
+    padding: 5px 6px !important;
+  }
+  /* Hide low-priority columns on phone */
+  .dash-trades .col-hide-mobile {
+    display: none !important;
+  }
+  .dash-trades .row-hide-mobile {
+    display: none !important;
+  }
+
+  .dash-ai-strip {
+    display: flex !important;
+  }
+}
+
+@media (min-width: 768px) {
+  .dash-ai-strip {
+    display: none !important;
+  }
+}
+
+
+/* Mobile header density */
+@media (max-width: 767px) {
+  .app-header {
+    padding-left: 10px !important;
+    padding-right: 10px !important;
+    min-height: calc(44px + env(safe-area-inset-top, 0px));
+  }
+  .app-header .btn-icon {
+    min-width: 36px;
+    min-height: 36px;
+  }
+}

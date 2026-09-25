@@ -1085,7 +1085,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const fmtTime = (ts) => fmtTs(ts, locale)
 
   return (
-    <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
+    <div className="dash-root h-full flex flex-col p-4 gap-3 overflow-hidden">
 
       {!connected && (
         <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--loss)]/30 bg-[var(--loss-dim)] text-2xs text-[var(--loss)]">
@@ -1095,7 +1095,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       )}
 
       {/* ═══ Status strip (Phase 5 UX) ═══ */}
-      <div className="flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
+      <div className="dash-status-strip flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
         <span
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border ${
             !connected
@@ -1220,8 +1220,9 @@ export default function Dashboard({ health, connected, isGuest }) {
       )}
 
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
-      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div data-tour="metrics" className="dash-metrics flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <EnhancedMetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.balance')}
           value={totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}
           icon={Wallet}
@@ -1265,7 +1266,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                 {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
               </span>
               {pnlByBot.length > 0 && (
-                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
+                <div className="max-md:hidden text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (
                     <div key={b.name} className="flex items-center gap-1">
                       <span className="text-[var(--txt-secondary)]">{b.name}:</span>
@@ -1285,6 +1286,7 @@ export default function Dashboard({ health, connected, isGuest }) {
           sparkData={sparkData[4]}
         />
         <MetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.positions_count')}
           value={<AnimatedValue>{positions.length}</AnimatedValue>}
           mono
@@ -1294,13 +1296,28 @@ export default function Dashboard({ health, connected, isGuest }) {
       </div>
 
       {/* ═══ MAIN GRID 65/35 ═══ */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
+
+      {/* Mobile: compact AI status (full card is on /bots) */}
+      <div className="dash-ai-strip flex-shrink-0 items-center justify-between gap-2 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${aiStatus?.running ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+          <span className="text-[0.7rem] font-semibold text-[var(--txt)] truncate">AI Discretionary</span>
+          <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${aiStatus?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+            {aiStatus?.running ? 'ON' : 'OFF'}
+          </span>
+        </div>
+        <div className={`mono text-[0.75rem] font-bold ${discPnlResolved >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+          {discPnlResolved >= 0 ? '+' : ''}{Number(discPnlResolved || 0).toFixed(2)}
+        </div>
+      </div>
+
+      <div className="dash-main-grid flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
         {/* ═══ LEFT — Positions + Trades ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
+        <div className="dash-left flex flex-col gap-3 min-h-0 overflow-hidden">
 
           {/* Open Positions — DEMO + LIVE in one panel */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          <div className="dash-positions dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
               <span>{t('dash.open_positions')}</span>
@@ -1377,8 +1394,8 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* Trades — DEMO + LIVE in one panel */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          {/* Trades — DEMO + LIVE; mobile shows last 3 */}
+          <div className="dash-trades dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
               <span>{t('dash.trades')}</span>
@@ -1394,21 +1411,22 @@ export default function Dashboard({ health, connected, isGuest }) {
                     <th>Время</th>
                     <th>Пара</th>
                     <th>Напр.</th>
-                    <th className="text-right">Вход</th>
-                    <th className="text-right">Выход</th>
+                    <th className="text-right col-hide-mobile">Вход</th>
+                    <th className="text-right col-hide-mobile">Выход</th>
                     <th className="text-right">PnL</th>
-                    <th>Статус</th>
+                    <th className="col-hide-mobile">Статус</th>
                   </tr>
                 </thead>
                 <tbody>
                   {closedTradesForTable.slice(0, 40).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
-                    const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
+                    const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
+                    const isLong = sideRaw === 'long' || sideRaw === 'buy'
                     const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
                     const reason = (tr.reason || tr.state || 'closed').toLowerCase()
                     const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
-                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`}>
+                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`} className={i >= 3 ? 'row-hide-mobile' : undefined}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
                           {pair || '—'}
@@ -1424,12 +1442,12 @@ export default function Dashboard({ health, connected, isGuest }) {
                             {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">
+                        <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
                             ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
                             : '—'}
                         </td>
-                        <td className="text-right mono text-2xs">
+                        <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
                             ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
                             : '—'}
@@ -1441,7 +1459,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                             </span>
                           ) : '—'}
                         </td>
-                        <td>
+                        <td className="col-hide-mobile">
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
                             {reason === 'open' ? 'ОТКРЫТА' : reason}
                           </span>
@@ -1458,7 +1476,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         </div>
 
                 {/* ═══ RIGHT — Filters + Bots ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
+        <div className="dash-right-panel flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
 
           <DashBotPanel
