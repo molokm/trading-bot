@@ -182,7 +182,7 @@ function MiniAppPageInner() {
       seen.add(key)
       unique.push(t)
     }
-    return unique.slice(0, 20).map(t => {
+    return unique.slice(0, 3).map(t => {
       let side = String(t.side || t.pos_side || '').toLowerCase()
       // Normalize buy/sell leftovers → position direction
       if (side === 'buy') side = 'long'
@@ -207,158 +207,155 @@ function MiniAppPageInner() {
     return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Настройте Telegram бота</div>
   }
 
+  const demoOn = !!data?.demo?.running
+
   return (
-    <div className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
-      <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center shadow">
-            <Zap size={15} className="text-white" />
+    <div
+      className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden"
+      style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
+      {/* Header — compact */}
+      <div className="flex-shrink-0 flex items-center justify-between gap-2 px-2.5 py-1.5 bg-[var(--surface)] border-b border-[var(--border)]">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center">
+            <Zap size={13} className="text-white" />
           </div>
-          <div className="min-w-0">
-            <div className="text-sm font-bold leading-none">COPIX</div>
-            <div className="text-[0.6rem] text-[var(--txt-muted)] mt-0.5 truncate">AI · 1H</div>
-          </div>
+          <span className="text-sm font-bold tracking-tight">COPIX</span>
         </div>
-        <div className="flex items-center gap-1.5">
-          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.65rem] font-bold">
+        <div className="flex items-center gap-1">
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.6rem] font-bold">
             <button type="button" onClick={() => setMode('demo')} className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}>DEMO</button>
-            <button type="button" onClick={() => setMode('live')} disabled={!data?.live?.connected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'} ${!data?.live?.connected ? 'opacity-40' : ''}`}>
-              {data?.live?.connected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
+            <button
+              type="button"
+              onClick={() => setMode('live')}
+              disabled={!data?.live?.connected}
+              className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'} ${!data?.live?.connected ? 'opacity-40' : ''}`}
+            >
+              {data?.live?.connected ? <Wifi size={9} /> : <WifiOff size={9} />}LIVE
             </button>
           </div>
-          <button type="button" className="p-1.5 rounded-lg hover:bg-[var(--surface-raised)]" onClick={load} disabled={loading}>
-            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
+          <button type="button" onClick={load} className="p-1.5 rounded-lg text-[var(--txt-muted)] active:bg-[var(--surface-overlay)]" aria-label="Refresh">
+            <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
-        <Card>
-          <div className="flex items-center justify-between mb-2.5">
-            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">{isLive ? 'LIVE PnL' : 'DEMO PnL'}</span>
-            {metrics.equity != null && (
-              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">Eq ${fmt(metrics.equity)}{metrics.capital != null ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}</span>
-            )}
+      {/* Body — one screen: metrics → AI → positions → 3 trades */}
+      <div className="flex-1 min-h-0 flex flex-col gap-1.5 p-2 overflow-hidden">
+        {/* 2×2 metrics */}
+        <div className="flex-shrink-0 grid grid-cols-2 gap-1.5">
+          <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Нереализ.</div>
+            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.unreal)}`}>{pnlSign(metrics.unreal)}</div>
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            <Metric label={isLive ? 'Всего LIVE' : 'Всего DEMO'} value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
-            <Metric label="Сегодня" value={pnlSign(metrics.today)} className={pnlClass(metrics.today)} />
-            <Metric label="Нереализ." value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
+          <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сегодня</div>
+            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.today)}`}>{pnlSign(metrics.today)}</div>
           </div>
-        </Card>
-
-        {!isLive && (
-          <Card>
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${data?.demo?.running ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'}`}>
-                  <Bot size={18} className={data?.demo?.running ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-bold truncate">AI Discretionary 1H</div>
-                  <div className="text-[0.65rem] text-[var(--txt-muted)]">{data?.demo?.model || 'LLM'} · сделок {metrics.tradesN}{data?.demo?.win_rate ? ` · WR ${data?.demo?.win_rate}%` : ''}</div>
-                </div>
-              </div>
-              <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${data?.demo?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
-                {data?.demo?.running ? 'ON' : 'OFF'}
-              </span>
+          <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">Сумма PnL</div>
+            <div className={`text-[1.05rem] font-bold mono leading-tight ${pnlClass(metrics.total)}`}>{pnlSign(metrics.total)}</div>
+          </div>
+          <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+            <div className="text-[0.55rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">{metrics.equity != null ? 'Equity' : 'Сделок'}</div>
+            <div className="text-[1.05rem] font-bold mono leading-tight text-[var(--txt)]">
+              {metrics.equity != null ? `$${fmt(metrics.equity, 0)}` : metrics.tradesN}
             </div>
-            {data?.demo?.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{data?.demo?.pulse}</p>}
-          </Card>
-        )}
+          </div>
+        </div>
 
-        {isLive && (
-          <Card>
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-[var(--profit-dim)]">
-                  <Bot size={18} className="text-[var(--profit)]" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-bold truncate">LIVE Mirror</div>
-                  <div className="text-[0.65rem] text-[var(--txt-muted)]">сделок {metrics.tradesN}{data?.live?.win_rate != null ? ` · WR ${data?.live?.win_rate}%` : ''}</div>
-                </div>
-              </div>
-              <span className="flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LIVE</span>
-            </div>
-          </Card>
-        )}
+        {/* AI status strip */}
+        <div className="flex-shrink-0 flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${demoOn || isLive ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+            <Bot size={12} className="text-[var(--txt-muted)] flex-shrink-0" />
+            <span className="text-[0.7rem] font-semibold truncate">AI Discretionary</span>
+            <span className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded ${demoOn || (isLive && data?.live) ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+              {isLive ? (data?.live?.connected ? 'LIVE' : 'OFF') : (demoOn ? 'ON' : 'OFF')}
+            </span>
+          </div>
+          <span className={`mono text-[0.75rem] font-bold flex-shrink-0 ${pnlClass(metrics.total)}`}>{pnlSign(metrics.total)}</span>
+        </div>
 
-        <div>
-          <div className="flex items-center justify-between mb-1.5 px-0.5">
-            <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">Позиции</h2>
-            <span className="text-[0.65rem] text-[var(--txt-muted)]">{viewPositions.length}</span>
+        {/* Positions */}
+        <div className="flex-1 min-h-0 flex flex-col gap-1 overflow-hidden">
+          <div className="flex-shrink-0 flex items-center justify-between px-0.5">
+            <h2 className="text-[0.6rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">Позиции</h2>
+            <span className="text-[0.6rem] text-[var(--txt-muted)] mono">{viewPositions.length}</span>
           </div>
           {viewPositions.length === 0 ? (
-            <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет открытых позиций</Card>
+            <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] py-3 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет открытых</div>
           ) : (
-            <div className="space-y-2 max-h-[40vh] overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain space-y-1" style={{ WebkitOverflowScrolling: 'touch' }}>
               {viewPositions.map(p => (
-                <Card key={p.key} className="py-2.5">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
-                      <span className="text-xs font-bold truncate">{p.coin}</span>
-                      <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                <div key={p.key} className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] px-2.5 py-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1 min-w-0 flex-wrap">
+                      <span className="text-[0.75rem] font-bold">{p.coin}</span>
+                      <span className={`text-[0.55rem] font-bold px-1 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
                         {p.side === 'long' ? 'LONG' : 'SHORT'}
                       </span>
                       {p.mode === 'live' ? (
-                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                        <span className="text-[0.5rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
                       ) : (
-                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                        <span className="text-[0.5rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
                       )}
                     </div>
-                    <span className={`text-xs font-bold mono ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
+                    <span className={`text-[0.75rem] font-bold mono flex-shrink-0 ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
                   </div>
-                  <div className="text-[0.65rem] text-[var(--txt-muted)] mono flex flex-wrap gap-x-2 gap-y-0.5">
-                    {p.notional > 0 && <span>Объём <span className="text-[var(--txt)]">${fmt(p.notional, 0)}</span></span>}
-                    {p.entry > 0 && <span>Вход <span className="text-[var(--txt)]">${fmt(p.entry, p.entry >= 100 ? 2 : 4)}</span></span>}
-                    {p.mark > 0 && <span>Марка <span className="text-[var(--txt)]">${fmt(p.mark, p.mark >= 100 ? 2 : 4)}</span></span>}
-                    {p.size > 0 && <span>Контр. <span className="text-[var(--txt)]">{fmt(p.size, 3)}</span></span>}
+                  <div className="mt-0.5 text-[0.6rem] text-[var(--txt-muted)] mono flex flex-wrap gap-x-2">
+                    {p.notional > 0 && <span>${fmt(p.notional, 0)}</span>}
+                    {p.entry > 0 && <span>вх {fmt(p.entry, p.entry >= 100 ? 1 : 3)}</span>}
+                    {p.mark > 0 && <span>мрк {fmt(p.mark, p.mark >= 100 ? 1 : 3)}</span>}
                     {p.lever > 0 && <span>{fmt(p.lever, 1)}x</span>}
-                    {!p.entry && !p.mark && !p.notional && <span>—</span>}
                   </div>
-                </Card>
+                </div>
               ))}
             </div>
           )}
         </div>
 
-        <div className="pb-6">
-          <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)] mb-1.5 px-0.5">Сделки</h2>
-          <Card className="p-0 overflow-hidden">
+        {/* Last 3 trades */}
+        <div className="flex-shrink-0 flex flex-col gap-1">
+          <div className="flex items-center justify-between px-0.5">
+            <h2 className="text-[0.6rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">Сделки</h2>
+            <span className="text-[0.55rem] text-[var(--txt-muted)]">последние 3</span>
+          </div>
+          <div className="rounded-[10px] border border-[var(--border)] bg-[var(--surface)] overflow-hidden">
             {viewTrades.length === 0 ? (
-              <div className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет сделок</div>
+              <div className="py-2.5 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет сделок</div>
             ) : (
               <div className="divide-y divide-[var(--border)]">
                 {viewTrades.map((tr, i) => (
-                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2.5">
+                  <div key={i} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
                     <div className="flex items-center gap-1.5 min-w-0">
-                      {Number(tr.pnl) >= 0 ? <ArrowUpRight size={14} className="text-[var(--profit)] flex-shrink-0" /> : <ArrowDownRight size={14} className="text-[var(--loss)] flex-shrink-0" />}
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold truncate">
-                          {tr.inst || '—'}{' '}
-                          <span className={`font-bold text-[0.65rem] ${tr.side === 'long' ? 'text-[var(--profit)]' : tr.side === 'short' ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
-                            {tr.sideLabel || tr.side || '—'}
-                          </span>
-                          {tr.mode === 'live' ? (
-                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
-                          ) : (
-                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
-                          )}
-                        </div>
+                      {Number(tr.pnl) >= 0
+                        ? <ArrowUpRight size={12} className="text-[var(--profit)] flex-shrink-0" />
+                        : <ArrowDownRight size={12} className="text-[var(--loss)] flex-shrink-0" />}
+                      <div className="text-[0.7rem] font-semibold truncate">
+                        {tr.inst || '—'}{' '}
+                        <span className={`font-bold text-[0.55rem] ${tr.side === 'long' ? 'text-[var(--profit)]' : tr.side === 'short' ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+                          {tr.sideLabel || tr.side || '—'}
+                        </span>
+                        {tr.mode === 'live' ? (
+                          <span className="ml-1 text-[0.5rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                        ) : (
+                          <span className="ml-1 text-[0.5rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                        )}
                       </div>
                     </div>
-                    <span className={`text-xs font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>{pnlSign(tr.pnl)}</span>
+                    <span className={`text-[0.7rem] font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>{pnlSign(tr.pnl)}</span>
                   </div>
                 ))}
               </div>
             )}
-          </Card>
+          </div>
         </div>
       </div>
     </div>
   )
 }
+
 
 export default function MiniAppPage(props) {
   return <MiniAppErrorBoundary><MiniAppPageInner {...props} /></MiniAppErrorBoundary>
