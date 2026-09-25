@@ -4241,8 +4241,40 @@ class AIStrategy:
 
 
     def _status_pulse(self, decision: dict) -> str:
-        """Краткий динамический статус — меняется при изменении рынка. Не бросает."""
+        """Короткий статус на русском для карточки бота (без англ. терминов)."""
         decision = decision or {"action": "hold"}
+
+        def _prob_word(score: float | None) -> str:
+            if score is None:
+                return "неясной"
+            try:
+                s = float(score)
+            except (TypeError, ValueError):
+                return "неясной"
+            if s >= 0.75:
+                return "высокой"
+            if s >= 0.55:
+                return "средней"
+            return "низкой"
+
+        def _side_ru(side: str) -> str:
+            s = str(side or "").lower()
+            if s in ("long", "buy"):
+                return "лонг"
+            if s in ("short", "sell"):
+                return "шорт"
+            return ""
+
+        def _coin_side(obj):
+            if isinstance(obj, dict):
+                coin = obj.get("coin") or obj.get("symbol") or "?"
+                side = str(obj.get("side") or obj.get("pos_side") or "").lower()
+            else:
+                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
+                side = str(getattr(obj, "side", "") or "").lower()
+            coin = str(coin).replace("-USDT-SWAP", "").replace("-USD-SWAP", "").upper()
+            return coin, _side_ru(side) or "—"
+
         try:
             q = self._build_quant() or {}
         except Exception as e:
@@ -4254,36 +4286,30 @@ class AIStrategy:
             print(f"[AI] pulse board: {e}", flush=True)
             board = []
 
-        reg = str(q.get("global_regime") or "неизвестно").lower()
+        reg = str(q.get("global_regime") or "unknown").lower()
         reg_ru = {
             "bull": "бычий", "bear": "медвежий", "chop": "боковик",
             "unknown": "неясный", "неизвестно": "неясный",
-        }.get(reg, reg)
-        preset = (self._adapt or {}).get("preset") or "normal"
-        preset_ru = {
-            "conservative": "осторожный",
-            "normal": "обычный",
-            "aggressive": "агрессивный",
-        }.get(str(preset).lower(), str(preset))
+        }.get(reg, "неясный")
+
         act = str(decision.get("action") or "hold").lower()
-        conf = decision.get("confidence")
         try:
-            conf_f = float(conf) if conf is not None else None
+            conf_f = float(decision.get("confidence")) if decision.get("confidence") is not None else None
         except (TypeError, ValueError):
             conf_f = None
 
-        # If action references a coin that no longer exists, treat as hold
+        # Stale action → hold
         if act in ("close", "reduce", "open"):
-            _sym_check = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
-            _pos_map = getattr(self, "_positions", None) or {}
-            if act in ("close", "reduce") and _sym_check and _sym_check not in _pos_map:
+            _sym = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+            _pos = getattr(self, "_positions", None) or {}
+            if act in ("close", "reduce") and _sym and _sym not in _pos:
                 act = "hold"
-            elif act == "open" and _sym_check and _sym_check in _pos_map:
+            elif act == "open" and _sym and _sym in _pos:
                 act = "hold"
 
         best_free = None
         best_any = None
-        for b in board:
+        for b in board or []:
             try:
                 sc = float(b.get("align_score") or 0)
             except (TypeError, ValueError):
@@ -4294,114 +4320,83 @@ class AIStrategy:
                 if best_free is None or sc > best_free[0]:
                     best_free = (sc, b)
 
-        def _coin_side(obj):
-            if isinstance(obj, dict):
-                coin = obj.get("coin") or obj.get("symbol") or "?"
-                side = str(obj.get("side") or "").lower()
-            else:
-                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
-                side = str(getattr(obj, "side", None) or "").lower()
-            coin = str(coin).replace("-USDT-SWAP", "").replace("-USDT", "")
-            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else (side or "—"))
-            return coin, side_ru
+        pos_map = getattr(self, "_positions", None) or {}
+        items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+        open_list = []
+        for pos in items:
+            try:
+                sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
+            except (TypeError, ValueError):
+                sz = 0.0
+            if abs(sz) > 1e-12:
+                open_list.append(pos)
 
-        lines = [f"Рынок: {reg_ru}, режим: {preset_ru}."]
+        # ── Open / close actions ──
+        if act == "open":
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            side_ru = _side_ru(decision.get("side") or "")
+            prob = _prob_word(conf_f)
+            conf_txt = f"{conf_f:.0%}" if conf_f is not None else "—"
+            msg = f"Готовим вход: {sym} {side_ru}. Вероятность {prob}, оценка ИИ {conf_txt}."
+            if decision.get("veto_reason"):
+                msg += " Вход пока заблокирован фильтром."
+            return msg[:280]
 
-        # Only THIS bot's non-zero positions (never report Scale-In / foreign as ours)
-        def _owned_open_list():
-            pos_map = getattr(self, "_positions", None) or {}
-            items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
-            out = []
-            for pos in items:
-                try:
-                    sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
-                except (TypeError, ValueError):
-                    sz = 0.0
-                if abs(sz) <= 1e-12:
-                    continue
-                out.append(pos)
-            return out
+        if act in ("close", "reduce"):
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            verb = "закрываем" if act == "close" else "сокращаем"
+            return f"Решение: {verb} {sym}."[:280]
 
-        open_list = _owned_open_list()
+        # ── Hold ──
+        if open_list:
+            parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
+            msg = f"В работе: {', '.join(parts)}. Новых входов нет — жду сигнал на выход."
+            return msg[:280]
 
-        if act == "hold":
-            if open_list:
-                parts = []
-                for pos in open_list:
-                    coin, side_ru = _coin_side(pos)
-                    parts.append(f"{coin} {side_ru}")
-                line = (
-                    f"Мои позиции: {', '.join(parts)}. "
-                    "Новых входов нет — управляю / жду условия выхода."
-                )
-            else:
-                line = "Позиций у этого бота нет."
-                if best_free:
-                    b = best_free[1]
-                    side = b.get("best_side") or "—"
-                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    coin = b.get("coin") or "?"
-                    # Compute next 1H bar close time
-                    next_bar_info = ""
-                    try:
-                        from datetime import datetime, timezone, timedelta
-                        now = datetime.now(timezone.utc)
-                        bar = getattr(self.config, "bar", "1H") or "1H"
-                        if bar == "1H":
-                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                        elif bar == "4H":
-                            h = (now.hour // 4 + 1) * 4
-                            next_bar = now.replace(hour=h, minute=0, second=0, microsecond=0)
-                            if h >= 24:
-                                next_bar += timedelta(days=1)
-                                next_bar = next_bar.replace(hour=0)
-                        else:
-                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                        wait_min = int((next_bar - now).total_seconds() / 60)
-                        next_bar_info = f" (решение через ~{wait_min} мин, {next_bar.strftime('%H:%M')} UTC)"
-                    except Exception:
-                        pass
-                    line += (
-                        f" Доступно: {coin} {side_ru} ({best_free[0]:.2f}) "
-                        f"— жду подтверждения LLM/quant{next_bar_info}."
-                    )
-                elif best_any:
-                    b = best_any[1]
-                    side = b.get("best_side") or "—"
-                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    line += (
-                        f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) "
-                        "— заблокирован (ADX/align)."
-                    )
+        # Flat market scan
+        if best_free:
+            sc, b = best_free
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            conf_part = ""
+            if conf_f is not None:
+                conf_part = f" Оценка ИИ {conf_f:.0%}."
+            # wait until next bar if useful
+            wait = ""
+            try:
+                from datetime import datetime, timezone, timedelta
+                now = datetime.now(timezone.utc)
+                bar = getattr(self.config, "bar", "1H") or "1H"
+                if str(bar).upper() in ("4H", "4h"):
+                    h = (now.hour // 4 + 1) * 4
+                    nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=h)
+                    if h >= 24:
+                        nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 else:
-                    line += " Явных кандидатов нет."
-            lines.append(line)
-        elif act == "open":
-            sym = decision.get("symbol") or "?"
-            side = decision.get("side") or ""
-            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-            lines.append(
-                f"Сигнал на вход: {sym} {side_ru}"
-                + (f" (уверенность {conf_f:.2f})." if conf_f is not None else ".")
-            )
-            veto_reason = decision.get("veto_reason")
-            if veto_reason:
-                lines.append(f"Заблокирован квантом: {veto_reason}.")
-            if open_list:
-                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
-                lines.append(f"Уже открыто: {', '.join(parts)}.")
-        elif act in ("close", "reduce"):
-            sym = decision.get("symbol") or "?"
-            lines.append(
-                f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}."
-            )
-        else:
-            lines.append(f"Действие: {act}.")
-            if open_list:
-                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
-                lines.append(f"Открыто: {', '.join(parts)}.")
+                    nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                mins = max(0, int((nxt - now).total_seconds() / 60))
+                if mins > 0:
+                    wait = f" Следующая проверка ~через {mins} мин."
+            except Exception:
+                pass
+            return (
+                f"Рынок: {reg_ru}. Ожидаем {side_ru} по {coin} с {prob} вероятностью "
+                f"(совпадение {sc:.0%}).{conf_part}{wait}"
+            )[:280]
 
-        return " ".join(lines)
+        if best_any:
+            sc, b = best_any
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            return (
+                f"Рынок: {reg_ru}. Кандидат {coin} {side_ru} с {prob} вероятностью "
+                f"({sc:.0%}) — проходит проверку, пока не допущен к входу."
+            )[:280]
+
+        return f"Рынок: {reg_ru}. Явных сигналов нет — наблюдаю."[:280]
+
 
     def _safe_pulse_text(self) -> str:
         """Always recompute live pulse for UI (do not reuse stale last_decision.pulse)."""
