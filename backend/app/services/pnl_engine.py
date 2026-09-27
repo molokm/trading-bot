@@ -25,8 +25,8 @@ PNL_EPOCH_ISO = "2026-09-12T00:00:00+00:00"  # clean slate after multi-bot mix
 PNL_TZ = ZoneInfo("Europe/Moscow")
 
 _CLORD_MAP = (
-    # ais legacy Scale-In fills fold into the single remaining AI bot
-    ("ais", "AI Discretionary 1H"),
+    # NOTE: "ais" (retired Scale-In) must NOT match via startswith("ai")
+    # — handled explicitly in label_from_clord.
     ("ai", "AI Discretionary 1H"),
     ("rot", "Momentum"),
     ("momentum", "Momentum"),
@@ -38,7 +38,7 @@ AI_ONLY_LABELS = ("AI Discretionary 1H",)
 
 _BOT_ID_MAP = {
     "ai_strategy": "AI Discretionary 1H",
-    "ai_scale_strategy": "AI Discretionary 1H",  # retired — fold into AI
+    "ai_scale_strategy": "",  # retired — do not attribute to AI
     "ai_discretionary": "AI Discretionary 1H",
 }
 
@@ -48,11 +48,22 @@ def epoch_ms() -> int:
 
 
 def label_from_clord(cl_ord_id: str) -> str:
+    """Map OKX clOrdId prefix → bot label.
+
+    Critical: ``ais…`` (retired Scale-In) must NOT be attributed to AI.
+    Plain ``startswith('ai')`` would false-positive on ``ais``.
+    """
     cl = (cl_ord_id or "").strip().lower()
     if not cl:
         return ""
-    for pfx, label in _CLORD_MAP:
+    # Retired Scale-In — exclude from AI Discretionary totals
+    if cl.startswith("ais"):
+        return ""
+    # Longest known prefix first
+    for pfx, label in sorted(_CLORD_MAP, key=lambda x: -len(x[0])):
         if cl.startswith(pfx):
+            # Boundary: next char should not extend another token oddly;
+            # ai123 / ai_ok / ai-… all ok.
             return label
     return ""
 
@@ -64,7 +75,9 @@ def normalize_bot_label(raw: str) -> str:
     if s in AI_ONLY_LABELS:
         return s
     low = s.lower()
-    if "scale" in low or "discretionary" in low or s in ("AI", "ai_strategy", "AI Scale-In 1H"):
+    if "scale" in low or s in ("AI Scale-In 1H", "ai_scale_strategy"):
+        return ""  # retired — do not fold into AI totals
+    if "discretionary" in low or s in ("AI", "ai_strategy"):
         return "AI Discretionary 1H"
     if s in _BOT_ID_MAP:
         return _BOT_ID_MAP[s]
@@ -162,8 +175,8 @@ def aggregate_rows(
             continue
 
         ts_ms = _parse_ts_ms(r.get("close_ts") or r.get("ts") or r.get("timestamp"))
-        # Epoch filter only when we have a timestamp; ts=0 kept (legacy rows)
-        if ts_ms and ts_ms < ep:
+        # Require a real timestamp after epoch — ts=0 legacy rows inflated totals
+        if not ts_ms or ts_ms < ep:
             skipped_before_epoch += 1
             continue
 

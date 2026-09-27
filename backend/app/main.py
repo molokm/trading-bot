@@ -5213,6 +5213,9 @@ async def sync_exchange_close_trades() -> int:
             if clord.startswith(pfx):
                 bot_label = label
                 break
+        # Retired Scale-In must not feed AI Discretionary totals in AI_ONLY_MODE
+        if AI_ONLY_MODE and bot_label in ('AI Scale-In 1H', 'AI Scale-In'):
+            bot_label = ''
         if not bot_label:
             inst = info.get('inst_id') or ''
             best_cl = ''
