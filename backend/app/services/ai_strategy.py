@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
-from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills
 from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status, mock_decide
 import json
@@ -101,6 +101,47 @@ LOT_SZ = {
     "BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01,
     "OKB": 0.1, "DOGE": 1.0, "BCH": 0.01, "DAI": 1.0,
 }
+
+
+def _fmt_px(px: float, coin: str = "") -> str:
+    """Human price for TG — more digits for BTC-like, fewer for cheap alts."""
+    try:
+        p = float(px or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if p <= 0:
+        return "0"
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 10:
+        return f"{p:.4f}".rstrip("0").rstrip(".")
+    if p >= 1:
+        return f"{p:.5f}".rstrip("0").rstrip(".")
+    return f"{p:.6f}".rstrip("0").rstrip(".")
+
+
+def compute_close_metrics(pos, coin: str, exit_px: float, fee=0, fills=None):
+    """Entry / exit / net PnL for Telegram and books — always contract-aware.
+
+    Prefer OKX fillPnl when fill rows exist; else size * ctVal * price delta − fee.
+    """
+    entry = float(getattr(pos, "entry_price", 0) or 0)
+    sz = float(getattr(pos, "size", 0) or 0)
+    side = getattr(pos, "side", "long")
+    try:
+        exit_px = float(exit_px or 0)
+    except (TypeError, ValueError):
+        exit_px = 0.0
+    if fills:
+        try:
+            net, avg, fee_c, _filled = pnl_from_okx_fills(fills, exit_px)
+            if net is not None:
+                return entry, float(avg or exit_px), round(float(net), 2), float(fee_c)
+        except Exception:
+            pass
+    ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+    pnl = close_pnl(side, sz, entry, exit_px, fee, ct)
+    return entry, exit_px, round(float(pnl), 2), float(fee_cost(fee))
 
 
 @dataclass
@@ -1849,17 +1890,44 @@ class AIStrategy:
             else:
                 print(f"[AI] TG close: plain send (no open msg) signal={signal_id} {coin}", flush=True)
             bot_name = self.BOT_NAME + (bot_name_suffix or "")
+            # Recompute PnL with contract value if caller used bare (exit-entry)*sz
+            entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
+                pos, coin, fill_px, fee=0, fills=None,
+            )
+            # Prefer caller pnl when it already used close_pnl / fillPnl (non-trivial)
+            try:
+                caller_pnl = float(pnl or 0)
+            except (TypeError, ValueError):
+                caller_pnl = 0.0
+            # If caller left pnl~0 but price moved, or magnitude is way off vs contract formula → use formula
+            use_pnl = caller_pnl
+            if abs(pnl_m) > 1e-9:
+                if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
+                    use_pnl = pnl_m
+                elif abs(caller_pnl) > 0 and abs(pnl_m) > 0:
+                    # if caller is ~ct_val off (forgot ct), ratio near ct → replace
+                    ratio = abs(caller_pnl / pnl_m) if pnl_m else 0
+                    if ratio > 5 or ratio < 0.2:
+                        use_pnl = pnl_m
+            entry_show = entry_m if entry_m > 0 else float(getattr(pos, "entry_price", 0) or 0)
+            exit_show = exit_m if exit_m > 0 else float(fill_px or 0)
             _txt = self.notifier.close_msg(
                 coin=coin,
                 side=getattr(pos, "side", "long"),
-                entry=round(float(getattr(pos, "entry_price", 0) or 0), 4),
-                exit_px=round(float(fill_px or 0), 4),
-                pnl=round(float(pnl or 0), 2),
+                entry=_fmt_px(entry_show, coin),
+                exit_px=_fmt_px(exit_show, coin),
+                pnl=round(float(use_pnl), 2),
                 reason=reason,
                 bot_name=bot_name,
                 signal_id=signal_id,
                 account_mode=account_mode,
                 account_key=account_mode,
+                size=float(getattr(pos, "size", 0) or 0),
+            )
+            print(
+                f"[AI] TG close metrics {coin}: entry={entry_show} exit={exit_show} "
+                f"pnl_caller={caller_pnl:.4f} pnl_ct={pnl_m:.4f} use={use_pnl:.4f}",
+                flush=True,
             )
             mid = await self.notifier.send_trade(
                 _txt,
@@ -1893,14 +1961,7 @@ class AIStrategy:
         if not self._execute_enabled():
             print(f"[AI] SIGNAL close {coin} ({reason}) execute=0 — still TG notify", flush=True)
             mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
-            pnl = 0.0
-            try:
-                entry = float(pos.entry_price or 0)
-                sz = float(pos.size or 0)
-                if entry and sz and mark:
-                    pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
-            except Exception:
-                pass
+            _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
             mode, _k = self._account_mode_tag()
             try:
                 await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode=mode)
@@ -1934,14 +1995,7 @@ class AIStrategy:
                         mark = float(_td[0].get("last") or mark) or mark
                 except Exception:
                     pass
-                pnl = 0.0
-                try:
-                    entry = float(pos.entry_price or 0)
-                    sz = float(pos.size or 0)
-                    if entry and sz and mark:
-                        pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
-                except Exception:
-                    pass
+                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                 signal_id = int(getattr(pos, "signal_id", 0) or 0)
                 mode, key = self._account_mode_tag()
                 # Persist close for PnL integrity
@@ -1991,14 +2045,7 @@ class AIStrategy:
                             mark = float(_td[0].get("last") or mark) or mark
                     except Exception:
                         pass
-                    pnl = 0.0
-                    try:
-                        entry = float(pos.entry_price or 0)
-                        sz = float(pos.size or 0)
-                        if entry and sz and mark:
-                            pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
-                    except Exception:
-                        pass
+                    _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                     mode, _k = self._account_mode_tag()
                     await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
                     del self._positions[coin]
@@ -2029,7 +2076,16 @@ class AIStrategy:
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
-        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
+        # Prefer exchange-reported fillPnl when present (matches OKX history)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
@@ -2391,14 +2447,7 @@ class AIStrategy:
                         mark = float(_td[0].get("last") or mark) or mark
                 except Exception:
                     pass
-                pnl = 0.0
-                try:
-                    entry = float(pos.entry_price or 0)
-                    sz = float(pos.size or 0)
-                    if entry and sz and mark:
-                        pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
-                except Exception:
-                    pass
+                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                 await self._notify_close_tg(
                     pos, coin, reason or "exchange_stop", mark, pnl,
                     account_mode="live", bot_name_suffix=" (LIVE)",
@@ -2448,8 +2497,16 @@ class AIStrategy:
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
-        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
-                         CT_VAL.get(coin, 0.01))
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
+                             CT_VAL.get(coin, 0.01))
         self._live_equity += pnl
         self._live_session_pnl += pnl
         self._live_lifetime_pnl += pnl
@@ -2655,14 +2712,7 @@ class AIStrategy:
                                 exit_px = float(_td[0].get("last") or exit_px) or exit_px
                         except Exception:
                             pass
-                        pnl = 0.0
-                        try:
-                            entry = float(pos.entry_price or 0)
-                            sz = float(pos.size or 0)
-                            if entry and sz and exit_px:
-                                pnl = ((exit_px - entry) * abs(sz)) if pos.side == "long" else ((entry - exit_px) * abs(sz))
-                        except Exception:
-                            pass
+                        _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                         try:
                             await self._notify_close_tg(
                                 pos, coin, "exchange_stop", exit_px, pnl,
@@ -3255,17 +3305,7 @@ class AIStrategy:
                         exit_px = float(_td[0].get("last") or 0)
                 except Exception:
                     pass
-                pnl = 0.0
-                try:
-                    sz = float(getattr(pos, "size", 0) or 0)
-                    entry = float(getattr(pos, "entry_price", 0) or 0)
-                    if sz and entry and exit_px:
-                        if side == "long":
-                            pnl = (exit_px - entry) * abs(sz)
-                        else:
-                            pnl = (entry - exit_px) * abs(sz)
-                except Exception:
-                    pass
+                _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                 print(
                     f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
                     f"(was {side} sz={getattr(pos, 'size', 0)} pnl={pnl:+.2f})",
