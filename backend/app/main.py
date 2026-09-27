@@ -5655,7 +5655,9 @@ async def _compute_pnl():
     global _pnl_cache, _exchange_sync_ts
     _mode = _account_mode()
     try:
-        _exchange_sync_ts = 0
+        _exchange_sync_ts = 0  # force fresh OKX bills pull
+        if isinstance(_pnl_cache, dict):
+            _pnl_cache.clear()
         data = await pnl_engine.compute(db, account_mode=_mode, ai_only=bool(AI_ONLY_MODE), sync_fn=sync_exchange_close_trades, reclassify_fn=getattr(db, 'reclassify_exchange_bot_labels', None))
     except Exception as e:
         print(f'[pnl] engine error: {e}', flush=True)

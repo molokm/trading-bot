@@ -102,46 +102,37 @@ def _to_msk_date(ts_ms: int):
 
 
 def resolve_bot(row: dict, *, ai_only: bool) -> str:
-    """clOrdId (longest prefix) → stored bot_label. Never guess Discretionary.
+    """Attribute close → bot. AI_ONLY: only explicit ``ai*`` clOrdId (not ``ais*``).
 
-    Untagged closes must not steal Scale-In PnL. Attribute only with evidence.
+    Never force historical Scale-In / date hacks onto AI Discretionary.
     """
-    # Hard: all 2026-09-11 closes → Scale-In (session owned by SCL per Telegram)
-    ts = str(row.get("close_ts") or row.get("exit_time") or row.get("time") or row.get("timestamp") or "")
-    try:
-        cts = int(row.get("close_ts") or 0)
-        if cts > 10_000_000_000:
-            from datetime import datetime, timezone
-            ts = datetime.fromtimestamp(cts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
-        elif cts > 0:
-            from datetime import datetime, timezone
-            ts = datetime.fromtimestamp(cts, tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    if "2026-09-11" in str(ts) or "11.09.26" in str(ts):
-        return "AI Discretionary 1H"
-
-    # Hard: ETH ≈ -414 is Scale-In (ops correction 11.09.2026)
-    try:
-        pnl = float(row.get("pnl") or 0)
-    except (TypeError, ValueError):
-        pnl = 0.0
-    inst = str(row.get("inst_id") or row.get("symbol") or "")
-    if "ETH" in inst.upper() and abs(pnl - (-414.06)) < 12.0:
-        return "AI Discretionary 1H"
-
-    cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "")
+    cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "").strip().lower()
+    # Retired Scale-In — hard exclude even if bot_label was wrongly set to AI
+    if cl.startswith("ais"):
+        return ""
     tagged = label_from_clord(cl)
     if tagged:
         return tagged
+    # Unknown clOrdId in AI_ONLY: do not trust a stored "AI Discretionary" label
+    # (prevents Scale-In / manual / foreign fills from polluting AI totals)
+    if ai_only and cl:
+        return ""
     stored = normalize_bot_label(row.get("bot_label") or row.get("bot") or "")
     if stored in AI_ONLY_LABELS:
-        return stored
+        # Only accept stored AI label when clOrdId is empty (legacy rows)
+        if ai_only and not cl:
+            return stored
+        if not ai_only:
+            return stored
+        return ""
     if stored and not ai_only:
         return stored
     bid = str(row.get("bot_id") or "")
-    if bid in _BOT_ID_MAP:
-        return _BOT_ID_MAP[bid]
+    mapped = _BOT_ID_MAP.get(bid) or ""
+    if mapped in AI_ONLY_LABELS and not cl:
+        return mapped
+    if mapped and not ai_only:
+        return mapped
     return ""
 
 
