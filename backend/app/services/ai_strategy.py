@@ -2577,6 +2577,52 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] reconcile: {e}", flush=True)
 
+    async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
+                                  take_pct: float, reason: str) -> None:
+        """Retry LIVE mirror within seconds after a failed primary mirror.
+
+        Delays: 2s, 5s, 12s — total <20s. Aborts if demo flat or live already has coin.
+        """
+        for delay in (2.0, 5.0, 12.0):
+            try:
+                await asyncio.sleep(delay)
+            except Exception:
+                return
+            if not self._running:
+                return
+            if coin not in self._positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: demo already flat", flush=True)
+                return
+            if coin in self._live_positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: already on live", flush=True)
+                return
+            if not await self._mirror_enabled():
+                return
+            try:
+                await self._try_refresh_live_client()
+                if not self._live_ready():
+                    print(f"[AI-LIVE] fast_retry {coin}: live not ready (t+{delay:.0f}s)", flush=True)
+                    continue
+                demo_pos = self._positions.get(coin)
+                if demo_pos:
+                    entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+                    stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+                    take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+                    if entry > 0 and stop_p > 0:
+                        stop_pct = abs(stop_p - entry) / entry
+                    if entry > 0 and take_p > 0:
+                        take_pct = abs(take_p - entry) / entry
+                    side = getattr(demo_pos, "side", side)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
+                    reason=f"fast_retry_{reason}",
+                )
+                print(f"[AI-LIVE] fast_retry {coin} t+{delay:.0f}s → {ok}", flush=True)
+                if ok:
+                    return
+            except Exception as e:
+                print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
+
     async def _clone_missing_to_live(self):
         """Clone demo positions that are missing from live (hydrate + gap-fill)."""
         if not await self._mirror_enabled():
