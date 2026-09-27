@@ -96,8 +96,30 @@ function MiniAppPageInner() {
     if (!unreal && Array.isArray(d.positions)) {
       unreal = d.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
     }
+    // Prefer sum of closed DEMO trades from payload (same list as UI)
+    let totalFromTrades = null
+    const all = Array.isArray(data?.trades) ? data.trades : []
+    if (all.length) {
+      let s = 0
+      let n = 0
+      const EPOCH = Date.parse('2026-09-01T00:00:00Z')
+      for (const tr of all) {
+        const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
+        if (mode === 'live') continue
+        const reason = String(tr.reason || '').toLowerCase()
+        if (reason === 'open') continue
+        let ts = Number(tr.time || tr.exit_time || tr.ts || 0) || 0
+        if (ts > 0 && ts < 1e12) ts *= 1000
+        if (ts > 0 && ts < EPOCH) continue
+        const pnl = Number(tr.pnl)
+        if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
+        s += pnl
+        n += 1
+      }
+      if (n > 0) totalFromTrades = Math.round(s * 100) / 100
+    }
     return {
-      total: Number(d.pnl ?? 0),
+      total: totalFromTrades != null ? totalFromTrades : Number(d.pnl ?? 0),
       today: Number(d.session_pnl ?? 0),
       unreal,
       equity: d.equity ?? null,

@@ -396,7 +396,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     // 30s cache, so updates arrive a little after the fast tier.
     try {
       const [trades, liveTr, pnlData] = await Promise.all([
-        api.getPairedTrades(50).catch(() => null),
+        api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
@@ -611,7 +611,45 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Demo: demo or untagged legacy payload
     return !m || m === 'demo'
   })()
-  const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+
+  // DEMO total from the SAME closed trades shown on the dashboard (authoritative for UI).
+  // Server /api/pnl has drifted (Scale-In mix / label bugs); day/week from server still used.
+  const demoRealizedFromTrades = (() => {
+    let s = 0
+    let n = 0
+    const EPOCH = Date.parse('2026-09-01T00:00:00Z')
+    for (const tr of (tradeLog || [])) {
+      const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
+      if (mode === 'live') continue
+      const reason = String(tr.reason || '').toLowerCase()
+      // count closed only
+      const isClosed = reason === 'closed' || reason === 'close' || tr.exit_price != null || tr.exit_px != null || tr.exit != null
+      if (!isClosed && reason === 'open') continue
+      if (reason === 'open') continue
+      const bot = String(tr.bot || tr.bot_label || tr.strategy || tr.bot_name || 'AI Discretionary 1H')
+      // Skip non-AI strategies if explicitly labeled
+      if (/scale-?in|momentum|impulse|validation|scalp|умн|smart.?money|vwap/i.test(bot) && !/discretionary|^ai\b/i.test(bot)) continue
+      let ts = tr.exit_time || tr.time || tr.close_ts || tr.timestamp || 0
+      if (typeof ts === 'string' && ts) {
+        const p = Date.parse(ts)
+        if (!Number.isNaN(p)) ts = p
+        else ts = 0
+      }
+      ts = Number(ts) || 0
+      if (ts > 0 && ts < 1e12) ts *= 1000
+      if (ts > 0 && ts < EPOCH) continue
+      const pnl = Number(tr.pnl)
+      if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
+      s += pnl
+      n += 1
+    }
+    return { total: Math.round(s * 100) / 100, n }
+  })()
+
+  const discPnlResolved = (() => {
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
+    return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+  })()
   const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
@@ -619,6 +657,10 @@ export default function Dashboard({ health, connected, isGuest }) {
     return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
   })()
   const pnlTotal = (() => {
+    // Prefer sum of visible DEMO closed trades — matches what user sees in the list
+    if (demoMode && demoRealizedFromTrades.n > 0) {
+      return demoRealizedFromTrades.total
+    }
     if (!pnlModeOk) return 0
     if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
       return Number(pnl.total)
@@ -669,7 +711,10 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
+      const v = (demoMode && demoRealizedFromTrades.n > 0)
+        ? demoRealizedFromTrades.total
+        : Number(per['AI Discretionary 1H'] ?? 0)
+      rows.push({ name: 'AI Discretionary 1H', val: v })
       return rows
     }
     for (const [bid, val] of Object.entries(per)) {
@@ -678,7 +723,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       rows.push({ name, val: Number(val || 0) })
     }
     return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl])
+  }, [pnl, demoMode, demoRealizedFromTrades])
 
   // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
   const momentumCardPnl = useMemo(() => {
@@ -702,11 +747,12 @@ export default function Dashboard({ health, connected, isGuest }) {
   }, [pnl, validationStatus?.total_pnl])
 
   const aiCardPnl = useMemo(() => {
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     const per = pnl?.per_bot || {}
     if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
     if (per.ai_strategy != null) return Number(per.ai_strategy)
     return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl, demoMode, demoRealizedFromTrades])
 
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
