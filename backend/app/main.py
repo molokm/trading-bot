@@ -268,7 +268,7 @@ async def startup():
                     await db.wipe_strategy_trading_data(bot_ids)
                 except Exception as we:
                     print(f'[startup] wipe_strategy_trading_data: {we}', flush=True)
-                await db.set_setting('pnl_epoch', epoch)
+                await db.set_setting('pnl_epoch', '2026-09-01T00:00:00+00:00')
                 await db.set_setting('trading_stats_reset_marker', 'manual')
                 for key in (f'ai_lifetime:{AI_BOT_ID}', 'fix_last_eth_to_scale_pnl', 'pnl_bot_overrides'):
                     try:
@@ -5659,6 +5659,43 @@ async def _compute_pnl():
         if isinstance(_pnl_cache, dict):
             _pnl_cache.clear()
         data = await pnl_engine.compute(db, account_mode=_mode, ai_only=bool(AI_ONLY_MODE), sync_fn=sync_exchange_close_trades, reclassify_fn=getattr(db, 'reclassify_exchange_bot_labels', None))
+        # Cross-check: sum exchange_close_trades for AI Discretionary only (demo/live)
+        try:
+            from app.services.pnl_engine import epoch_ms as _ep_ms, label_from_clord as _lfc, normalize_bot_label as _nbl
+            _rows = await db.get_exchange_pnl_timebucket(bot_label=None, account_mode=None, epoch_ms=_ep_ms()) or []
+            _sum = 0.0
+            _n = 0
+            for _r in _rows:
+                _am = str(_r.get('account_mode') or '').lower()
+                if _mode == 'live' and _am != 'live':
+                    continue
+                if _mode != 'live' and _am not in ('', 'demo'):
+                    continue
+                _cl = str(_r.get('cl_ord_id') or '').lower()
+                if _cl.startswith('ais'):
+                    continue
+                _lab = _lfc(_cl) or _nbl(_r.get('bot_label') or '')
+                if _lab != 'AI Discretionary 1H':
+                    continue
+                try:
+                    _sum += float(_r.get('pnl') or 0)
+                    _n += 1
+                except (TypeError, ValueError):
+                    pass
+            _sum = round(_sum, 2)
+            _eng = round(float(data.get('total') or 0), 2)
+            if abs(_sum - _eng) > 0.05:
+                print(f'[pnl] CROSS-CHECK mode={_mode} engine={_eng} direct_sum={_sum} n={_n} → prefer direct', flush=True)
+                data['total'] = _sum
+                data['strategy_realized'] = _sum
+                pb = dict(data.get('per_bot') or {})
+                pb['AI Discretionary 1H'] = _sum
+                data['per_bot'] = pb
+                data['source'] = (data.get('source') or '') + '+crosscheck'
+            else:
+                print(f'[pnl] CROSS-CHECK ok mode={_mode} total={_eng} n={_n}', flush=True)
+        except Exception as _ce:
+            print(f'[pnl] cross-check: {_ce}', flush=True)
     except Exception as e:
         print(f'[pnl] engine error: {e}', flush=True)
         import traceback

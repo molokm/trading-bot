@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
-PNL_EPOCH_ISO = "2026-09-12T00:00:00+00:00"  # clean slate after multi-bot mix
+PNL_EPOCH_ISO = "2026-09-01T00:00:00+00:00"  # product start — include full AI demo history
 PNL_TZ = ZoneInfo("Europe/Moscow")
 
 _CLORD_MAP = (
@@ -102,34 +102,28 @@ def _to_msk_date(ts_ms: int):
 
 
 def resolve_bot(row: dict, *, ai_only: bool) -> str:
-    """Attribute close → bot. AI_ONLY: only explicit ``ai*`` clOrdId (not ``ais*``).
+    """Attribute close → bot.
 
-    Never force historical Scale-In / date hacks onto AI Discretionary.
+    Rules (AI_ONLY):
+      - clOrdId ``ais*`` → never count (retired Scale-In)
+      - clOrdId ``ai*``  → AI Discretionary
+      - else trust stored bot_label / bot_id when it is AI Discretionary
+        (covers closes without clOrdId and recovered labels)
     """
     cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "").strip().lower()
-    # Retired Scale-In — hard exclude even if bot_label was wrongly set to AI
     if cl.startswith("ais"):
         return ""
     tagged = label_from_clord(cl)
     if tagged:
         return tagged
-    # Unknown clOrdId in AI_ONLY: do not trust a stored "AI Discretionary" label
-    # (prevents Scale-In / manual / foreign fills from polluting AI totals)
-    if ai_only and cl:
-        return ""
     stored = normalize_bot_label(row.get("bot_label") or row.get("bot") or "")
     if stored in AI_ONLY_LABELS:
-        # Only accept stored AI label when clOrdId is empty (legacy rows)
-        if ai_only and not cl:
-            return stored
-        if not ai_only:
-            return stored
-        return ""
+        return stored
     if stored and not ai_only:
         return stored
     bid = str(row.get("bot_id") or "")
     mapped = _BOT_ID_MAP.get(bid) or ""
-    if mapped in AI_ONLY_LABELS and not cl:
+    if mapped in AI_ONLY_LABELS:
         return mapped
     if mapped and not ai_only:
         return mapped
