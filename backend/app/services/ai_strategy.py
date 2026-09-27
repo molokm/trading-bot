@@ -1764,6 +1764,73 @@ class AIStrategy:
             self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
 
+
+    async def _notify_close_tg(
+        self,
+        pos: "AIPosition",
+        coin: str,
+        reason: str,
+        fill_px: float,
+        pnl: float,
+        *,
+        account_mode: str = "demo",
+        bot_name_suffix: str = "",
+    ) -> None:
+        """Always try to send close notification (reply to open if possible)."""
+        if not self.notifier:
+            print(f"[AI] TG close skipped: no notifier ({coin})", flush=True)
+            return
+        # Allow channel-only setups (token + channel) not just chat_id
+        tok = getattr(self.notifier, "token", "") or ""
+        has_target = bool(
+            getattr(self.notifier, "chat_id", "")
+            or getattr(self.notifier, "channel_id", "")
+        )
+        if not tok or not has_target:
+            print(
+                f"[AI] TG close skipped: token={bool(tok)} target={has_target} ({coin})",
+                flush=True,
+            )
+            return
+        try:
+            signal_id = int(getattr(pos, "signal_id", 0) or 0)
+            _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+            if not _reply:
+                try:
+                    _reply = int(
+                        await self.notifier.resolve_open_message_id(
+                            self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    _reply = 0
+            if _reply:
+                print(f"[AI] TG close: reply_to={_reply} signal={signal_id} {coin}", flush=True)
+            else:
+                print(f"[AI] TG close: plain send (no open msg) signal={signal_id} {coin}", flush=True)
+            bot_name = self.BOT_NAME + (bot_name_suffix or "")
+            _txt = self.notifier.close_msg(
+                coin=coin,
+                side=getattr(pos, "side", "long"),
+                entry=round(float(getattr(pos, "entry_price", 0) or 0), 4),
+                exit_px=round(float(fill_px or 0), 4),
+                pnl=round(float(pnl or 0), 2),
+                reason=reason,
+                bot_name=bot_name,
+                signal_id=signal_id,
+                account_mode=account_mode,
+                account_key=account_mode,
+            )
+            mid = await self.notifier.send_trade(
+                _txt,
+                reply_to_message_id=_reply or None,
+                account_mode=account_mode if account_mode in ("demo", "live") else "demo",
+            )
+            print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        except Exception as e:
+            print(f"[AI] TG close error {coin}: {e}", flush=True)
+
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
         if not pos:
@@ -1793,13 +1860,48 @@ class AIStrategy:
                     has_pos = True
                     break
             if not has_pos:
-                print(f"[AI] close skip {coin}: exchange pos already gone (algo fired?)", flush=True)
+                # Exchange SL/TP (or manual) already closed — still notify TG
+                print(f"[AI] close {coin}: exchange pos already gone (algo/manual) — notify TG", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                try:
+                    ticker = await client.get_ticker(pos.inst_id)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        mark = float(_td[0].get("last") or mark) or mark
+                except Exception:
+                    pass
+                pnl = 0.0
+                try:
+                    entry = float(pos.entry_price or 0)
+                    sz = float(pos.size or 0)
+                    if entry and sz and mark:
+                        pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
+                except Exception:
+                    pass
+                signal_id = int(getattr(pos, "signal_id", 0) or 0)
+                mode, key = self._account_mode_tag()
+                # Persist close for PnL integrity
+                if self.db:
+                    try:
+                        await self.db.save_trade(
+                            bot_id=self.BOT_ID,
+                            side=("sell" if pos.side == "long" else "buy"),
+                            sz=pos.size, px=mark,
+                            ord_id="", inst_id=pos.inst_id, ord_type="market",
+                            fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                            state="closed", signal_id=signal_id or None,
+                            account_mode=mode, account_key=key,
+                        )
+                    except Exception as e:
+                        print(f"[AI] db close (algo): {e}", flush=True)
+                await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
                 del self._positions[coin]
                 if self.db:
                     try:
                         await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
                     except Exception:
                         pass
+                print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [already flat]", flush=True)
                 return
         except Exception as e:
             print(f"[AI] close exchange-check: {e}", flush=True)
@@ -1915,29 +2017,8 @@ class AIStrategy:
                     )
             except Exception as e:
                 print(f"[AI] exchange_close tag: {e}", flush=True)
-        if self.notifier:
-            try:
-                if not getattr(self.notifier, 'configured', True):
-                    raise RuntimeError('tg not configured')
-                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
-                if not _reply and self.notifier:
-                    _reply = await self.notifier.resolve_open_message_id(
-                        self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
-                    )
-                if not _reply:
-                    print(f"[AI] TG close: no open message_id (signal={signal_id})", flush=True)
-                else:
-                    print(f"[AI] TG close: reply_to={_reply} signal={signal_id}", flush=True)
-                _txt = self.notifier.close_msg(
-                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
-                    exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=signal_id,
-                    account_mode=self._account_mode_tag()[0],
-                    account_key=self._account_mode_tag()[1],
-                )
-                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None, account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo")
-            except Exception as e:
-                print(f"[AI] TG close: {e}", flush=True)
+        mode, _key = self._account_mode_tag()
+        await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode=mode)
         del self._positions[coin]
         if self.db:
             try:
@@ -2201,9 +2282,30 @@ class AIStrategy:
                     has_pos = True
                     break
             if not has_pos:
-                print(f"[AI-LIVE] close skip {coin}: exchange pos already gone", flush=True)
+                print(f"[AI-LIVE] close {coin}: exchange pos already gone — notify TG", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                try:
+                    ticker = await lc.get_ticker(pos.inst_id)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        mark = float(_td[0].get("last") or mark) or mark
+                except Exception:
+                    pass
+                pnl = 0.0
+                try:
+                    entry = float(pos.entry_price or 0)
+                    sz = float(pos.size or 0)
+                    if entry and sz and mark:
+                        pnl = (mark - entry) * abs(sz) if pos.side == "long" else (entry - mark) * abs(sz)
+                except Exception:
+                    pass
+                await self._notify_close_tg(
+                    pos, coin, reason or "exchange_stop", mark, pnl,
+                    account_mode="live", bot_name_suffix=" (LIVE)",
+                )
                 self._live_positions.pop(coin, None)
-                return False
+                self._persist_live()
+                return True
         except Exception as e:
             print(f"[AI-LIVE] close exchange-check: {e}", flush=True)
         live_bid = self._live_bot_id()
@@ -2297,23 +2399,10 @@ class AIStrategy:
             await release_open(self.db, live_bid, pos.inst_id, pos.side)
         except Exception:
             pass
-        if self.notifier and getattr(self.notifier, 'configured', True):
-            try:
-                _txt = self.notifier.close_msg(
-                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
-                    exit_px=round(fill_px, 4), pnl=round(pnl, 2),
-                    reason=reason,
-                    bot_name=self.BOT_NAME + " (LIVE)",
-                    signal_id=signal_id,
-                    account_mode="live", account_key="live",
-                )
-                await self.notifier.send_trade(
-                    _txt,
-                    reply_to_message_id=getattr(pos, "tg_message_id", 0) or None,
-                    account_mode="live",
-                )
-            except Exception as e:
-                print(f"[AI-LIVE] TG close: {e}", flush=True)
+        await self._notify_close_tg(
+            pos, coin, reason, fill_px, pnl,
+            account_mode="live", bot_name_suffix=" (LIVE)",
+        )
         self._live_positions.pop(coin, None)
         self._persist_live()
         print(f"[AI-LIVE] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
@@ -2920,25 +3009,13 @@ class AIStrategy:
                     f"(was {side} sz={getattr(pos, 'size', 0)} pnl={pnl:+.2f})",
                     flush=True,
                 )
-                if self.notifier:
-                    try:
-                        _txt = self.notifier.close_msg(
-                            coin=coin, side=side,
-                            entry=round(float(getattr(pos, "entry_price", 0) or 0), 4),
-                            exit_px=round(exit_px, 4),
-                            pnl=round(pnl, 2),
-                            reason="manual_close",
-                            bot_name=self.BOT_NAME,
-                            signal_id=getattr(pos, "signal_id", 0),
-                            account_mode=self._account_mode_tag()[0],
-                            account_key=self._account_mode_tag()[1],
-                        )
-                        await self.notifier.send_trade(
-                            _txt,
-                            account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo",
-                        )
-                    except Exception as _nte:
-                        print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
+                try:
+                    mode = self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo"
+                    await self._notify_close_tg(
+                        pos, coin, "manual_close", exit_px, pnl, account_mode=mode,
+                    )
+                except Exception as _nte:
+                    print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
                 self._positions.pop(coin, None)
                 try:
                     if self.db:
