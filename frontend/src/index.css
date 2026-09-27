@@ -1145,3 +1145,133 @@ body {
     font-size: 0.92rem !important;
   }
 }
+
+
+/* ═══════════════════════════════════════════
+   Telegram Mini App — same visual as iOS one-screen
+   (always applied, not only @media max-width)
+   ═══════════════════════════════════════════ */
+.mini-app-root {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--txt);
+  padding: 8px 10px;
+  gap: 8px;
+  box-sizing: border-box;
+}
+.mini-app-root .mini-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mini-app-root .mini-metrics {
+  flex-shrink: 0;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.mini-app-root .mini-metric {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mini-app-root .mini-metric .label {
+  font-size: 0.58rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--txt-muted);
+}
+.mini-app-root .mini-metric .value {
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.mini-app-root .mini-ai {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.mini-app-root .mini-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+}
+.mini-app-root .mini-section-title {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--txt-muted);
+  padding: 0 2px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.mini-app-root .mini-panel {
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+}
+.mini-app-root .mini-positions {
+  flex: 1 1 42%;
+  min-height: 0;
+  overflow: auto;
+}
+.mini-app-root .mini-pos-row {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.mini-app-root .mini-pos-row:last-child {
+  border-bottom: none;
+}
+.mini-app-root .mini-trades {
+  flex: 0 0 auto;
+}
+.mini-app-root .mini-trade-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.mini-app-root .mini-trade-row:last-child {
+  border-bottom: none;
+}
+.mini-app-root .badge-demo {
+  font-size: 0.5rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(59, 130, 246, 0.12);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+.mini-app-root .badge-live {
+  font-size: 0.5rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--profit);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
