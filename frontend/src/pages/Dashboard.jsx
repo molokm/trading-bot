@@ -1351,6 +1351,13 @@ export default function Dashboard({ health, connected, isGuest }) {
           value={
             <div className="flex flex-col gap-0.5">
               <span>{dualPnlNode(pnlTotal, liveTotal)}</span>
+              {pnl?.before_week != null && (
+                <div className="text-[0.55rem] leading-tight text-[var(--txt-muted)]">
+                  до пн: {Number(pnl.before_week) >= 0 ? '+' : ''}{Number(pnl.before_week).toFixed(0)}
+                  {' · '}нед: {Number(pnl.week) >= 0 ? '+' : ''}{Number(pnl.week || 0).toFixed(0)}
+                  {pnl.trades_before_week != null ? ` (${pnl.trades_before_week}+${pnl.trades_week || 0})` : ''}
+                </div>
+              )}
               {pnlByBot.length > 0 && (
                 <div className="max-md:hidden text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (

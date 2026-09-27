@@ -147,9 +147,13 @@ def aggregate_rows(
 
     per_bot: dict[str, float] = {k: 0.0 for k in AI_ONLY_LABELS} if ai_only else {}
     realized_1d = realized_week = realized_7d = realized_30d = 0.0
+    realized_before_week = 0.0
     total_fees = account_all = 0.0
     counted = skipped_before_epoch = skipped_other = 0
     used_fallback_label = 0
+    counted_week = counted_before = 0
+    # Keep a few largest losers for diagnostics (absolute pnl)
+    sample_losers: list[dict] = []
 
     for r in rows or []:
         try:
@@ -195,6 +199,20 @@ def aggregate_rows(
             realized_1d += pnl
         if d >= week_start_d:
             realized_week += pnl
+            counted_week += 1
+        else:
+            realized_before_week += pnl
+            counted_before += 1
+            if pnl < -1.0:
+                sample_losers.append({
+                    "pnl": round(pnl, 2),
+                    "ts": ts_ms,
+                    "date": str(d),
+                    "inst": str(r.get("inst_id") or "")[:24],
+                    "bot": bot,
+                    "ord": str(r.get("ord_id") or "")[:16],
+                    "cl": str(r.get("cl_ord_id") or "")[:20],
+                })
         age = (now - datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)).total_seconds()
         if age <= 604800:
             realized_7d += pnl
@@ -217,8 +235,12 @@ def aggregate_rows(
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
+        "before_week": round(realized_before_week, 2),
+        "trades_week": counted_week,
+        "trades_before_week": counted_before,
         "week_basis": "calendar_week_msk_monday",
         "week_start": week_start.isoformat(),
+        "sample_losers_before_week": sorted(sample_losers, key=lambda x: x["pnl"])[:8],
         "7d_rolling": round(realized_7d, 2),
         "unrealized": 0.0,
         "funding": 0.0,
