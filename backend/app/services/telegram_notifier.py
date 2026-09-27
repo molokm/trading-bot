@@ -330,6 +330,9 @@ class TelegramNotifier:
             print("[TG] send_trade DEMO skipped: no token", flush=True)
             return 0
         mid = 0
+        if not self.chat_id and not self.channel_id:
+            print("[TG] send_trade DEMO skipped: no chat_id and no channel_id", flush=True)
+            return 0
         if self.chat_id:
             mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
             if not mid:
