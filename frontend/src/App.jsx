@@ -24,15 +24,25 @@ import { GlossaryModal, OnboardingTour } from './components/ui'
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
 
-/** True inside Telegram WebApp / Mini App (or explicit /mini path). */
+/** True only in real Telegram Mini App or explicit /mini route.
+ *  Do NOT treat main website as mini just because telegram-web-app.js is loaded.
+ */
 function isTelegramMiniApp() {
   try {
     if (typeof window === 'undefined') return false
-    if (window.__MINI_APP__) return true
-    if (window.location && String(window.location.pathname || '').startsWith('/mini')) return true
+    // Explicit mini route
+    const path = String(window.location?.pathname || '')
+    if (path === '/mini' || path.startsWith('/mini/')) return true
+    // Flag set only by MiniAppPage module
+    if (window.__MINI_APP__ === true && path.startsWith('/mini')) return true
+    // Real Telegram session: non-empty initData (opened inside Telegram client)
     const tg = window.Telegram && window.Telegram.WebApp
-    if (tg && (tg.initData || tg.initDataUnsafe)) return true
-    if (tg && typeof tg.platform === 'string' && tg.platform) return true
+    if (tg) {
+      const init = String(tg.initData || '').trim()
+      if (init.length > 10) return true
+      const unsafe = tg.initDataUnsafe
+      if (unsafe && (unsafe.user || unsafe.query_id || unsafe.auth_date)) return true
+    }
   } catch { /* ignore */ }
   return false
 }
@@ -85,6 +95,13 @@ class MiniErrorBoundary extends React.Component {
 
 function AppRouter() {
   const { auth, setAuth } = useAuth()
+  // Inside Telegram client → dedicated mini UI (not the full website shell)
+  try {
+    if (typeof window !== 'undefined' && isTelegramMiniApp() && !String(window.location.pathname || '').startsWith('/mini')) {
+      window.location.replace('/mini')
+      return null
+    }
+  } catch { /* ignore */ }
   if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
   return <AppLayout />
 }
@@ -318,14 +335,8 @@ export default function App() {
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
               <Route path="/mini/*" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route
-                path="/*"
-                element={
-                  isTelegramMiniApp()
-                    ? <MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>
-                    : <AppRouter />
-                }
-              />
+              {/* Full website always via AppRouter. Mini app only at /mini (and real TG session redirects below). */}
+              <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>
         </OnboardingProvider>

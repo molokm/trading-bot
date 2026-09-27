@@ -5,7 +5,6 @@ import {
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
-window.__MINI_APP__ = true
 
 function fmt(n, digits = 2) {
   if (n == null || Number.isNaN(Number(n))) return '—'
@@ -62,6 +61,8 @@ class MiniAppErrorBoundary extends React.Component {
 
 function MiniAppPageInner() {
   const { t } = useTranslation()
+  useEffect(() => { try { window.__MINI_APP__ = true } catch {} }, [])
+
 
   useEffect(() => {
     try {
