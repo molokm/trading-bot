@@ -2577,6 +2577,65 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] reconcile: {e}", flush=True)
 
+
+    async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
+        """Re-check AI/quant gates with *current* indicators before a delayed LIVE open.
+
+        Immediate mirror (same tick as demo fill) skips this. Fast-retry / gap-fill
+        must pass — otherwise market may have flipped and blind clone is unsafe.
+        """
+        side = (side or "").lower()
+        if side not in ("long", "short"):
+            return False, "bad_side"
+        # Fresh indicators if we have a client
+        try:
+            client = await self._client()
+            if client:
+                await self._fetch_indicators(client)
+        except Exception as e:
+            print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
+        ind = self._latest_indicators.get(coin) or {}
+        if not ind:
+            return False, "no_indicators"
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        adx = float(ind.get("adx") or 0)
+        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+        # Slightly softer for mirror revalidate (already had a demo signal)
+        min_align = max(0.45, min_align - 0.05)
+        align = al if side == "long" else ash
+        if align < min_align - 1e-9:
+            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
+        # ADX gate with same soft-bypass as open path
+        best = max(al, ash)
+        try:
+            if self._adx_blocks_open(adx, best):
+                return False, f"adx_block:{adx:.1f}"
+        except Exception:
+            pass
+        # Regime clash: don't open long in clear bear / short in clear bull
+        reg = str(ind.get("regime") or "").lower()
+        if side == "long" and reg in ("bear", "bearish", "down"):
+            if al < min_align + 0.08:
+                return False, f"regime_bear_vs_long:{reg}"
+        if side == "short" and reg in ("bull", "bullish", "up"):
+            if ash < min_align + 0.08:
+                return False, f"regime_bull_vs_short:{reg}"
+        # Price still near demo entry? (avoid chasing >1.2% adverse move)
+        demo_pos = self._positions.get(coin)
+        try:
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
+            last = float(ind.get("close") or ind.get("last") or 0)
+            if entry > 0 and last > 0:
+                move = (last - entry) / entry
+                if side == "long" and move < -0.012:
+                    return False, f"price_ran_away_long:{move:.3%}"
+                if side == "short" and move > 0.012:
+                    return False, f"price_ran_away_short:{move:.3%}"
+        except Exception:
+            pass
+        return True, f"ok_align={align:.2f}_adx={adx:.1f}"
+
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
                                   take_pct: float, reason: str) -> None:
         """Retry LIVE mirror within seconds after a failed primary mirror.
@@ -2613,6 +2672,15 @@ class AIStrategy:
                     if entry > 0 and take_p > 0:
                         take_pct = abs(take_p - entry) / entry
                     side = getattr(demo_pos, "side", side)
+                # Delayed entry: re-confirm with current AI/quant data
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] fast_retry SKIP {coin} t+{delay:.0f}s: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] fast_retry AI ok {coin}: {gate_reason}", flush=True)
                 ok = await self._open_live(
                     coin, side, stop_pct, take_pct,
                     reason=f"fast_retry_{reason}",
@@ -2658,6 +2726,14 @@ class AIStrategy:
             print(f"[AI-LIVE] clone_missing {coin}: {side} demo_sz={demo_pos.size} "
                   f"entry={entry:.4f}", flush=True)
             try:
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] clone_missing SKIP {coin}: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] clone_missing AI ok {coin}: {gate_reason}", flush=True)
                 ok = await self._open_live(
                     coin, side, stop_pct, take_pct,
                     reason="clone_missing_from_demo",
