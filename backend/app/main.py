@@ -7,7 +7,7 @@ import os
 import time as _time
 import uuid
 import faulthandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
@@ -5708,56 +5708,152 @@ async def get_pnl(request: Request=None):
         return dict(data)
 
 async def _compute_pnl():
-    """Single-source PnL via pnl_engine (epoch 2026-09-01, MSK calendar, AI bots only)."""
+    """PnL DIRECTLY from OKX close bills since 2026-09-01 (MSK calendar).
+
+    Source of truth: OKX /account/bills + /account/bills-archive, subType 5/6,
+    field ``pnl`` as returned by the exchange (net of fees). No bot-label
+    remixing — account-level realized closes for the current mode (demo|live).
+    """
     global _pnl_cache, _exchange_sync_ts
+    from zoneinfo import ZoneInfo
+    from app.services.pnl_engine import epoch_ms as _ep_ms
     _mode = _account_mode()
+    _MSK = ZoneInfo('Europe/Moscow')
+    _ep = int(_ep_ms())
     try:
-        _exchange_sync_ts = 0  # force fresh OKX bills pull
+        _exchange_sync_ts = 0
         if isinstance(_pnl_cache, dict):
             _pnl_cache.clear()
-        data = await pnl_engine.compute(db, account_mode=_mode, ai_only=bool(AI_ONLY_MODE), sync_fn=sync_exchange_close_trades, reclassify_fn=getattr(db, 'reclassify_exchange_bot_labels', None))
-        # Cross-check: sum exchange_close_trades for AI Discretionary only (demo/live)
-        try:
-            from app.services.pnl_engine import epoch_ms as _ep_ms, label_from_clord as _lfc, normalize_bot_label as _nbl
-            _rows = await db.get_exchange_pnl_timebucket(bot_label=None, account_mode=None, epoch_ms=_ep_ms()) or []
-            _sum = 0.0
-            _n = 0
-            for _r in _rows:
-                _am = str(_r.get('account_mode') or '').lower()
-                if _mode == 'live' and _am != 'live':
-                    continue
-                if _mode != 'live' and _am not in ('', 'demo'):
-                    continue
-                _cl = str(_r.get('cl_ord_id') or '').lower()
-                if _cl.startswith('ais'):
-                    continue
-                _lab = _lfc(_cl) or _nbl(_r.get('bot_label') or '')
-                if _lab != 'AI Discretionary 1H':
-                    continue
-                try:
-                    _sum += float(_r.get('pnl') or 0)
-                    _n += 1
-                except (TypeError, ValueError):
-                    pass
-            _sum = round(_sum, 2)
-            _eng = round(float(data.get('total') or 0), 2)
-            if abs(_sum - _eng) > 0.05:
-                print(f'[pnl] CROSS-CHECK mode={_mode} engine={_eng} direct_sum={_sum} n={_n} → prefer direct', flush=True)
-                data['total'] = _sum
-                data['strategy_realized'] = _sum
-                pb = dict(data.get('per_bot') or {})
-                pb['AI Discretionary 1H'] = _sum
-                data['per_bot'] = pb
-                data['source'] = (data.get('source') or '') + '+crosscheck'
+        # 1) Pull bills from exchange (recent + archive from epoch)
+        bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode)
+        # 2) Group close bills (subType 5/6) by ordId — same as exchange realized
+        by_ord: dict = {}
+        for b in bills or []:
+            sub = str(b.get('subType', '') or '')
+            if sub not in ('5', '6'):
+                continue
+            oid = str(b.get('ordId', '') or '').strip()
+            if not oid:
+                continue
+            try:
+                ts = int(b.get('ts') or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if ts and ts < _ep:
+                continue
+            try:
+                bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
+            except (TypeError, ValueError):
+                bp = 0.0
+            try:
+                bf = abs(float(b.get('fee') or 0))
+            except (TypeError, ValueError):
+                bf = 0.0
+            cl = str(b.get('clOrdId', '') or '').strip()
+            inst = str(b.get('instId', '') or '')
+            if oid not in by_ord:
+                by_ord[oid] = {'pnl': 0.0, 'fee': 0.0, 'ts': ts, 'cl': cl, 'inst': inst}
+            by_ord[oid]['pnl'] += bp
+            by_ord[oid]['fee'] += bf
+            if ts > int(by_ord[oid].get('ts') or 0):
+                by_ord[oid]['ts'] = ts
+            if cl and not by_ord[oid].get('cl'):
+                by_ord[oid]['cl'] = cl
+            if inst and not by_ord[oid].get('inst'):
+                by_ord[oid]['inst'] = inst
+
+        now = datetime.now(timezone.utc)
+        now_msk = now.astimezone(_MSK)
+        today = now_msk.date()
+        week_start = (now_msk - timedelta(days=now_msk.weekday())).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).date()
+
+        total = day = week = d7 = d30 = 0.0
+        fees = 0.0
+        n = 0
+        n_week = n_before = 0
+        before_week = 0.0
+        for o in by_ord.values():
+            pnl = float(o['pnl'] or 0)
+            if abs(pnl) < 1e-12:
+                continue
+            ts = int(o.get('ts') or 0)
+            if ts and ts < _ep:
+                continue
+            total += pnl
+            fees += float(o.get('fee') or 0)
+            n += 1
+            if not ts:
+                continue
+            d = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).astimezone(_MSK).date()
+            if d == today:
+                day += pnl
+            if d >= week_start:
+                week += pnl
+                n_week += 1
             else:
-                print(f'[pnl] CROSS-CHECK ok mode={_mode} total={_eng} n={_n}', flush=True)
-        except Exception as _ce:
-            print(f'[pnl] cross-check: {_ce}', flush=True)
+                before_week += pnl
+                n_before += 1
+            age = (now - datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)).total_seconds()
+            if age <= 604800:
+                d7 += pnl
+            if age <= 2592000:
+                d30 += pnl
+
+        total = round(total, 2)
+        data = {
+            'total': total,
+            'account_total': total,
+            '1d': round(day, 2),
+            '7d': round(d7, 2),
+            '30d': round(d30, 2),
+            'week': round(week, 2),
+            'before_week': round(before_week, 2),
+            'trades_week': n_week,
+            'trades_before_week': n_before,
+            'week_basis': 'calendar_week_msk_monday',
+            'week_start': str(week_start),
+            'unrealized': 0.0,
+            'funding': 0.0,
+            'economic_approx': total,
+            'strategy_realized': total,
+            'source': 'okx_bills_direct',
+            'pnl_tz': 'Europe/Moscow',
+            'fees': round(fees, 2),
+            'fees_informational': True,
+            'pnl_includes_fee': True,
+            'per_bot': {'AI Discretionary 1H': total},
+            'per_bot_all': {'AI Discretionary 1H': total},
+            'active_bots': ['AI Discretionary 1H'],
+            'trades_counted': n,
+            'pnl_epoch': PNL_EPOCH_ISO,
+            'engine': 'okx_bills_direct_v1',
+            'account_mode': _mode,
+            'closes_raw': len(by_ord),
+            'bills_fetched': len(bills or []),
+        }
+        print(
+            f'[pnl] OKX-direct mode={_mode} total={total} 1d={data["1d"]} week={data["week"]} '
+            f'before_week={data["before_week"]} n={n} bills={len(bills or [])}',
+            flush=True,
+        )
+        # Keep DB in sync for history UI (best-effort, non-blocking for numbers)
+        try:
+            await sync_exchange_close_trades()
+        except Exception as _se:
+            print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
     except Exception as e:
-        print(f'[pnl] engine error: {e}', flush=True)
+        print(f'[pnl] okx-direct error: {e}', flush=True)
         import traceback
         traceback.print_exc()
-        data = {'total': 0, '1d': 0, '7d': 0, '30d': 0, 'week': 0, 'unrealized': 0, 'per_bot': {'AI Discretionary 1H': 0, 'AI Scale-In 1H': 0}, 'active_bots': ['AI Discretionary 1H', 'AI Scale-In 1H'], 'source': 'error', 'pnl_epoch': PNL_EPOCH_ISO, 'error': str(e)}
+        data = {
+            'total': 0, '1d': 0, '7d': 0, '30d': 0, 'week': 0, 'unrealized': 0,
+            'per_bot': {'AI Discretionary 1H': 0},
+            'active_bots': ['AI Discretionary 1H'],
+            'source': 'error', 'pnl_epoch': PNL_EPOCH_ISO, 'error': str(e),
+            'account_mode': _mode,
+        }
     try:
         unreal = 0.0
         client = client_manager.get_client() if client_manager else None

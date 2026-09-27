@@ -647,6 +647,10 @@ export default function Dashboard({ health, connected, isGuest }) {
   })()
 
   const discPnlResolved = (() => {
+    const src = String(pnl?.source || '')
+    if (pnlModeOk && pnl?.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
+      return Number(pnl.per_bot?.['AI Discretionary 1H'] ?? pnl.total ?? 0)
+    }
     if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
   })()
@@ -657,13 +661,14 @@ export default function Dashboard({ health, connected, isGuest }) {
     return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
   })()
   const pnlTotal = (() => {
-    // Prefer sum of visible DEMO closed trades — matches what user sees in the list
+    if (!pnlModeOk) return 0
+    // Prefer direct OKX bills / exchange engine — authoritative since 01.09.2026
+    const src = String(pnl?.source || '')
+    if (pnl && pnl.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
+      return Number(pnl.total)
+    }
     if (demoMode && demoRealizedFromTrades.n > 0) {
       return demoRealizedFromTrades.total
-    }
-    if (!pnlModeOk) return 0
-    if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
-      return Number(pnl.total)
     }
     if (AI_ONLY_MODE) return discPnlResolved
     if (pnl && pnl.total != null) return Number(pnl.total)
