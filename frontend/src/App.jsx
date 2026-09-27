@@ -24,6 +24,20 @@ import { GlossaryModal, OnboardingTour } from './components/ui'
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
 
+/** True inside Telegram WebApp / Mini App (or explicit /mini path). */
+function isTelegramMiniApp() {
+  try {
+    if (typeof window === 'undefined') return false
+    if (window.__MINI_APP__) return true
+    if (window.location && String(window.location.pathname || '').startsWith('/mini')) return true
+    const tg = window.Telegram && window.Telegram.WebApp
+    if (tg && (tg.initData || tg.initDataUnsafe)) return true
+    if (tg && typeof tg.platform === 'string' && tg.platform) return true
+  } catch { /* ignore */ }
+  return false
+}
+
+
 /* ═══ ErrorBoundary — показать ошибку вместо белого экрана ═══ */
 class MiniErrorBoundary extends React.Component {
   constructor(props) {
@@ -250,7 +264,8 @@ function AppLayout() {
       {/* ═══ MODALS ═══ */}
       <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
 
-      {/* Mobile bottom nav */}
+      {/* Mobile bottom nav — never in Telegram Mini App */}
+      {!isTelegramMiniApp() && (
       <nav className="mobile-bottom-nav md:hidden" aria-label="Primary">
         {navItems.map(item => (
           <NavLink
@@ -266,6 +281,7 @@ function AppLayout() {
           </NavLink>
         ))}
       </nav>
+      )}
       <OnboardingTour />
     </div>
   )
@@ -301,7 +317,15 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route path="/*" element={<AppRouter />} />
+              <Route path="/mini/*" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
+              <Route
+                path="/*"
+                element={
+                  isTelegramMiniApp()
+                    ? <MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>
+                    : <AppRouter />
+                }
+              />
             </Routes>
           </AuthContext.Provider>
         </OnboardingProvider>

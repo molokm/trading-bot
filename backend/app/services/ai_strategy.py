@@ -2554,30 +2554,45 @@ class AIStrategy:
             print(f"[AI-LIVE] reconcile: {e}", flush=True)
 
     async def _clone_missing_to_live(self):
-        """After hydrate: clone demo positions that are missing from live."""
-        if not self._live_ready():
+        """Clone demo positions that are missing from live (hydrate + gap-fill)."""
+        if not await self._mirror_enabled():
             return
-        # Adopt whatever is already on the live account FIRST — otherwise a
-        # pre-existing (un-hydrated) position would get a duplicate market order.
+        if not self._live_ready():
+            await self._try_refresh_live_client()
+        if not self._live_ready():
+            print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            return
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
             print(f"[AI-LIVE] clone_missing pre-reconcile: {e}", flush=True)
-        for coin, demo_pos in self._positions.items():
+        import time as _t
+        if not hasattr(self, "_clone_attempt_ts"):
+            self._clone_attempt_ts = {}
+        now = _t.time()
+        for coin, demo_pos in list(self._positions.items()):
             if coin in self._live_positions:
                 continue
-            if demo_pos.size <= 0:
+            if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
-            entry = demo_pos.entry_price
-            stop_pct = abs(demo_pos.stop_price - entry) / entry if entry > 0 and demo_pos.stop_price > 0 else 0.03
-            take_pct = abs(demo_pos.take_price - entry) / entry if entry > 0 and demo_pos.take_price > 0 else 0.06
-            print(f"[AI-LIVE] clone_missing {coin}: {demo_pos.side} sz={demo_pos.size} "
+            last = float(self._clone_attempt_ts.get(coin) or 0)
+            if now - last < 90:
+                continue
+            self._clone_attempt_ts[coin] = now
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+            stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+            take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+            stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.03
+            take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.06
+            side = getattr(demo_pos, "side", "long")
+            print(f"[AI-LIVE] clone_missing {coin}: {side} demo_sz={demo_pos.size} "
                   f"entry={entry:.4f}", flush=True)
             try:
-                await self._open_live(
-                    coin, demo_pos.side, stop_pct, take_pct,
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
                     reason="clone_missing_from_demo",
                 )
+                print(f"[AI-LIVE] clone_missing result {coin}={ok}", flush=True)
             except Exception as e:
                 print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
 
@@ -3301,6 +3316,17 @@ class AIStrategy:
                 await self._reconcile_live_from_exchange()
         except Exception as _le:
             print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
+        # Gap-fill: demo open without live twin (failed mirror / late connect)
+        try:
+            if await self._mirror_enabled() and (self._tick_count == 0 or self._tick_count % 2 == 0):
+                await self._try_refresh_live_client()
+                if self._live_ready() and self._positions:
+                    missing = [c for c in self._positions if c not in self._live_positions]
+                    if missing:
+                        print(f"[AI-LIVE] gap-fill missing on live: {missing}", flush=True)
+                        await self._clone_missing_to_live()
+        except Exception as _ge:
+            print(f"[AI-LIVE] gap-fill: {_ge}", flush=True)
         # Once per process-ish: sweep unclaimed exchange positions
         try:
             n = int(getattr(self, "_orphan_tick", 0) or 0) + 1

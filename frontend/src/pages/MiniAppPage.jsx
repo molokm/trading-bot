@@ -62,6 +62,17 @@ class MiniAppErrorBoundary extends React.Component {
 
 function MiniAppPageInner() {
   const { t } = useTranslation()
+
+  useEffect(() => {
+    try {
+      const tg = window.Telegram && window.Telegram.WebApp
+      if (tg) {
+        tg.ready && tg.ready()
+        tg.expand && tg.expand()
+      }
+    } catch {}
+  }, [])
+
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
