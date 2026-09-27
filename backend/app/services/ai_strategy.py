@@ -27,6 +27,21 @@ from .analysis_logger import get_logger
 
 AI_BOT_ID = "ai_strategy"
 
+def _exec_evt(kind: str, coin: str = "", side: str = "", reason: str = "", **extra) -> dict:
+    """Small structured log row for open/mirror execution trail."""
+    from datetime import datetime, timezone
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "coin": coin,
+        "side": side,
+        "reason": reason,
+    }
+    if extra:
+        row.update(extra)
+    return row
+
+
 def _ai_state_path() -> str:
     """Prefer persistent disk; /tmp is wiped on every Render deploy."""
     candidates = [
