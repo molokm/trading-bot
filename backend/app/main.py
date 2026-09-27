@@ -5094,7 +5094,12 @@ _bills_cache: dict = {}
 _BILLS_TTL = 60
 
 async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> list:
-    """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live)."""
+    """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live).
+
+    - /account/bills — last ~7 days (paginated)
+    - /account/bills-archive — older history with begin=PNL epoch (2026-09-01)
+    Up to 40 pages × 100 per endpoint so history is not truncated at ~19.09.
+    """
     global _bills_cache
     mode = (mode or _account_mode()).lower()
     if mode not in ('demo', 'live'):
@@ -5105,48 +5110,100 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
         return list(cached.get('data') or [])
     bills: list = []
     seen: set = set()
+    # Epoch for archive begin (ms) — product start 2026-09-01
     try:
-        for endpoint, fn in (('bills', lambda c, **kw: c.get_bills(inst_type='SWAP', type='2', **kw)), ('archive', lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw))):
-            after = ''
-            for _ in range(10):
-                kw = {'limit': limit_per_page}
-                if after:
-                    kw['after'] = after
-                resp = None
-                for attempt in range(3):
+        from app.services.pnl_engine import epoch_ms as _epoch_ms
+        begin_ms = int(_epoch_ms())
+    except Exception:
+        begin_ms = int(datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+    async def _pull(endpoint: str, fn, *, use_begin: bool, max_pages: int):
+        after = ''
+        pages = 0
+        while pages < max_pages:
+            pages += 1
+            kw = {'limit': limit_per_page}
+            if after:
+                kw['after'] = after
+            if use_begin and begin_ms:
+                kw['begin'] = str(begin_ms)
+            resp = None
+            for attempt in range(3):
+                try:
                     resp = await _okx_call_account(lambda c, e=fn, k=kw: e(c, **k), mode=mode)
-                    if not resp.get('error'):
-                        break
-                    msg = str(resp.get('message', ''))
-                    if '429' in msg or 'Too Many Requests' in msg:
-                        await asyncio.sleep(1.0 + attempt)
-                        continue
+                except Exception as e:
+                    resp = {'error': True, 'message': str(e)}
+                if not resp.get('error'):
                     break
-                if not resp or resp.get('error'):
-                    print(f'[bills] {mode}/{endpoint} error: {(resp or {}).get('message', '')}', flush=True)
-                    break
-                data = resp.get('data', [])
-                if not data:
-                    break
-                added = 0
-                for b in data:
-                    bid = b.get('billId', '')
-                    if bid in seen:
-                        continue
+                msg = str(resp.get('message', ''))
+                if '429' in msg or 'Too Many Requests' in msg:
+                    await asyncio.sleep(1.0 + attempt)
+                    continue
+                break
+            if not resp or resp.get('error'):
+                print(f'[bills] {mode}/{endpoint} error: {(resp or {}).get("message", "")}', flush=True)
+                break
+            data = resp.get('data', []) or []
+            if not data:
+                break
+            added = 0
+            for b in data:
+                bid = str(b.get('billId', '') or '')
+                if bid and bid in seen:
+                    continue
+                if bid:
                     seen.add(bid)
-                    if str(b.get('type', '')) == '2':
-                        b = dict(b)
-                        b['account_mode'] = mode
-                        b['_from_okx'] = True
-                        bills.append(b)
-                        added += 1
-                after = data[-1].get('billId', '')
-                if added == 0 or len(data) < limit_per_page:
+                # type=2 trade bills; keep rows even if type missing on archive edge cases
+                btype = str(b.get('type', '') or '2')
+                if btype not in ('2', ''):
+                    continue
+                b = dict(b)
+                b['account_mode'] = mode
+                b['_from_okx'] = True
+                b['_endpoint'] = endpoint
+                bills.append(b)
+                added += 1
+            after = str(data[-1].get('billId', '') or '')
+            if not after or len(data) < limit_per_page:
+                break
+            # Stop if oldest bill in page is before epoch
+            try:
+                oldest = int(data[-1].get('ts') or 0)
+                if oldest and begin_ms and oldest < begin_ms:
                     break
+            except (TypeError, ValueError):
+                pass
+        print(f'[bills] {mode}/{endpoint} pages={pages} total_so_far={len(bills)}', flush=True)
+
+    try:
+        # Recent (≤7d)
+        await _pull(
+            'bills',
+            lambda c, **kw: c.get_bills(inst_type='SWAP', type='2', **kw),
+            use_begin=False,
+            max_pages=15,
+        )
+        # Archive from epoch (covers 01.09 → ~20.09 gap)
+        await _pull(
+            'archive',
+            lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw),
+            use_begin=True,
+            max_pages=40,
+        )
     except Exception as e:
         import traceback
         print(f'[bills] {mode} fetch error: {e}', flush=True)
         traceback.print_exc()
+    # Oldest-first log for ops
+    try:
+        ts_list = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
+        if ts_list:
+            from datetime import datetime as _dt, timezone as _tz
+            a = _dt.fromtimestamp(ts_list[0] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
+            z = _dt.fromtimestamp(ts_list[-1] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
+            print(f'[bills] {mode} range {a} → {z} n={len(bills)}', flush=True)
+    except Exception:
+        pass
     if isinstance(_bills_cache, dict):
         _bills_cache[mode] = {'ts': _time.time(), 'data': bills}
     return bills
@@ -6430,6 +6487,60 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
             if isinstance(_fp, dict):
                 _fp['account_mode'] = _fp.get('account_mode') or mode
                 _fp['_from_okx'] = True
+        # Backfill closes from exchange_close_trades (persisted since epoch) missing in bills window
+        try:
+            from app.services.pnl_engine import epoch_ms as _epm
+            _ep = int(_epm())
+            if db and hasattr(db, 'get_exchange_close_trades_detail'):
+                _ects = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or []
+                _have = {str(x.get('ord_id') or '').strip() for x in fills_paired if isinstance(x, dict)}
+                _added = 0
+                for _r in _ects:
+                    _am = str(_r.get('account_mode') or 'demo').lower()
+                    if mode == 'live' and _am != 'live':
+                        continue
+                    if mode != 'live' and _am not in ('', 'demo'):
+                        continue
+                    oid = str(_r.get('ord_id') or '').strip()
+                    if oid and oid in _have:
+                        continue
+                    try:
+                        _pnl = float(_r.get('pnl') or 0)
+                    except (TypeError, ValueError):
+                        _pnl = 0.0
+                    if abs(_pnl) < 1e-12:
+                        continue
+                    ts_ms = int(_r.get('close_ts') or 0)
+                    if ts_ms and ts_ms < _ep:
+                        continue
+                    inst = str(_r.get('inst_id') or '')
+                    fills_paired.append({
+                        'time': _ms_to_iso(ts_ms) if ts_ms else '',
+                        'entry_time': '',
+                        'side': '',
+                        'symbol': inst,
+                        'inst_id': inst,
+                        'size': float(_r.get('sz') or 0),
+                        'pnl': round(_pnl, 4),
+                        'ord_id': oid,
+                        'fee': float(_r.get('fee') or 0),
+                        'entry': 0,
+                        'entry_price': 0,
+                        'exit_price': float(_r.get('avg_px') or 0),
+                        'reason': 'closed',
+                        'pos_side': '',
+                        'bot': _r.get('bot_label') or 'AI Discretionary 1H',
+                        'account_mode': _am or mode,
+                        'source': 'exchange_close_trades',
+                        '_from_db': True,
+                    })
+                    if oid:
+                        _have.add(oid)
+                    _added += 1
+                if _added:
+                    print(f'[trades/paired] backfilled {_added} closes from exchange_close_trades', flush=True)
+        except Exception as _bf_e:
+            print(f'[trades/paired] backfill: {_bf_e}', flush=True)
         for t in fills_paired:
             inst = t.get('inst_id', '') or t.get('symbol', '')
             is_open = t.get('reason') == 'open'
