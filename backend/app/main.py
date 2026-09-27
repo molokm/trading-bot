@@ -5778,6 +5778,44 @@ async def _compute_pnl():
             if inst and not by_ord[oid].get('inst'):
                 by_ord[oid]['inst'] = inst
 
+        try:
+            db_rows = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=500) if hasattr(db, 'get_exchange_close_trades_detail') else []
+        except Exception:
+            db_rows = []
+        for row in db_rows or []:
+            oid = str(row.get('ord_id', '') or '').strip()
+            if not oid or oid in by_ord:
+                continue
+            cl = str(row.get('cl_ord_id', '') or '').strip().lower()
+            if cl:
+                continue
+            label = str(row.get('bot_label', '') or row.get('strategy_name', '') or '').strip()
+            if 'discretionary' not in label.lower() and 'ai' not in label.lower():
+                continue
+            try:
+                ts = int(row.get('close_time_ms') or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if not ts:
+                t_iso = str(row.get('time', '') or '')
+                if t_iso:
+                    try:
+                        ts = int(datetime.fromisoformat(t_iso.replace('Z', '+00:00')).timestamp() * 1000)
+                    except Exception:
+                        pass
+            if ts and ts < _ep:
+                continue
+            try:
+                bp = float(row.get('realized_pnl') or row.get('pnl') or 0)
+            except (TypeError, ValueError):
+                bp = 0.0
+            try:
+                bf = abs(float(row.get('fee') or 0))
+            except (TypeError, ValueError):
+                bf = 0.0
+            inst = str(row.get('inst_id', '') or row.get('symbol', '') or '')
+            by_ord[oid] = {'pnl': bp, 'fee': bf, 'ts': ts, 'cl': '', 'inst': inst}
+
         now = datetime.now(timezone.utc)
         now_msk = now.astimezone(_MSK)
         today = now_msk.date()
