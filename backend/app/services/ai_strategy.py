@@ -561,6 +561,15 @@ class AIStrategy:
 
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
+            # Pending LIVE mirror gaps → poll every 8s (not 1–3 min)
+            try:
+                if await self._mirror_enabled() and self._positions:
+                    _miss = [c for c in self._positions if c not in self._live_positions]
+                    if _miss:
+                        _sleep = min(_sleep, 8)
+                        print(f"[AI-LIVE] pending mirror {_miss} — next tick in {_sleep}s", flush=True)
+            except Exception:
+                pass
             import time as _t
             _next_ts = _t.time() + _sleep
             self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
@@ -1743,7 +1752,7 @@ class AIStrategy:
             await self._place_exchange_sl_tp(client, pos)
         except Exception as e:
             print(f"[AI] exchange SL/TP placement: {e}", flush=True)
-        # Mirror to LIVE after primary fill (re-bind client if needed)
+        # Mirror to LIVE after primary fill — must be near-instant (market moves fast)
         try:
             if not await self._mirror_enabled():
                 _m = "disabled_by_user"
@@ -1751,6 +1760,7 @@ class AIStrategy:
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
                 await self._try_refresh_live_client()
+                ok = False
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
                     _m = "mirror_ok" if ok else "mirror_fail"
@@ -1760,9 +1770,23 @@ class AIStrategy:
                     _m = "live_not_ready"
                     self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
                     print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
+                # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
+                if not ok:
+                    try:
+                        asyncio.create_task(
+                            self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                        )
+                    except Exception as _te:
+                        print(f"[AI-LIVE] schedule fast_retry: {_te}", flush=True)
         except Exception as e:
             self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
+            try:
+                asyncio.create_task(
+                    self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                )
+            except Exception:
+                pass
 
 
     async def _notify_close_tg(
@@ -2576,7 +2600,7 @@ class AIStrategy:
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
             last = float(self._clone_attempt_ts.get(coin) or 0)
-            if now - last < 90:
+            if now - last < 15:
                 continue
             self._clone_attempt_ts[coin] = now
             entry = float(getattr(demo_pos, "entry_price", 0) or 0)
@@ -3318,7 +3342,7 @@ class AIStrategy:
             print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
         # Gap-fill: demo open without live twin (failed mirror / late connect)
         try:
-            if await self._mirror_enabled() and (self._tick_count == 0 or self._tick_count % 2 == 0):
+            if await self._mirror_enabled():
                 await self._try_refresh_live_client()
                 if self._live_ready() and self._positions:
                     missing = [c for c in self._positions if c not in self._live_positions]
