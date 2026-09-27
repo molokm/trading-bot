@@ -5728,6 +5728,10 @@ async def _compute_pnl():
         bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode)
         # 2) Group close bills (subType 5/6) by ordId — same as exchange realized
         by_ord: dict = {}
+        skipped_other = 0.0
+        skipped_other_n = 0
+        skipped_ais = 0.0
+        skipped_ais_n = 0
         for b in bills or []:
             sub = str(b.get('subType', '') or '')
             if sub not in ('5', '6'):
@@ -5750,7 +5754,19 @@ async def _compute_pnl():
             except (TypeError, ValueError):
                 bf = 0.0
             cl = str(b.get('clOrdId', '') or '').strip()
+            cl_l = cl.lower()
             inst = str(b.get('instId', '') or '')
+            # Only AI Discretionary: clOrdId starts with "ai" but NOT "ais" (retired Scale-In).
+            # Other prefixes (rot/imp/val/scl/sm) and untagged → exclude from dashboard total.
+            if cl_l.startswith('ais'):
+                skipped_ais += bp
+                skipped_ais_n += 1
+                continue
+            is_ai = cl_l.startswith('ai') and not cl_l.startswith('ais')
+            if not is_ai:
+                skipped_other += bp
+                skipped_other_n += 1
+                continue
             if oid not in by_ord:
                 by_ord[oid] = {'pnl': 0.0, 'fee': 0.0, 'ts': ts, 'cl': cl, 'inst': inst}
             by_ord[oid]['pnl'] += bp
@@ -5832,10 +5848,16 @@ async def _compute_pnl():
             'account_mode': _mode,
             'closes_raw': len(by_ord),
             'bills_fetched': len(bills or []),
+            'excluded_ais_pnl': round(skipped_ais, 2),
+            'excluded_ais_n': skipped_ais_n,
+            'excluded_other_pnl': round(skipped_other, 2),
+            'excluded_other_n': skipped_other_n,
+            'filter': 'clOrdId=ai* (not ais)',
         }
         print(
             f'[pnl] OKX-direct mode={_mode} total={total} 1d={data["1d"]} week={data["week"]} '
-            f'before_week={data["before_week"]} n={n} bills={len(bills or [])}',
+            f'before_week={data["before_week"]} n={n} bills={len(bills or [])} '
+            f'excl_ais={skipped_ais:.2f}({skipped_ais_n}) excl_other={skipped_other:.2f}({skipped_other_n})',
             flush=True,
         )
         # Keep DB in sync for history UI (best-effort, non-blocking for numbers)
