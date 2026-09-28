@@ -5967,6 +5967,7 @@ async def _compute_pnl():
 
 
 
+@app.get('/api/pnl/reconcile', dependencies=[Depends(require_admin)])
 async def pnl_reconcile():
     """Compare dashboard strict PnL vs OKX bills (trade + funding) + positions upl.
 
