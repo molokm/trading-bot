@@ -87,9 +87,9 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.10-defensive"
+STRATEGY_VERSION = "v1.11-antichurn"
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.10 — защитный режим: BTC/ETH/SOL/XRP, высокий порог входа, ранний трейл и безубыток, риск ~1.5% на сделку."
+    "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
 
 CT_VAL = {
@@ -188,6 +188,17 @@ class AIConfig:
     exit_weak_adx: float = 12.0
     trail_activate_pct: float = 0.40       # start locking earlier
     trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
+    # Anti-churn: close→same-side reopen wastes fees when trend continues
+    reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
+    reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
+    # Do not indicator-exit at a loss if same-side trend still confirmed
+    hold_loss_if_align: float = 0.60       # align >= this → skip soft/hard ind exit while red
+    # Scale-in on continuation instead of close+reopen
+    scale_in_enabled: bool = True
+    scale_in_min_align: float = 0.70
+    scale_in_max_adds: int = 1
+    scale_in_frac: float = 0.45            # add ~45% of current size
+    scale_in_min_hold_min: float = 30.0    # only after position seasoned
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
@@ -232,6 +243,7 @@ class AIPosition:
     peak_price: float = 0.0
     unrealized_pnl: float = 0.0
     sl_algo_id: str = ""
+    scale_adds: int = 0
     tp_algo_id: str = ""
 
 
@@ -257,6 +269,7 @@ class AIStrategy:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._positions: dict[str, AIPosition] = {}
+        self._last_closes: dict = {}  # coin -> {side,ts,pnl,reason}
         # ── LIVE mirror state (separate from the demo/primary account) ──
         # The live account mirrors every primary open/close. It uses its own
         # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
@@ -1609,6 +1622,110 @@ class AIStrategy:
             cl_ord_id=cl_id, is_close=is_close,
         )
 
+
+    async def _maybe_scale_in(self, client, coin: str, decision: dict) -> bool:
+        """Add to existing position when trend continues — cheaper than close+reopen."""
+        pos = self._positions.get(coin)
+        if not pos:
+            return False
+        cfg = self.config
+        side = str(decision.get("side") or pos.side).lower()
+        if side != pos.side:
+            return False
+        adds = int(getattr(pos, "scale_adds", 0) or 0)
+        if adds >= int(getattr(cfg, "scale_in_max_adds", 1) or 1):
+            self._record_exec("scale_skip", coin=coin, side=side, reason="max_adds")
+            return False
+        try:
+            opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+            held = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+        except Exception:
+            held = 999.0
+        if held < float(getattr(cfg, "scale_in_min_hold_min", 30) or 30):
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_early:{held:.0f}m")
+            return False
+        ind = self._latest_indicators.get(coin) or {}
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align = ash if side == "short" else al
+        min_al = float(getattr(cfg, "scale_in_min_align", 0.70) or 0.70)
+        if align < min_al:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"weak_align:{align:.2f}")
+            return False
+        # Don't average down aggressively when already deep red
+        px = float(ind.get("close") or 0) or float(pos.entry_price or 0)
+        upl = self._unrealized_pct(pos, px)
+        if upl < -1.2:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_red:{upl:+.2f}%")
+            return False
+        frac = float(getattr(cfg, "scale_in_frac", 0.45) or 0.45)
+        add_sz = round(float(pos.size) * frac, 8)
+        lot = LOT_SZ.get(coin, 0.01)
+        if add_sz < lot:
+            add_sz = lot
+        if not self._execute_enabled():
+            print(f"[AI] SIGNAL scale_in {side} {coin} +{add_sz} align={align:.2f}", flush=True)
+            return False
+        order_side = "buy" if side == "long" else "sell"
+        try:
+            resp = await self._place(client, pos.inst_id, order_side, add_sz, side)
+        except Exception as e:
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(e)[:80])
+            return False
+        if resp.get("error"):
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(resp.get("message") or "")[:80])
+            return False
+        fills = resp.get("data") or []
+        fill_px, fee, _ = extract_fill_avg(fills, px)
+        if not fill_px:
+            fill_px = px
+        # Weighted average entry
+        old_sz = float(pos.size or 0)
+        old_entry = float(pos.entry_price or 0)
+        new_sz = old_sz + add_sz
+        if new_sz > 0 and old_entry > 0 and fill_px > 0:
+            pos.entry_price = (old_entry * old_sz + fill_px * add_sz) / new_sz
+        pos.size = new_sz
+        pos.scale_adds = adds + 1
+        # Widen stop slightly from new avg (keep risk coherent)
+        stop_pct = abs(pos.stop_price - old_entry) / old_entry if old_entry and pos.stop_price else 0.02
+        if pos.side == "long":
+            pos.stop_price = pos.entry_price * (1 - stop_pct)
+        else:
+            pos.stop_price = pos.entry_price * (1 + stop_pct)
+        self._record_exec(
+            "scale_in", coin=coin, side=side, size=add_sz,
+            reason=f"align={align:.2f}_upl={upl:+.2f}%_avg={pos.entry_price:.4f}",
+        )
+        print(
+            f"[AI] SCALE-IN {side} {coin} +{add_sz} @ {fill_px} → sz={new_sz} avg={pos.entry_price:.4f} "
+            f"align={align:.2f} upl={upl:+.2f}%",
+            flush=True,
+        )
+        # Mirror scale-in on LIVE only if that coin is already mirrored
+        try:
+            if await self._mirror_enabled() and self._live_ready() and coin in (self._live_positions or {}):
+                lc = self._live_client()
+                lpos = self._live_positions[coin]
+                if lc and lpos:
+                    oside = "buy" if side == "long" else "sell"
+                    resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    if not resp_l.get("error"):
+                        fills_l = resp_l.get("data") or []
+                        fpx, _, _ = extract_fill_avg(fills_l, fill_px)
+                        fpx = fpx or fill_px
+                        osz = float(lpos.size or 0)
+                        oen = float(lpos.entry_price or 0)
+                        nsz = osz + add_sz
+                        if nsz > 0 and oen > 0:
+                            lpos.entry_price = (oen * osz + fpx * add_sz) / nsz
+                        lpos.size = nsz
+                        lpos.scale_adds = int(getattr(lpos, "scale_adds", 0) or 0) + 1
+                        print(f"[AI-LIVE] SCALE-IN {coin} +{add_sz} @ {fpx}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] scale_in mirror: {e}", flush=True)
+        return True
+
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str):
         ind = self._latest_indicators.get(coin) or {}
@@ -2014,6 +2131,15 @@ class AIStrategy:
                     except Exception as e:
                         print(f"[AI] db close (algo): {e}", flush=True)
                 await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
+                try:
+                    self._last_closes[coin] = {
+                        "side": getattr(pos, "side", ""),
+                        "ts": time.time(),
+                        "pnl": float(pnl or 0),
+                        "reason": str(reason or "exchange_stop"),
+                    }
+                except Exception:
+                    pass
                 del self._positions[coin]
                 if self.db:
                     try:
@@ -2176,6 +2302,15 @@ class AIStrategy:
                 print(f"[AI] exchange_close tag: {e}", flush=True)
         mode, _key = self._account_mode_tag()
         await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode=mode)
+        try:
+            self._last_closes[coin] = {
+                "side": getattr(pos, "side", ""),
+                "ts": time.time(),
+                "pnl": float(pnl or 0),
+                "reason": str(reason or ""),
+            }
+        except Exception:
+            pass
         del self._positions[coin]
         if self.db:
             try:
@@ -3099,11 +3234,27 @@ class AIStrategy:
             soft = True
             hard = True
 
+        # Same-side trend still strong? Do not exit at a loss on indicator noise —
+        # that causes close→reopen churn and double fees when short/long continues.
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align_side = ash if pos.side == "short" else al
+        hold_al = float(getattr(cfg, "hold_loss_if_align", 0.60) or 0)
+        trend_still_ok = hold_al > 0 and align_side >= hold_al
+
         # In profit + any soft signal → take the small win
         if soft and upl >= min_p:
             return "ind_exit:" + "+".join(reasons[:3])
         # Strong multi-signal against even if flat/small red — cut before full SL
+        # BUT skip if we are red AND same-side align still confirms the trade
         if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
+            if upl < 0 and trend_still_ok:
+                print(
+                    f"[AI] hold through ind noise {pos.coin} {pos.side}: "
+                    f"upl={upl:+.2f}% align={align_side:.2f} reasons={reasons[:3]}",
+                    flush=True,
+                )
+                return None
             return "ind_exit:" + "+".join(reasons[:3])
         return None
 
@@ -3885,6 +4036,41 @@ class AIStrategy:
                     return
             except Exception as e:
                 print(f"[{self.BOT_NAME}] sibling check: {e}", flush=True)
+            side_dec = str(decision.get("side") or "").lower()
+            # Scale-in: already in same coin+side and trend continues → add size, don't churn
+            if coin in self._positions and getattr(self._positions[coin], "side", "") == side_dec:
+                if getattr(self.config, "scale_in_enabled", True):
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in: {e}", flush=True)
+                else:
+                    self._record_exec("open_skip", coin=coin, side=side_dec, reason="already_in")
+                return
+            # Anti-churn: just closed same side → wait (unless align is exceptional)
+            try:
+                lc = (self._last_closes or {}).get(coin) or {}
+                if lc and str(lc.get("side") or "").lower() == side_dec:
+                    age_min = (time.time() - float(lc.get("ts") or 0)) / 60.0
+                    cd = float(getattr(self.config, "reopen_cooldown_min", 75) or 75)
+                    ind0 = self._latest_indicators.get(coin) or {}
+                    al0 = float(ind0.get("align_long") or 0)
+                    ash0 = float(ind0.get("align_short") or 0)
+                    align0 = ash0 if side_dec == "short" else al0
+                    ov = float(getattr(self.config, "reopen_align_override", 0.82) or 0.82)
+                    if age_min < cd and align0 < ov:
+                        self._record_exec(
+                            "open_skip", coin=coin, side=side_dec,
+                            reason=f"reopen_cooldown:{age_min:.0f}m<{cd:.0f}m_align={align0:.2f}",
+                        )
+                        print(
+                            f"[AI] skip reopen {coin} {side_dec}: cooldown {age_min:.0f}/{cd:.0f}m "
+                            f"align={align0:.2f} last_pnl={lc.get('pnl')}",
+                            flush=True,
+                        )
+                        return
+            except Exception as e:
+                print(f"[AI] reopen cooldown check: {e}", flush=True)
             if len(self._positions) >= self.config.max_positions:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="max_positions")

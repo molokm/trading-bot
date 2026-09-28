@@ -352,7 +352,7 @@ const en = {
   'bots.tagline_validation': 'MACD+Donchian strategy: entry on a 15-day-high breakout confirmed by MACD, chandelier 4×ATR, breakeven at +1.5%, partial take-profit 8% (30%), second TP 10%, max_hold 3 days, top-4 @ 1×.',
   'bots.ai_name': 'AI Discretionary 1H',
   'bots.ai_tagline': 'AI bot: analyzes the market and decides on its own when to open and close trades.',
-  'bots.ai_desc': 'AI Discretionary 1H v1.10 defensive: BTC · ETH · SOL · XRP only, higher entry bar, early trail/breakeven, ~1.5% risk per trade.',
+  'bots.ai_desc': 'AI Discretionary 1H v1.11: BTC·ETH·SOL·XRP — no close→reopen churn, hold trend, scale-in on continuation, ~1.5% risk.',
   'bots.tag_ai_llm': 'LLM Groq',
   'bots.tag_tf_1h': '1H candles',
   'bots.tag_demo_exec': 'demo execution',
