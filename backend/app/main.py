@@ -5732,203 +5732,205 @@ async def get_pnl(request: Request=None):
         return dict(data)
 
 async def _compute_pnl():
-    """PnL DIRECTLY from OKX close bills since 2026-09-01 (MSK calendar).
+    """PnL from app closed trades (DB) — same source as History / deals list.
 
-    Source of truth: OKX /account/bills + /account/bills-archive, subType 5/6,
-    field ``pnl`` as returned by the exchange (net of fees). No bot-label
-    remixing — account-level realized closes for the current mode (demo|live).
+    Source of truth: ``exchange_close_trades`` (+ optional ``trades`` closes),
+    attributed to AI Discretionary only, since PNL_EPOCH (2026-09-01).
+    Day / week by Moscow calendar. Unrealized still from open exchange positions.
     """
     global _pnl_cache, _exchange_sync_ts
     from zoneinfo import ZoneInfo
-    from app.services.pnl_engine import epoch_ms as _ep_ms
+    from app.services.pnl_engine import (
+        aggregate_rows,
+        epoch_ms as _ep_ms,
+        resolve_bot,
+        PNL_EPOCH_ISO as _EP_ISO,
+    )
     _mode = _account_mode()
-    _MSK = ZoneInfo('Europe/Moscow')
     _ep = int(_ep_ms())
     try:
         _exchange_sync_ts = 0
         if isinstance(_pnl_cache, dict):
             _pnl_cache.clear()
-        # 1) Pull bills from exchange (recent + archive from epoch)
-        bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode)
-        # 2) Group close bills (subType 5/6) by ordId — same as exchange realized
-        by_ord: dict = {}
-        skipped_other = 0.0
-        skipped_other_n = 0
-        skipped_ais = 0.0
-        skipped_ais_n = 0
-        for b in bills or []:
-            sub = str(b.get('subType', '') or '')
-            if sub not in ('5', '6'):
-                continue
-            oid = str(b.get('ordId', '') or '').strip()
-            if not oid:
-                continue
-            try:
-                ts = int(b.get('ts') or 0)
-            except (TypeError, ValueError):
-                ts = 0
-            if ts and ts < _ep:
-                continue
-            try:
-                bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
-            except (TypeError, ValueError):
-                bp = 0.0
-            try:
-                bf = abs(float(b.get('fee') or 0))
-            except (TypeError, ValueError):
-                bf = 0.0
-            cl = str(b.get('clOrdId', '') or '').strip()
-            cl_l = cl.lower()
-            inst = str(b.get('instId', '') or '')
-            # Only AI Discretionary: clOrdId starts with "ai" but NOT "ais" (retired Scale-In).
-            # Other prefixes (rot/imp/val/scl/sm) and untagged → exclude from dashboard total.
-            if cl_l.startswith('ais'):
-                skipped_ais += bp
-                skipped_ais_n += 1
-                continue
-            is_ai = cl_l.startswith('ai') and not cl_l.startswith('ais')
-            if not is_ai:
-                skipped_other += bp
-                skipped_other_n += 1
-                continue
-            if oid not in by_ord:
-                by_ord[oid] = {'pnl': 0.0, 'fee': 0.0, 'ts': ts, 'cl': cl, 'inst': inst}
-            by_ord[oid]['pnl'] += bp
-            by_ord[oid]['fee'] += bf
-            if ts > int(by_ord[oid].get('ts') or 0):
-                by_ord[oid]['ts'] = ts
-            if cl and not by_ord[oid].get('cl'):
-                by_ord[oid]['cl'] = cl
-            if inst and not by_ord[oid].get('inst'):
-                by_ord[oid]['inst'] = inst
 
-        try:
-            db_rows = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=500) if hasattr(db, 'get_exchange_close_trades_detail') else []
-        except Exception:
-            db_rows = []
-        for row in db_rows or []:
-            oid = str(row.get('ord_id', '') or '').strip()
-            if not oid or oid in by_ord:
-                continue
-            cl = str(row.get('cl_ord_id', '') or '').strip().lower()
-            if cl:
-                continue
-            label = str(row.get('bot_label', '') or row.get('strategy_name', '') or '').strip()
-            if 'discretionary' not in label.lower() and 'ai' not in label.lower():
-                continue
-            try:
-                ts = int(row.get('close_time_ms') or 0)
-            except (TypeError, ValueError):
-                ts = 0
-            if not ts:
-                t_iso = str(row.get('time', '') or '')
-                if t_iso:
-                    try:
-                        ts = int(datetime.fromisoformat(t_iso.replace('Z', '+00:00')).timestamp() * 1000)
-                    except Exception:
-                        pass
-            if ts and ts < _ep:
-                continue
-            try:
-                bp = float(row.get('realized_pnl') or row.get('pnl') or 0)
-            except (TypeError, ValueError):
-                bp = 0.0
-            try:
-                bf = abs(float(row.get('fee') or 0))
-            except (TypeError, ValueError):
-                bf = 0.0
-            inst = str(row.get('inst_id', '') or row.get('symbol', '') or '')
-            by_ord[oid] = {'pnl': bp, 'fee': bf, 'ts': ts, 'cl': '', 'inst': inst}
-
-        now = datetime.now(timezone.utc)
-        now_msk = now.astimezone(_MSK)
-        today = now_msk.date()
-        week_start = (now_msk - timedelta(days=now_msk.weekday())).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ).date()
-
-        total = day = week = d7 = d30 = 0.0
-        fees = 0.0
-        n = 0
-        n_week = n_before = 0
-        before_week = 0.0
-        for o in by_ord.values():
-            pnl = float(o['pnl'] or 0)
-            if abs(pnl) < 1e-12:
-                continue
-            ts = int(o.get('ts') or 0)
-            if ts and ts < _ep:
-                continue
-            total += pnl
-            fees += float(o.get('fee') or 0)
-            n += 1
-            if not ts:
-                continue
-            d = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc).astimezone(_MSK).date()
-            if d == today:
-                day += pnl
-            if d >= week_start:
-                week += pnl
-                n_week += 1
-            else:
-                before_week += pnl
-                n_before += 1
-            age = (now - datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)).total_seconds()
-            if age <= 604800:
-                d7 += pnl
-            if age <= 2592000:
-                d30 += pnl
-
-        total = round(total, 2)
-        data = {
-            'total': total,
-            'account_total': total,
-            '1d': round(day, 2),
-            '7d': round(d7, 2),
-            '30d': round(d30, 2),
-            'week': round(week, 2),
-            'before_week': round(before_week, 2),
-            'trades_week': n_week,
-            'trades_before_week': n_before,
-            'week_basis': 'calendar_week_msk_monday',
-            'week_start': str(week_start),
-            'unrealized': 0.0,
-            'funding': 0.0,
-            'economic_approx': total,
-            'strategy_realized': total,
-            'source': 'okx_bills_direct',
-            'pnl_tz': 'Europe/Moscow',
-            'fees': round(fees, 2),
-            'fees_informational': True,
-            'pnl_includes_fee': True,
-            'per_bot': {'AI Discretionary 1H': total},
-            'per_bot_all': {'AI Discretionary 1H': total},
-            'active_bots': ['AI Discretionary 1H'],
-            'trades_counted': n,
-            'pnl_epoch': PNL_EPOCH_ISO,
-            'engine': 'okx_bills_direct_v1',
-            'account_mode': _mode,
-            'closes_raw': len(by_ord),
-            'bills_fetched': len(bills or []),
-            'excluded_ais_pnl': round(skipped_ais, 2),
-            'excluded_ais_n': skipped_ais_n,
-            'excluded_other_pnl': round(skipped_other, 2),
-            'excluded_other_n': skipped_other_n,
-            'filter': 'clOrdId=ai* (not ais)',
-        }
-        print(
-            f'[pnl] OKX-direct mode={_mode} total={total} 1d={data["1d"]} week={data["week"]} '
-            f'before_week={data["before_week"]} n={n} bills={len(bills or [])} '
-            f'excl_ais={skipped_ais:.2f}({skipped_ais_n}) excl_other={skipped_other:.2f}({skipped_other_n})',
-            flush=True,
-        )
-        # Keep DB in sync for history UI (best-effort, non-blocking for numbers)
+        # Best-effort: refresh DB from exchange so new closes appear, but
+        # numbers below always come from what is stored in the app.
         try:
             await sync_exchange_close_trades()
         except Exception as _se:
             print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
+
+        rows: list = []
+        try:
+            if db and hasattr(db, 'get_exchange_close_trades_detail'):
+                raw = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or []
+            else:
+                raw = []
+        except Exception as e:
+            print(f'[pnl] db exchange_close_trades: {e}', flush=True)
+            raw = []
+
+        for r in raw:
+            try:
+                mode_r = str(r.get('account_mode') or 'demo').lower()
+                if mode_r and mode_r != _mode and _mode in ('demo', 'live'):
+                    # Prefer same-mode rows; keep unknown/empty as demo
+                    if mode_r not in (_mode, '', 'demo') and not (
+                        _mode == 'demo' and mode_r in ('', 'demo')
+                    ):
+                        if not (_mode == 'demo' and mode_r == 'demo'):
+                            if mode_r != _mode:
+                                continue
+            except Exception:
+                pass
+            try:
+                pnl = float(r.get('realized_pnl') if r.get('realized_pnl') not in (None, '') else r.get('pnl') or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            if abs(pnl) < 1e-12:
+                continue
+            ts_ms = 0
+            try:
+                ts_ms = int(r.get('close_time_ms') or r.get('close_ts') or r.get('ts') or 0)
+            except (TypeError, ValueError):
+                ts_ms = 0
+            if not ts_ms:
+                t_iso = str(r.get('time') or r.get('closed_at') or r.get('timestamp') or '')
+                if t_iso:
+                    try:
+                        ts_ms = int(datetime.fromisoformat(t_iso.replace('Z', '+00:00')).timestamp() * 1000)
+                    except Exception:
+                        pass
+            if ts_ms and ts_ms < _ep:
+                continue
+            row = {
+                'pnl': pnl,
+                'fee': abs(float(r.get('fee') or 0)),
+                'close_ts': ts_ms,
+                'ts': ts_ms,
+                'cl_ord_id': r.get('cl_ord_id') or r.get('clOrdId') or '',
+                'bot_label': r.get('bot_label') or r.get('strategy_name') or '',
+                'bot_id': r.get('bot_id') or '',
+                'inst_id': r.get('inst_id') or r.get('symbol') or '',
+                'ord_id': r.get('ord_id') or r.get('ordId') or '',
+                'account_mode': r.get('account_mode') or _mode,
+            }
+            # Attribute only AI Discretionary
+            bot = resolve_bot(row, ai_only=True)
+            if not bot:
+                continue
+            row['bot'] = bot
+            rows.append(row)
+
+        # Also include closed rows from trades table (app-native closes)
+        try:
+            if db and hasattr(db, 'get_trades'):
+                trs = await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or []
+            else:
+                trs = []
+        except Exception as e:
+            print(f'[pnl] db trades: {e}', flush=True)
+            trs = []
+        seen_oid = {str(x.get('ord_id') or '') for x in rows if x.get('ord_id')}
+        for r in trs:
+            status = str(r.get('status') or r.get('state') or '').lower()
+            # only closed / realized
+            if status and status not in ('closed', 'filled', 'done', 'realized', ''):
+                if 'open' in status:
+                    continue
+            try:
+                pnl = float(r.get('realized_pnl') if r.get('realized_pnl') not in (None, '') else r.get('pnl') or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            if abs(pnl) < 1e-12:
+                continue
+            oid = str(r.get('ord_id') or r.get('order_id') or r.get('id') or '')
+            if oid and oid in seen_oid:
+                continue
+            ts_ms = 0
+            for k in ('close_ts', 'timestamp', 'ts', 'closed_at'):
+                v = r.get(k)
+                if v is None or v == '':
+                    continue
+                try:
+                    if isinstance(v, (int, float)) or str(v).isdigit():
+                        ts_ms = int(float(v))
+                        if ts_ms < 10_000_000_000:
+                            ts_ms *= 1000
+                    else:
+                        ts_ms = int(datetime.fromisoformat(str(v).replace('Z', '+00:00')).timestamp() * 1000)
+                    break
+                except Exception:
+                    continue
+            if ts_ms and ts_ms < _ep:
+                continue
+            row = {
+                'pnl': pnl,
+                'fee': abs(float(r.get('fee') or 0)),
+                'close_ts': ts_ms,
+                'ts': ts_ms,
+                'cl_ord_id': r.get('cl_ord_id') or '',
+                'bot_label': r.get('bot_label') or 'AI Discretionary 1H',
+                'bot_id': r.get('bot_id') or 'ai_strategy',
+                'inst_id': r.get('inst_id') or r.get('symbol') or '',
+                'ord_id': oid,
+                'account_mode': r.get('account_mode') or _mode,
+            }
+            bot = resolve_bot(row, ai_only=True) or 'AI Discretionary 1H'
+            row['bot'] = bot
+            rows.append(row)
+            if oid:
+                seen_oid.add(oid)
+
+        agg = aggregate_rows(rows, ai_only=True)
+        total = round(float(agg.get('total') or 0), 2)
+        day = round(float(agg.get('1d') or 0), 2)
+        week = round(float(agg.get('week') or 0), 2)
+        d7 = round(float(agg.get('7d') or 0), 2)
+        d30 = round(float(agg.get('30d') or 0), 2)
+        before_week = round(float(agg.get('before_week') or 0), 2)
+        fees = round(float(agg.get('fees') or 0), 2)
+        n = int(agg.get('trades_counted') or len(rows))
+        per_bot = agg.get('per_bot') or {'AI Discretionary 1H': total}
+
+        data = {
+            'total': total,
+            'account_total': total,
+            '1d': day,
+            '7d': d7,
+            '30d': d30,
+            'week': week,
+            'before_week': before_week,
+            'trades_week': int(agg.get('trades_week') or 0),
+            'trades_before_week': int(agg.get('trades_before_week') or 0),
+            'week_basis': 'calendar_week_msk_monday',
+            'week_start': str(agg.get('week_start') or ''),
+            'unrealized': 0.0,
+            'funding': 0.0,
+            'economic_approx': total,
+            'strategy_realized': total,
+            'source': 'app_closed_trades',
+            'pnl_tz': 'Europe/Moscow',
+            'fees': fees,
+            'fees_informational': True,
+            'pnl_includes_fee': True,
+            'per_bot': per_bot if per_bot else {'AI Discretionary 1H': total},
+            'per_bot_all': per_bot if per_bot else {'AI Discretionary 1H': total},
+            'active_bots': list(per_bot.keys()) if per_bot else ['AI Discretionary 1H'],
+            'trades_counted': n,
+            'pnl_epoch': _EP_ISO,
+            'engine': 'app_db_closes_v1',
+            'account_mode': _mode,
+            'closes_raw': len(rows),
+            'filter': 'AI Discretionary closed trades in app DB since epoch',
+        }
+        print(
+            f'[pnl] APP-DB mode={_mode} total={total} 1d={day} week={week} '
+            f'before_week={before_week} n={n} rows={len(rows)}',
+            flush=True,
+        )
     except Exception as e:
-        print(f'[pnl] okx-direct error: {e}', flush=True)
+        print(f'[pnl] app-db error: {e}', flush=True)
         import traceback
         traceback.print_exc()
         data = {
@@ -5943,33 +5945,28 @@ async def _compute_pnl():
         client = client_manager.get_client() if client_manager else None
         if client:
             pos = await client.get_positions(inst_type='SWAP')
-            _pos_rows = [] if (isinstance(pos, dict) and pos.get('error')) else (
-                (pos.get('data') or []) if isinstance(pos, dict) else (pos or []))
-            for p in _pos_rows:
-                try:
-                    unreal += float(p.get('upl') or 0)
-                except (TypeError, ValueError, AttributeError):
-                    pass
+            if not pos.get('error'):
+                for p in (pos.get('data') or []):
+                    try:
+                        if abs(float(p.get('pos') or 0)) < 1e-12:
+                            continue
+                        unreal += float(p.get('upl') or 0)
+                    except (TypeError, ValueError):
+                        pass
         data['unrealized'] = round(unreal, 2)
-        data['economic_approx'] = round(float(data.get('total') or 0) + unreal, 2)
     except Exception as e:
         print(f'[pnl] unrealized: {e}', flush=True)
         data.setdefault('unrealized', 0.0)
-    data['account_mode'] = _mode
     try:
-        if AI_ONLY_MODE:
-            pb = data.get('per_bot') or {}
-            s = float(pb.get('AI Discretionary 1H') or 0) + float(pb.get('AI Scale-In 1H') or 0)
-            tot = float(data.get('total') or 0)
-            if abs(s - tot) > 0.05:
-                print(f'[pnl] INVARIANT FIX per_bot sum {s:.2f} != total {tot:.2f}', flush=True)
-                data['total'] = round(s, 2)
-                data['strategy_realized'] = round(s, 2)
+        if isinstance(_pnl_cache, dict):
+            _pnl_cache['data'] = data
+            _pnl_cache['ts'] = _time.time()
     except Exception:
         pass
     return data
 
-@app.get('/api/pnl/reconcile', dependencies=[Depends(require_admin)])
+
+
 async def pnl_reconcile():
     """Compare dashboard strict PnL vs OKX bills (trade + funding) + positions upl.
 
