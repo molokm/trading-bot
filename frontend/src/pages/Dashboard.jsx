@@ -1096,13 +1096,23 @@ export default function Dashboard({ health, connected, isGuest }) {
   }
 
   const handleClosePosition = async (p) => {
-    const posId = `${p.instId}_${p.posSide}`
+    const mode = String(p.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+    const posId = `${p.instId}_${p.posSide}_${mode}`
+    if (mode === 'live') {
+      const ok = window.confirm('Закрыть позицию на LIVE-счёте? Это реальное закрытие на бирже.')
+      if (!ok) return
+    }
     setClosing(posId)
     try {
-      const account = p.account_mode === 'live' ? 'live' : 'demo'
-      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross', account)
+      await api.closePosition(
+        p.instId,
+        p.posSide || p.side || 'net',
+        p.pos || p.size,
+        p.mgnMode || 'cross',
+        mode,
+      )
       loadData()
-    } catch (e) { alert(t('dash.error') + e.message) }
+    } catch (e) { alert((t('dash.error') || 'Ошибка: ') + (e.message || e)) }
     finally { setClosing(null) }
   }
 
@@ -1479,16 +1489,16 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
                         <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
                         <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                        {!isGuest && mode === 'demo' && (
+                        {!isGuest && (
                           <button
                             type="button"
                             className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2 inline-flex items-center gap-1"
                             onClick={() => handleClosePosition(p)}
                             disabled={closing === posId}
-                            title={t('dash.close')}
+                            title={mode === 'live' ? 'Закрыть LIVE' : (t('dash.close') || 'Закрыть')}
                           >
                             {closing === posId ? <Loader /> : <XCircle size={11} />}
-                            {t('dash.close')}
+                            {mode === 'live' ? 'Закрыть LIVE' : (t('dash.close') || 'Закрыть')}
                           </button>
                         )}
                       </div>

@@ -4398,7 +4398,31 @@ async def close_position(data: dict):
     result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
     if result.get('error'):
         raise HTTPException(status_code=400, detail=result.get('message', ''))
-    return {'message': 'Position closed', 'data': result.get('data')}
+    # Sync bot memory after manual close (esp. LIVE orphan when demo already flat)
+    try:
+        coin = str(inst_id or '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+        if account == 'live' and coin:
+            bot = globals().get('ai_bot')
+            if bot is not None:
+                lp = getattr(bot, '_live_positions', None)
+                if isinstance(lp, dict) and coin in lp:
+                    lp.pop(coin, None)
+                    print(f'[positions/close] dropped AI live memory {coin}', flush=True)
+                try:
+                    if hasattr(bot, '_persist_live'):
+                        bot._persist_live()
+                except Exception:
+                    pass
+        elif coin:
+            bot = globals().get('ai_bot')
+            if bot is not None:
+                pos = getattr(bot, '_positions', None)
+                if isinstance(pos, dict) and coin in pos:
+                    pos.pop(coin, None)
+                    print(f'[positions/close] dropped AI demo memory {coin}', flush=True)
+    except Exception as e:
+        print(f'[positions/close] memory sync: {e}', flush=True)
+    return {'message': 'Position closed', 'data': result.get('data'), 'account': account or 'demo'}
 _ticker_cache: dict = {}
 _ticker_cache_ts: dict = {}
 _TICKER_TTL = 5
