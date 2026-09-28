@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.11-antichurn"
+STRATEGY_VERSION = "v1.12-scale-atr-hold"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
@@ -199,6 +199,8 @@ class AIConfig:
     scale_in_max_adds: int = 1
     scale_in_frac: float = 0.45            # add ~45% of current size
     scale_in_min_hold_min: float = 30.0    # only after position seasoned
+    scale_in_max_adverse_atr: float = 0.5  # no add if price already >0.5×ATR against entry
+    time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
@@ -1658,6 +1660,26 @@ class AIStrategy:
         if upl < -1.2:
             self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_red:{upl:+.2f}%")
             return False
+        # No averaging down past 0.5×ATR against entry (even if UPL% not yet -1.2)
+        try:
+            atr = float(ind.get("atr") or 0)
+            entry = float(pos.entry_price or 0)
+            max_adv = float(getattr(cfg, "scale_in_max_adverse_atr", 0.5) or 0.5)
+            if upl < 0 and atr > 0 and entry > 0 and max_adv > 0:
+                adverse = (entry - px) if side == "long" else (px - entry)
+                if adverse > max_adv * atr:
+                    self._record_exec(
+                        "scale_skip", coin=coin, side=side,
+                        reason=f"adverse_atr:{adverse:.4f}>{max_adv}*atr={atr:.4f}",
+                    )
+                    print(
+                        f"[AI] scale_skip {coin}: adverse {adverse:.4f} > {max_adv}×ATR {atr:.4f} "
+                        f"(upl={upl:+.2f}%)",
+                        flush=True,
+                    )
+                    return False
+        except Exception as e:
+            print(f"[AI] scale atr gate: {e}", flush=True)
         frac = float(getattr(cfg, "scale_in_frac", 0.45) or 0.45)
         add_sz = round(float(pos.size) * frac, 8)
         lot = LOT_SZ.get(coin, 0.01)
@@ -3283,12 +3305,25 @@ class AIStrategy:
                 if stale_h > 0 and held_h >= stale_h:
                     upl0 = self._unrealized_pct(pos, px)
                     if upl0 < min_prog:
-                        print(
-                            f"[AI] time_stop_stale {coin} held={held_h:.1f}h upl={upl0:+.2f}%",
-                            flush=True,
-                        )
-                        await self._close(client, coin, "time_stop_stale")
-                        continue
+                        # Symmetric to hold-in-loss: if trend still aligned, don't time-stop
+                        al = float(ind.get("align_long") or 0)
+                        ash = float(ind.get("align_short") or 0)
+                        align_side = ash if pos.side == "short" else al
+                        hold_al = float(getattr(self.config, "time_stop_hold_align", 0.70) or 0)
+                        if hold_al > 0 and align_side >= hold_al:
+                            print(
+                                f"[AI] time_stop HOLD {coin} {pos.side}: held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}>={hold_al}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[AI] time_stop_stale {coin} held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}",
+                                flush=True,
+                            )
+                            await self._close(client, coin, "time_stop_stale")
+                            continue
             except Exception as e:
                 print(f"[AI] time_stop check: {e}", flush=True)
 
