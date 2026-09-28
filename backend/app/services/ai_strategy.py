@@ -86,9 +86,9 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.9-no-countertrend"
+STRATEGY_VERSION = "v1.10-defensive"
 STRATEGY_DESC = (
-    "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
+    "AI Discretionary v1.10 — defensive: higher entry bar, early trail, majors preferred, "
     "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
     "индикаторный выход и self-adapt."
 )
@@ -150,7 +150,7 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 2                 # v1.3: allow 2 concurrent
-    risk_per_trade: float = 0.02           # ~2% equity at stop
+    risk_per_trade: float = 0.015          # ~1.5% equity at stop (defensive)
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
@@ -159,51 +159,51 @@ class AIConfig:
     decide_on_bar_close: bool = True
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
     llm_min_interval_sec: int = 180        # hard floor between LLM calls even if bars glitch
-    daily_loss_limit_pct: float = 0.03     # block new opens after -3% day (realized session)
+    daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
     btc_roc_veto: float = 0.20             # BTC ROC% against side → block open (short blocked if btc_roc >= this)
-    min_confidence: float = 0.62
-    min_adx: float = 18.0                  # restore stronger trend filter
+    min_confidence: float = 0.68           # fewer marginal opens
+    min_adx: float = 20.0                  # stronger trend required
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 14.0
-    adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
+    adx_soft_floor: float = 16.0
+    adx_align_bypass: float = 0.78         # only very strong align softens ADX
     min_roc_abs: float = 0.15
-    min_stop_pct: float = 0.018
-    max_stop_pct: float = 0.05
-    min_take_pct: float = 0.035
+    min_stop_pct: float = 0.016
+    max_stop_pct: float = 0.035            # cut max pain per trade
+    min_take_pct: float = 0.028            # closer TP — bank wins earlier
     max_hold_hours: float = 12.0            # phase4: hard time-stop
-    time_stop_stale_hours: float = 8.0      # close if no meaningful progress
-    time_stop_min_progress_pct: float = 0.15  # need at least this UPL% to keep past stale
+    time_stop_stale_hours: float = 5.0      # do not bleed for 8h
+    time_stop_min_progress_pct: float = 0.20
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
-    min_hold_minutes: float = 25.0
-    exit_min_profit_pct: float = 0.12
+    min_hold_minutes: float = 20.0
+    exit_min_profit_pct: float = 0.10      # lock small gains on structure flip
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.6
-    trail_lock_pct: float = 0.20
+    trail_activate_pct: float = 0.40       # start locking earlier
+    trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.55
+    quant_min_align: float = 0.62
     block_chop_opens: bool = True
     # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
     adapt_window: int = 12
     adapt_min_trades: int = 4
-    conf_floor: float = 0.58
+    conf_floor: float = 0.64               # adapt cannot loosen below this
     conf_ceil: float = 0.78
-    align_floor: float = 0.42
+    align_floor: float = 0.55
     align_ceil: float = 0.70
     size_cap_floor: float = 0.08
     size_cap_ceil: float = 0.18
@@ -212,7 +212,9 @@ class AIConfig:
 
     def __post_init__(self):
         if self.symbols is None:
-            self.symbols = list(ALLOWED_SYMBOLS)
+            # Majors first — fewer noisy alts (DOGE/BCH/DAI) after drawdown period
+            majors = [s for s in ("BTC", "ETH", "SOL", "XRP") if s in set(ALLOWED_SYMBOLS)]
+            self.symbols = majors or list(ALLOWED_SYMBOLS)
 
 
 @dataclass
@@ -3147,8 +3149,18 @@ class AIStrategy:
                 pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
 
             upl = self._unrealized_pct(pos, px)
-            act = float(getattr(self.config, "trail_activate_pct", 0.8) or 0)
-            lock = float(getattr(self.config, "trail_lock_pct", 0.25) or 0)
+            # Early breakeven: once +0.35% in favor, never give full stop distance back
+            if pos.entry_price and upl >= 0.35:
+                if pos.side == "long":
+                    be = float(pos.entry_price) * 1.0005  # tiny buffer above entry
+                    if be > float(pos.stop_price or 0):
+                        pos.stop_price = be
+                else:
+                    be = float(pos.entry_price) * 0.9995
+                    if not pos.stop_price or be < float(pos.stop_price):
+                        pos.stop_price = be
+            act = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
+            lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
             if act > 0 and upl >= act and pos.entry_price:
                 old_stop = pos.stop_price
                 if pos.side == "long":
@@ -3792,7 +3804,7 @@ class AIStrategy:
                         continue
                     if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr):
                         continue
-                    if al < max(min_al, 0.78):
+                    if al < max(min_al, 0.85):
                         continue
                     if al < min_cf and al < 0.88:
                         continue
