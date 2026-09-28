@@ -1950,6 +1950,26 @@ async def me_dashboard(request: Request):
                 'reason': reason or 'closed',
                 'ord_id': str(row.get('ord_id') or row.get('ordId') or '').strip(),
             }
+            # Unified PnL filter: only AI Discretionary closes in set T
+            try:
+                from app.services.pnl_engine import pnl_eligible, normalize_close_row
+                _cand = {
+                    'pnl': entry['pnl'],
+                    'close_ts': entry['time'],
+                    'ts': entry['time'],
+                    'account_mode': mode,
+                    'cl_ord_id': str(row.get('cl_ord_id') or row.get('clOrdId') or ''),
+                    'bot_label': str(row.get('bot_label') or row.get('bot') or 'AI Discretionary 1H'),
+                    'bot_id': str(row.get('bot_id') or 'ai_strategy'),
+                    'ord_id': entry.get('ord_id') or '',
+                    'inst_id': entry.get('inst') or '',
+                }
+                ok, _why = pnl_eligible(_cand, mode=mode, ai_only=True)
+                if not ok:
+                    return
+                entry['bot'] = 'AI Discretionary 1H'
+            except Exception:
+                pass
             k = _dedupe_key(entry)
             if k in seen_keys:
                 return
@@ -5732,18 +5752,16 @@ async def get_pnl(request: Request=None):
         return dict(data)
 
 async def _compute_pnl():
-    """PnL from app closed trades (DB) — same source as History / deals list.
+    """PnL from unified set T: AI Discretionary closed trades in app DB.
 
-    Source of truth: ``exchange_close_trades`` (+ optional ``trades`` closes),
-    attributed to AI Discretionary only, since PNL_EPOCH (2026-09-01).
-    Day / week by Moscow calendar. Unrealized still from open exchange positions.
+    Same filter for dashboard cards, history list, bot KPI, mini app.
+    Day/week by Moscow calendar. Unrealized from open exchange positions.
     """
     global _pnl_cache, _exchange_sync_ts
-    from zoneinfo import ZoneInfo
     from app.services.pnl_engine import (
         aggregate_rows,
         epoch_ms as _ep_ms,
-        resolve_bot,
+        filter_pnl_rows,
         PNL_EPOCH_ISO as _EP_ISO,
     )
     _mode = _account_mode()
@@ -5752,136 +5770,24 @@ async def _compute_pnl():
         _exchange_sync_ts = 0
         if isinstance(_pnl_cache, dict):
             _pnl_cache.clear()
-
-        # Best-effort: refresh DB from exchange so new closes appear, but
-        # numbers below always come from what is stored in the app.
         try:
             await sync_exchange_close_trades()
         except Exception as _se:
             print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
 
-        rows: list = []
+        raw: list = []
         try:
             if db and hasattr(db, 'get_exchange_close_trades_detail'):
-                raw = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or []
-            else:
-                raw = []
+                raw.extend(await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or [])
         except Exception as e:
             print(f'[pnl] db exchange_close_trades: {e}', flush=True)
-            raw = []
-
-        for r in raw:
-            try:
-                mode_r = str(r.get('account_mode') or 'demo').lower()
-                if mode_r and mode_r != _mode and _mode in ('demo', 'live'):
-                    # Prefer same-mode rows; keep unknown/empty as demo
-                    if mode_r not in (_mode, '', 'demo') and not (
-                        _mode == 'demo' and mode_r in ('', 'demo')
-                    ):
-                        if not (_mode == 'demo' and mode_r == 'demo'):
-                            if mode_r != _mode:
-                                continue
-            except Exception:
-                pass
-            try:
-                pnl = float(r.get('realized_pnl') if r.get('realized_pnl') not in (None, '') else r.get('pnl') or 0)
-            except (TypeError, ValueError):
-                pnl = 0.0
-            if abs(pnl) < 1e-12:
-                continue
-            ts_ms = 0
-            try:
-                ts_ms = int(r.get('close_time_ms') or r.get('close_ts') or r.get('ts') or 0)
-            except (TypeError, ValueError):
-                ts_ms = 0
-            if not ts_ms:
-                t_iso = str(r.get('time') or r.get('closed_at') or r.get('timestamp') or '')
-                if t_iso:
-                    try:
-                        ts_ms = int(datetime.fromisoformat(t_iso.replace('Z', '+00:00')).timestamp() * 1000)
-                    except Exception:
-                        pass
-            if ts_ms and ts_ms < _ep:
-                continue
-            row = {
-                'pnl': pnl,
-                'fee': abs(float(r.get('fee') or 0)),
-                'close_ts': ts_ms,
-                'ts': ts_ms,
-                'cl_ord_id': r.get('cl_ord_id') or r.get('clOrdId') or '',
-                'bot_label': r.get('bot_label') or r.get('strategy_name') or '',
-                'bot_id': r.get('bot_id') or '',
-                'inst_id': r.get('inst_id') or r.get('symbol') or '',
-                'ord_id': r.get('ord_id') or r.get('ordId') or '',
-                'account_mode': r.get('account_mode') or _mode,
-            }
-            # Attribute only AI Discretionary
-            bot = resolve_bot(row, ai_only=True)
-            if not bot:
-                continue
-            row['bot'] = bot
-            rows.append(row)
-
-        # Also include closed rows from trades table (app-native closes)
         try:
             if db and hasattr(db, 'get_trades'):
-                trs = await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or []
-            else:
-                trs = []
+                raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
         except Exception as e:
             print(f'[pnl] db trades: {e}', flush=True)
-            trs = []
-        seen_oid = {str(x.get('ord_id') or '') for x in rows if x.get('ord_id')}
-        for r in trs:
-            status = str(r.get('status') or r.get('state') or '').lower()
-            # only closed / realized
-            if status and status not in ('closed', 'filled', 'done', 'realized', ''):
-                if 'open' in status:
-                    continue
-            try:
-                pnl = float(r.get('realized_pnl') if r.get('realized_pnl') not in (None, '') else r.get('pnl') or 0)
-            except (TypeError, ValueError):
-                pnl = 0.0
-            if abs(pnl) < 1e-12:
-                continue
-            oid = str(r.get('ord_id') or r.get('order_id') or r.get('id') or '')
-            if oid and oid in seen_oid:
-                continue
-            ts_ms = 0
-            for k in ('close_ts', 'timestamp', 'ts', 'closed_at'):
-                v = r.get(k)
-                if v is None or v == '':
-                    continue
-                try:
-                    if isinstance(v, (int, float)) or str(v).isdigit():
-                        ts_ms = int(float(v))
-                        if ts_ms < 10_000_000_000:
-                            ts_ms *= 1000
-                    else:
-                        ts_ms = int(datetime.fromisoformat(str(v).replace('Z', '+00:00')).timestamp() * 1000)
-                    break
-                except Exception:
-                    continue
-            if ts_ms and ts_ms < _ep:
-                continue
-            row = {
-                'pnl': pnl,
-                'fee': abs(float(r.get('fee') or 0)),
-                'close_ts': ts_ms,
-                'ts': ts_ms,
-                'cl_ord_id': r.get('cl_ord_id') or '',
-                'bot_label': r.get('bot_label') or 'AI Discretionary 1H',
-                'bot_id': r.get('bot_id') or 'ai_strategy',
-                'inst_id': r.get('inst_id') or r.get('symbol') or '',
-                'ord_id': oid,
-                'account_mode': r.get('account_mode') or _mode,
-            }
-            bot = resolve_bot(row, ai_only=True) or 'AI Discretionary 1H'
-            row['bot'] = bot
-            rows.append(row)
-            if oid:
-                seen_oid.add(oid)
 
+        rows, diag = filter_pnl_rows(raw, mode=_mode, ai_only=True)
         agg = aggregate_rows(rows, ai_only=True)
         total = round(float(agg.get('total') or 0), 2)
         day = round(float(agg.get('1d') or 0), 2)
@@ -5919,18 +5825,36 @@ async def _compute_pnl():
             'active_bots': list(per_bot.keys()) if per_bot else ['AI Discretionary 1H'],
             'trades_counted': n,
             'pnl_epoch': _EP_ISO,
-            'engine': 'app_db_closes_v1',
+            'engine': 'unified_filter_v1',
             'account_mode': _mode,
-            'closes_raw': len(rows),
-            'filter': 'AI Discretionary closed trades in app DB since epoch',
+            'closes_raw': len(raw),
+            'eligible_n': diag.get('eligible_n'),
+            'excluded_n': diag.get('excluded_n'),
+            'excluded_pnl': diag.get('excluded_pnl'),
+            'exclude_reasons': diag.get('exclude_reasons'),
+            'filter': diag.get('filter'),
+            'trades': [
+                {
+                    'time': r.get('close_ts') or r.get('ts'),
+                    'inst': (r.get('inst_id') or '').replace('-USDT-SWAP', ''),
+                    'side': r.get('side') or '',
+                    'pnl': round(float(r.get('pnl') or 0), 4),
+                    'account_mode': r.get('account_mode') or _mode,
+                    'bot': r.get('bot') or 'AI Discretionary 1H',
+                    'ord_id': r.get('ord_id') or '',
+                    'reason': 'closed',
+                }
+                for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:80]
+            ],
         }
         print(
-            f'[pnl] APP-DB mode={_mode} total={total} 1d={day} week={week} '
-            f'before_week={before_week} n={n} rows={len(rows)}',
+            f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
+            f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
+            f"excl_pnl={diag.get('excluded_pnl')}",
             flush=True,
         )
     except Exception as e:
-        print(f'[pnl] app-db error: {e}', flush=True)
+        print(f'[pnl] unified error: {e}', flush=True)
         import traceback
         traceback.print_exc()
         data = {

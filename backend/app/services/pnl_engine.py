@@ -7,13 +7,13 @@ STABILITY LOCK — do not reintroduce:
 - attributing untagged closes only when AI_ONLY (resolve_bot fallback)
 
 
-Rules:
-1. Realized PnL from exchange_close_trades (OKX close bills), optionally
-   supplemented from DB trades when exchange is empty after epoch.
+Rules (unified filter — one set T for cards, history, bot KPI, TG):
+1. Realized closes only (non-zero pnl), from app DB (exchange_close_trades + trades).
 2. Epoch: 2026-09-01 00:00:00 UTC — closes before this are ignored.
-3. Label priority: clOrdId (ais/ai/…) → stored bot_label → AI_ONLY fallback.
-4. Calendar periods in Europe/Moscow.
-5. All UI cards must use /api/pnl from this engine only.
+3. Bot = AI Discretionary only (clOrdId ai* not ais*, or stored label).
+4. account_mode matches context (demo XOR live).
+5. Calendar periods in Europe/Moscow.
+6. All UI surfaces must use the same eligible set T.
 """
 from __future__ import annotations
 
@@ -128,6 +128,155 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
     if mapped and not ai_only:
         return mapped
     return ""
+
+
+
+def normalize_close_row(r: dict) -> Optional[dict]:
+    """Normalize a DB/API close row into the canonical shape used by aggregate_rows.
+
+    Returns None if the row has no usable pnl.
+    """
+    if not isinstance(r, dict):
+        return None
+    try:
+        pnl = float(
+            r.get("realized_pnl")
+            if r.get("realized_pnl") not in (None, "")
+            else (r.get("pnl") if r.get("pnl") not in (None, "") else 0)
+        )
+    except (TypeError, ValueError):
+        return None
+    if abs(pnl) < 1e-12:
+        return None
+    ts_ms = _parse_ts_ms(
+        r.get("close_time_ms")
+        or r.get("close_ts")
+        or r.get("ts")
+        or r.get("timestamp")
+        or r.get("time")
+    )
+    if not ts_ms:
+        for k in ("closed_at", "time", "timestamp"):
+            v = r.get(k)
+            if not v or isinstance(v, (int, float)):
+                continue
+            try:
+                ts_ms = int(
+                    datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000
+                )
+                break
+            except Exception:
+                continue
+    mode = str(r.get("account_mode") or r.get("mode") or "demo").strip().lower()
+    if mode not in ("demo", "live"):
+        mode = "demo"
+    inst = str(r.get("inst_id") or r.get("instId") or r.get("symbol") or r.get("inst") or r.get("coin") or "")
+    side = str(r.get("side") or r.get("posSide") or r.get("pos_side") or "").lower()
+    return {
+        "pnl": pnl,
+        "fee": abs(float(r.get("fee") or 0) or 0),
+        "close_ts": ts_ms,
+        "ts": ts_ms,
+        "cl_ord_id": str(r.get("cl_ord_id") or r.get("clOrdId") or "").strip(),
+        "bot_label": str(r.get("bot_label") or r.get("bot") or r.get("strategy_name") or "").strip(),
+        "bot_id": str(r.get("bot_id") or "").strip(),
+        "inst_id": inst,
+        "ord_id": str(r.get("ord_id") or r.get("ordId") or "").strip(),
+        "account_mode": mode,
+        "side": side,
+    }
+
+
+def pnl_eligible(
+    row: dict,
+    *,
+    mode: str = "demo",
+    ai_only: bool = True,
+    require_ts: bool = True,
+) -> tuple[bool, str]:
+    """Unified membership test for set T (cards + history + KPI).
+
+    Returns (ok, reason). reason is empty when ok.
+    """
+    if not isinstance(row, dict):
+        return False, "not_dict"
+    try:
+        pnl = float(row.get("pnl") or 0)
+    except (TypeError, ValueError):
+        return False, "bad_pnl"
+    if abs(pnl) < 1e-12:
+        return False, "zero_pnl"
+    ts_ms = _parse_ts_ms(row.get("close_ts") or row.get("ts") or row.get("timestamp"))
+    ep = epoch_ms()
+    if require_ts and (not ts_ms or ts_ms < ep):
+        return False, "before_epoch_or_no_ts"
+    row_mode = str(row.get("account_mode") or "demo").strip().lower()
+    if row_mode not in ("demo", "live"):
+        row_mode = "demo"
+    want = (mode or "demo").strip().lower()
+    if want in ("demo", "live") and row_mode != want:
+        return False, f"mode:{row_mode}!={want}"
+    bot = resolve_bot(row, ai_only=ai_only)
+    if ai_only and bot not in AI_ONLY_LABELS:
+        return False, "not_ai"
+    if not bot and ai_only:
+        return False, "no_bot"
+    return True, ""
+
+
+def filter_pnl_rows(
+    rows: list[dict],
+    *,
+    mode: str = "demo",
+    ai_only: bool = True,
+) -> tuple[list[dict], dict]:
+    """Normalize + filter to set T. Returns (eligible_rows, diagnostics)."""
+    out: list[dict] = []
+    excluded_n = 0
+    excluded_pnl = 0.0
+    reasons: dict[str, int] = {}
+    seen_oid: set[str] = set()
+    for raw in rows or []:
+        norm = normalize_close_row(raw) if "close_ts" not in (raw or {}) or "pnl" not in (raw or {}) else None
+        row = norm or (dict(raw) if isinstance(raw, dict) else None)
+        if not row:
+            excluded_n += 1
+            reasons["normalize_fail"] = reasons.get("normalize_fail", 0) + 1
+            continue
+        # If already canonical, still re-normalize numbers
+        if norm is None:
+            n2 = normalize_close_row(raw)
+            if n2:
+                row = n2
+        ok, reason = pnl_eligible(row, mode=mode, ai_only=ai_only)
+        if not ok:
+            excluded_n += 1
+            try:
+                excluded_pnl += float(row.get("pnl") or 0)
+            except (TypeError, ValueError):
+                pass
+            reasons[reason or "other"] = reasons.get(reason or "other", 0) + 1
+            continue
+        oid = str(row.get("ord_id") or "")
+        if oid and oid in seen_oid:
+            excluded_n += 1
+            reasons["dup_ord"] = reasons.get("dup_ord", 0) + 1
+            continue
+        if oid:
+            seen_oid.add(oid)
+        bot = resolve_bot(row, ai_only=ai_only) or "AI Discretionary 1H"
+        row["bot"] = bot
+        row["bot_label"] = bot
+        out.append(row)
+    diag = {
+        "eligible_n": len(out),
+        "excluded_n": excluded_n,
+        "excluded_pnl": round(excluded_pnl, 2),
+        "exclude_reasons": reasons,
+        "mode": mode,
+        "filter": "AI Discretionary · mode=%s · since %s" % (mode, PNL_EPOCH_ISO[:10]),
+    }
+    return out, diag
 
 
 def aggregate_rows(
