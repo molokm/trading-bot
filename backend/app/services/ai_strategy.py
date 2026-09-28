@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.12-scale-atr-hold"
+STRATEGY_VERSION = "v1.13-atr-opt"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
@@ -199,7 +199,14 @@ class AIConfig:
     scale_in_max_adds: int = 1
     scale_in_frac: float = 0.45            # add ~45% of current size
     scale_in_min_hold_min: float = 30.0    # only after position seasoned
-    scale_in_max_adverse_atr: float = 0.5  # no add if price already >0.5×ATR against entry
+    # ATR framework (1H crypto) — stops/trail/scale relative to volatility
+    atr_period: int = 14
+    atr_stop_mult: float = 1.15            # stop ≈ 1.15×ATR (clamped to min/max_stop_pct)
+    atr_take_mult: float = 1.90            # take ≈ 1.9×ATR → RR ~1.65 before clamp
+    scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
+    breakeven_atr_mult: float = 0.28       # move stop to BE after +0.28×ATR in favor
+    trail_atr_mult: float = 0.55           # trail distance from peak = 0.55×ATR
+    trail_activate_atr_mult: float = 0.45  # start trailing after +0.45×ATR profit
     time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
@@ -834,7 +841,7 @@ class AIStrategy:
                 adx = self._adx(highs, lows, closes, cfg.adx_period)
                 rsi = self._rsi(closes, getattr(cfg, "rsi_period", 14))
                 macd_l, macd_s, macd_h = self._macd(closes)
-                atr = self._atr(highs, lows, closes, 14)
+                atr = self._atr(highs, lows, closes, int(getattr(cfg, "atr_period", 14) or 14))
                 bb_m, bb_u, bb_l = self._bb(closes, 20, 2.0)
 
                 # volume ratio vs 20-bar avg
@@ -3187,6 +3194,57 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] ensure_default_stops {getattr(pos, 'coin', '?')}: {e}", flush=True)
 
+
+    def _atr_pct(self, coin: str, entry: float = 0.0) -> float:
+        """ATR as fraction of price (entry or last close)."""
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        try:
+            atr = float(ind.get("atr") or 0)
+            px = float(entry or ind.get("close") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if atr <= 0 or px <= 0:
+            return 0.0
+        return atr / px
+
+    def _stops_from_atr(self, coin: str, entry: float, stop_pct: float = 0.0, take_pct: float = 0.0) -> tuple[float, float]:
+        """Blend LLM/quant stop/take with ATR multiples, clamp to config bounds.
+
+        Prefer ATR when available so quiet markets get tighter stops and
+        volatile markets get room without exceeding max_stop_pct.
+        """
+        cfg = self.config
+        min_s = float(getattr(cfg, "min_stop_pct", 0.016) or 0.016)
+        max_s = float(getattr(cfg, "max_stop_pct", 0.035) or 0.035)
+        min_t = float(getattr(cfg, "min_take_pct", 0.028) or 0.028)
+        atr_p = self._atr_pct(coin, entry)
+        if atr_p > 0:
+            s_atr = atr_p * float(getattr(cfg, "atr_stop_mult", 1.15) or 1.15)
+            t_atr = atr_p * float(getattr(cfg, "atr_take_mult", 1.90) or 1.90)
+            # Blend: if LLM gave a stop, average with ATR; else pure ATR
+            try:
+                sp = float(stop_pct or 0)
+            except (TypeError, ValueError):
+                sp = 0.0
+            try:
+                tp = float(take_pct or 0)
+            except (TypeError, ValueError):
+                tp = 0.0
+            if sp > 0:
+                stop_pct = 0.5 * sp + 0.5 * s_atr
+            else:
+                stop_pct = s_atr
+            if tp > 0:
+                take_pct = 0.5 * tp + 0.5 * t_atr
+            else:
+                take_pct = t_atr
+        stop_pct = min(max_s, max(min_s, abs(float(stop_pct or min_s))))
+        take_pct = max(min_t, abs(float(take_pct or min_t)))
+        # Enforce RR ≥ 1.35 after fees buffer
+        if take_pct < stop_pct * 1.35:
+            take_pct = stop_pct * 1.5
+        return stop_pct, take_pct
+
     def _unrealized_pct(self, pos, px: float) -> float:
         if not px or not pos.entry_price:
             return 0.0
@@ -3334,32 +3392,61 @@ class AIStrategy:
                 pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
 
             upl = self._unrealized_pct(pos, px)
-            # Early breakeven: once +0.35% in favor, never give full stop distance back
-            if pos.entry_price and upl >= 0.35:
+            atr_p = self._atr_pct(coin, float(pos.entry_price or px or 0))
+            # Favorable move in ATR units
+            fav_atr = 0.0
+            if atr_p > 0 and pos.entry_price and px:
                 if pos.side == "long":
-                    be = float(pos.entry_price) * 1.0005  # tiny buffer above entry
+                    fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
+                else:
+                    fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
+            # Early BE after +breakeven_atr_mult × ATR (fallback 0.28)
+            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.28) or 0.28)
+            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= 0.35):
+                if pos.side == "long":
+                    be = float(pos.entry_price) * 1.0005
                     if be > float(pos.stop_price or 0):
                         pos.stop_price = be
                 else:
                     be = float(pos.entry_price) * 0.9995
                     if not pos.stop_price or be < float(pos.stop_price):
                         pos.stop_price = be
-            act = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
+            # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.45) or 0.45)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 0.55) or 0.55)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
             lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
-            if act > 0 and upl >= act and pos.entry_price:
+            trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
+            if trail_on and pos.entry_price:
                 old_stop = pos.stop_price
-                if pos.side == "long":
-                    be = pos.entry_price * (1 + lock / 100.0)
-                    trail = (pos.peak_price or px) * (1 - lock / 100.0)
-                    new_stop = max(be, trail)
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
+                if atr_p > 0 and trail_m > 0:
+                    # Distance from peak in price units
+                    dist = trail_m * atr_p * float(pos.entry_price)
+                    if pos.side == "long":
+                        be = pos.entry_price * 1.0005
+                        trail = float(pos.peak_price or px) - dist
+                        new_stop = max(be, trail)
+                        if new_stop > float(pos.stop_price or 0):
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * 0.9995
+                        trail = float(pos.peak_price or px) + dist
+                        new_stop = min(be, trail) if pos.stop_price else trail
+                        if not pos.stop_price or new_stop < float(pos.stop_price):
+                            pos.stop_price = new_stop
                 else:
-                    be = pos.entry_price * (1 - lock / 100.0)
-                    trail = (pos.peak_price or px) * (1 + lock / 100.0)
-                    new_stop = min(be, trail)
-                    if new_stop < pos.stop_price:
-                        pos.stop_price = new_stop
+                    if pos.side == "long":
+                        be = pos.entry_price * (1 + lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 - lock / 100.0)
+                        new_stop = max(be, trail)
+                        if new_stop > pos.stop_price:
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * (1 - lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 + lock / 100.0)
+                        new_stop = min(be, trail)
+                        if new_stop < pos.stop_price:
+                            pos.stop_price = new_stop
                 # Amend exchange SL order if stop moved
                 if pos.stop_price != old_stop:
                     try:
@@ -4156,13 +4243,21 @@ class AIStrategy:
                 if side == "short" and roc > 0:
                     self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
                     return
-            stop_pct = float(decision.get("stop_pct") or 0.03)
-            take_pct = float(decision.get("take_pct") or 0.06)
-            stop_pct = min(float(self.config.max_stop_pct), max(float(self.config.min_stop_pct), stop_pct))
-            take_pct = max(float(self.config.min_take_pct), take_pct)
-            # need RR at least ~1.3 after fees
-            if take_pct < stop_pct * 1.3:
-                take_pct = stop_pct * 1.5
+            try:
+                _entry_hint = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+            except (TypeError, ValueError):
+                _entry_hint = 0.0
+            stop_pct, take_pct = self._stops_from_atr(
+                coin,
+                _entry_hint,
+                stop_pct=float(decision.get("stop_pct") or 0),
+                take_pct=float(decision.get("take_pct") or 0),
+            )
+            print(
+                f"[AI] ATR stops {coin}: atr_pct={self._atr_pct(coin, _entry_hint):.4f} "
+                f"stop={stop_pct:.4f} take={take_pct:.4f}",
+                flush=True,
+            )
             await self._open(
                 client, coin, side,
                 stop_pct=stop_pct, take_pct=take_pct,
