@@ -9,7 +9,7 @@ import { useTranslation } from '../hooks/useTranslation'
 
 /** Stage-3: AI Discretionary + Live mirror only (legacy bots removed). */
 
-const AI_SYMBOLS = ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']
+const AI_SYMBOLS = ['BTC', 'ETH', 'SOL', 'XRP']
 
 function BotSparkline({ botId, pnl }) {
   const points = useMemo(() => {
@@ -706,7 +706,7 @@ const aiRunning = !!aiStatus?.running
             aiStatus?.pulse
             || aiStatus?.description
             || t('bots.ai_desc')
-            || 'AI Discretionary — LLM анализирует рынок и открывает/закрывает позиции.'
+            || 'AI Discretionary 1H v1.10 — защитный режим: BTC/ETH/SOL/XRP, высокий порог входа, ранний трейл и безубыток, риск ~1.5% на сделку.'
           }
           tags={[
             aiStatus?.model || aiStatus?.llm?.model || 'LLM',

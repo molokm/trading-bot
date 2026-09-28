@@ -689,7 +689,7 @@ async def startup():
                     from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
                     _syms = list(_AI_SYMS)
                 except Exception:
-                    _syms = ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']
+                    _syms = ['BTC', 'ETH', 'SOL', 'XRP']
                 _cap = float(os.getenv('AI_CAPITAL', '10000'))
                 try:
                     _cap_db = await db.get_setting('ai_live_capital')
@@ -791,7 +791,7 @@ async def startup():
                 from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
                 _syms = list(_AI_SYMS)
             except Exception:
-                _syms = ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"]
+                _syms = ["BTC", "ETH", "SOL", "XRP"]
             _cap = float(os.getenv("AI_CAPITAL", "10000"))
             ai_cfg = AIConfig(
                 symbols=_syms, capital=_cap,
@@ -4243,11 +4243,11 @@ async def get_positions(request: Request, inst_type: str='SWAP'):
                     if coin in univ:
                         candidates.append((VAL_BOT_ID, 'MACD+Donchian Validation', validation))
                 if ai_bot and getattr(ai_bot, '_running', False):
-                    univ = list(getattr(getattr(ai_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'])
+                    univ = list(getattr(getattr(ai_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'XRP'])
                     if coin in univ:
                         candidates.append((AI_BOT_ID, 'AI Discretionary 1H', ai_bot))
                 if ai_scale_bot and getattr(ai_scale_bot, '_running', False):
-                    univ = list(getattr(getattr(ai_scale_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'])
+                    univ = list(getattr(getattr(ai_scale_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'XRP'])
                     if coin in univ:
                         candidates.append((AI_SCALE_BOT_ID, 'AI Scale-In 1H', ai_scale_bot))
                 if len(candidates) == 1:

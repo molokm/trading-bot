@@ -1,10 +1,11 @@
-"""AI Discretionary Strategy — 1H multi-coin (BTC ETH SOL OKB DOGE XRP BCH DAI) with LLM decisions.
+"""AI Discretionary Strategy — 1H majors (BTC ETH SOL XRP) with LLM decisions.
 
 Safety envelope (anti-liquidation oriented):
   - capital baseline $10_000, max leverage 3x
-  - stop distance clamped 1.5–5%; size from risk budget
-  - max 1–2 positions; AI_EXECUTE=0 → decide+log only (no orders)
+  - stop distance clamped ~1.6–3.5%; size from risk budget (~1.5%)
+  - max 1 position; AI_EXECUTE=0 → decide+log only (no orders)
   - risk_guard.assert_can_open on entries
+  - v1.10 defensive: early trail/BE, daily loss limit −2%
 """
 from __future__ import annotations
 
@@ -88,9 +89,7 @@ def save_ai_state(payload: dict) -> None:
 STRATEGY_NAME = "AI Discretionary 1H"
 STRATEGY_VERSION = "v1.10-defensive"
 STRATEGY_DESC = (
-    "AI Discretionary v1.10 — defensive: higher entry bar, early trail, majors preferred, "
-    "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
-    "индикаторный выход и self-adapt."
+    "AI Discretionary 1H v1.10 — защитный режим: BTC/ETH/SOL/XRP, высокий порог входа, ранний трейл и безубыток, риск ~1.5% на сделку."
 )
 
 CT_VAL = {
@@ -149,7 +148,7 @@ class AIConfig:
     symbols: list = None
     capital: float = 10000.0
     max_leverage: float = 3.0
-    max_positions: int = 2                 # v1.3: allow 2 concurrent
+    max_positions: int = 1                 # v1.10: single position focus
     risk_per_trade: float = 0.015          # ~1.5% equity at stop (defensive)
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
@@ -2633,7 +2632,7 @@ class AIStrategy:
             data = (resp or {}).get("data") or []
             seen: set[str] = set()
             allowed = set(self.config.symbols or []) or {
-                "BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI",
+                "BTC", "ETH", "SOL", "XRP",
             }
             for ep in data:
                 inst = ep.get("instId") or ""
