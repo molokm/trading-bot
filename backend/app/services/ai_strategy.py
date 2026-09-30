@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.14-chop-protect"
+STRATEGY_VERSION = "v1.15-llm-deep"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
@@ -157,7 +157,9 @@ class AIConfig:
     # Phase-1 efficiency: decide on closed 1H bar, not every poll
     decide_on_bar_close: bool = True
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
-    llm_min_interval_sec: int = 180        # hard floor between LLM calls even if bars glitch
+    llm_min_interval_sec: int = 180        # hard floor between LLM calls (entry)
+    llm_manage_interval_sec: int = 90       # v1.15: more frequent LLM while in a position
+
     daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
@@ -921,6 +923,14 @@ class AIStrategy:
                     except Exception:
                         return None
 
+                # Last 5 closed closes for LLM structure context
+                bar_closes = [_r(x) for x in closes[-6:-1]] if len(closes) >= 6 else [_r(x) for x in closes[:-1][-5:]]
+                ema_slope = None
+                try:
+                    if e21 and len(ema21) >= 4 and ema21[-4]:
+                        ema_slope = round((float(e21) - float(ema21[-4])) / float(ema21[-4]) * 100.0, 4)
+                except Exception:
+                    ema_slope = None
                 out[coin] = {
                     "close": _r(c),
                     "closed_bar_ts": closed_bar_ts,
@@ -929,6 +939,8 @@ class AIStrategy:
                     "ema200": _r(e200),
                     "ema_fast": _r(e21),  # compat exits
                     "ema_slow": _r(e50),
+                    "ema_slope": ema_slope,
+                    "bar_closes": bar_closes,
                     "roc_3": _r(roc[-1]),
                     "roc": _r(roc[-1]),
                     "adx": _r(adx[-1]),
@@ -1519,6 +1531,25 @@ class AIStrategy:
             else:
                 candidates.append(row)
         candidates.sort(key=lambda x: float(x.get("align") or 0), reverse=True)
+        # Short natural-language hints so LLM focuses on edge cases
+        hints = []
+        try:
+            g = str((quant or {}).get("global_regime") or "")
+            if g:
+                hints.append(f"global_regime={g}")
+            btc_r = (quant or {}).get("btc_roc")
+            if btc_r is not None:
+                hints.append(f"btc_roc={btc_r}")
+            for row in (candidates or [])[:3]:
+                hints.append(
+                    f"allowed:{row.get('coin')} {row.get('side')} align={row.get('align')} adx={row.get('adx')}"
+                )
+            for row in (blocked or [])[:2]:
+                hints.append(f"blocked:{row.get('coin')} {row.get('side')}")
+            for p in open_list[:2]:
+                hints.append(f"open:{p.get('coin')} {p.get('side')} entry={p.get('entry_price')}")
+        except Exception:
+            pass
         return {
             "equity": round(self._equity, 2),
             "capital": self._capital,
@@ -1529,15 +1560,17 @@ class AIStrategy:
             "candidates_allowed": candidates,
             "candidates_blocked": blocked,
             "indicators": self._latest_indicators,
+            "analysis_hints": hints,
             "adaptive": self._adapt,
             "reflection": self._reflection,
             "daily_lessons": list(getattr(self, "_daily_lessons", None) or []),
-            "journal_tail": list(getattr(self, "_journal", None) or [])[-5:],
+            "journal_tail": list(getattr(self, "_journal", None) or [])[-8:],
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
             "llm": llm_status(),
             "execute": self._execute_enabled(),
             "policy_hint": (
+                "Analyze structure+momentum+risk using indicators and analysis_hints. "
                 "Prefer opens only from candidates_allowed. "
                 "Ignore candidates_blocked unless managing existing positions."
             ),
@@ -3990,7 +4023,11 @@ class AIStrategy:
         fresh = self._new_closed_bars() if decide_bar else list((self._latest_indicators or {}).keys())
         import time as _time
         now_ts = _time.time()
-        min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
+        # v1.15: tighter LLM cadence when managing an open position
+        if self._positions:
+            min_gap = float(getattr(self.config, "llm_manage_interval_sec", 90) or 90)
+        else:
+            min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
         gap_ok = (now_ts - float(getattr(self, "_last_llm_ts", 0) or 0)) >= min_gap
         # Always allow manage path more often if we have open positions and a fresh bar
         need_llm = bool(fresh) and gap_ok
