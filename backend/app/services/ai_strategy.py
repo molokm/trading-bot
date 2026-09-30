@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.13-atr-opt"
+STRATEGY_VERSION = "v1.14-chop-protect"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
@@ -149,7 +149,7 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 1                 # v1.10: single position focus
-    risk_per_trade: float = 0.015          # ~1.5% equity at stop (defensive)
+    risk_per_trade: float = 0.012          # ~1.2% equity at stop (v1.14 chop protect)
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
@@ -193,6 +193,9 @@ class AIConfig:
     reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
     # Do not indicator-exit at a loss if same-side trend still confirmed
     hold_loss_if_align: float = 0.60       # align >= this → skip soft/hard ind exit while red
+    hold_loss_min_adx: float = 22.0        # v1.14: no hold-in-loss in weak trend
+    hold_loss_block_chop: bool = True      # v1.14: never hold red in chop regime
+    force_exit_adverse_atr: float = 0.60   # v1.14: if loss >0.6×ATR allow ind_exit despite align
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
@@ -1573,7 +1576,11 @@ class AIStrategy:
         lot = LOT_SZ.get(coin, 0.01)
         stop_pct = max(0.015, min(0.05, abs(stop_pct)))
         eq = float(equity) if equity else self._equity
-        risk_usd = eq * cfg.risk_per_trade
+        # v1.14: hard cap risk at 1.2% even if env/DB still has 2%
+        _r = float(getattr(cfg, "risk_per_trade", 0.012) or 0.012)
+        if _r > 0.012:
+            _r = 0.012
+        risk_usd = eq * _r
         # notional such that stop_pct * notional ≈ risk_usd
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
         max_margin = eq * cfg.allocation_pct
@@ -3316,22 +3323,54 @@ class AIStrategy:
 
         # Same-side trend still strong? Do not exit at a loss on indicator noise —
         # that causes close→reopen churn and double fees when short/long continues.
+        # v1.14: hold-in-loss ONLY outside chop and with ADX>=min; force exit if adverse >0.6×ATR.
         al = float(ind.get("align_long") or 0)
         ash = float(ind.get("align_short") or 0)
         align_side = ash if pos.side == "short" else al
         hold_al = float(getattr(cfg, "hold_loss_if_align", 0.60) or 0)
-        trend_still_ok = hold_al > 0 and align_side >= hold_al
+        reg = str(ind.get("regime") or "").lower()
+        min_adx_hold = float(getattr(cfg, "hold_loss_min_adx", 22.0) or 0)
+        block_chop = bool(getattr(cfg, "hold_loss_block_chop", True))
+        # Adverse move in ATR units while red
+        adverse_atr = 0.0
+        try:
+            atr = float(ind.get("atr") or 0)
+            entry = float(pos.entry_price or 0)
+            if atr > 0 and entry > 0 and upl < 0:
+                adverse = (entry - px) if pos.side == "long" else (px - entry)
+                if adverse > 0:
+                    adverse_atr = adverse / atr
+        except Exception:
+            adverse_atr = 0.0
+        force_adv = float(getattr(cfg, "force_exit_adverse_atr", 0.60) or 0.60)
+        too_deep = force_adv > 0 and adverse_atr >= force_adv
+        trend_still_ok = (
+            hold_al > 0
+            and align_side >= hold_al
+            and (not block_chop or reg not in ("chop", "unknown", ""))
+            and (min_adx_hold <= 0 or adx >= min_adx_hold)
+            and not too_deep
+        )
 
         # In profit + any soft signal → take the small win
         if soft and upl >= min_p:
             return "ind_exit:" + "+".join(reasons[:3])
+        # Deep adverse in ATR terms → cut even on single hard signal / soft cluster
+        if too_deep and (hard or (soft and len(reasons) >= 1)) and upl < 0:
+            print(
+                f"[AI] force ind_exit {pos.coin} {pos.side}: adverse_atr={adverse_atr:.2f} "
+                f">={force_adv} upl={upl:+.2f}% reg={reg} adx={adx:.1f}",
+                flush=True,
+            )
+            return "ind_exit:adverse_atr+" + "+".join(reasons[:2] or ["deep"])
         # Strong multi-signal against even if flat/small red — cut before full SL
-        # BUT skip if we are red AND same-side align still confirms the trade
+        # BUT skip if we are red AND trend still confirmed (non-chop, ADX ok, not too deep)
         if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
             if upl < 0 and trend_still_ok:
                 print(
                     f"[AI] hold through ind noise {pos.coin} {pos.side}: "
-                    f"upl={upl:+.2f}% align={align_side:.2f} reasons={reasons[:3]}",
+                    f"upl={upl:+.2f}% align={align_side:.2f} reg={reg} adx={adx:.1f} "
+                    f"adv_atr={adverse_atr:.2f} reasons={reasons[:3]}",
                     flush=True,
                 )
                 return None
