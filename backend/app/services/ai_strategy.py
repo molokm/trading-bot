@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.16-let-winners-run"
+STRATEGY_VERSION = "v1.17-mirror-reliable"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
     "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
@@ -2021,6 +2021,13 @@ class AIStrategy:
             else:
                 await self._try_refresh_live_client()
                 ok = False
+                if not self._live_client():
+                    # One more ensure pass (credentials may load just after open)
+                    try:
+                        await asyncio.sleep(0.4)
+                        await self._try_refresh_live_client()
+                    except Exception:
+                        pass
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
                     _m = "mirror_ok" if ok else "mirror_fail"
@@ -2952,15 +2959,30 @@ class AIStrategy:
 
 
     async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
-        """Re-check AI/quant gates with *current* indicators before a delayed LIVE open.
+        """Re-check gates before a *delayed* LIVE open (fast-retry / gap-fill).
 
-        Immediate mirror (same tick as demo fill) skips this. Fast-retry / gap-fill
-        must pass — otherwise market may have flipped and blind clone is unsafe.
+        Immediate mirror (same tick as demo fill) skips this.
+        v1.17: softer than entry quant — demo already accepted the signal; we only
+        block if the market clearly ran away or flipped hard against the side.
         """
         side = (side or "").lower()
         if side not in ("long", "short"):
             return False, "bad_side"
-        # Fresh indicators if we have a client
+        demo_pos = self._positions.get(coin)
+        # Age of demo position (seconds)
+        age_s = 1e9
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            opened = getattr(demo_pos, "opened_at", None) if demo_pos else None
+            if opened:
+                if isinstance(opened, str):
+                    opened = _dt.fromisoformat(opened.replace("Z", "+00:00"))
+                if getattr(opened, "tzinfo", None) is None:
+                    opened = opened.replace(tzinfo=_tz.utc)
+                age_s = max(0.0, (_dt.now(_tz.utc) - opened).total_seconds())
+        except Exception:
+            age_s = 1e9
+
         try:
             client = await self._client()
             if client:
@@ -2968,46 +2990,55 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
         ind = self._latest_indicators.get(coin) or {}
+        # First 3 minutes: only block hard adverse price move (mirror must catch up)
+        soft_window = age_s <= 180.0
         if not ind:
+            # Without indicators still allow early mirror if live is ready
+            if soft_window:
+                return True, "ok_no_ind_soft_window"
             return False, "no_indicators"
+
         al = float(ind.get("align_long") or 0)
         ash = float(ind.get("align_short") or 0)
         adx = float(ind.get("adx") or 0)
-        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
-        # Slightly softer for mirror revalidate (already had a demo signal)
-        min_align = max(0.45, min_align - 0.05)
         align = al if side == "long" else ash
-        if align < min_align - 1e-9:
-            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
-        # ADX gate with same soft-bypass as open path
-        best = max(al, ash)
-        try:
-            if self._adx_blocks_open(adx, best):
-                return False, f"adx_block:{adx:.1f}"
-        except Exception:
-            pass
-        # Regime clash: don't open long in clear bear / short in clear bull
-        reg = str(ind.get("regime") or "").lower()
-        if side == "long" and reg in ("bear", "bearish", "down"):
-            if al < min_align + 0.08:
-                return False, f"regime_bear_vs_long:{reg}"
-        if side == "short" and reg in ("bull", "bullish", "up"):
-            if ash < min_align + 0.08:
-                return False, f"regime_bull_vs_short:{reg}"
-        # Price still near demo entry? (avoid chasing >1.2% adverse move)
-        demo_pos = self._positions.get(coin)
+        # Soften align floor strongly for mirror lag (demo already traded)
+        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+        min_align = max(0.35, min_align - (0.15 if soft_window else 0.10))
+
+        # Price chase guard: 2.5% adverse in soft window, 3.5% after
+        max_adverse = 0.025 if soft_window else 0.035
         try:
             entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
             last = float(ind.get("close") or ind.get("last") or 0)
             if entry > 0 and last > 0:
                 move = (last - entry) / entry
-                if side == "long" and move < -0.012:
+                if side == "long" and move < -max_adverse:
                     return False, f"price_ran_away_long:{move:.3%}"
-                if side == "short" and move > 0.012:
+                if side == "short" and move > max_adverse:
                     return False, f"price_ran_away_short:{move:.3%}"
         except Exception:
             pass
-        return True, f"ok_align={align:.2f}_adx={adx:.1f}"
+
+        if soft_window:
+            # Early gap-fill: skip ADX/regime/align hardness — only price guard above
+            return True, f"ok_soft age={age_s:.0f}s align={align:.2f}"
+
+        if align < min_align - 1e-9:
+            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
+        best = max(al, ash)
+        try:
+            # Softer ADX: only block if very weak and no align
+            if adx < 12 and align < min_align + 0.05:
+                return False, f"adx_block:{adx:.1f}"
+        except Exception:
+            pass
+        reg = str(ind.get("regime") or "").lower()
+        if side == "long" and reg in ("bear", "bearish", "down") and al < min_align + 0.05:
+            return False, f"regime_bear_vs_long:{reg}"
+        if side == "short" and reg in ("bull", "bullish", "up") and ash < min_align + 0.05:
+            return False, f"regime_bull_vs_short:{reg}"
+        return True, f"ok_align={align:.2f}_adx={adx:.1f}_age={age_s:.0f}s"
 
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
                                   take_pct: float, reason: str) -> None:
@@ -3087,7 +3118,21 @@ class AIStrategy:
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
             last = float(self._clone_attempt_ts.get(coin) or 0)
-            if now - last < 15:
+            # Fresh demo pos: retry every 5s; older: every 12s
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                op = getattr(demo_pos, "opened_at", None)
+                age = 9999.0
+                if op:
+                    if isinstance(op, str):
+                        op = _dt.fromisoformat(op.replace("Z", "+00:00"))
+                    if getattr(op, "tzinfo", None) is None:
+                        op = op.replace(tzinfo=_tz.utc)
+                    age = (_dt.now(_tz.utc) - op).total_seconds()
+            except Exception:
+                age = 9999.0
+            cd = 5.0 if age < 300 else 12.0
+            if now - last < cd:
                 continue
             self._clone_attempt_ts[coin] = now
             entry = float(getattr(demo_pos, "entry_price", 0) or 0)
