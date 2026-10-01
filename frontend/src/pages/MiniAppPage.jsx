@@ -233,53 +233,6 @@ function MiniAppPageInner() {
     return out
   }, [data, liveConnected])
 
-  const viewTrades = useMemo(() => {
-    const all = Array.isArray(data?.trades) ? data.trades : []
-    const mapped = all
-      .filter((tr) => String(tr.reason || '').toLowerCase() !== 'open')
-      .map((tr, i) => {
-        const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
-        const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
-        const isLong = sideRaw === 'long' || sideRaw === 'buy'
-        const isShort = sideRaw === 'short' || sideRaw === 'sell'
-        const inst = (tr.inst_id || tr.symbol || tr.coin || '').replace('-USDT-SWAP', '')
-        return {
-          key: `${mode}-${tr.ord_id || i}-${tr.time || tr.exit_time || i}`,
-          inst: inst || '—',
-          side: isLong ? 'long' : isShort ? 'short' : '',
-          sideLabel: isLong ? 'LONG' : isShort ? 'SHORT' : '—',
-          pnl: Number(tr.pnl || 0),
-          mode,
-          time: tr.exit_time || tr.time || '',
-        }
-      })
-    return mapped.slice(0, 3)
-  }, [data?.trades])
-
-  if (loading && !data) {
-    return (
-      <div className="mini-app-root items-center justify-center text-[var(--txt-muted)] text-sm">
-        Загрузка…
-      </div>
-    )
-  }
-
-  if (error && !data) {
-    return (
-      <div className="mini-app-root items-center justify-center gap-3">
-        <div className="text-sm font-semibold">Не удалось загрузить</div>
-        <div className="text-2xs text-[var(--txt-muted)]">{error}</div>
-        <button
-          type="button"
-          onClick={load}
-          className="px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold"
-        >
-          Повторить
-        </button>
-      </div>
-    )
-  }
-
   const pulse = data?.demo?.pulse || data?.demo?.description || ''
   const demoOn = !!(data?.demo?.running)
 
@@ -426,53 +379,6 @@ function MiniAppPageInner() {
                     </span>
                   </span>
                 </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      {/* Last 3 trades */}
-      <div className="mini-section mini-trades">
-        <div className="mini-section-title">
-          <span>Сделки</span>
-          <span>последние 3</span>
-        </div>
-        <div className="mini-panel">
-          {viewTrades.length === 0 ? (
-            <div className="py-2.5 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет сделок</div>
-          ) : (
-            viewTrades.map((tr) => (
-              <div key={tr.key} className="mini-trade-row">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {Number(tr.pnl) >= 0 ? (
-                    <ArrowUpRight size={12} className="text-[var(--profit)] flex-shrink-0" />
-                  ) : (
-                    <ArrowDownRight size={12} className="text-[var(--loss)] flex-shrink-0" />
-                  )}
-                  <div className="text-[0.7rem] font-semibold truncate">
-                    {tr.inst}{' '}
-                    <span
-                      className={`font-bold text-[0.55rem] ${
-                        tr.side === 'long'
-                          ? 'text-[var(--profit)]'
-                          : tr.side === 'short'
-                            ? 'text-[var(--loss)]'
-                            : 'text-[var(--txt-muted)]'
-                      }`}
-                    >
-                      {tr.sideLabel}
-                    </span>
-                    {tr.mode === 'live' ? (
-                      <span className="badge-live ml-1">LIVE</span>
-                    ) : (
-                      <span className="badge-demo ml-1">DEMO</span>
-                    )}
-                  </div>
-                </div>
-                <span className={`text-[0.7rem] font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>
-                  {pnlSign(tr.pnl)}
-                </span>
               </div>
             ))
           )}
