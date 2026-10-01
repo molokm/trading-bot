@@ -151,8 +151,18 @@ export const api = {
   },
 
   pnlReconcile: () => request('/pnl/reconcile'),
-  getPnl: () => request('/pnl'),
-  getPnlSummary: () => request('/pnl/summary'),
+  getPnl: (opts = {}) => {
+    const q = new URLSearchParams()
+    if (opts.mode) q.set('mode', opts.mode)
+    const s = q.toString()
+    return request('/pnl' + (s ? `?${s}` : ''))
+  },
+  getPnlSummary: (opts = {}) => {
+    const q = new URLSearchParams()
+    if (opts.mode) q.set('mode', opts.mode)
+    const s = q.toString()
+    return request('/pnl/summary' + (s ? `?${s}` : ''))
+  },
   getStats: ({ period = 'all', mode = 'demo', date_from = '', date_to = '' } = {}) => {
     const q = new URLSearchParams({ period, mode });
     if (date_from) q.set('date_from', date_from);

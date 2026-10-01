@@ -5677,12 +5677,13 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
 
 
 @app.get('/api/pnl/summary')
-async def pnl_summary():
+async def pnl_summary(request: Request=None, mode: str = None):
     """Lightweight PnL for dashboard metric cards (cached via get_pnl).
 
     Avoids clients re-implementing aggregation; same TTL as full /api/pnl.
+    Optional ``mode=demo|live`` — same as /api/pnl.
     """
-    full = await get_pnl()
+    full = await get_pnl(request=request, mode=mode)
     return {'total': full.get('total', 0), '1d': full.get('1d', 0), '7d': full.get('7d', 0), '30d': full.get('30d', 0), 'week': full.get('week', 0), 'unrealized': full.get('unrealized', 0), 'funding': full.get('funding', 0), 'funding_scope': full.get('funding_scope', 'account'), 'economic_approx': full.get('economic_approx', 0), 'strategy_realized': full.get('strategy_realized', full.get('total', 0)), 'per_bot': full.get('per_bot', {}), 'active_bots': full.get('active_bots', []), 'source': full.get('source', ''), 'sticky': full.get('sticky', False), 'account_mode': full.get('account_mode'), 'trades_counted': full.get('trades_counted', 0), 'engine': full.get('engine'), 'pnl_epoch': full.get('pnl_epoch'), 'pnl_tz': full.get('pnl_tz') or full.get('timezone'), 'timezone': full.get('timezone'), 'day_basis': full.get('day_basis'), 'cached': True, 'cache_ttl_sec': _PNL_TTL}
 
 def _active_bot_labels() -> set:
@@ -5709,22 +5710,52 @@ def _active_bot_labels() -> set:
     return labels
 
 @app.get('/api/pnl')
-async def get_pnl(request: Request=None):
-    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
+async def get_pnl(request: Request=None, mode: str = None):
+    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only.
+
+    Optional query ``mode=demo|live`` forces account isolation (needed by dual
+    DEMO/LIVE cards on one page). Default = platform _account_mode().
+    """
     global _pnl_cache
-    _mode = _account_mode()
+    q = None
+    try:
+        if request is not None:
+            q = (request.query_params.get('mode') or '').strip().lower()
+    except Exception:
+        q = None
+    if mode:
+        q = str(mode).strip().lower()
+    if q in ('demo', 'live'):
+        _mode = q
+    else:
+        _mode = _account_mode()
     now_s = _time.time()
-    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+    # Support multi-mode cache: dict mode -> {ts, data}
+    cache_bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else None
+    if cache_bag:
+        entry = (cache_bag.get('by_mode') or {}).get(_mode)
+        if entry and (now_s - entry.get('ts', 0) < _PNL_TTL):
+            out = dict(entry['data'])
+            out['account_mode'] = _mode
+            return out
+    elif _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
         out = dict(_pnl_cache['data'])
         out['account_mode'] = _mode
         return out
     async with _pnl_lock:
         now_s = _time.time()
-        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+        cache_bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else None
+        if cache_bag:
+            entry = (cache_bag.get('by_mode') or {}).get(_mode)
+            if entry and (now_s - entry.get('ts', 0) < _PNL_TTL):
+                out = dict(entry['data'])
+                out['account_mode'] = _mode
+                return out
+        elif _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
             out = dict(_pnl_cache['data'])
             out['account_mode'] = _mode
             return out
-        data = await _compute_pnl()
+        data = await _compute_pnl(mode=_mode)
         if isinstance(data, dict):
             data = dict(data)
             data['account_mode'] = _mode
@@ -5748,10 +5779,19 @@ async def get_pnl(request: Request=None):
                     data = kept
         except Exception:
             pass
-        _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
+        # Multi-mode cache so demo+live cards stay stable on one page
+        bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else {'by_mode': {}}
+        if not isinstance(bag.get('by_mode'), dict):
+            bag['by_mode'] = {}
+        bag['by_mode'][_mode] = {'ts': _time.time(), 'data': data}
+        # keep legacy fields for older readers
+        bag['ts'] = _time.time()
+        bag['data'] = data
+        bag['mode'] = _mode
+        _pnl_cache = bag
         return dict(data)
 
-async def _compute_pnl():
+async def _compute_pnl(mode: str = None):
     """PnL from unified set T: AI Discretionary closed trades in app DB.
 
     Same filter for dashboard cards, history list, bot KPI, mini app.
@@ -5764,7 +5804,9 @@ async def _compute_pnl():
         filter_pnl_rows,
         PNL_EPOCH_ISO as _EP_ISO,
     )
-    _mode = _account_mode()
+    _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
+    if _mode not in ('demo', 'live'):
+        _mode = _account_mode()
     _ep = int(_ep_ms())
     try:
         # Do NOT clear _pnl_cache here — concurrent readers would see empty

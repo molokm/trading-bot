@@ -398,7 +398,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       const [trades, liveTr, pnlData] = await Promise.all([
         api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
-        api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
+        api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
       ])
       const demoRows = trades?.trades || []
       const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
@@ -421,31 +421,30 @@ export default function Dashboard({ health, connected, isGuest }) {
       }
       setTradeLog([...byKey.values()])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        // ONLY accept pnl_engine payloads — never bot-status seeds
+        // Accept pnl_engine / app_closed_trades / exchange — never bot-status seeds
         const src = String(pnlData.source || '')
-        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
-        if (okSrc || pnlData.pnl_epoch) {
-          const wantMode = demoMode ? 'demo' : 'live'
-          const gotMode = String(pnlData.account_mode || '').toLowerCase()
-          // Ignore payload from the other account mode
-          if (gotMode && gotMode !== wantMode) {
-            console.warn('[pnl] ignore mismatched mode', gotMode, 'want', wantMode)
-          } else {
-            setPnl(prev => {
-              const newTot = Math.abs(Number(pnlData.total ?? 0))
-              const oldTot = Math.abs(Number(prev?.total ?? 0))
-              const newSrc = String(pnlData.source || '')
-              const prevMode = String(prev?.account_mode || '').toLowerCase()
-              // Zero on purpose when live has no closes — do not keep demo total
-              if (prevMode && prevMode !== wantMode) {
-                return { ...pnlData, account_mode: gotMode || wantMode }
-              }
-              if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
-                return prev
-              }
-              return { ...pnlData, account_mode: gotMode || wantMode }
-            })
-          }
+        const okSrc = (
+          src.startsWith('exchange')
+          || src.startsWith('db_trades')
+          || src === 'app_closed_trades'
+          || src === 'error'
+          || !!pnlData.engine
+          || !!pnlData.pnl_epoch
+        )
+        if (okSrc) {
+          const gotMode = String(pnlData.account_mode || 'demo').toLowerCase()
+          // Dual dashboard: demo totals always applied to `pnl` state (left side of cards)
+          // Live half comes from liveStatus — do not reject demo payload when UI mode differs
+          setPnl(prev => {
+            const newTot = Math.abs(Number(pnlData.total ?? 0))
+            const oldTot = Math.abs(Number(prev?.total ?? 0))
+            const newSrc = String(pnlData.source || '')
+            // Sticky: never flash 0 over a real total on transient errors
+            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none' || newSrc === '')) {
+              return prev
+            }
+            return { ...pnlData, account_mode: gotMode || 'demo' }
+          })
         }
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
@@ -610,12 +609,10 @@ export default function Dashboard({ health, connected, isGuest }) {
   }
   // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
   const wantPnlMode = demoMode ? 'demo' : 'live'
+  // Dual DEMO/LIVE page: left metrics are always DEMO aggregate from /api/pnl?mode=demo
   const pnlModeOk = (() => {
     const m = String(pnl?.account_mode || '').toLowerCase()
-    // Live: require explicit live — missing mode = treat as not ready (show 0)
-    if (!demoMode) return m === 'live'
-    // Demo: demo or untagged legacy payload
-    return !m || m === 'demo'
+    return !m || m === 'demo' || !!pnl?.engine || String(pnl?.source || '').includes('closed')
   })()
 
   // DEMO total from the SAME closed trades shown on the dashboard (authoritative for UI).
@@ -719,9 +716,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      const v = (demoMode && demoRealizedFromTrades.n > 0)
-        ? demoRealizedFromTrades.total
-        : Number(per['AI Discretionary 1H'] ?? 0)
+      const v = Number(per['AI Discretionary 1H'] ?? pnl?.total ?? 0)
       rows.push({ name: 'AI Discretionary 1H', val: v })
       return rows
     }
