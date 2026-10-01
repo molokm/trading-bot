@@ -261,9 +261,11 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
+  const [livePnl, setLivePnl] = useState(null)
   // Drop PnL + trade log when switching Demo ↔ Live — never mix modes
   useEffect(() => {
     setPnl(null)
+    setLivePnl(null)
     setTradeLog([])
     setPositions([])
   }, [demoMode])
@@ -395,10 +397,11 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [trades, liveTr, pnlData] = await Promise.all([
+      const [trades, liveTr, pnlData, livePnlData] = await Promise.all([
         api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
         api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
+        api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
       ])
       const demoRows = trades?.trades || []
       const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
@@ -465,6 +468,29 @@ export default function Dashboard({ health, connected, isGuest }) {
             source: sd.pnl_source || 'health_fallback',
           }
         })
+      }
+      // LIVE PnL from same engine (?mode=live) — independent of liveStatus bills noise
+      if (livePnlData && !livePnlData.detail && (livePnlData.total != null || livePnlData['1d'] != null || livePnlData.per_bot)) {
+        const srcL = String(livePnlData.source || '')
+        const okLive = (
+          srcL.startsWith('exchange')
+          || srcL.startsWith('db_trades')
+          || srcL === 'app_closed_trades'
+          || srcL === 'error'
+          || !!livePnlData.engine
+          || !!livePnlData.pnl_epoch
+        )
+        if (okLive) {
+          setLivePnl(prev => {
+            const newTot = Math.abs(Number(livePnlData.total ?? 0))
+            const oldTot = Math.abs(Number(prev?.total ?? 0))
+            const newSrc = String(livePnlData.source || '')
+            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none' || newSrc === '')) {
+              return prev
+            }
+            return { ...livePnlData, account_mode: 'live' }
+          })
+        }
       }
       setDataFreshAt(Date.now())
     } catch {}
@@ -1143,9 +1169,16 @@ export default function Dashboard({ health, connected, isGuest }) {
   // LIVE numbers for dual DEMO/LIVE metric display
   const liveConnected = !!(liveStatus?.connected)
   const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
-  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
-  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
-  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
+  // Prefer stable /api/pnl?mode=live; fall back to liveStatus only if engine not loaded yet
+  const liveToday = (livePnl && livePnl['1d'] != null)
+    ? Number(livePnl['1d'])
+    : Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
+  const liveWeek = (livePnl && livePnl.week != null)
+    ? Number(livePnl.week)
+    : Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
+  const liveTotal = (livePnl && livePnl.total != null)
+    ? Number(livePnl.total)
+    : Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
   const liveEquity = Number(liveStatus?.equity ?? 0)
 
   const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
@@ -1636,8 +1669,8 @@ export default function Dashboard({ health, connected, isGuest }) {
                 <div className="grid grid-cols-4 gap-1.5">
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
                     <div className="text-[var(--txt-muted)]">PnL</div>
-                    <div className={`mono font-semibold ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{Number(liveStatus?.total_pnl ?? 0).toFixed(2)}
+                    <div className={`mono font-semibold ${liveTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {liveTotal >= 0 ? '+' : ''}{Number(liveTotal || 0).toFixed(2)}
                     </div>
                   </div>
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
