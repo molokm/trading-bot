@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.17-mirror-reliable"
+STRATEGY_VERSION = "v1.18-mirror-strict"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
     "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
@@ -1814,6 +1814,20 @@ class AIStrategy:
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str):
+        # HARD RULE: primary execution is DEMO-only. LIVE must only be opened via
+        # _open_live (mirror of an existing demo position). Never place signal
+        # orders on the live account as the primary client.
+        try:
+            if client is not None and not bool(getattr(client, "demo", True)):
+                print(
+                    f"[AI] BLOCK open {side} {coin}: primary client is LIVE — "
+                    f"refusing (mirror-only policy)",
+                    flush=True,
+                )
+                self._exec_log.append(_exec_evt("open_block_live_primary", coin, side, reason="primary_not_demo"))
+                return False
+        except Exception:
+            pass
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
@@ -2452,6 +2466,26 @@ class AIStrategy:
                          take_pct: float, reason: str) -> bool:
         """Mirror a primary (demo) open onto the connected LIVE account.
         Called at the end of `_open` when the primary fill succeeded."""
+        # Mirror-only: refuse LIVE open unless DEMO already holds this coin+side
+        demo_pos = self._positions.get(coin)
+        if not demo_pos:
+            print(f"[AI-LIVE] open_skip {coin}: no DEMO position to mirror", flush=True)
+            try:
+                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason="no_demo_position"))
+            except Exception:
+                pass
+            return False
+        if str(getattr(demo_pos, "side", "") or "").lower() != str(side or "").lower():
+            print(
+                f"[AI-LIVE] open_skip {coin}: DEMO side={getattr(demo_pos, 'side', None)} "
+                f"!= mirror side={side}",
+                flush=True,
+            )
+            try:
+                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason="side_mismatch"))
+            except Exception:
+                pass
+            return False
         lc = self._live_client()
         if not lc:
             try:
@@ -2894,6 +2928,20 @@ class AIStrategy:
                     lev = 0.0
                 seen.add(coin)
                 old = self._live_positions.get(coin)
+                # STRICT: do not adopt random LIVE exchange positions as "ours".
+                # Only track: (1) already mirrored in memory, or (2) DEMO holds same coin+side.
+                demo_match = self._positions.get(coin)
+                demo_ok = (
+                    demo_match is not None
+                    and str(getattr(demo_match, "side", "") or "").lower() == side
+                )
+                if old is None and not demo_ok:
+                    print(
+                        f"[AI-LIVE] reconcile IGNORE orphan {coin} {side} sz={sz} "
+                        f"(no DEMO twin — will not manage)",
+                        flush=True,
+                    )
+                    continue
                 if old and abs(float(old.size or 0) - sz) < 1e-9 and old.side == side:
                     # refresh mark fields only
                     old.unrealized_pnl = unc

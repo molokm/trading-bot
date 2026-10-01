@@ -708,7 +708,7 @@ async def startup():
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
-                ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+                ai_bot = AIStrategy(config=ai_cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
                     import json as _json
@@ -802,7 +802,7 @@ async def startup():
                 execute=True,
             )
             ai_bot = AIStrategy(
-                config=ai_cfg, client_manager=client_manager, db=db,
+                config=ai_cfg, client_manager=showcase_manager, db=db,
                 notifier=telegram, live_client_manager=live_manager,
             )
             _wire_ai_live_cb(ai_bot)
@@ -2412,7 +2412,7 @@ async def ai_start(data: dict=None):
                         print('[AI/start] live mirror init rejected (demo=true), skipping', flush=True)
             except Exception as e:
                 print(f'[AI/start] live mirror DB restore: {e}', flush=True)
-        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+        ai_bot = AIStrategy(config=cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
         _wire_ai_live_cb(ai_bot)
         try:
             import json as _json
