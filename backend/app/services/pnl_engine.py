@@ -257,13 +257,23 @@ def filter_pnl_rows(
                 pass
             reasons[reason or "other"] = reasons.get(reason or "other", 0) + 1
             continue
-        oid = str(row.get("ord_id") or "")
-        if oid and oid in seen_oid:
+        # Dedupe across exchange_close_trades + trades table (same close, different ids)
+        oid = str(row.get("ord_id") or "").strip()
+        cl = str(row.get("cl_ord_id") or "").strip()
+        inst = str(row.get("inst_id") or "").strip()
+        try:
+            pnl_k = round(float(row.get("pnl") or 0), 4)
+        except (TypeError, ValueError):
+            pnl_k = 0.0
+        ts_k = int(row.get("close_ts") or row.get("ts") or 0) or 0
+        # Prefer ord_id; else composite fingerprint
+        key = oid if oid else f"{cl}|{inst}|{pnl_k}|{ts_k // 60000}"
+        if key and key in seen_oid:
             excluded_n += 1
             reasons["dup_ord"] = reasons.get("dup_ord", 0) + 1
             continue
-        if oid:
-            seen_oid.add(oid)
+        if key:
+            seen_oid.add(key)
         bot = resolve_bot(row, ai_only=ai_only) or "AI Discretionary 1H"
         row["bot"] = bot
         row["bot_label"] = bot

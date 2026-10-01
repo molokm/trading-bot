@@ -5767,9 +5767,9 @@ async def _compute_pnl():
     _mode = _account_mode()
     _ep = int(_ep_ms())
     try:
+        # Do NOT clear _pnl_cache here — concurrent readers would see empty
+        # mid-compute and the UI would flash 0 / alternate totals.
         _exchange_sync_ts = 0
-        if isinstance(_pnl_cache, dict):
-            _pnl_cache.clear()
         try:
             await sync_exchange_close_trades()
         except Exception as _se:

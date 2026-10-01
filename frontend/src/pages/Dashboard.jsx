@@ -449,16 +449,22 @@ export default function Dashboard({ health, connected, isGuest }) {
         }
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
-        setPnl({
-          total: Number(sd.pnl_total ?? 0),
-          '1d': Number(sd.pnl_1d ?? 0),
-          week: Number(sd.pnl_week ?? 0),
-          '7d': Number(sd.pnl_week ?? 0),
-          '30d': Number(sd.pnl_total ?? 0),
-          unrealized: Number(sd.pnl_unrealized ?? 0),
-          per_bot: sd.pnl_per_bot || {},
-          per_bot_all: sd.pnl_per_bot || {},
-          source: sd.pnl_source || 'health_fallback',
+        setPnl(prev => {
+          // Never overwrite a real /api/pnl payload with health fallback
+          if (prev && prev.source && !['health_fallback', 'error', 'none', ''].includes(String(prev.source))) {
+            return prev
+          }
+          return {
+            total: Number(sd.pnl_total ?? 0),
+            '1d': Number(sd.pnl_1d ?? 0),
+            week: Number(sd.pnl_week ?? 0),
+            '7d': Number(sd.pnl_week ?? 0),
+            '30d': Number(sd.pnl_total ?? 0),
+            unrealized: Number(sd.pnl_unrealized ?? 0),
+            per_bot: sd.pnl_per_bot || {},
+            per_bot_all: sd.pnl_per_bot || {},
+            source: sd.pnl_source || 'health_fallback',
+          }
         })
       }
       setDataFreshAt(Date.now())
@@ -646,33 +652,30 @@ export default function Dashboard({ health, connected, isGuest }) {
     return { total: Math.round(s * 100) / 100, n }
   })()
 
+  // Single source of truth: /api/pnl (backend pnl_engine). Do NOT re-sum tradeLog —
+  // that list loads async, can double-count, and makes Total PnL jump on every poll.
   const discPnlResolved = (() => {
-    const src = String(pnl?.source || '')
-    if (pnlModeOk && pnl?.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
-      return Number(pnl.per_bot?.['AI Discretionary 1H'] ?? pnl.total ?? 0)
+    if (!pnlModeOk) return 0
+    if (pnl?.per_bot?.['AI Discretionary 1H'] != null) {
+      return Number(pnl.per_bot['AI Discretionary 1H'])
     }
-    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
-    return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+    if (pnl?.total != null && Number.isFinite(Number(pnl.total))) return Number(pnl.total)
+    return 0
   })()
   const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
-    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
-    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
+    if (pnl?.trades_counted != null) return Number(pnl.trades_counted)
+    if (!demoMode) return Number(aiStatus?.lifetime_trades ?? 0)
+    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0)
   })()
   const pnlTotal = (() => {
     if (!pnlModeOk) return 0
-    // Prefer direct OKX bills / exchange engine — authoritative since 01.09.2026
-    const src = String(pnl?.source || '')
-    if (pnl && pnl.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
+    // Always prefer server aggregate (app_closed_trades / okx_bills / exchange)
+    if (pnl && pnl.total != null && Number.isFinite(Number(pnl.total))) {
       return Number(pnl.total)
     }
-    if (demoMode && demoRealizedFromTrades.n > 0) {
-      return demoRealizedFromTrades.total
-    }
-    if (AI_ONLY_MODE) return discPnlResolved
-    if (pnl && pnl.total != null) return Number(pnl.total)
-    return discPnlResolved + scalePnlResolved
+    return discPnlResolved
   })()
   const pnlDay = (() => {
     if (!pnlModeOk) return 0
@@ -752,12 +755,13 @@ export default function Dashboard({ health, connected, isGuest }) {
   }, [pnl, validationStatus?.total_pnl])
 
   const aiCardPnl = useMemo(() => {
-    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     const per = pnl?.per_bot || {}
     if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
     if (per.ai_strategy != null) return Number(per.ai_strategy)
+    if (pnl?.total != null && Number.isFinite(Number(pnl.total))) return Number(pnl.total)
+    // last resort only — never preferred over /api/pnl
     return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl, demoMode, demoRealizedFromTrades])
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
 
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
