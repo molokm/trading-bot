@@ -87,9 +87,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.15-llm-deep"
+STRATEGY_VERSION = "v1.16-let-winners-run"
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
+    "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
+    "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
+    "вместо лоссов), риск ~1.2%, hold-in-trend при align≥0.60 с chop/ADX-гардами."
 )
 
 CT_VAL = {
@@ -175,7 +177,10 @@ class AIConfig:
     min_roc_abs: float = 0.15
     min_stop_pct: float = 0.016
     max_stop_pct: float = 0.035            # cut max pain per trade
-    min_take_pct: float = 0.028            # closer TP — bank wins earlier
+    min_take_pct: float = 0.038            # v1.16: widened back — v1.10 cut this to 0.028
+                                            # while *also* diagnosing "wins too small vs
+                                            # losses"; that shrank wins further. Restored
+                                            # above the pre-v1.10 0.035 baseline.
     max_hold_hours: float = 12.0            # phase4: hard time-stop
     time_stop_stale_hours: float = 5.0      # do not bleed for 8h
     time_stop_min_progress_pct: float = 0.20
@@ -188,7 +193,11 @@ class AIConfig:
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.40       # start locking earlier
+    trail_activate_pct: float = 0.65       # v1.16: 0.40→0.65 — kept in sync with
+                                            # trail_activate_atr_mult (OR'd together;
+                                            # the smaller of the two always wins, so
+                                            # leaving this low would have silently
+                                            # undone the ATR widening above)
     trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
@@ -207,11 +216,19 @@ class AIConfig:
     # ATR framework (1H crypto) — stops/trail/scale relative to volatility
     atr_period: int = 14
     atr_stop_mult: float = 1.15            # stop ≈ 1.15×ATR (clamped to min/max_stop_pct)
-    atr_take_mult: float = 1.90            # take ≈ 1.9×ATR → RR ~1.65 before clamp
+    atr_take_mult: float = 2.30            # v1.16: 1.9→2.3×ATR → RR ~2.0 before clamp
+                                            # (was cut to 1.90 under v1.10's "closer TP"
+                                            # fix, which worked against its own diagnosis)
     scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
-    breakeven_atr_mult: float = 0.28       # move stop to BE after +0.28×ATR in favor
-    trail_atr_mult: float = 0.55           # trail distance from peak = 0.55×ATR
-    trail_activate_atr_mult: float = 0.45  # start trailing after +0.45×ATR profit
+    breakeven_atr_mult: float = 0.45       # v1.16: 0.28→0.45 — give winners room before
+                                            # locking BE (was triggering too early)
+    breakeven_min_pct: float = 0.55        # v1.16: named replacement for the old hardcoded
+                                            # upl>=0.35 OR-fallback (was firing before the
+                                            # ATR condition, defeating the widening above)
+    trail_atr_mult: float = 0.65           # v1.16: 0.55→0.65 — slightly wider trail
+                                            # distance once active, less whipsaw-prone
+    trail_activate_atr_mult: float = 0.70  # v1.16: 0.45→0.70 — let a trade breathe further
+                                            # before trailing starts clamping it down
     time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
@@ -3472,9 +3489,12 @@ class AIStrategy:
                     fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
                 else:
                     fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
-            # Early BE after +breakeven_atr_mult × ATR (fallback 0.28)
-            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.28) or 0.28)
-            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= 0.35):
+            # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
+            # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
+            # override the other (see v1.16 notes on the config fields above).
+            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.45) or 0.45)
+            be_min_pct = float(getattr(self.config, "breakeven_min_pct", 0.55) or 0.55)
+            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
                 if pos.side == "long":
                     be = float(pos.entry_price) * 1.0005
                     if be > float(pos.stop_price or 0):
@@ -3484,9 +3504,9 @@ class AIStrategy:
                     if not pos.stop_price or be < float(pos.stop_price):
                         pos.stop_price = be
             # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
-            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.45) or 0.45)
-            trail_m = float(getattr(self.config, "trail_atr_mult", 0.55) or 0.55)
-            act_pct = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.70) or 0.70)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 0.65) or 0.65)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 0.65) or 0)
             lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
             trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
             if trail_on and pos.entry_price:
