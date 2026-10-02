@@ -554,16 +554,20 @@ class AIStrategy:
         return r
 
     async def _mirror_enabled(self) -> bool:
-        """True if user has EXPLICITLY connected the LIVE mirror (flag == '1').
-
-        Fail-closed: any error reading the flag → mirror OFF.
+        """
+        Жесткое правило: лайв торгует ТОЛЬКО при explicit connect пользователя.
+        Любая ошибка/отсутствие флага → mirror OFF (fail-closed).
         """
         if not self.db:
             return False
         try:
             en = await self.db.get_setting("live_mirror_enabled")
-            return str(en or "").strip().lower() in ("1", "true", "yes", "on")
+            val = str(en or "").strip().lower()
+            # СТРОГО: только explicit '1'/'true'/'yes'/'on' = enabled
+            # Любые другие значения ('0', 'false', 'no', 'off', '', None, ошибка) = disabled
+            return val in ("1", "true", "yes", "on")
         except Exception:
+            # Fail-closed: любая ошибка чтения = mirror OFF
             return False
 
     async def _try_refresh_live_client(self) -> bool:
@@ -1681,6 +1685,15 @@ class AIStrategy:
             return 0.0
 
     async def _place(self, client, inst_id, side, sz, pos_side, is_close=False):
+        """
+        Strict rule: live client can ONLY be called through mirror logic (_open_live, _close_live, _mirror_fast_retry, scale-in mirror).
+        Direct calls on live client are BLOCKED unless coming from mirror logic.
+        """
+        is_live = (not getattr(client, "demo", True) and getattr(client, "has_credentials", lambda: False)())
+        if is_live and not getattr(self, "_mirror_call_active", False):
+            print(f"[AI-LIVE] BLOCKED direct _place on live client (not from mirror logic)", flush=True)
+            return {"error": "Direct live trading blocked — only mirror trades allowed"}
+
         coin = inst_id.split("-")[0]
         cl_id = f"ai{int(time.time() * 1000)}"
         return await client.place_order(
@@ -1796,7 +1809,11 @@ class AIStrategy:
                 lpos = self._live_positions[coin]
                 if lc and lpos:
                     oside = "buy" if side == "long" else "sell"
-                    resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    self._mirror_call_active = True
+                    try:
+                        resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    finally:
+                        self._mirror_call_active = False
                     if not resp_l.get("error"):
                         fills_l = resp_l.get("data") or []
                         fpx, _, _ = extract_fill_avg(fills_l, fill_px)
@@ -2510,11 +2527,16 @@ class AIStrategy:
                                       pos_side=ps if ps else "net")
             except Exception:
                 pass
+        # Strict: mark mirror call active so _place allows this live trade
+        self._mirror_call_active = True
         try:
             resp = await self._place(lc, inst, order_side, sz, side)
         except Exception as e:
             print(f"[AI-LIVE] open_error {coin}: {e}", flush=True)
+            self._mirror_call_active = False
             return False
+        finally:
+            self._mirror_call_active = False
         if resp.get("error"):
             msg = str(resp.get("message") or resp)
             if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
@@ -2538,12 +2560,15 @@ class AIStrategy:
                                               pos_side=side)
                     except Exception:
                         pass
+                    self._mirror_call_active = True
                     try:
                         resp = await self._place(lc, inst, order_side, sz2, side)
                         if not resp.get("error"):
                             sz, lev = sz2, lev2
                     except Exception:
                         pass
+                    finally:
+                        self._mirror_call_active = False
             if resp.get("error"):
                 print(f"[AI-LIVE] open_error {coin}: {resp.get('message')}", flush=True)
                 return False
@@ -2695,14 +2720,18 @@ class AIStrategy:
         close_side = "sell" if pos.side == "long" else "buy"
         resp = None
         for _attempt in range(2):
+            self._mirror_call_active = True
             try:
                 resp = await self._place(lc, pos.inst_id, close_side,
                                          pos.size, pos.side, is_close=True)
             except Exception as e:
                 print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {e}", flush=True)
+                self._mirror_call_active = False
                 if _attempt == 0:
                     await asyncio.sleep(3)
                 continue
+            finally:
+                self._mirror_call_active = False
             if resp.get("error"):
                 print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {resp.get('message')}", flush=True)
                 if _attempt == 0:
