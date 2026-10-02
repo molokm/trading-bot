@@ -2466,11 +2466,11 @@ async def ai_stop():
 
 @app.get('/api/live/status')
 async def live_status():
-    """Public — returns live mirror connection state + stats (no secrets). Cached 10s."""
+    """Public — returns live mirror connection state + stats (no secrets). Cached 30s."""
     global ai_bot, live_manager
     # Short cache to avoid hammering OKX bills on every 30s frontend poll
     now_s = _time.time()
-    if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 10):
+    if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 30):
         return dict(_live_status_cache['data'])
     global ai_bot, live_manager
     lc = None
@@ -2652,6 +2652,7 @@ async def live_status():
     wins = 0
     fees = 0.0
     capital = 0.0
+    _pnl_src = None
     # MSK day / week bounds for session + week realized
     try:
         from datetime import datetime, timezone, timedelta
@@ -2767,89 +2768,88 @@ async def live_status():
                     'source': 'exchange',
                 })
             debug['positions_n'] = len(positions_out)
-            if ai_bot and hasattr(ai_bot, '_reconcile_live_from_exchange'):
-                try:
-                    await ai_bot._reconcile_live_from_exchange()
-                except Exception as _re:
-                    print(f'[LIVE] reconcile: {_re}', flush=True)
         except Exception as e:
             debug['positions_err'] = str(e)
             print(f'[LIVE] positions: {e}', flush=True)
 
-        # Realized from bills (type=2) — tolerant parse
+        # ── PnL: unified source — SAME rows as /api/stats?mode=live ──────────
+        # 1) DB: exchange_close_trades(live) + trades(<BOT_ID>_live), dedup by ord_id
+        # 2) Fallback (DB has no live closes yet): OKX bills grouped by close ordId
+        #    — full history via _fetch_all_trade_bills (bills + bills-archive), no 600 cap.
+        _pnl_src = None
         try:
-            after = ''
-            seen = set()
-            for _page in range(6):
-                params_try = [
-                    {'instType': 'SWAP', 'type': '2', 'limit': '100'},
-                    {'instType': 'SWAP', 'limit': '100'},
-                ]
-                data = []
-                last_err = None
-                for pr in params_try:
-                    if after:
-                        pr = dict(pr)
-                        pr['after'] = after
-                    try:
-                        resp = await lc._request('GET', '/api/v5/account/bills', params=pr)
-                    except Exception as e:
-                        last_err = str(e)
+            from app.services import pnl_engine as _pe
+        except Exception:
+            _pe = None
+        mirror = None
+        if db and _pe is not None:
+            try:
+                mirror = await _pe.mirror_stats(db, account_mode='live', ai_only=bool(AI_ONLY_MODE))
+            except Exception as _me:
+                debug['mirror_err'] = str(_me)
+                print(f'[LIVE] mirror_stats: {_me}', flush=True)
+        if mirror and int(mirror.get('trades') or 0) > 0:
+            realized = float(mirror.get('total') or 0)
+            realized_today = float(mirror.get('1d') or 0)
+            realized_week = float(mirror.get('week') or 0)
+            lifetime_trades = int(mirror.get('trades') or 0)
+            wins = int(mirror.get('wins') or 0)
+            fees = float(mirror.get('fees') or 0)
+            _pnl_src = str(mirror.get('source') or 'db_unified')
+            debug['mirror_rows'] = int(mirror.get('rows_exchange') or 0)
+            debug['mirror_db_rows'] = int(mirror.get('rows_db_extra') or 0)
+        elif _pe is not None and lc is not None:
+            try:
+                _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
+                _close_by_ord = {}
+                for _b in _bills or []:
+                    if str(_b.get('subType') or '') not in ('5', '6'):
                         continue
-                    if not isinstance(resp, dict):
-                        continue
-                    if resp.get('error'):
-                        last_err = resp.get('message')
-                        continue
-                    if str(resp.get('code', '0')) not in ('0', ''):
-                        last_err = resp.get('msg') or resp.get('message')
-                        continue
-                    data = resp.get('data') or []
-                    break
-                if not data:
-                    if last_err:
-                        debug['bills_err'] = last_err
-                    break
-                for b in data:
-                    bid = str(b.get('billId') or '')
-                    if bid and bid in seen:
-                        continue
-                    if bid:
-                        seen.add(bid)
-                    btype = str(b.get('type') or '')
-                    if btype and btype not in ('2', '1'):
+                    _oid = str(_b.get('ordId') or '').strip()
+                    if not _oid:
                         continue
                     try:
-                        bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
+                        _bp = float(_b.get('pnl') or 0)
                     except (TypeError, ValueError):
-                        bp = 0.0
+                        _bp = 0.0
                     try:
-                        bf = abs(float(b.get('fee') or 0))
+                        _bf = abs(float(_b.get('fee') or 0))
                     except (TypeError, ValueError):
-                        bf = 0.0
-                    fees += bf
-                    # only count rows that moved PnL (closes / funding already filtered by type)
-                    if abs(bp) < 1e-12:
-                        continue
-                    realized += bp
-                    lifetime_trades += 1
-                    if bp > 0:
-                        wins += 1
+                        _bf = 0.0
+                    _row = _close_by_ord.get(_oid)
+                    if _row is None:
+                        _row = _close_by_ord[_oid] = {
+                            'ord_id': _oid,
+                            'inst_id': _b.get('instId') or '',
+                            'cl_ord_id': str(_b.get('clOrdId') or '').strip(),
+                            'pnl': 0.0, 'fee': 0.0, 'close_ts': 0,
+                            'account_mode': 'live', 'account_key': 'live',
+                        }
+                    _row['pnl'] += _bp
+                    _row['fee'] += _bf
                     try:
-                        bts = int(b.get('ts') or 0)
+                        _bts = int(_b.get('ts') or 0)
                     except (TypeError, ValueError):
-                        bts = 0
-                    if bts and _today_ms and bts >= _today_ms:
-                        realized_today += bp
-                    if bts and _week_ms and bts >= _week_ms:
-                        realized_week += bp
-                debug['bills_n'] = len(seen)
-                after = str(data[-1].get('billId') or '')
-                if len(data) < 100 or not after:
-                    break
-        except Exception as e:
-            debug['bills_err'] = str(e)
-            print(f'[LIVE] bills: {e}', flush=True)
+                        _bts = 0
+                    if _bts > int(_row.get('close_ts') or 0):
+                        _row['close_ts'] = _bts
+                    if not _row['cl_ord_id']:
+                        _row['cl_ord_id'] = str(_b.get('clOrdId') or '').strip()
+                _agg = _pe.summarize_close_rows(list(_close_by_ord.values()), ai_only=bool(AI_ONLY_MODE))
+                realized = float(_agg.get('total') or 0)
+                realized_today = float(_agg.get('1d') or 0)
+                realized_week = float(_agg.get('week') or 0)
+                lifetime_trades = int(_agg.get('trades') or 0)
+                wins = int(_agg.get('wins') or 0)
+                fees = float(_agg.get('fees') or 0)
+                _pnl_src = 'okx_live_bills'
+                debug['bills_n'] = len(_bills or [])
+                debug['mirror_close_orders'] = len(_close_by_ord)
+            except Exception as e:
+                debug['bills_err'] = str(e)
+                print(f'[LIVE] bills fallback: {e}', flush=True)
+        if _pnl_src is None:
+            _pnl_src = 'db_unified' if connected else 'no_connection'
 
         if ai_bot is not None:
             try:
@@ -2888,7 +2888,7 @@ async def live_status():
         'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
         'open_positions': positions_out,
-        'pnl_source': 'okx_live',
+        'pnl_source': _pnl_src or ('okx_live' if connected else 'no_connection'),
         'enabled': True,
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
@@ -5782,7 +5782,11 @@ async def _compute_pnl():
         except Exception as e:
             print(f'[pnl] db exchange_close_trades: {e}', flush=True)
         try:
-            if db and hasattr(db, 'get_trades'):
+            if db and hasattr(db, 'get_trades_multi_bot'):
+                # live mirror writes closes under <BOT_ID>_live (ai_strategy._live_bot_id)
+                raw.extend(await db.get_trades_multi_bot(
+                    ['ai_strategy', 'ai_strategy_live'], limit=2000, account_mode=_mode) or [])
+            elif db and hasattr(db, 'get_trades'):
                 raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
         except Exception as e:
             print(f'[pnl] db trades: {e}', flush=True)
