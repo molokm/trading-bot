@@ -84,7 +84,7 @@ _ACTIVE_SYSTEM_PROMPT = None  # set per call_llm
 
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce", "add")
 ALLOWED_SIDES = ("long", "short")
-ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")  # v1.10 majors only
+ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI")
 
 _DEPRECATED_GROQ_MODELS = {
     "llama-3.1-8b-instant",
@@ -122,84 +122,37 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 SYSTEM_PROMPT_MANAGE = """You MANAGE an open OKX USDT-SWAP position (do not open a new coin).
-Think like a desk: structure → momentum → risk → action.
-Reply with ONE JSON object only (no markdown). Write thesis/reason FIRST — reason
-through structure/momentum/risk before committing to action, not after:
-{"thesis":"<=180 chars optional: structure+momentum+risk read, in that order",
-"reason":"<=200 chars",
-"confidence":0-1,
-"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
-"size_pct":0.25-0.75}
-
-Analysis checklist (use fields in snapshot):
-- Structure: price vs EMA21/50/200, tf_4h.trend_up, BB position
-- Momentum: ROC, MACD hist sign/change, RSI zone
-- Trend strength: ADX, regime (bull/bear/chop)
-- Risk: distance to stop/take in %, unrealized if present, funding_rate
-- Context: reflection + daily_lessons + journal_tail (recent outcomes)
+Reply with ONE JSON object only:
+{"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
+"size_pct":0.25-0.75,"confidence":0-1,"reason":"<=120 chars"}
 
 Rules:
-1) Prefer close if trend flipped (EMA/ROC against side), ADX collapsed, or structure broke.
+1) Prefer close if trend flipped (EMA/ROC against side) or ADX collapsed.
 2) reduce if in profit but momentum fading; lock gains.
-3) add ONLY if open_positions.can_add is true AND adverse move is moderate AND regime is not chop.
-4) hold if trend intact, ADX supportive, stop not threatened.
-5) In regime=chop prefer reduce/close over add; do not average into noise.
-6) Cite >=2 concrete metrics in reason. Put deeper logic in thesis. DEFAULT=hold if unsure.
+3) add ONLY if open_positions.can_add is true AND adverse move is moderate.
+4) hold if trend intact and stop not threatened.
+5) Cite 2 metrics in reason. DEFAULT=hold if unsure.
 """
 
-SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk. Analyze first, trade second.
-Prefer candidates_allowed; avoid candidates_blocked. You receive a full quant snapshot — use it.
-
-Reply with ONE JSON object only (no markdown). Write the analysis fields FIRST —
-they are your scratchpad, use them to reason step by step BEFORE committing to
-action/side/sizing. Do not decide the action mentally first and backfill thesis
-to match it.
-{"thesis":"<=220 chars: structure+momentum+strength+risk, in that order",
-"reason":"<=200 chars: the >=2 concrete metrics that decided it",
-"regime":"bull|bear|chop|unknown",
-"confidence":0-1,
-"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
-"size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10}
-
-How to analyze (write this into thesis/reason, in order):
-A) Market structure per coin: close vs EMA21/50/200, BB location, tf_4h trend alignment
-B) Momentum: ROC, MACD histogram sign, RSI (avoid extremes against the trade)
-C) Strength: ADX, regime, vol_ratio (participation)
-D) Risk context: ATR-based stop room, funding_rate bias, max_positions, adaptive preset
-E) Self-reflection: journal_tail + daily_lessons + reflection — skip patterns that recently lost
+SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk (balanced-aggressive). Prefer trading candidates_allowed when align is solid; avoid candidates_blocked.
+Reply with ONE JSON object only (no markdown):
+{"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
+"size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
+"confidence":0-1,"regime":"bull|bear|chop|unknown","reason":"<=120 chars"}
 
 Hard rules:
-1) DEFAULT action is hold. Open only with clear multi-factor edge.
-2) Never open if open_positions is non-empty (close/reduce/add existing first).
-3) Prefer align_score >= 0.6 and regime matching side (bull→long, bear→short).
-4) regime=chop → hold unless exceptional align (>=0.75) AND 4H agrees AND catalyst in thesis.
-5) Require RR take_pct/stop_pct >= 1.6 and confidence >= adaptive.min_confidence (or 0.68).
-6) If block_open true → hold for that coin.
-7) reason must cite >=2 metrics; thesis may expand structure/momentum/risk narrative.
-8) Respect adaptive.size_cap and daily_lessons RULE*.
-9) Prefer BTC/ETH leadership consistent with the chosen side when trading alts.
-10) Size down (near size_pct floor) when ADX is only moderate or regime mixed.
-
-Worked examples (follow this reasoning pattern, not these exact numbers):
-
-Example A — good open:
-thesis: "BTC>EMA21>50>200, 4H confirms. ROC+1.8%, MACD hist rising 3 bars, RSI 61 (room
-to 70). ADX 27 regime=bull. Funding flat, stop room 1.4xATR."
-reason: "ADX27 trend-confirmed, align_long 0.74, MACD hist rising"
-confidence: 0.74 -> action: open, side: long, size_pct_equity: 0.07
-
-Example B — correct hold despite a tempting setup:
-thesis: "ETH ROC +2.1% looks strong but 1H ADX only 14 (chop), 4H trend flat, RSI
-already 68 near extreme against fresh longs. BB mid, no clear structure break."
-reason: "ADX14<min, regime=chop, RSI stretched — no multi-factor edge"
-confidence: 0.41 -> action: hold (DEFAULT wins: single-factor momentum is not enough)
-
-Example C — avoid counter-trend chase:
-thesis: "SOL ROC -3% but BTC regime=bull and btc_roc +0.9% (leadership against this
-short). Align_short only 0.48. Funding -0.09% also against the short."
-reason: "fighting BTC leadership + weak align_short — high false-signal risk"
-confidence: 0.38 -> action: hold
+1) DEFAULT action is hold. Open only with clear edge.
+2) Never open if open_positions is non-empty (close/reduce first).
+3) Prefer setups where quant.align_score >= 0.6 and regime is bull (long) or bear (short).
+4) In regime=chop → hold unless one side has strong quant alignment (>=0.55) and a clear catalyst in reason.
+5) Require RR take_pct/stop_pct >= 1.8 and confidence >= 0.75 to open.
+6) Use precomputed indicators (EMA21/50/200, RSI, MACD, ADX, ATR, BB, vol_ratio, tf_4h).
+7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
+8) If quant.block_open is true → hold.
+9) Respect adaptive.min_confidence and adaptive.size_cap; read reflection (recent trade outcomes) before opening.
+10) Obey daily_lessons RULE* if present — they are derived from recent losing patterns.
 """
+
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -254,7 +207,6 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
     conf = _clip(conf, 0.0, 1.0)
 
     reason = str(raw.get("reason") or "")[:240]
-    thesis = str(raw.get("thesis") or raw.get("analysis") or "")[:280]
 
     # Policy clamps
     if action == "open":
@@ -283,7 +235,6 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
         "take_pct": round(take_pct, 4),
         "confidence": round(conf, 3),
         "reason": reason,
-        "thesis": thesis,
     }
 
 
@@ -375,12 +326,8 @@ def mock_decide(snapshot: dict) -> dict:
     }, open_syms)
 
 
-async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict:
-    """Ask LLM (or mock) for a single decision given market snapshot.
-
-    Internal — call_llm() wraps this with a self-consistency re-check for
-    new-position opens (the highest-stakes decision point).
-    """
+async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
+    """Ask LLM (or mock) for a decision given market snapshot."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
         # Auto: Groq first, then openrouter, else mock (BAI removed)
@@ -395,24 +342,9 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
     mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
     _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
 
-    def _compact_ind(ind):
-        if not isinstance(ind, dict):
-            return {}
-        keys = (
-            "close", "ema21", "ema50", "ema200", "roc_3", "adx", "rsi",
-            "macd_hist", "atr", "bb_mid", "bb_upper", "bb_lower", "vol_ratio",
-            "regime", "align_long", "align_short", "funding_rate", "tf_4h",
-            "bar_closes", "ema_slope",
-        )
-        return {k: ind.get(k) for k in keys if ind.get(k) is not None}
-
-    inds_raw = snapshot.get("indicators") or {}
-    inds_compact = {c: _compact_ind(v) for c, v in inds_raw.items()}
-
     user_payload = {
         "decision_mode": mode,
         "decision_trigger": snapshot.get("decision_trigger"),
-        "fresh_bars": snapshot.get("fresh_bars"),
         "equity": snapshot.get("equity"),
         "capital": snapshot.get("capital"),
         "max_leverage": snapshot.get("max_leverage"),
@@ -421,8 +353,7 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
         "quant": snapshot.get("quant"),
         "candidates_allowed": snapshot.get("candidates_allowed") or [],
         "candidates_blocked": snapshot.get("candidates_blocked") or [],
-        "indicators": inds_compact,
-        "analysis_hints": snapshot.get("analysis_hints") or [],
+        "indicators": snapshot.get("indicators"),
         "server_time": snapshot.get("server_time"),
         "policy": {
             "prefer": "trade_allowed_candidates",
@@ -432,19 +363,15 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
             "max_size_pct": (snapshot.get("adaptive") or {}).get("size_cap", 0.15),
             "adapt_preset": (snapshot.get("adaptive") or {}).get("preset"),
             "hint": snapshot.get("policy_hint") or "",
-            "risk_note": "Prefer smaller size in chop/mixed; respect stop distance vs ATR",
         },
         "reflection": snapshot.get("reflection") or "",
         "daily_lessons": snapshot.get("daily_lessons") or [],
         "journal_tail": snapshot.get("journal_tail") or [],
         "adaptive": snapshot.get("adaptive"),
     }
-    raw_json = json.dumps(user_payload, ensure_ascii=False)
-    max_chars = int(os.getenv("AI_LLM_PAYLOAD_CHARS", "6000") or 6000)
     user_msg = (
-        "Full quant snapshot for discretionary analysis. "
-        "Follow checklist in system prompt; then decide.\n"
-        + raw_json[:max_chars]
+        "Quant-preprocessed market snapshot + self-reflection. Decide next action.\n"
+        + json.dumps(user_payload, ensure_ascii=False)[:3200]
     )
 
     if provider == "mock" or not provider:
@@ -504,56 +431,6 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
         if used != provider:
             dec["reason"] = f"via_{used}: {dec.get('reason')}"
     return dec
-
-
-async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
-    """Ask LLM for a decision, with a self-consistency re-check on new opens.
-
-    Free-tier budget: we only spend a second call at the highest-stakes moment
-    (opening a brand-new position). Manage-mode decisions (hold/close/reduce/
-    add on an existing position) and holds stay single-call, since they're
-    already re-evaluated every llm_manage_interval_sec anyway — a second call
-    there would burn quota for little benefit.
-    """
-    dec1 = await _call_llm_once(snapshot, provider)
-
-    open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
-    mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
-    if mode != "entry" or dec1.get("action") != "open":
-        return dec1
-
-    dec2 = await _call_llm_once(snapshot, provider)
-
-    agree = (
-        dec2.get("action") == "open"
-        and dec2.get("symbol") == dec1.get("symbol")
-        and dec2.get("side") == dec1.get("side")
-    )
-    if not agree:
-        dec1["action"] = "hold"
-        dec1["size_pct_equity"] = 0.0
-        dec1["reason"] = (
-            f"self_consistency_fail: run1={dec1.get('symbol')}/{dec1.get('side')} "
-            f"vs run2={dec2.get('symbol')}/{dec2.get('side')}/{dec2.get('action')}"
-        )[:240]
-        return dec1
-
-    # Agreement: merge conservatively — average size/stop/take, take the LOWER
-    # confidence of the two (don't let one lucky high-confidence run dominate).
-    for k in ("size_pct_equity", "stop_pct", "take_pct"):
-        try:
-            v1, v2 = float(dec1.get(k) or 0), float(dec2.get(k) or 0)
-            if v1 > 0 and v2 > 0:
-                dec1[k] = round((v1 + v2) / 2, 5)
-        except (TypeError, ValueError):
-            pass
-    try:
-        dec1["confidence"] = round(min(float(dec1.get("confidence") or 0),
-                                        float(dec2.get("confidence") or 0)), 3)
-    except (TypeError, ValueError):
-        pass
-    dec1["reason"] = f"consensus(2/2): {dec1.get('reason', '')}"[:240]
-    return dec1
 
 
 def _provider_chain(primary: str) -> list[str]:

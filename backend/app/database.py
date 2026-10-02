@@ -593,32 +593,26 @@ class Database:
 
     
     async def reclassify_exchange_bot_labels(self) -> int:
-        """Fix bot_label from cl_ord_id.
-
-        ais* → empty (retired Scale-In — must not feed AI Discretionary totals)
-        ai* (not ais*) → AI Discretionary 1H
-        """
+        """Fix bot_label from cl_ord_id (ais* → Scale-In, ai* → Discretionary)."""
         n = 0
         try:
             if self._pg_mode:
-                await self._execute(
-                    """UPDATE exchange_close_trades SET bot_label = ''
+                r1 = await self._execute(
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Scale-In 1H'
                        WHERE lower(coalesce(cl_ord_id,'')) LIKE 'ais%'
-                         AND coalesce(bot_label,'') <> ''"""
+                         AND bot_label IS DISTINCT FROM 'AI Scale-In 1H'"""
                 )
-                await self._execute(
+                r2 = await self._execute(
                     """UPDATE exchange_close_trades SET bot_label = 'AI Discretionary 1H'
                        WHERE lower(coalesce(cl_ord_id,'')) LIKE 'ai%'
                          AND lower(coalesce(cl_ord_id,'')) NOT LIKE 'ais%'
                          AND bot_label IS DISTINCT FROM 'AI Discretionary 1H'"""
                 )
-                # Strip AI label from rows that still say AI but clord is empty/unknown
-                # (keep only explicit ai* clord for AI_ONLY integrity)
             else:
                 await self._execute(
-                    """UPDATE exchange_close_trades SET bot_label = ''
+                    """UPDATE exchange_close_trades SET bot_label = 'AI Scale-In 1H'
                        WHERE lower(ifnull(cl_ord_id,'')) LIKE 'ais%'
-                         AND ifnull(bot_label,'') != ''"""
+                         AND ifnull(bot_label,'') != 'AI Scale-In 1H'"""
                 )
                 await self._execute(
                     """UPDATE exchange_close_trades SET bot_label = 'AI Discretionary 1H'
@@ -627,7 +621,6 @@ class Database:
                          AND ifnull(bot_label,'') != 'AI Discretionary 1H'"""
                 )
             n = 1
-            print("[db] reclassify_exchange_bot_labels: ais* cleared, ai* → AI Discretionary", flush=True)
         except Exception as e:
             print(f"[db] reclassify_exchange_bot_labels: {e}", flush=True)
         return n

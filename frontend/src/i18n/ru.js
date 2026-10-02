@@ -352,7 +352,7 @@ const ru = {
   'bots.tagline_validation': 'Вход на пробое 15-дневного максимума с подтверждением MACD, chandelier 4×ATR, breakeven при +1.5%, частичный тейк 8% (30%), второй тейк 10%, max_hold 3 дня, топ-4 @ 1×.',
   'bots.ai_name': 'AI Discretionary 1H',
   'bots.ai_tagline': 'AI-бот: анализирует рынок и сам решает, когда открывать и закрывать сделки.',
-  'bots.ai_desc': 'AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%.',
+  'bots.ai_desc': 'AI Discretionary — интеллектуальный бот: нейросеть анализирует рынок и сама решает, когда открывать и закрывать сделки. Подстраивается под рыночные условия и учится на своих результатах.',
   'bots.tag_ai_llm': 'LLM Groq',
   'bots.tag_tf_1h': '1H свечи',
   'bots.tag_demo_exec': 'исполнение demo',

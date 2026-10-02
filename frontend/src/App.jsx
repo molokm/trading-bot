@@ -24,30 +24,6 @@ import { GlossaryModal, OnboardingTour } from './components/ui'
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
 
-/** True only in real Telegram Mini App or explicit /mini route.
- *  Do NOT treat main website as mini just because telegram-web-app.js is loaded.
- */
-function isTelegramMiniApp() {
-  try {
-    if (typeof window === 'undefined') return false
-    // Explicit mini route
-    const path = String(window.location?.pathname || '')
-    if (path === '/mini' || path.startsWith('/mini/')) return true
-    // Flag set only by MiniAppPage module
-    if (window.__MINI_APP__ === true && path.startsWith('/mini')) return true
-    // Real Telegram session: non-empty initData (opened inside Telegram client)
-    const tg = window.Telegram && window.Telegram.WebApp
-    if (tg) {
-      const init = String(tg.initData || '').trim()
-      if (init.length > 10) return true
-      const unsafe = tg.initDataUnsafe
-      if (unsafe && (unsafe.user || unsafe.query_id || unsafe.auth_date)) return true
-    }
-  } catch { /* ignore */ }
-  return false
-}
-
-
 /* ═══ ErrorBoundary — показать ошибку вместо белого экрана ═══ */
 class MiniErrorBoundary extends React.Component {
   constructor(props) {
@@ -95,13 +71,6 @@ class MiniErrorBoundary extends React.Component {
 
 function AppRouter() {
   const { auth, setAuth } = useAuth()
-  // Inside Telegram client → dedicated mini UI (not the full website shell)
-  try {
-    if (typeof window !== 'undefined' && isTelegramMiniApp() && !String(window.location.pathname || '').startsWith('/mini')) {
-      window.location.replace('/mini')
-      return null
-    }
-  } catch { /* ignore */ }
   if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
   return <AppLayout />
 }
@@ -159,9 +128,9 @@ function AppLayout() {
   ]
 
   return (
-    <div className="app-shell h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] overflow-hidden">
+    <div className="h-screen flex flex-col bg-[var(--bg)] overflow-hidden">
       {/* ═══ HEADER ═══ */}
-      <header className="app-header flex items-center justify-between px-4 sm:px-5 border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
+      <header className="flex items-center justify-between px-5 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
         {/* Left: Logo + Nav */}
         <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
@@ -264,7 +233,7 @@ function AppLayout() {
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="app-main flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] md:pb-0">
+      <main className="flex-1 overflow-y-auto overflow-x-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
           <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
@@ -281,8 +250,7 @@ function AppLayout() {
       {/* ═══ MODALS ═══ */}
       <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
 
-      {/* Mobile bottom nav — never in Telegram Mini App */}
-      {!isTelegramMiniApp() && (
+      {/* Mobile bottom nav */}
       <nav className="mobile-bottom-nav md:hidden" aria-label="Primary">
         {navItems.map(item => (
           <NavLink
@@ -298,7 +266,6 @@ function AppLayout() {
           </NavLink>
         ))}
       </nav>
-      )}
       <OnboardingTour />
     </div>
   )
@@ -334,8 +301,6 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route path="/mini/*" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              {/* Full website always via AppRouter. Mini app only at /mini (and real TG session redirects below). */}
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>

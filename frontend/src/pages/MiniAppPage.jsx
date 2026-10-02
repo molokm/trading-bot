@@ -5,12 +5,11 @@ import {
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
+window.__MINI_APP__ = true
+
 function fmt(n, digits = 2) {
   if (n == null || Number.isNaN(Number(n))) return '—'
-  return Number(n).toLocaleString('en-US', {
-    minimumFractionDigits: digits,
-    maximumFractionDigits: digits,
-  })
+  return Number(n).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 
 function pnlClass(v) {
@@ -25,55 +24,23 @@ function pnlSign(v) {
   return (n > 0 ? '+$' : '-$') + fmt(Math.abs(n))
 }
 
-/** DEMO / LIVE fraction — same as iOS dashboard cards */
-function dualPnl(demoVal, liveVal, liveConnected) {
-  return (
-    <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
-      <span className={pnlClass(demoVal)} title="Демо">{pnlSign(demoVal)}</span>
-      <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
-      <span
-        className={liveConnected ? pnlClass(liveVal) : 'text-[var(--txt-muted)]'}
-        title="Лайф"
-      >
-        {liveConnected ? pnlSign(liveVal) : '—'}
-      </span>
-    </span>
-  )
-}
-
 function withTimeout(promise, ms = 15000) {
   return new Promise((resolve, reject) => {
     const id = setTimeout(() => reject(new Error('timeout')), ms)
-    promise.then(
-      (v) => { clearTimeout(id); resolve(v) },
-      (e) => { clearTimeout(id); reject(e) },
-    )
+    promise.then(v => { clearTimeout(id); resolve(v) }, e => { clearTimeout(id); reject(e) })
   })
 }
 
 class MiniAppErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props)
-    this.state = { err: null }
-  }
-  static getDerivedStateFromError(err) {
-    return { err }
-  }
+  constructor(props) { super(props); this.state = { err: null } }
+  static getDerivedStateFromError(err) { return { err } }
   render() {
     if (this.state.err) {
       return (
         <div className="min-h-[100dvh] flex flex-col items-center justify-center gap-3 p-6 bg-[var(--bg)] text-[var(--txt)]">
           <div className="text-sm font-semibold">Ошибка</div>
-          <div className="text-2xs text-[var(--txt-muted)] text-center max-w-xs break-words">
-            {String(this.state.err?.message || this.state.err)}
-          </div>
-          <button
-            type="button"
-            className="px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold"
-            onClick={() => window.location.reload()}
-          >
-            Обновить
-          </button>
+          <div className="text-2xs text-[var(--txt-muted)] text-center max-w-xs break-words">{String(this.state.err?.message || this.state.err)}</div>
+          <button type="button" className="px-4 py-2 rounded-lg bg-[var(--info)] text-white text-sm font-semibold" onClick={() => window.location.reload()}>Обновить</button>
         </div>
       )
     }
@@ -81,307 +48,285 @@ class MiniAppErrorBoundary extends React.Component {
   }
 }
 
+function Card({ children, className = '' }) {
+  return <div className={`rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3.5 ${className}`}>{children}</div>
+}
+
+function Metric({ label, value, className = '' }) {
+  return (
+    <div className="flex flex-col gap-0.5 min-w-0">
+      <span className="text-[0.65rem] uppercase tracking-wide text-[var(--txt-muted)] font-semibold">{label}</span>
+      <span className={`text-sm font-bold mono truncate ${className}`}>{value}</span>
+    </div>
+  )
+}
+
 function MiniAppPageInner() {
   const { t } = useTranslation()
+  const [loading, setLoading] = useState(false)
   const [data, setData] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+  const [mode, setMode] = useState('demo')
 
   useEffect(() => {
-    try { window.__MINI_APP__ = true } catch { /* ignore */ }
-    try {
-      const tg = window.Telegram && window.Telegram.WebApp
-      if (tg) {
-        tg.ready && tg.ready()
-        tg.expand && tg.expand()
-        try {
-          if (tg.setHeaderColor) tg.setHeaderColor('secondary_bg_color')
-          if (tg.setBackgroundColor) tg.setBackgroundColor('bg_color')
-        } catch { /* ignore */ }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const tg = window.Telegram?.WebApp
+        try { tg?.ready?.(); tg?.expand?.() } catch {}
+        const initData = tg?.initData || ''
+        if (initData) {
+          try {
+            const r = await withTimeout(api.telegramAuth(initData), 20000)
+            if (r?.token) localStorage.setItem('auth_token', r.token)
+            if (r?.role) localStorage.setItem('auth_role', r.role)
+          } catch {}
+        }
+      } finally {
+        if (!cancelled) setLoading(false)
       }
-    } catch { /* ignore */ }
+    })()
+    return () => { cancelled = true }
   }, [])
 
   const load = useCallback(async () => {
     setLoading(true)
-    setError(null)
     try {
-      const dash = await withTimeout(api.meDashboard().catch(() => api.getDashboard?.() || null))
-      // Prefer dedicated me/dashboard payload shaped for mini
-      if (dash && (dash.demo || dash.live || dash.trades)) {
-        setData(dash)
-      } else {
-        // Fallback: assemble from public endpoints
-        const [pnl, positions, trades, liveSt, aiSt] = await Promise.all([
-          api.getPnlSummary?.().catch(() => api.getPnl?.().catch(() => null)),
-          api.getPositions?.().catch(() => null),
-          api.getPairedTrades?.(30).catch(() => null),
-          api.liveStatus?.().catch(() => null),
-          api.aiStatus?.().catch(() => null),
-        ])
-        setData({
-          demo: {
-            pnl: pnl?.total,
-            session_pnl: pnl?.['1d'],
-            week: pnl?.week,
-            unrealized: pnl?.unrealized,
-            equity: null,
-            positions: positions?.positions || positions || [],
-            pulse: aiSt?.pulse || aiSt?.status_text || aiSt?.description || '',
-            running: !!(aiSt?.running || aiSt?.active),
-          },
-          live: {
-            connected: !!(liveSt?.connected || liveSt?.enabled),
-            total_pnl: liveSt?.total_pnl,
-            session_pnl: liveSt?.session_pnl,
-            week: liveSt?.week,
-            unrealized_pnl: liveSt?.unrealized_pnl ?? liveSt?.unrealized,
-            equity: liveSt?.equity,
-            positions: liveSt?.open_positions || liveSt?.positions || [],
-          },
-          trades: trades?.trades || trades || [],
-        })
-      }
-    } catch (e) {
-      setError(String(e?.message || e || 'load failed'))
-    } finally {
-      setLoading(false)
-    }
+      const d = await withTimeout(api.meDashboard(), 20000)
+      setData(d)
+    } catch {}
+    setLoading(false)
   }, [])
 
-  useEffect(() => {
-    load()
-    const id = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return
-      load()
-    }, 30000)
-    return () => clearInterval(id)
-  }, [load])
+  useEffect(() => { load() }, [])
 
-  const liveConnected = !!(data?.live?.connected)
+  const isLive = mode === 'live' && data?.live?.connected
 
   const metrics = useMemo(() => {
+    if (isLive && data?.live) {
+      const L = data.live
+      return {
+        total: Number(L.total_pnl ?? L.strategy_realized ?? 0),
+        today: Number(L.session_pnl ?? 0),
+        unreal: Number(L.unrealized ?? 0),
+        equity: L.equity ?? null,
+        tradesN: Number(L.trades ?? 0),
+        winRate: L.win_rate,
+      }
+    }
     const d = data?.demo || {}
-    const L = data?.live || {}
+    // Unrealized: prefer engine field, else sum positions
     let unreal = Number(d.unrealized ?? 0)
     if (!unreal && Array.isArray(d.positions)) {
       unreal = d.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
     }
-    // Sum closed DEMO trades when server total is missing
-    let totalFromTrades = null
-    const all = Array.isArray(data?.trades) ? data.trades : []
-    if (all.length) {
-      let s = 0
-      let n = 0
-      const EPOCH = Date.parse('2026-09-01T00:00:00Z')
-      for (const tr of all) {
-        const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
-        if (mode === 'live') continue
-        if (String(tr.reason || '').toLowerCase() === 'open') continue
-        let ts = Number(tr.time || tr.exit_time || tr.ts || 0) || 0
-        if (ts > 0 && ts < 1e12) ts *= 1000
-        if (typeof tr.time === 'string') {
-          const p = Date.parse(tr.time)
-          if (!Number.isNaN(p)) ts = p
-        }
-        if (ts > 0 && ts < EPOCH) continue
-        const pnl = Number(tr.pnl)
-        if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
-        s += pnl
-        n += 1
-      }
-      if (n > 0) totalFromTrades = Math.round(s * 100) / 100
-    }
     return {
-      total: totalFromTrades != null ? totalFromTrades : Number(d.pnl ?? 0),
+      total: Number(d.pnl ?? 0),
       today: Number(d.session_pnl ?? 0),
-      week: Number(d.week ?? d.pnl_week ?? 0),
       unreal,
       equity: d.equity ?? null,
-      liveConnected,
-      liveTotal: Number(L.total_pnl ?? L.strategy_realized ?? 0),
-      liveToday: Number(L.session_pnl ?? L.pnl_1d ?? 0),
-      liveWeek: Number(L.week ?? L.pnl_week ?? 0),
-      liveUnreal: Number(L.unrealized_pnl ?? L.unrealized ?? 0),
-      liveEquity: L.equity != null ? Number(L.equity) : null,
+      capital: d.capital ?? null,
+      tradesN: Number(d.trades ?? 0),
+      winRate: d.win_rate,
     }
-  }, [data, liveConnected])
+  }, [isLive, data])
 
-  const positions = useMemo(() => {
-    const out = []
-    const push = (list, mode) => {
-      if (!Array.isArray(list)) return
-      list.forEach((p, i) => {
-        const coin = (p.inst_id || p.instId || p.symbol || p.coin || '').replace('-USDT-SWAP', '')
-        const side = String(p.pos_side || p.side || p.posSide || '').toLowerCase()
-        const isLong = side === 'long' || side === 'net' || side === 'buy'
-        out.push({
-          key: `${mode}-${coin || i}-${side}-${p.size || p.pos || i}`,
-          coin: coin || '—',
-          side: isLong ? 'long' : 'short',
-          sideLabel: isLong ? 'LONG' : 'SHORT',
-          size: Number(p.size ?? p.pos ?? p.sz ?? 0),
-          entry: Number(p.entry_price ?? p.avgPx ?? p.entry ?? 0),
-          mark: Number(p.mark_price ?? p.markPx ?? p.last ?? 0),
-          upl: Number(p.upl ?? p.unrealized_pnl ?? p.pnl ?? 0),
-          mode,
+  const viewPositions = useMemo(() => {
+    const src = isLive ? (data?.live?.positions || []) : (data?.demo?.positions || [])
+    const CT = { BTC: 0.01, ETH: 0.1, SOL: 1, XRP: 100, DOGE: 1000, BNB: 0.01, ADA: 10, AVAX: 1, LTC: 0.1, BCH: 0.1, TRX: 1000, OKB: 0.1 }
+    return src.map((p, i) => {
+      const size = Math.abs(Number(p.size || p.sz || p.size_remaining || p.pos || 0))
+      const entry = Number(p.entry_price || p.entry || p.avgPx || p.avg_px || p.px || 0)
+      const mark = Number(p.mark_price || p.mark || p.mark_px || p.markPx || 0)
+      const upl = Number(p.upl || p.unrealized_pnl || 0)
+      const coin = String(p.coin || p.symbol || p.inst_id || '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '').toUpperCase()
+      const ct = CT[coin] || 1
+      const px = mark || entry
+      const notional = size && px ? size * ct * px : 0
+      return {
+        key: `${coin || i}-${p.side}-${isLive ? 'live' : 'demo'}`,
+        coin,
+        side: (p.side || p.pos_side || 'long').toLowerCase().includes('short') ? 'short' : 'long',
+        size,
+        entry,
+        mark,
+        upl,
+        notional,
+        lever: Number(p.leverage || p.lever || 0),
+        mode: isLive ? 'live' : 'demo',
+      }
+    }).filter(p => p.size > 0 || Math.abs(p.upl) > 0)
+  }, [isLive, data])
+
+  const viewTrades = useMemo(() => {
+    const all = data?.trades || []
+    const filtered = isLive
+      ? all.filter(t => String(t.account_mode || '').toLowerCase() === 'live')
+      : all.filter(t => {
+          const m = String(t.account_mode || t.mode || '').toLowerCase()
+          return !m || m === 'demo'
         })
-      })
-    }
-    push(data?.demo?.positions, 'demo')
-    if (liveConnected) push(data?.live?.positions, 'live')
-    return out
-  }, [data, liveConnected])
+    return filtered.slice(0, 15).map(t => ({
+      time: t.time || t.timestamp || '',
+      inst: (t.inst || t.symbol || '').replace('-USDT-SWAP', ''),
+      side: (t.side || '').toLowerCase(),
+      pnl: Number(t.pnl || 0),
+      mode: isLive ? 'live' : 'demo',
+    }))
+  }, [data?.trades, isLive])
 
-  const pulse = data?.demo?.pulse || data?.demo?.description || ''
-  const demoOn = !!(data?.demo?.running)
+  if (loading) {
+    return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Загрузка…</div>
+  }
+
+  if (!data) {
+    return <div className="min-h-[100dvh] flex items-center justify-center bg-[var(--bg)] text-[var(--txt-muted)] text-sm">Настройте Telegram бота</div>
+  }
 
   return (
-    <div
-      className="mini-app-root"
-      style={{
-        paddingTop: 'max(8px, env(safe-area-inset-top))',
-        paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
-      }}
-    >
-      {/* Header — like iOS strip */}
-      <div className="mini-header">
-        <div className="flex items-center gap-1.5 min-w-0">
-          <Zap size={14} className="text-[var(--info)] flex-shrink-0" />
-          <span className="text-[0.85rem] font-bold tracking-tight truncate">
-            {t('nav.dashboard') || 'COPIX'}
-          </span>
+    <div className="h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] text-[var(--txt)] overflow-hidden" style={{ paddingTop: 'env(safe-area-inset-top)', paddingBottom: 'env(safe-area-inset-bottom)' }}>
+      <div className="flex-shrink-0 flex items-center justify-between gap-2 px-3 py-2.5 bg-[var(--surface)]/95 backdrop-blur-md border-b border-[var(--border)]">
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-[var(--info)] to-[#4a3fd1] flex items-center justify-center shadow">
+            <Zap size={15} className="text-white" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-sm font-bold leading-none">COPIX</div>
+            <div className="text-[0.6rem] text-[var(--txt-muted)] mt-0.5 truncate">AI · 1H</div>
+          </div>
         </div>
-        <div className="flex items-center gap-1.5 flex-shrink-0">
-          <span
-            className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[0.55rem] font-bold border ${
-              liveConnected
-                ? 'border-[var(--profit)]/40 bg-[var(--profit-dim)] text-[var(--profit)]'
-                : 'border-[var(--border)] bg-[var(--surface)] text-[var(--txt-muted)]'
-            }`}
-            title={liveConnected ? 'Лайф подключён' : 'Лайф не подключён'}
-          >
-            {liveConnected ? <Wifi size={10} /> : <WifiOff size={10} />}
-            {liveConnected ? 'ЛАЙФ ●' : 'ЛАЙФ —'}
-          </span>
-          <button
-            type="button"
-            onClick={load}
-            className="p-1.5 rounded-lg border border-[var(--border)] bg-[var(--surface)] text-[var(--txt-muted)]"
-            aria-label="Обновить"
-          >
-            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} />
+        <div className="flex items-center gap-1.5">
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden text-[0.65rem] font-bold">
+            <button type="button" onClick={() => setMode('demo')} className={`px-2 py-1 ${mode === 'demo' ? 'bg-[var(--info)] text-white' : 'text-[var(--txt-muted)]'}`}>DEMO</button>
+            <button type="button" onClick={() => setMode('live')} disabled={!data?.live?.connected} className={`px-2 py-1 flex items-center gap-0.5 ${mode === 'live' ? 'bg-[var(--profit)] text-white' : 'text-[var(--txt-muted)]'} ${!data?.live?.connected ? 'opacity-40' : ''}`}>
+              {data?.live?.connected ? <Wifi size={10} /> : <WifiOff size={10} />}LIVE
+            </button>
+          </div>
+          <button type="button" className="p-1.5 rounded-lg hover:bg-[var(--surface-raised)]" onClick={load} disabled={loading}>
+            <RefreshCw size={15} className={loading ? 'animate-spin' : ''} />
           </button>
         </div>
       </div>
 
-      {/* 2×2 metrics — same as iOS dashboard */}
-      <div className="mini-metrics">
-        <div className="mini-metric">
-          <div className="label">Нереализ. · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.unreal, metrics.liveUnreal, liveConnected)}</div>
-        </div>
-        <div className="mini-metric">
-          <div className="label">Сегодня · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.today, metrics.liveToday, liveConnected)}</div>
-        </div>
-        <div className="mini-metric">
-          <div className="label">Сумма · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.total, metrics.liveTotal, liveConnected)}</div>
-        </div>
-        <div className="mini-metric">
-          <div className="label">Equity · демо/лайф</div>
-          <div className="value mono text-[var(--txt)]">
-            <span title="Демо">{metrics.equity != null ? `$${fmt(metrics.equity, 0)}` : '—'}</span>
-            <span className="text-[var(--txt-muted)] mx-0.5 font-normal">/</span>
-            <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
-              {liveConnected && metrics.liveEquity != null ? `$${fmt(metrics.liveEquity, 0)}` : '—'}
-            </span>
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain px-3 py-3 space-y-3" style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}>
+        <Card>
+          <div className="flex items-center justify-between mb-2.5">
+            <span className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">{isLive ? 'LIVE PnL' : 'DEMO PnL'}</span>
+            {metrics.equity != null && (
+              <span className="text-[0.65rem] text-[var(--txt-muted)] mono">Eq ${fmt(metrics.equity)}{metrics.capital != null ? ` · Cap $${fmt(metrics.capital, 0)}` : ''}</span>
+            )}
           </div>
-        </div>
-      </div>
+          <div className="grid grid-cols-3 gap-2">
+            <Metric label={isLive ? 'Всего LIVE' : 'Всего DEMO'} value={pnlSign(metrics.total)} className={pnlClass(metrics.total)} />
+            <Metric label="Сегодня" value={pnlSign(metrics.today)} className={pnlClass(metrics.today)} />
+            <Metric label="Нереализ." value={pnlSign(metrics.unreal)} className={pnlClass(metrics.unreal)} />
+          </div>
+        </Card>
 
-      {/* AI status + Russian pulse */}
-      <div className="mini-ai">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span
-              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                demoOn ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'
-              }`}
-            />
-            <Bot size={12} className="text-[var(--txt-muted)] flex-shrink-0" />
-            <span className="text-[0.7rem] font-semibold truncate">AI Discretionary</span>
-            <span
-              className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded ${
-                demoOn
-                  ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                  : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
-              }`}
-            >
-              {demoOn ? 'ВКЛ' : 'ВЫКЛ'}
-            </span>
-          </div>
-        </div>
-        {pulse ? (
-          <div className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-2">
-            {pulse}
-          </div>
-        ) : null}
-      </div>
-
-      {/* Open positions */}
-      <div className="mini-section mini-positions">
-        <div className="mini-section-title">
-          <span>Открытые позиции</span>
-          <span>{positions.length}</span>
-        </div>
-        <div className="mini-panel flex-1 min-h-0 overflow-auto">
-          {positions.length === 0 ? (
-            <div className="py-3 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет позиций</div>
-          ) : (
-            positions.map((p) => (
-              <div key={p.key} className="mini-pos-row">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[0.75rem] font-bold">{p.coin}</span>
-                    <span
-                      className={`text-[0.55rem] font-bold ${
-                        p.side === 'long' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
-                      }`}
-                    >
-                      {p.sideLabel}
-                    </span>
-                    {p.mode === 'live' ? (
-                      <span className="badge-live">LIVE</span>
-                    ) : (
-                      <span className="badge-demo">DEMO</span>
-                    )}
-                  </div>
-                  <span className={`text-[0.75rem] font-bold mono ${pnlClass(p.upl)}`}>
-                    {pnlSign(p.upl)}
-                  </span>
+        {!isLive && (
+          <Card>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center ${data?.demo?.running ? 'bg-[var(--profit-dim)]' : 'bg-[var(--surface-overlay)]'}`}>
+                  <Bot size={18} className={data?.demo?.running ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'} />
                 </div>
-                <div className="mt-0.5 flex flex-wrap gap-x-3 text-[0.58rem] text-[var(--txt-muted)] mono">
-                  <span>
-                    Размер <span className="text-[var(--txt)]">{p.size ? p.size.toFixed(3) : '—'}</span>
-                  </span>
-                  <span>
-                    Вход{' '}
-                    <span className="text-[var(--txt)]">
-                      {p.entry ? `$${p.entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
-                    </span>
-                  </span>
-                  <span>
-                    Марка{' '}
-                    <span className="text-[var(--txt)]">
-                      {p.mark ? `$${p.mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
-                    </span>
-                  </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold truncate">AI Discretionary 1H</div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)]">{data?.demo?.model || 'LLM'} · сделок {metrics.tradesN}{data?.demo?.win_rate ? ` · WR ${data?.demo?.win_rate}%` : ''}</div>
                 </div>
               </div>
-            ))
+              <span className={`flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold ${data?.demo?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+                {data?.demo?.running ? 'ON' : 'OFF'}
+              </span>
+            </div>
+            {data?.demo?.pulse && <p className="mt-2.5 text-xs leading-snug text-[var(--txt-secondary)] line-clamp-3">{data?.demo?.pulse}</p>}
+          </Card>
+        )}
+
+        {isLive && (
+          <Card>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-9 h-9 rounded-xl flex items-center justify-center bg-[var(--profit-dim)]">
+                  <Bot size={18} className="text-[var(--profit)]" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-bold truncate">LIVE Mirror</div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)]">сделок {metrics.tradesN}{data?.live?.win_rate != null ? ` · WR ${data?.live?.win_rate}%` : ''}</div>
+                </div>
+              </div>
+              <span className="flex-shrink-0 px-2 py-1 rounded-lg text-[0.65rem] font-bold bg-[var(--profit-dim)] text-[var(--profit)]">LIVE</span>
+            </div>
+          </Card>
+        )}
+
+        <div>
+          <div className="flex items-center justify-between mb-1.5 px-0.5">
+            <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)]">Позиции</h2>
+            <span className="text-[0.65rem] text-[var(--txt-muted)]">{viewPositions.length}</span>
+          </div>
+          {viewPositions.length === 0 ? (
+            <Card className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет открытых позиций</Card>
+          ) : (
+            <div className="space-y-2 max-h-[40vh] overflow-y-auto overscroll-y-contain" style={{ WebkitOverflowScrolling: 'touch' }}>
+              {viewPositions.map(p => (
+                <Card key={p.key} className="py-2.5">
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
+                      <span className="text-xs font-bold truncate">{p.coin}</span>
+                      <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${p.side === 'long' ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                        {p.side === 'long' ? 'LONG' : 'SHORT'}
+                      </span>
+                      {p.mode === 'live' ? (
+                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                      ) : (
+                        <span className="text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                      )}
+                    </div>
+                    <span className={`text-xs font-bold mono ${pnlClass(p.upl)}`}>{pnlSign(p.upl)}</span>
+                  </div>
+                  <div className="text-[0.65rem] text-[var(--txt-muted)] mono flex flex-wrap gap-x-2 gap-y-0.5">
+                    {p.notional > 0 && <span>Объём <span className="text-[var(--txt)]">${fmt(p.notional, 0)}</span></span>}
+                    {p.entry > 0 && <span>Вход <span className="text-[var(--txt)]">${fmt(p.entry, p.entry >= 100 ? 2 : 4)}</span></span>}
+                    {p.mark > 0 && <span>Марка <span className="text-[var(--txt)]">${fmt(p.mark, p.mark >= 100 ? 2 : 4)}</span></span>}
+                    {p.size > 0 && <span>Контр. <span className="text-[var(--txt)]">{fmt(p.size, 3)}</span></span>}
+                    {p.lever > 0 && <span>{fmt(p.lever, 1)}x</span>}
+                    {!p.entry && !p.mark && !p.notional && <span>—</span>}
+                  </div>
+                </Card>
+              ))}
+            </div>
           )}
+        </div>
+
+        <div className="pb-6">
+          <h2 className="text-[0.65rem] font-bold uppercase tracking-wider text-[var(--txt-muted)] mb-1.5 px-0.5">Сделки</h2>
+          <Card className="p-0 overflow-hidden">
+            {viewTrades.length === 0 ? (
+              <div className="py-4 text-center text-xs text-[var(--txt-muted)]">Нет сделок</div>
+            ) : (
+              <div className="divide-y divide-[var(--border)]">
+                {viewTrades.map((tr, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2.5">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {Number(tr.pnl) >= 0 ? <ArrowUpRight size={14} className="text-[var(--profit)] flex-shrink-0" /> : <ArrowDownRight size={14} className="text-[var(--loss)] flex-shrink-0" />}
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold truncate">
+                          {tr.inst || '—'}{' '}
+                          <span className="text-[var(--txt-muted)] font-normal">{tr.side}</span>
+                          {tr.mode === 'live' ? (
+                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30">LIVE</span>
+                          ) : (
+                            <span className="ml-1 text-[0.55rem] font-bold px-1 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30">DEMO</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    <span className={`text-xs font-bold mono flex-shrink-0 ${pnlClass(tr.pnl)}`}>{pnlSign(tr.pnl)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
         </div>
       </div>
     </div>
@@ -389,9 +334,5 @@ function MiniAppPageInner() {
 }
 
 export default function MiniAppPage(props) {
-  return (
-    <MiniAppErrorBoundary>
-      <MiniAppPageInner {...props} />
-    </MiniAppErrorBoundary>
-  )
+  return <MiniAppErrorBoundary><MiniAppPageInner {...props} /></MiniAppErrorBoundary>
 }

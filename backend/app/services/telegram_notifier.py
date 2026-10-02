@@ -330,9 +330,6 @@ class TelegramNotifier:
             print("[TG] send_trade DEMO skipped: no token", flush=True)
             return 0
         mid = 0
-        if not self.chat_id and not self.channel_id:
-            print("[TG] send_trade DEMO skipped: no chat_id and no channel_id", flush=True)
-            return 0
         if self.chat_id:
             mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
             if not mid:
@@ -479,37 +476,24 @@ class TelegramNotifier:
             f"Плечо: {_esc(leverage)}x{self._footer(signal_id)}"
         )
 
-    def close_msg(self, coin: str, side: str, entry, exit_px,
+    def close_msg(self, coin: str, side: str, entry: float, exit_px: float,
                   pnl: float, reason: str, bot_name: str = "",
                   signal_id: int = 0, account_mode: str = "",
-                  account_key: str = "", size: float = 0, **_kwargs) -> str:
+                  account_key: str = "", **_kwargs) -> str:
         mode = (account_mode or "").strip().lower()
         mode_line = ""
         if mode in ("demo", "live"):
             mode_line = f"\nРежим: <b>{'DEMO' if mode == 'demo' else 'LIVE'}</b>"
-        try:
-            pnl_f = float(pnl or 0)
-        except (TypeError, ValueError):
-            pnl_f = 0.0
-        icon = "✅" if pnl_f >= 0 else "❌"
-        sign = "+" if pnl_f >= 0 else ""
-        # entry/exit may already be formatted strings from caller
-        entry_s = entry if isinstance(entry, str) else _esc(entry)
-        exit_s = exit_px if isinstance(exit_px, str) else _esc(exit_px)
-        size_line = ""
-        try:
-            if size and float(size) > 0:
-                size_line = f"\nРазмер: {_esc(round(float(size), 4))}"
-        except (TypeError, ValueError):
-            pass
+        icon = "✅" if pnl >= 0 else "❌"
+        sign = "+" if pnl >= 0 else ""
         return (
             f"{icon} <b>ЗАКРЫТА ПОЗИЦИЯ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
             f"Бот: <b>{_esc(bot_name)}</b>{mode_line}\n"
             f"Инструмент: <b>{_esc(coin)}</b>\n"
-            f"Направление: {self._side_label(side)}{size_line}\n"
-            f"Вход: {entry_s} → Выход: {exit_s}\n"
-            f"PnL: <b>{sign}{_esc(round(pnl_f, 2))} USDT</b>\n"
+            f"Направление: {self._side_label(side)}\n"
+            f"Вход: {_esc(entry)} → Выход: {_esc(exit_px)}\n"
+            f"PnL: <b>{sign}{_esc(pnl)} USDT</b>\n"
             f"Причина: {self._reason_label(reason)}{self._footer(signal_id)}"
         )
 
