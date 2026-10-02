@@ -87,9 +87,11 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.15-llm-deep"
+STRATEGY_VERSION = "v1.16-let-winners-run"
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
+    "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
+    "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
+    "вместо лоссов), риск ~1.2%, hold-in-trend при align≥0.60 с chop/ADX-гардами."
 )
 
 CT_VAL = {
@@ -175,7 +177,10 @@ class AIConfig:
     min_roc_abs: float = 0.15
     min_stop_pct: float = 0.016
     max_stop_pct: float = 0.035            # cut max pain per trade
-    min_take_pct: float = 0.028            # closer TP — bank wins earlier
+    min_take_pct: float = 0.038            # v1.16: widened back — v1.10 cut this to 0.028
+                                            # while *also* diagnosing "wins too small vs
+                                            # losses"; that shrank wins further. Restored
+                                            # above the pre-v1.10 0.035 baseline.
     max_hold_hours: float = 12.0            # phase4: hard time-stop
     time_stop_stale_hours: float = 5.0      # do not bleed for 8h
     time_stop_min_progress_pct: float = 0.20
@@ -188,7 +193,11 @@ class AIConfig:
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.40       # start locking earlier
+    trail_activate_pct: float = 0.65       # v1.16: 0.40→0.65 — kept in sync with
+                                            # trail_activate_atr_mult (OR'd together;
+                                            # the smaller of the two always wins, so
+                                            # leaving this low would have silently
+                                            # undone the ATR widening above)
     trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
@@ -207,11 +216,19 @@ class AIConfig:
     # ATR framework (1H crypto) — stops/trail/scale relative to volatility
     atr_period: int = 14
     atr_stop_mult: float = 1.15            # stop ≈ 1.15×ATR (clamped to min/max_stop_pct)
-    atr_take_mult: float = 1.90            # take ≈ 1.9×ATR → RR ~1.65 before clamp
+    atr_take_mult: float = 2.30            # v1.16: 1.9→2.3×ATR → RR ~2.0 before clamp
+                                            # (was cut to 1.90 under v1.10's "closer TP"
+                                            # fix, which worked against its own diagnosis)
     scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
-    breakeven_atr_mult: float = 0.28       # move stop to BE after +0.28×ATR in favor
-    trail_atr_mult: float = 0.55           # trail distance from peak = 0.55×ATR
-    trail_activate_atr_mult: float = 0.45  # start trailing after +0.45×ATR profit
+    breakeven_atr_mult: float = 0.45       # v1.16: 0.28→0.45 — give winners room before
+                                            # locking BE (was triggering too early)
+    breakeven_min_pct: float = 0.55        # v1.16: named replacement for the old hardcoded
+                                            # upl>=0.35 OR-fallback (was firing before the
+                                            # ATR condition, defeating the widening above)
+    trail_atr_mult: float = 0.65           # v1.16: 0.55→0.65 — slightly wider trail
+                                            # distance once active, less whipsaw-prone
+    trail_activate_atr_mult: float = 0.70  # v1.16: 0.45→0.70 — let a trade breathe further
+                                            # before trailing starts clamping it down
     time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
@@ -2612,11 +2629,16 @@ class AIStrategy:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
               f"lev={lev} (mirror)", flush=True)
-        # Place exchange-level SL/TP on live account
-        try:
-            await self._place_exchange_sl_tp(lc, pos)
-        except Exception as e:
-            print(f"[AI-LIVE] exchange SL/TP: {e}", flush=True)
+        # v1.17: deliberately NOT placing exchange-level SL/TP on LIVE anymore.
+        # An independent exchange-native order on the LIVE account could fire
+        # on its own (LIVE and DEMO are separate OKX environments with their
+        # own price feeds/execution), closing LIVE without DEMO's knowledge —
+        # confirmed root cause of LIVE drifting from DEMO on its own. LIVE now
+        # closes ONLY when _close_live() is called in lockstep with DEMO's own
+        # software-side close decision — a true mirror, by explicit choice.
+        # Trade-off accepted: if this bot process goes down, LIVE positions
+        # have no stop-loss protection at all until it comes back online —
+        # consider an external/exchange-side watchdog if that risk matters.
         self._persist_live()
         return True
 
@@ -2796,11 +2818,35 @@ class AIStrategy:
     async def _manage_live_orphans(self, client):
         """Safety net: close live positions whose coin is not in the primary
         book (i.e. the demo close was never mirrored, or live position was
-        opened outside the bot). Only fires when orphan_close_enabled."""
+        opened outside the bot).
+
+        v1.17: this used to be disabled by default (ORPHAN_CLOSE=0) because it
+        once wiped real positions right after a deploy/restart, before
+        self._positions had been hydrated back from the DB — at that moment
+        every live position looks "orphaned" even though it legitimately has a
+        demo twin that just hasn't loaded yet. That default-off stance traded
+        one bug for a worse one: a demo close whose LIVE close call failed
+        (API hiccup, rate limit, etc.) would never be retried, so LIVE could
+        silently diverge from DEMO forever — exactly the desync this mirror
+        exists to prevent. Fix: gate on hydration being complete + a boot
+        grace period, so the sweep is safe to run by default; ORPHAN_CLOSE=0
+        remains available as an explicit kill-switch if ever needed again.
+        """
         lc = self._live_client()
         if not lc:
             return
         if not orphan_close_enabled():
+            return
+        if not getattr(self, "_hydrated", False):
+            return
+        try:
+            started = self._started_at
+            if started:
+                started_dt = datetime.fromisoformat(started)
+                elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds()
+                if elapsed < 120:
+                    return
+        except Exception:
             return
         coins = list(self._live_positions.keys())
         for coin in coins:
@@ -2919,8 +2965,13 @@ class AIStrategy:
                             pass
                         _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                         try:
+                            # v1.17: LIVE no longer carries its own exchange SL/TP, so
+                            # this path should now only fire on manual intervention,
+                            # liquidation, or another external event — not routine
+                            # bot-placed stop/take execution. Labelled accordingly so
+                            # it stands out if it ever happens again.
                             await self._notify_close_tg(
-                                pos, coin, "exchange_stop", exit_px, pnl,
+                                pos, coin, "exchange_vanished_unexpected", exit_px, pnl,
                                 account_mode="live", bot_name_suffix=" (LIVE)",
                             )
                         except Exception as _nte:
@@ -2935,15 +2986,22 @@ class AIStrategy:
 
 
     async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
-        """Re-check AI/quant gates with *current* indicators before a delayed LIVE open.
+        """Gate a *delayed* LIVE mirror open (fast-retry / gap-fill) — v1.17.
 
-        Immediate mirror (same tick as demo fill) skips this. Fast-retry / gap-fill
-        must pass — otherwise market may have flipped and blind clone is unsafe.
+        IMPORTANT: this is a mirror, not a second opinion. The trade was
+        already decided once, when it opened on demo. This function must NOT
+        re-litigate whether the trade idea is still good (that caused LIVE to
+        permanently skip mirroring demo positions whenever the AI/quant gate's
+        opinion drifted during the retry window — a real demo/live desync bug,
+        since nothing else ever retried after a skip here).
+        The only thing this still checks is whether the price has run away so
+        far from the demo entry that opening LIVE here would be a structurally
+        different (not just delayed) trade. Immediate mirror (same tick as
+        demo fill) skips this entirely, same as before.
         """
         side = (side or "").lower()
         if side not in ("long", "short"):
             return False, "bad_side"
-        # Fresh indicators if we have a client
         try:
             client = await self._client()
             if client:
@@ -2951,33 +3009,9 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
         ind = self._latest_indicators.get(coin) or {}
-        if not ind:
-            return False, "no_indicators"
-        al = float(ind.get("align_long") or 0)
-        ash = float(ind.get("align_short") or 0)
-        adx = float(ind.get("adx") or 0)
-        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
-        # Slightly softer for mirror revalidate (already had a demo signal)
-        min_align = max(0.45, min_align - 0.05)
-        align = al if side == "long" else ash
-        if align < min_align - 1e-9:
-            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
-        # ADX gate with same soft-bypass as open path
-        best = max(al, ash)
-        try:
-            if self._adx_blocks_open(adx, best):
-                return False, f"adx_block:{adx:.1f}"
-        except Exception:
-            pass
-        # Regime clash: don't open long in clear bear / short in clear bull
-        reg = str(ind.get("regime") or "").lower()
-        if side == "long" and reg in ("bear", "bearish", "down"):
-            if al < min_align + 0.08:
-                return False, f"regime_bear_vs_long:{reg}"
-        if side == "short" and reg in ("bull", "bullish", "up"):
-            if ash < min_align + 0.08:
-                return False, f"regime_bull_vs_short:{reg}"
-        # Price still near demo entry? (avoid chasing >1.2% adverse move)
+        # Price still near demo entry? (avoid chasing >1.2% adverse move — this
+        # is the one guard kept: beyond this, LIVE would carry meaningfully
+        # more risk than demo did at entry, not just a few seconds' delay)
         demo_pos = self._positions.get(coin)
         try:
             entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
@@ -2990,7 +3024,7 @@ class AIStrategy:
                     return False, f"price_ran_away_short:{move:.3%}"
         except Exception:
             pass
-        return True, f"ok_align={align:.2f}_adx={adx:.1f}"
+        return True, "ok_mirror_no_relitigation"
 
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
                                   take_pct: float, reason: str) -> None:
@@ -3472,9 +3506,12 @@ class AIStrategy:
                     fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
                 else:
                     fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
-            # Early BE after +breakeven_atr_mult × ATR (fallback 0.28)
-            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.28) or 0.28)
-            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= 0.35):
+            # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
+            # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
+            # override the other (see v1.16 notes on the config fields above).
+            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.45) or 0.45)
+            be_min_pct = float(getattr(self.config, "breakeven_min_pct", 0.55) or 0.55)
+            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
                 if pos.side == "long":
                     be = float(pos.entry_price) * 1.0005
                     if be > float(pos.stop_price or 0):
@@ -3484,9 +3521,9 @@ class AIStrategy:
                     if not pos.stop_price or be < float(pos.stop_price):
                         pos.stop_price = be
             # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
-            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.45) or 0.45)
-            trail_m = float(getattr(self.config, "trail_atr_mult", 0.55) or 0.55)
-            act_pct = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.70) or 0.70)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 0.65) or 0.65)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 0.65) or 0)
             lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
             trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
             if trail_on and pos.entry_price:
