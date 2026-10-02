@@ -84,7 +84,7 @@ _ACTIVE_SYSTEM_PROMPT = None  # set per call_llm
 
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce", "add")
 ALLOWED_SIDES = ("long", "short")
-ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI")
+ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP")  # v1.10 majors only
 
 _DEPRECATED_GROQ_MODELS = {
     "llama-3.1-8b-instant",
@@ -122,37 +122,55 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 SYSTEM_PROMPT_MANAGE = """You MANAGE an open OKX USDT-SWAP position (do not open a new coin).
-Reply with ONE JSON object only:
+Think like a desk: structure → momentum → risk → action.
+Reply with ONE JSON object only (no markdown):
 {"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
-"size_pct":0.25-0.75,"confidence":0-1,"reason":"<=120 chars"}
+"size_pct":0.25-0.75,"confidence":0-1,
+"reason":"<=200 chars","thesis":"<=180 chars optional"}
+
+Analysis checklist (use fields in snapshot):
+- Structure: price vs EMA21/50/200, tf_4h.trend_up, BB position
+- Momentum: ROC, MACD hist sign/change, RSI zone
+- Trend strength: ADX, regime (bull/bear/chop)
+- Risk: distance to stop/take in %, unrealized if present, funding_rate
+- Context: reflection + daily_lessons + journal_tail (recent outcomes)
 
 Rules:
-1) Prefer close if trend flipped (EMA/ROC against side) or ADX collapsed.
+1) Prefer close if trend flipped (EMA/ROC against side), ADX collapsed, or structure broke.
 2) reduce if in profit but momentum fading; lock gains.
-3) add ONLY if open_positions.can_add is true AND adverse move is moderate.
-4) hold if trend intact and stop not threatened.
-5) Cite 2 metrics in reason. DEFAULT=hold if unsure.
+3) add ONLY if open_positions.can_add is true AND adverse move is moderate AND regime is not chop.
+4) hold if trend intact, ADX supportive, stop not threatened.
+5) In regime=chop prefer reduce/close over add; do not average into noise.
+6) Cite >=2 concrete metrics in reason. Put deeper logic in thesis. DEFAULT=hold if unsure.
 """
 
-SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk (balanced-aggressive). Prefer trading candidates_allowed when align is solid; avoid candidates_blocked.
+SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk. Analyze first, trade second.
+Prefer candidates_allowed; avoid candidates_blocked. You receive a full quant snapshot — use it.
 Reply with ONE JSON object only (no markdown):
 {"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
 "size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
-"confidence":0-1,"regime":"bull|bear|chop|unknown","reason":"<=120 chars"}
+"confidence":0-1,"regime":"bull|bear|chop|unknown",
+"reason":"<=200 chars","thesis":"<=220 chars optional"}
+
+How to analyze (do this mentally before choosing action):
+A) Market structure per coin: close vs EMA21/50/200, BB location, tf_4h trend alignment
+B) Momentum: ROC, MACD histogram sign, RSI (avoid extremes against the trade)
+C) Strength: ADX, regime, vol_ratio (participation)
+D) Risk context: ATR-based stop room, funding_rate bias, max_positions, adaptive preset
+E) Self-reflection: journal_tail + daily_lessons + reflection — skip patterns that recently lost
 
 Hard rules:
-1) DEFAULT action is hold. Open only with clear edge.
-2) Never open if open_positions is non-empty (close/reduce first).
-3) Prefer setups where quant.align_score >= 0.6 and regime is bull (long) or bear (short).
-4) In regime=chop → hold unless one side has strong quant alignment (>=0.55) and a clear catalyst in reason.
-5) Require RR take_pct/stop_pct >= 1.8 and confidence >= 0.75 to open.
-6) Use precomputed indicators (EMA21/50/200, RSI, MACD, ADX, ATR, BB, vol_ratio, tf_4h).
-7) Short reason must cite 2+ concrete metrics (e.g. adx, ema200, rsi).
-8) If quant.block_open is true → hold.
-9) Respect adaptive.min_confidence and adaptive.size_cap; read reflection (recent trade outcomes) before opening.
-10) Obey daily_lessons RULE* if present — they are derived from recent losing patterns.
+1) DEFAULT action is hold. Open only with clear multi-factor edge.
+2) Never open if open_positions is non-empty (close/reduce/add existing first).
+3) Prefer align_score >= 0.6 and regime matching side (bull→long, bear→short).
+4) regime=chop → hold unless exceptional align (>=0.75) AND 4H agrees AND catalyst in thesis.
+5) Require RR take_pct/stop_pct >= 1.6 and confidence >= adaptive.min_confidence (or 0.68).
+6) If block_open true → hold for that coin.
+7) reason must cite >=2 metrics; thesis may expand structure/momentum/risk narrative.
+8) Respect adaptive.size_cap and daily_lessons RULE*.
+9) Prefer BTC/ETH leadership consistent with the chosen side when trading alts.
+10) Size down (near size_pct floor) when ADX is only moderate or regime mixed.
 """
-
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -207,6 +225,7 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
     conf = _clip(conf, 0.0, 1.0)
 
     reason = str(raw.get("reason") or "")[:240]
+    thesis = str(raw.get("thesis") or raw.get("analysis") or "")[:280]
 
     # Policy clamps
     if action == "open":
@@ -235,6 +254,7 @@ def validate_decision(raw: Any, open_symbols: Optional[list] = None) -> dict:
         "take_pct": round(take_pct, 4),
         "confidence": round(conf, 3),
         "reason": reason,
+        "thesis": thesis,
     }
 
 
@@ -342,9 +362,24 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
     _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
 
+    def _compact_ind(ind):
+        if not isinstance(ind, dict):
+            return {}
+        keys = (
+            "close", "ema21", "ema50", "ema200", "roc_3", "adx", "rsi",
+            "macd_hist", "atr", "bb_mid", "bb_upper", "bb_lower", "vol_ratio",
+            "regime", "align_long", "align_short", "funding_rate", "tf_4h",
+            "bar_closes", "ema_slope",
+        )
+        return {k: ind.get(k) for k in keys if ind.get(k) is not None}
+
+    inds_raw = snapshot.get("indicators") or {}
+    inds_compact = {c: _compact_ind(v) for c, v in inds_raw.items()}
+
     user_payload = {
         "decision_mode": mode,
         "decision_trigger": snapshot.get("decision_trigger"),
+        "fresh_bars": snapshot.get("fresh_bars"),
         "equity": snapshot.get("equity"),
         "capital": snapshot.get("capital"),
         "max_leverage": snapshot.get("max_leverage"),
@@ -353,7 +388,8 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         "quant": snapshot.get("quant"),
         "candidates_allowed": snapshot.get("candidates_allowed") or [],
         "candidates_blocked": snapshot.get("candidates_blocked") or [],
-        "indicators": snapshot.get("indicators"),
+        "indicators": inds_compact,
+        "analysis_hints": snapshot.get("analysis_hints") or [],
         "server_time": snapshot.get("server_time"),
         "policy": {
             "prefer": "trade_allowed_candidates",
@@ -363,15 +399,19 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             "max_size_pct": (snapshot.get("adaptive") or {}).get("size_cap", 0.15),
             "adapt_preset": (snapshot.get("adaptive") or {}).get("preset"),
             "hint": snapshot.get("policy_hint") or "",
+            "risk_note": "Prefer smaller size in chop/mixed; respect stop distance vs ATR",
         },
         "reflection": snapshot.get("reflection") or "",
         "daily_lessons": snapshot.get("daily_lessons") or [],
         "journal_tail": snapshot.get("journal_tail") or [],
         "adaptive": snapshot.get("adaptive"),
     }
+    raw_json = json.dumps(user_payload, ensure_ascii=False)
+    max_chars = int(os.getenv("AI_LLM_PAYLOAD_CHARS", "6000") or 6000)
     user_msg = (
-        "Quant-preprocessed market snapshot + self-reflection. Decide next action.\n"
-        + json.dumps(user_payload, ensure_ascii=False)[:3200]
+        "Full quant snapshot for discretionary analysis. "
+        "Follow checklist in system prompt; then decide.\n"
+        + raw_json[:max_chars]
     )
 
     if provider == "mock" or not provider:

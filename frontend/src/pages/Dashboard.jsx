@@ -396,7 +396,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     // 30s cache, so updates arrive a little after the fast tier.
     try {
       const [trades, liveTr, pnlData] = await Promise.all([
-        api.getPairedTrades(50).catch(() => null),
+        api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
         api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
@@ -611,7 +611,49 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Demo: demo or untagged legacy payload
     return !m || m === 'demo'
   })()
-  const discPnlResolved = pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+
+  // DEMO total from the SAME closed trades shown on the dashboard (authoritative for UI).
+  // Server /api/pnl has drifted (Scale-In mix / label bugs); day/week from server still used.
+  const demoRealizedFromTrades = (() => {
+    let s = 0
+    let n = 0
+    const EPOCH = Date.parse('2026-09-01T00:00:00Z')
+    for (const tr of (tradeLog || [])) {
+      const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
+      if (mode === 'live') continue
+      const reason = String(tr.reason || '').toLowerCase()
+      // count closed only
+      const isClosed = reason === 'closed' || reason === 'close' || tr.exit_price != null || tr.exit_px != null || tr.exit != null
+      if (!isClosed && reason === 'open') continue
+      if (reason === 'open') continue
+      const bot = String(tr.bot || tr.bot_label || tr.strategy || tr.bot_name || 'AI Discretionary 1H')
+      // Skip non-AI strategies if explicitly labeled
+      if (/scale-?in|momentum|impulse|validation|scalp|умн|smart.?money|vwap/i.test(bot) && !/discretionary|^ai\b/i.test(bot)) continue
+      let ts = tr.exit_time || tr.time || tr.close_ts || tr.timestamp || 0
+      if (typeof ts === 'string' && ts) {
+        const p = Date.parse(ts)
+        if (!Number.isNaN(p)) ts = p
+        else ts = 0
+      }
+      ts = Number(ts) || 0
+      if (ts > 0 && ts < 1e12) ts *= 1000
+      if (ts > 0 && ts < EPOCH) continue
+      const pnl = Number(tr.pnl)
+      if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
+      s += pnl
+      n += 1
+    }
+    return { total: Math.round(s * 100) / 100, n }
+  })()
+
+  const discPnlResolved = (() => {
+    const src = String(pnl?.source || '')
+    if (pnlModeOk && pnl?.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
+      return Number(pnl.per_bot?.['AI Discretionary 1H'] ?? pnl.total ?? 0)
+    }
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
+    return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+  })()
   const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
@@ -620,8 +662,13 @@ export default function Dashboard({ health, connected, isGuest }) {
   })()
   const pnlTotal = (() => {
     if (!pnlModeOk) return 0
-    if (pnl && pnl.total != null && pnl.source && String(pnl.source).startsWith('exchange')) {
+    // Prefer direct OKX bills / exchange engine — authoritative since 01.09.2026
+    const src = String(pnl?.source || '')
+    if (pnl && pnl.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
       return Number(pnl.total)
+    }
+    if (demoMode && demoRealizedFromTrades.n > 0) {
+      return demoRealizedFromTrades.total
     }
     if (AI_ONLY_MODE) return discPnlResolved
     if (pnl && pnl.total != null) return Number(pnl.total)
@@ -669,7 +716,10 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      rows.push({ name: 'AI Discretionary 1H', val: Number(per['AI Discretionary 1H'] ?? 0) })
+      const v = (demoMode && demoRealizedFromTrades.n > 0)
+        ? demoRealizedFromTrades.total
+        : Number(per['AI Discretionary 1H'] ?? 0)
+      rows.push({ name: 'AI Discretionary 1H', val: v })
       return rows
     }
     for (const [bid, val] of Object.entries(per)) {
@@ -678,7 +728,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       rows.push({ name, val: Number(val || 0) })
     }
     return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl])
+  }, [pnl, demoMode, demoRealizedFromTrades])
 
   // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
   const momentumCardPnl = useMemo(() => {
@@ -702,11 +752,12 @@ export default function Dashboard({ health, connected, isGuest }) {
   }, [pnl, validationStatus?.total_pnl])
 
   const aiCardPnl = useMemo(() => {
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     const per = pnl?.per_bot || {}
     if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
     if (per.ai_strategy != null) return Number(per.ai_strategy)
     return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl, demoMode, demoRealizedFromTrades])
 
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
@@ -1045,13 +1096,23 @@ export default function Dashboard({ health, connected, isGuest }) {
   }
 
   const handleClosePosition = async (p) => {
-    const posId = `${p.instId}_${p.posSide}`
+    const mode = String(p.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
+    const posId = `${p.instId}_${p.posSide}_${mode}`
+    if (mode === 'live') {
+      const ok = window.confirm('Закрыть позицию на LIVE-счёте? Это реальное закрытие на бирже.')
+      if (!ok) return
+    }
     setClosing(posId)
     try {
-      const account = p.account_mode === 'live' ? 'live' : 'demo'
-      await api.closePosition(p.instId, p.posSide, p.pos, p.mgnMode || 'cross', account)
+      await api.closePosition(
+        p.instId,
+        p.posSide || p.side || 'net',
+        p.pos || p.size,
+        p.mgnMode || 'cross',
+        mode,
+      )
       loadData()
-    } catch (e) { alert(t('dash.error') + e.message) }
+    } catch (e) { alert((t('dash.error') || 'Ошибка: ') + (e.message || e)) }
     finally { setClosing(null) }
   }
 
@@ -1080,12 +1141,46 @@ export default function Dashboard({ health, connected, isGuest }) {
   const pnlSource = pnl?.source || ''
   const fundingNote = Number(pnl?.funding || 0)
 
+  // LIVE numbers for dual DEMO/LIVE metric display
+  const liveConnected = !!(liveStatus?.connected)
+  const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
+  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
+  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
+  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
+  const liveEquity = Number(liveStatus?.equity ?? 0)
+
+  const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
+    const one = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n)) return '—'
+      const abs = Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      if (!forceSigned && n === 0) return `$${abs}`
+      return `${n >= 0 ? '+' : '−'}$${abs}`
+    }
+    const cls = (v) => {
+      const n = Number(v)
+      if (v == null || Number.isNaN(n) || n === 0) return 'text-[var(--txt-secondary)]'
+      return n > 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
+    }
+    return (
+      <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
+        <span className={cls(demoVal)} title="Демо">{one(demoVal)}</span>
+        <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
+        <span className={liveConnected ? cls(liveVal) : 'text-[var(--txt-muted)]'} title="Лайф">
+          {liveConnected ? one(liveVal) : '—'}
+        </span>
+      </span>
+    )
+  }
+
+
+
   const fmt = (v, d = 2) => v != null ? v.toFixed(d) : '---'
   const fmtUsd = (v) => v != null ? `$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '---'
   const fmtTime = (ts) => fmtTs(ts, locale)
 
   return (
-    <div className="h-full flex flex-col p-4 gap-3 overflow-hidden">
+    <div className="dash-root h-full flex flex-col p-4 gap-3 overflow-hidden">
 
       {!connected && (
         <div className="flex-shrink-0 flex items-center gap-2 px-3 py-2 rounded-lg border border-[var(--loss)]/30 bg-[var(--loss-dim)] text-2xs text-[var(--loss)]">
@@ -1095,7 +1190,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       )}
 
       {/* ═══ Status strip (Phase 5 UX) ═══ */}
-      <div className="flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
+      <div className="dash-status-strip flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
         <span
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border ${
             !connected
@@ -1220,52 +1315,66 @@ export default function Dashboard({ health, connected, isGuest }) {
       )}
 
       {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
-      <div data-tour="metrics" className="flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div data-tour="metrics" className="dash-metrics flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <EnhancedMetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.balance')}
-          value={totalEquity ? `$${totalEquity.toLocaleString()}` : '---'}
+          value={
+            <span className="inline-flex items-baseline gap-0.5 mono">
+              <span title="Демо">{totalEquity ? `$${Number(totalEquity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</span>
+              <span className="text-[var(--txt-muted)] text-[0.85em]">/</span>
+              <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
+                {liveConnected && liveEquity ? `$${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+              </span>
+            </span>
+          }
           icon={Wallet}
           mono
-          tip={t('dash.balance_tip')}
+          tip={`${t('dash.balance_tip')} · демо / лайф`}
           sparkData={sparkData[0]}
-          subtitle={demoMode ? 'Demo Account' : 'Live Account'}
+          subtitle="демо / лайф"
         />
         <EnhancedMetricCard
           label={t('dash.unrealized')}
-          value={unrealizedPnl >= 0 ? `+$${fmt(unrealizedPnl)}` : `-$${fmt(Math.abs(unrealizedPnl))}`}
+          value={dualPnlNode(unrealizedPnl, liveUnreal)}
           changeType={unrealizedPnl >= 0 ? 'positive' : 'negative'}
           icon={Activity}
           mono
-          tip={t('dash.unrealized_tip')}
+          tip={`${t('dash.unrealized_tip')} · демо / лайф`}
           sparkData={sparkData[1]}
         />
         <EnhancedMetricCard
           label={t('dash.pnl_day')}
-          value={pnlDay >= 0 ? `+$${fmt(pnlDay)}` : `-$${fmt(Math.abs(pnlDay))}`}
+          value={dualPnlNode(pnlDay, liveToday)}
           changeType={pnlDay >= 0 ? 'positive' : 'negative'}
           icon={pnlDay >= 0 ? TrendingUp : TrendingDown}
           mono
-          tip={`${t('dash.pnl_day_tip')} (${pnlTz}, только активные боты)`}
+          tip={`${t('dash.pnl_day_tip')} · демо / лайф`}
           sparkData={sparkData[2]}
         />
         <EnhancedMetricCard
           label={t('dash.pnl_week')}
-          value={pnlWeek >= 0 ? `+$${fmt(pnlWeek)}` : `-$${fmt(Math.abs(pnlWeek))}`}
+          value={dualPnlNode(pnlWeek, liveWeek)}
           changeType={pnlWeek >= 0 ? 'positive' : 'negative'}
           icon={BarChart3}
           mono
-          tip={t('dash.pnl_week_tip')}
+          tip={`${t('dash.pnl_week_tip')} · демо / лайф`}
           sparkData={sparkData[3]}
         />
         <EnhancedMetricCard
           label={t('dash.total_pnl')}
           value={
             <div className="flex flex-col gap-0.5">
-              <span className={pnlTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
-                {pnlTotal >= 0 ? `+$${fmt(pnlTotal)}` : `-$${fmt(Math.abs(pnlTotal))}`}
-              </span>
+              <span>{dualPnlNode(pnlTotal, liveTotal)}</span>
+              {pnl?.before_week != null && (
+                <div className="text-[0.55rem] leading-tight text-[var(--txt-muted)]">
+                  до пн: {Number(pnl.before_week) >= 0 ? '+' : ''}{Number(pnl.before_week).toFixed(0)}
+                  {' · '}нед: {Number(pnl.week) >= 0 ? '+' : ''}{Number(pnl.week || 0).toFixed(0)}
+                  {pnl.trades_before_week != null ? ` (${pnl.trades_before_week}+${pnl.trades_week || 0})` : ''}
+                </div>
+              )}
               {pnlByBot.length > 0 && (
-                <div className="text-[0.6rem] leading-tight text-[var(--txt-muted)]">
+                <div className="max-md:hidden text-[0.6rem] leading-tight text-[var(--txt-muted)]">
                   {pnlByBot.map((b, i) => (
                     <div key={b.name} className="flex items-center gap-1">
                       <span className="text-[var(--txt-secondary)]">{b.name}:</span>
@@ -1285,6 +1394,7 @@ export default function Dashboard({ health, connected, isGuest }) {
           sparkData={sparkData[4]}
         />
         <MetricCard
+          className="metric-hide-mobile max-md:hidden"
           label={t('dash.positions_count')}
           value={<AnimatedValue>{positions.length}</AnimatedValue>}
           mono
@@ -1294,35 +1404,35 @@ export default function Dashboard({ health, connected, isGuest }) {
       </div>
 
       {/* ═══ MAIN GRID 65/35 ═══ */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
-        {/* ═══ LEFT — Цены + Positions + Trades ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 overflow-hidden">
-
-          {/* Цены — компактный тикер */}
-          <div className="panel flex-shrink-0 !py-1 !px-2.5">
-            <div className="flex items-center gap-x-3 gap-y-0.5 flex-wrap">
-              <span className="text-[var(--txt-muted)] text-2xs font-medium">{t('dash.prices')}</span>
-              {PRICE_COINS.map((coin) => {
-                const tk = coin === 'BTC' ? ticker : tickers[coin]
-                const price = tk ? parseFloat(tk.last) : 0
-                const change = tk ? change24hPct(tk) : 0
-                const isUp = change >= 0
-                const priceStr = price ? `$${price.toLocaleString(undefined, { maximumFractionDigits: price >= 1000 ? 0 : 2 })}` : '---'
-                const changeStr = `${isUp ? '▲' : '▼'}${Math.abs(change).toFixed(2)}%`
-                return (
-                  <span key={coin} className="flex items-center gap-1 coin-ticker">
-                    <span className="text-2xs font-semibold text-[var(--txt-secondary)]">{coin}</span>
-                    <span className="text-2xs mono text-[var(--txt)]">{priceStr}</span>
-                    <span className={`text-2xs mono ${isUp ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{changeStr}</span>
-                  </span>
-                )
-              })}
-            </div>
+      {/* Mobile: AI status + Russian pulse (same text as bot card) */}
+      <div className="dash-ai-strip flex-shrink-0 flex-col gap-1 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
+        <div className="flex items-center justify-between gap-2 w-full">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${aiStatus?.running ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'}`} />
+            <span className="text-[0.7rem] font-semibold text-[var(--txt)] truncate">AI Discretionary</span>
+            <span className={`text-[0.6rem] font-bold px-1.5 py-0.5 rounded ${aiStatus?.running ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'}`}>
+              {aiStatus?.running ? 'ВКЛ' : 'ВЫКЛ'}
+            </span>
           </div>
+          <div className={`mono text-[0.75rem] font-bold flex-shrink-0 ${discPnlResolved >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+            {discPnlResolved >= 0 ? '+' : ''}{Number(discPnlResolved || 0).toFixed(2)}
+          </div>
+        </div>
+        {(aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason) && (
+          <p className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
+            {aiStatus?.pulse || aiStatus?.description || aiStatus?.last_decision?.reason}
+          </p>
+        )}
+      </div>
+
+      <div className="dash-main-grid flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
+
+        {/* ═══ LEFT — Positions + Trades ═══ */}
+        <div className="dash-left flex flex-col gap-3 min-h-0 overflow-hidden">
 
           {/* Open Positions — DEMO + LIVE in one panel */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          <div className="dash-positions dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
               <span>{t('dash.open_positions')}</span>
@@ -1379,16 +1489,16 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
                         <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
                         <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                        {!isGuest && mode === 'demo' && (
+                        {!isGuest && (
                           <button
                             type="button"
                             className="ml-auto btn btn-danger btn-sm !py-0.5 !px-2 inline-flex items-center gap-1"
                             onClick={() => handleClosePosition(p)}
                             disabled={closing === posId}
-                            title={t('dash.close')}
+                            title={mode === 'live' ? 'Закрыть LIVE' : (t('dash.close') || 'Закрыть')}
                           >
                             {closing === posId ? <Loader /> : <XCircle size={11} />}
-                            {t('dash.close')}
+                            {mode === 'live' ? 'Закрыть LIVE' : (t('dash.close') || 'Закрыть')}
                           </button>
                         )}
                       </div>
@@ -1399,8 +1509,8 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* Trades — DEMO + LIVE in one panel */}
-          <div className="panel flex-1 flex flex-col min-h-0">
+          {/* Trades — DEMO + LIVE; mobile shows last 3 */}
+          <div className="dash-trades dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
               <span>{t('dash.trades')}</span>
@@ -1416,21 +1526,22 @@ export default function Dashboard({ health, connected, isGuest }) {
                     <th>Время</th>
                     <th>Пара</th>
                     <th>Напр.</th>
-                    <th className="text-right">Вход</th>
-                    <th className="text-right">Выход</th>
+                    <th className="text-right col-hide-mobile">Вход</th>
+                    <th className="text-right col-hide-mobile">Выход</th>
                     <th className="text-right">PnL</th>
-                    <th>Статус</th>
+                    <th className="col-hide-mobile">Статус</th>
                   </tr>
                 </thead>
                 <tbody>
                   {closedTradesForTable.slice(0, 40).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
-                    const isLong = (tr.side || '').toLowerCase() === 'buy' || (tr.pos_side || '').toLowerCase() === 'long'
+                    const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
+                    const isLong = sideRaw === 'long' || sideRaw === 'buy'
                     const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
                     const reason = (tr.reason || tr.state || 'closed').toLowerCase()
                     const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
-                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`}>
+                      <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`} className={i >= 3 ? 'row-hide-mobile' : undefined}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
                           {pair || '—'}
@@ -1446,12 +1557,12 @@ export default function Dashboard({ health, connected, isGuest }) {
                             {isLong ? 'LONG' : 'SHORT'}
                           </span>
                         </td>
-                        <td className="text-right mono text-2xs">
+                        <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
                             ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
                             : '—'}
                         </td>
-                        <td className="text-right mono text-2xs">
+                        <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
                             ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
                             : '—'}
@@ -1463,7 +1574,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                             </span>
                           ) : '—'}
                         </td>
-                        <td>
+                        <td className="col-hide-mobile">
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
                             {reason === 'open' ? 'ОТКРЫТА' : reason}
                           </span>
@@ -1480,7 +1591,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         </div>
 
                 {/* ═══ RIGHT — Filters + Bots ═══ */}
-        <div className="flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
+        <div className="dash-right-panel flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
 
           <DashBotPanel

@@ -7,7 +7,7 @@ import os
 import time as _time
 import uuid
 import faulthandler
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 from dataclasses import asdict
@@ -268,7 +268,7 @@ async def startup():
                     await db.wipe_strategy_trading_data(bot_ids)
                 except Exception as we:
                     print(f'[startup] wipe_strategy_trading_data: {we}', flush=True)
-                await db.set_setting('pnl_epoch', epoch)
+                await db.set_setting('pnl_epoch', '2026-09-01T00:00:00+00:00')
                 await db.set_setting('trading_stats_reset_marker', 'manual')
                 for key in (f'ai_lifetime:{AI_BOT_ID}', 'fix_last_eth_to_scale_pnl', 'pnl_bot_overrides'):
                     try:
@@ -689,7 +689,7 @@ async def startup():
                     from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
                     _syms = list(_AI_SYMS)
                 except Exception:
-                    _syms = ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI']
+                    _syms = ['BTC', 'ETH', 'SOL', 'XRP']
                 _cap = float(os.getenv('AI_CAPITAL', '10000'))
                 try:
                     _cap_db = await db.get_setting('ai_live_capital')
@@ -791,7 +791,7 @@ async def startup():
                 from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
                 _syms = list(_AI_SYMS)
             except Exception:
-                _syms = ["BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI"]
+                _syms = ["BTC", "ETH", "SOL", "XRP"]
             _cap = float(os.getenv("AI_CAPITAL", "10000"))
             ai_cfg = AIConfig(
                 symbols=_syms, capital=_cap,
@@ -1753,11 +1753,29 @@ async def me_dashboard(request: Request):
                 try:
                     bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
                     bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
-                    wins_n = 0
-                    losses_n = 0
-                    _seen_winloss = set()
+                    # Group fills by ordId → one closed trade per order
+
+                    def _pos_dir_from_bill(b, sub: str) -> str:
+                        """Return long/short for a close bill (not order buy/sell)."""
+                        ps = str(b.get('posSide') or b.get('pos_side') or '').lower()
+                        if ps in ('long', 'short'):
+                            return ps
+                        # OKX order side on close: sell = closing long, buy = closing short
+                        side = str(b.get('side') or '').lower()
+                        if side in ('sell', 'sell_order'):
+                            return 'long'
+                        if side in ('buy', 'buy_order'):
+                            return 'short'
+                        # subType 5 often close long in some mappings — prefer side above
+                        if sub == '5':
+                            return 'long'
+                        if sub == '6':
+                            return 'short'
+                        return ''
+
+                    by_ord: dict = {}
                     for b in bill_data:
-                        oid = str(b.get('ordId', '') or '')
+                        oid = str(b.get('ordId', '') or '').strip()
                         sub = str(b.get('subType', '') or '')
                         if sub not in ('5', '6'):
                             continue
@@ -1769,44 +1787,73 @@ async def me_dashboard(request: Request):
                             bts = int(b.get('ts') or 0)
                         except (TypeError, ValueError):
                             bts = 0
-                        if oid and oid not in _seen_winloss:
-                            _seen_winloss.add(oid)
-                            if bp > 0:
-                                wins_n += 1
-                            elif bp < 0:
-                                losses_n += 1
-                        inst = str(b.get('instId', '') or '')
-                        side_val = 'sell' if sub == '5' else 'buy'
+                        if not oid:
+                            oid = f"live-{bts}-{b.get('instId')}"
+                        pos_dir = _pos_dir_from_bill(b, sub)
+                        if oid not in by_ord:
+                            by_ord[oid] = {
+                                'pnl': 0.0, 'ts': bts,
+                                'inst': str(b.get('instId', '') or ''),
+                                'side': pos_dir or 'long',
+                            }
+                        by_ord[oid]['pnl'] += bp
+                        if bts >= by_ord[oid]['ts']:
+                            by_ord[oid]['ts'] = bts
+                            if pos_dir:
+                                by_ord[oid]['side'] = pos_dir
+                    wins_n = 0
+                    losses_n = 0
+                    for oid, g in by_ord.items():
+                        bp = float(g['pnl'])
+                        if bp > 0:
+                            wins_n += 1
+                        elif bp < 0:
+                            losses_n += 1
+                        inst = str(g['inst']).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
                         trades.append({
-                            'time': bts,
-                            'inst': inst.replace('-USDT-SWAP', ''),
-                            'side': side_val,
+                            'time': g['ts'],
+                            'inst': inst,
+                            'side': g['side'],
                             'pnl': round(bp, 4),
                             'account_mode': 'live',
+                            'ord_id': oid,
+                            'reason': 'closed',
                         })
                     # Aggregate LIVE realized PnL from close bills (subType 5/6)
+                    # Today / week by Moscow calendar (same as demo dashboard)
                     live_realized = 0.0
                     live_today = 0.0
-                    from datetime import datetime as _dt, timezone as _tz
-                    _today_start = _dt.now(_tz.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+                    live_week = 0.0
+                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    _msk = _tz(_td(hours=3))
+                    _now = _dt.now(_msk)
+                    _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    _week_start = _today_start - _td(days=_today_start.weekday())
                     _today_ms = int(_today_start.timestamp() * 1000)
+                    _week_ms = int(_week_start.timestamp() * 1000)
                     for _tr in trades:
                         if str(_tr.get('account_mode') or '') != 'live':
                             continue
                         try:
-                            live_realized += float(_tr.get('pnl') or 0)
+                            bp = float(_tr.get('pnl') or 0)
                         except (TypeError, ValueError):
-                            pass
+                            bp = 0.0
+                        live_realized += bp
                         try:
                             ts = _tr.get('time') or 0
                             ts_ms = int(ts) if not isinstance(ts, str) else 0
                             if ts_ms >= _today_ms:
-                                live_today += float(_tr.get('pnl') or 0)
+                                live_today += bp
+                            if ts_ms >= _week_ms:
+                                live_week += bp
                         except (TypeError, ValueError):
                             pass
                     live['total_pnl'] = round(live_realized, 2)
                     live['strategy_realized'] = live['total_pnl']
                     live['session_pnl'] = round(live_today, 2)
+                    live['pnl_1d'] = live['session_pnl']
+                    live['week'] = round(live_week, 2)
+                    live['pnl_week'] = live['week']
                     live['trades'] = wins_n + losses_n
                     _total_t = live.get('trades') or (wins_n + losses_n)
                     live['win_rate'] = round(wins_n / _total_t * 100, 1) if _total_t else None
@@ -1818,161 +1865,319 @@ async def me_dashboard(request: Request):
             live = {'connected': False, 'error': str(e)}
     else:
         live = {'connected': False}
-    # ── DEMO closed trades (always for mini-app DEMO tab) ──
+    # ── Closed trades for mini-app (DEMO + LIVE), strict dedupe ──
+    # Problem before: multiple sources (DB × bot_ids, bills, AI log, exchange_close)
+    # produced near-identical rows with different timestamp formats → duplicates.
+    # LIVE only showed raw bill fills without grouping by ordId → too few/odd counts.
     try:
-        _demo_keys = set()
-        def _add_demo_trade(row):
+        def _norm_ts(raw) -> int:
+            """Normalize to ms epoch int (0 if unknown)."""
+            if raw is None or raw == '':
+                return 0
+            try:
+                if isinstance(raw, (int, float)):
+                    ts = int(raw)
+                else:
+                    s = str(raw).strip()
+                    if s.isdigit():
+                        ts = int(s)
+                    else:
+                        from datetime import datetime, timezone as _tz
+                        ts = int(datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp() * 1000)
+                if 0 < ts < 10_000_000_000:
+                    ts *= 1000
+                return ts if ts > 0 else 0
+            except Exception:
+                return 0
+
+        def _norm_coin(inst) -> str:
+            s = str(inst or '').upper()
+            return s.replace('-USDT-SWAP', '').replace('-USD-SWAP', '').replace('-USDT', '').strip()
+
+        def _dedupe_key(t: dict) -> str:
+            oid = str(t.get('ord_id') or '').strip()
+            if oid:
+                return f"ord:{oid}|{t.get('account_mode') or 'demo'}"
+            ts = _norm_ts(t.get('time'))
+            # bucket to 1-minute to absorb format drift between sources
+            bucket = (ts // 60000) if ts else 0
+            try:
+                pnl_r = round(float(t.get('pnl') or 0), 2)
+            except (TypeError, ValueError):
+                pnl_r = 0.0
+            return f"fb:{bucket}|{_norm_coin(t.get('inst'))}|{pnl_r}|{t.get('account_mode') or 'demo'}"
+
+        seen_keys = set()
+        def _norm_side(row: dict) -> str:
+            """Position direction long/short — never leave raw buy/sell on closes."""
+            ps = str(row.get('pos_side') or row.get('posSide') or row.get('pos_side') or '').lower()
+            if ps in ('long', 'short'):
+                return ps
+            s = str(row.get('side') or '').lower()
+            if s in ('long', 'buy'):
+                # buy on open = long; buy on close = was short — use reason
+                reason = str(row.get('reason') or '').lower()
+                if reason in ('closed', 'close', 'closing', 'sl', 'tp', 'trail', 'manual_close', 'rotation'):
+                    return 'short' if s == 'buy' else ('long' if s == 'sell' else s)
+                return 'long' if s in ('long', 'buy') else 'short'
+            if s in ('short', 'sell'):
+                reason = str(row.get('reason') or '').lower()
+                if reason in ('closed', 'close', 'closing', 'sl', 'tp', 'trail', 'manual_close', 'rotation'):
+                    return 'long' if s == 'sell' else ('short' if s == 'buy' else s)
+                return 'short'
+            return s
+
+        def _push_trade(row: dict):
             try:
                 pnl = float(row.get('pnl') or 0)
             except (TypeError, ValueError):
-                pnl = 0.0
-            # Skip pure opens with zero pnl and no exit
+                return
+            # Skip pure opens / zero noise
             reason = str(row.get('reason') or '').lower()
-            if reason in ('open', 'add') and abs(pnl) < 1e-9:
+            if reason in ('open', 'add', 'opening') and abs(pnl) < 1.0:
                 return
-            inst = (row.get('inst') or row.get('inst_id') or row.get('symbol') or '')
-            inst = str(inst).replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
-            ts = row.get('time') or row.get('timestamp') or row.get('close_ts') or row.get('ts') or ''
-            key = f"{ts}|{inst}|{pnl:.4f}|demo"
-            if key in _demo_keys:
+            if abs(pnl) < 1e-9:
                 return
-            _demo_keys.add(key)
-            trades.append({
-                'time': ts,
-                'inst': inst,
-                'side': row.get('side') or '',
+            mode = str(row.get('account_mode') or 'demo').lower()
+            if mode not in ('demo', 'live'):
+                mode = 'demo'
+            entry = {
+                'time': _norm_ts(row.get('time') or row.get('close_ts') or row.get('ts') or row.get('timestamp')),
+                'inst': _norm_coin(row.get('inst') or row.get('inst_id') or row.get('symbol') or row.get('coin')),
+                'side': _norm_side(row),
                 'pnl': round(pnl, 4),
-                'account_mode': 'demo',
+                'account_mode': mode,
                 'reason': reason or 'closed',
-            })
+                'ord_id': str(row.get('ord_id') or row.get('ordId') or '').strip(),
+            }
+            # Unified PnL filter: only AI Discretionary closes in set T
+            try:
+                from app.services.pnl_engine import pnl_eligible, normalize_close_row
+                _cand = {
+                    'pnl': entry['pnl'],
+                    'close_ts': entry['time'],
+                    'ts': entry['time'],
+                    'account_mode': mode,
+                    'cl_ord_id': str(row.get('cl_ord_id') or row.get('clOrdId') or ''),
+                    'bot_label': str(row.get('bot_label') or row.get('bot') or 'AI Discretionary 1H'),
+                    'bot_id': str(row.get('bot_id') or 'ai_strategy'),
+                    'ord_id': entry.get('ord_id') or '',
+                    'inst_id': entry.get('inst') or '',
+                }
+                ok, _why = pnl_eligible(_cand, mode=mode, ai_only=True)
+                if not ok:
+                    return
+                entry['bot'] = 'AI Discretionary 1H'
+            except Exception:
+                pass
+            k = _dedupe_key(entry)
+            if k in seen_keys:
+                return
+            seen_keys.add(k)
+            trades.append(entry)
 
-        # 1) DB trades for AI bot (account_mode=demo)
+        # ── DEMO: prefer exchange_close_trades (authoritative closes) ──
         try:
-            for bid in ('ai_strategy', 'AI Discretionary 1H', getattr(ai_bot, 'BOT_ID', None) if ai_bot else None):
-                if not bid:
-                    continue
-                rows = await db.get_trades(bot_id=bid, limit=50, account_mode='demo')
-                for t in rows:
-                    _add_demo_trade({
-                        'time': t.get('timestamp') or t.get('time'),
+            from app.services.pnl_engine import epoch_ms as _ep_ms
+            _ep = _ep_ms()
+        except Exception:
+            _ep = 0
+        try:
+            if hasattr(db, 'get_exchange_close_trades_detail'):
+                ects = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=200)
+                for t in ects or []:
+                    am = str(t.get('account_mode') or 'demo').lower()
+                    if am not in ('', 'demo'):
+                        continue
+                    _push_trade({
+                        'time': t.get('close_ts') or t.get('ts'),
                         'inst_id': t.get('inst_id'),
-                        'side': t.get('side'),
+                        'side': t.get('side') or '',
                         'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
+                        'reason': 'closed',
+                        'account_mode': 'demo',
+                        'ord_id': t.get('ord_id'),
                     })
-            # Also unscoped demo rows (legacy)
-            rows_all = await db.get_trades(limit=50, account_mode='demo')
-            for t in rows_all:
-                _add_demo_trade({
-                    'time': t.get('timestamp') or t.get('time'),
-                    'inst_id': t.get('inst_id'),
-                    'side': t.get('side'),
-                    'pnl': t.get('pnl'),
-                    'reason': t.get('reason') or 'closed',
-                })
+        except Exception as _e:
+            print(f'[me/dashboard] demo exchange_close: {_e}', flush=True)
+
+        # DEMO supplement: DB closed rows (state=closed) if still sparse
+        try:
+            demo_count = sum(1 for x in trades if x.get('account_mode') == 'demo')
+            if demo_count < 5:
+                for bid in ('ai_strategy', 'ai_discretionary'):
+                    rows = await db.get_trades(bot_id=bid, limit=80, account_mode='demo')
+                    for t in (rows or []):
+                        st = str(t.get('state') or '').lower()
+                        if st not in ('closed', 'close', 'filled'):
+                            continue
+                        try:
+                            if abs(float(t.get('pnl') or 0)) < 1.0 and st == 'filled':
+                                continue
+                        except (TypeError, ValueError):
+                            continue
+                        _push_trade({
+                            'time': t.get('timestamp') or t.get('time'),
+                            'inst_id': t.get('inst_id'),
+                            'side': t.get('side'),
+                            'pnl': t.get('pnl'),
+                            'reason': 'closed' if st in ('closed', 'close') else (t.get('reason') or 'closed'),
+                            'account_mode': 'demo',
+                            'ord_id': t.get('ord_id'),
+                        })
         except Exception as _e:
             print(f'[me/dashboard] demo db trades: {_e}', flush=True)
 
-        # 2) exchange_close_trades (synced from OKX demo bills)
+        # DEMO: AI in-memory closed log (only closes)
         try:
-            epoch = await get_pnl_epoch()
-            epoch_ms = 0
-            if epoch:
-                from datetime import datetime as _dt, timezone as _tz
-                try:
-                    epoch_ms = int(_dt.fromisoformat(str(epoch).replace('Z', '+00:00')).timestamp() * 1000)
-                except Exception:
-                    epoch_ms = 0
-            ects = await db.get_exchange_close_trades_detail(epoch_ms=epoch_ms, limit=50)
-            for t in ects:
-                am = str(t.get('account_mode') or 'demo').lower()
-                if am == 'live':
-                    continue
-                st_sub = str(t.get('sub_type', '') or '')
-                side = 'sell' if st_sub == '5' else 'buy' if st_sub == '6' else (t.get('side') or '')
-                _add_demo_trade({
-                    'time': t.get('close_ts') or t.get('timestamp'),
-                    'inst_id': t.get('inst_id'),
-                    'side': side,
-                    'pnl': t.get('pnl'),
-                    'reason': 'closed',
-                })
+            if ai_bot and hasattr(ai_bot, '_trade_log'):
+                for t in list(getattr(ai_bot, '_trade_log') or [])[-80:]:
+                    if str(t.get('account_mode') or 'demo').lower() == 'live':
+                        continue
+                    reason = str(t.get('reason') or '').lower()
+                    if reason in ('open', 'add'):
+                        continue
+                    _push_trade({
+                        'time': t.get('time') or t.get('ts'),
+                        'inst': t.get('coin') or t.get('symbol') or t.get('inst_id'),
+                        'side': t.get('pos_side') or t.get('side'),
+                        'pos_side': t.get('pos_side') or '',
+                        'pnl': t.get('pnl'),
+                        'reason': reason or 'closed',
+                        'account_mode': 'demo',
+                        'ord_id': t.get('ord_id') or '',
+                    })
         except Exception as _e:
-            print(f'[me/dashboard] demo exchange closes: {_e}', flush=True)
+            print(f'[me/dashboard] demo ai log: {_e}', flush=True)
 
-        # 3) AI bot in-memory trade log / recent_trades
-        if ai_bot:
+        # ── LIVE: group OKX bills by ordId (one row per close order) ──
+        # (live client block already ran; re-fetch bills only if live connected and few live rows)
+        live_n = sum(1 for x in trades if x.get('account_mode') == 'live')
+        if live.get('connected') and live_n < 3:
             try:
-                st = ai_bot.get_status() or {}
-                for t in list(st.get('recent_trades') or [])[-30:]:
-                    am = str(t.get('account_mode') or 'demo').lower()
-                    if am == 'live':
-                        continue
-                    _add_demo_trade({
-                        'time': t.get('time') or t.get('ts') or t.get('exit_time'),
-                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
-                        'side': t.get('side'),
-                        'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
-                    })
-                log = getattr(ai_bot, '_trade_log', None) or []
-                for t in list(log)[-30:]:
-                    am = str(t.get('account_mode') or 'demo').lower()
-                    if am == 'live':
-                        continue
-                    _add_demo_trade({
-                        'time': t.get('time') or t.get('exit_time') or t.get('ts'),
-                        'inst': t.get('symbol') or t.get('inst_id') or t.get('coin'),
-                        'side': t.get('side'),
-                        'pnl': t.get('pnl'),
-                        'reason': t.get('reason') or 'closed',
-                    })
+                client = None
+                if role == 'admin' and user_id is None:
+                    client = live_manager.get_client() if live_manager else None
+                elif user_id:
+                    client = await _user_okx_client(str(user_id))
+                if client:
+                    bills_resp = await client.get_bills(inst_type='SWAP', type='2', limit=100)
+                    bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
+                    by_ord: dict = {}
+                    for b in bill_data or []:
+                        sub = str(b.get('subType', '') or '')
+                        if sub not in ('5', '6'):
+                            continue
+                        oid = str(b.get('ordId', '') or '').strip()
+                        if not oid:
+                            oid = f"ts-{b.get('ts')}-{b.get('instId')}"
+                        try:
+                            bp = float(b.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        try:
+                            bts = int(b.get('ts') or 0)
+                        except (TypeError, ValueError):
+                            bts = 0
+                        ps = str(b.get('posSide') or '').lower()
+                        if ps not in ('long', 'short'):
+                            oside = str(b.get('side') or '').lower()
+                            # close sell → was long; close buy → was short
+                            if oside == 'sell':
+                                ps = 'long'
+                            elif oside == 'buy':
+                                ps = 'short'
+                            else:
+                                ps = 'long' if sub == '5' else 'short'
+                        if oid not in by_ord:
+                            by_ord[oid] = {
+                                'pnl': 0.0, 'ts': bts, 'inst': b.get('instId', ''),
+                                'side': ps,
+                            }
+                        by_ord[oid]['pnl'] += bp
+                        if bts >= by_ord[oid]['ts']:
+                            by_ord[oid]['ts'] = bts
+                            by_ord[oid]['side'] = ps
+                    # replace any partial live fills already appended with grouped ones
+                    trades = [x for x in trades if x.get('account_mode') != 'live']
+                    seen_keys = {k for k in seen_keys if not k.endswith('|live') and not k.startswith('ord:') or '|demo' in k}
+                    # rebuild seen from remaining demo trades
+                    seen_keys = set()
+                    for x in trades:
+                        seen_keys.add(_dedupe_key(x))
+                    for oid, g in by_ord.items():
+                        _push_trade({
+                            'time': g['ts'],
+                            'inst_id': g['inst'],
+                            'side': g['side'],
+                            'pnl': g['pnl'],
+                            'reason': 'closed',
+                            'account_mode': 'live',
+                            'ord_id': oid,
+                        })
+                    # refresh live aggregates from grouped closes
+                    wins_n = losses_n = 0
+                    live_realized = 0.0
+                    for _tr in trades:
+                        if _tr.get('account_mode') != 'live':
+                            continue
+                        try:
+                            bp = float(_tr.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            bp = 0.0
+                        live_realized += bp
+                        if bp > 0:
+                            wins_n += 1
+                        elif bp < 0:
+                            losses_n += 1
+                    live['total_pnl'] = round(live_realized, 2)
+                    live['strategy_realized'] = live['total_pnl']
+                    live['trades'] = wins_n + losses_n
+                    _total_t = wins_n + losses_n
+                    live['win_rate'] = round(wins_n / _total_t * 100, 1) if _total_t else None
+                    live['wins'] = wins_n
+                    live['losses'] = losses_n
             except Exception as _e:
-                print(f'[me/dashboard] demo ai log: {_e}', flush=True)
+                print(f'[me/dashboard] live bills regroup: {_e}', flush=True)
 
-        # 4) Paired trades API path (same as dashboard) — DEMO only
-        try:
-            from app.services.pnl_engine import build_pnl_from_rows  # may not exist
-        except Exception:
-            pass
-        try:
-            # Showcase OKX bills via existing helper if available
-            if 'client_manager' in dir() or client_manager is not None:
-                cm = client_manager
-                client = cm.get_client() if cm else None
-                if client and getattr(client, 'demo', True):
+        # If LIVE already appended ungrouped fills earlier, collapse them now
+        live_rows = [x for x in trades if x.get('account_mode') == 'live']
+        if live_rows and any(not x.get('ord_id') for x in live_rows):
+            pass  # already handled when regroup runs
+        elif live_rows:
+            # Collapse multiple fills with same ord_id
+            by_o: dict = {}
+            rest = [x for x in trades if x.get('account_mode') != 'live']
+            for x in live_rows:
+                oid = x.get('ord_id') or f"fb-{x.get('time')}-{x.get('inst')}-{x.get('pnl')}"
+                if oid not in by_o:
+                    by_o[oid] = dict(x)
+                else:
                     try:
-                        bills_resp = await client.get_bills(inst_type='SWAP', limit=50)
-                        bill_data = bills_resp.get('data', []) if isinstance(bills_resp, dict) else []
-                        for b in bill_data:
-                            sub = str(b.get('subType', '') or '')
-                            if sub not in ('5', '6'):
-                                continue
-                            try:
-                                bp = float(b.get('pnl') or 0)
-                            except (TypeError, ValueError):
-                                bp = 0.0
-                            inst = str(b.get('instId', '') or '')
-                            side_val = 'sell' if sub == '5' else 'buy'
-                            _add_demo_trade({
-                                'time': b.get('ts') or '',
-                                'inst_id': inst,
-                                'side': side_val,
-                                'pnl': bp,
-                                'reason': 'closed',
-                            })
-                    except Exception as _e:
-                        print(f'[me/dashboard] demo okx bills: {_e}', flush=True)
-        except Exception as _e:
-            print(f'[me/dashboard] demo bills outer: {_e}', flush=True)
+                        by_o[oid]['pnl'] = round(float(by_o[oid].get('pnl') or 0) + float(x.get('pnl') or 0), 4)
+                    except (TypeError, ValueError):
+                        pass
+                    if _norm_ts(x.get('time')) >= _norm_ts(by_o[oid].get('time')):
+                        by_o[oid]['time'] = x.get('time')
+            trades = rest + list(by_o.values())
     except Exception as e:
-        print(f'[me/dashboard] demo trades block: {e}', flush=True)
+        print(f'[me/dashboard] trades block: {e}', flush=True)
+        import traceback
+        traceback.print_exc()
+
     def _trade_sort_key(t):
         v = t.get('time', 0)
-        if isinstance(v, str):
-            return v
-        return str(v)
+        try:
+            return int(v) if not isinstance(v, str) else int(v) if str(v).isdigit() else 0
+        except Exception:
+            return 0
     trades.sort(key=_trade_sort_key, reverse=True)
+    # Cap per mode so DEMO tab is full and LIVE is not starved
+    demo_tr = [x for x in trades if x.get('account_mode') == 'demo'][:30]
+    live_tr = [x for x in trades if x.get('account_mode') == 'live'][:30]
+    trades = demo_tr + live_tr
+    trades.sort(key=_trade_sort_key, reverse=True)
+
     return {'demo': demo, 'live': live, 'trades': trades[:40], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
@@ -2441,10 +2646,24 @@ async def live_status():
     positions_out = []
     unrealized = 0.0
     realized = 0.0
+    realized_today = 0.0
+    realized_week = 0.0
     lifetime_trades = 0
     wins = 0
     fees = 0.0
     capital = 0.0
+    # MSK day / week bounds for session + week realized
+    try:
+        from datetime import datetime, timezone, timedelta
+        _msk = timezone(timedelta(hours=3))
+        _now_msk = datetime.now(_msk)
+        _today_start = _now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
+        _week_start = _today_start - timedelta(days=_today_start.weekday())  # Monday
+        _today_ms = int(_today_start.timestamp() * 1000)
+        _week_ms = int(_week_start.timestamp() * 1000)
+    except Exception:
+        _today_ms = 0
+        _week_ms = 0
     try:
         if db:
             raw_cap = await db.get_setting('live_mirror_capital')
@@ -2616,6 +2835,14 @@ async def live_status():
                     lifetime_trades += 1
                     if bp > 0:
                         wins += 1
+                    try:
+                        bts = int(b.get('ts') or 0)
+                    except (TypeError, ValueError):
+                        bts = 0
+                    if bts and _today_ms and bts >= _today_ms:
+                        realized_today += bp
+                    if bts and _week_ms and bts >= _week_ms:
+                        realized_week += bp
                 debug['bills_n'] = len(seen)
                 after = str(data[-1].get('billId') or '')
                 if len(data) < 100 or not after:
@@ -2641,7 +2868,8 @@ async def live_status():
             flush=True,
         )
 
-    total_pnl = round(float(realized) + float(unrealized), 2)
+    # total = realized only (not + UPL). Today/week by MSK calendar.
+    total_pnl = round(float(realized), 2)
     win_rate = round(100.0 * wins / lifetime_trades, 1) if lifetime_trades else None
     _result = {
         'connected': connected,
@@ -2649,8 +2877,13 @@ async def live_status():
         'equity': round(float(equity or 0), 2),
         'capital': round(float(capital or 0), 2),
         'total_pnl': total_pnl,
+        'strategy_realized': total_pnl,
         'unrealized_pnl': round(float(unrealized), 2),
-        'session_pnl': round(float(realized), 2),
+        'unrealized': round(float(unrealized), 2),
+        'session_pnl': round(float(realized_today), 2),
+        'pnl_1d': round(float(realized_today), 2),
+        'week': round(float(realized_week), 2),
+        'pnl_week': round(float(realized_week), 2),
         'lifetime_trades': int(lifetime_trades),
         'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
@@ -4030,11 +4263,11 @@ async def get_positions(request: Request, inst_type: str='SWAP'):
                     if coin in univ:
                         candidates.append((VAL_BOT_ID, 'MACD+Donchian Validation', validation))
                 if ai_bot and getattr(ai_bot, '_running', False):
-                    univ = list(getattr(getattr(ai_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'])
+                    univ = list(getattr(getattr(ai_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'XRP'])
                     if coin in univ:
                         candidates.append((AI_BOT_ID, 'AI Discretionary 1H', ai_bot))
                 if ai_scale_bot and getattr(ai_scale_bot, '_running', False):
-                    univ = list(getattr(getattr(ai_scale_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'OKB', 'DOGE', 'XRP', 'BCH', 'DAI'])
+                    univ = list(getattr(getattr(ai_scale_bot, 'config', None), 'symbols', None) or ['BTC', 'ETH', 'SOL', 'XRP'])
                     if coin in univ:
                         candidates.append((AI_SCALE_BOT_ID, 'AI Scale-In 1H', ai_scale_bot))
                 if len(candidates) == 1:
@@ -4185,7 +4418,31 @@ async def close_position(data: dict):
     result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
     if result.get('error'):
         raise HTTPException(status_code=400, detail=result.get('message', ''))
-    return {'message': 'Position closed', 'data': result.get('data')}
+    # Sync bot memory after manual close (esp. LIVE orphan when demo already flat)
+    try:
+        coin = str(inst_id or '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+        if account == 'live' and coin:
+            bot = globals().get('ai_bot')
+            if bot is not None:
+                lp = getattr(bot, '_live_positions', None)
+                if isinstance(lp, dict) and coin in lp:
+                    lp.pop(coin, None)
+                    print(f'[positions/close] dropped AI live memory {coin}', flush=True)
+                try:
+                    if hasattr(bot, '_persist_live'):
+                        bot._persist_live()
+                except Exception:
+                    pass
+        elif coin:
+            bot = globals().get('ai_bot')
+            if bot is not None:
+                pos = getattr(bot, '_positions', None)
+                if isinstance(pos, dict) and coin in pos:
+                    pos.pop(coin, None)
+                    print(f'[positions/close] dropped AI demo memory {coin}', flush=True)
+    except Exception as e:
+        print(f'[positions/close] memory sync: {e}', flush=True)
+    return {'message': 'Position closed', 'data': result.get('data'), 'account': account or 'demo'}
 _ticker_cache: dict = {}
 _ticker_cache_ts: dict = {}
 _TICKER_TTL = 5
@@ -4881,7 +5138,12 @@ _bills_cache: dict = {}
 _BILLS_TTL = 60
 
 async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> list:
-    """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live)."""
+    """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live).
+
+    - /account/bills — last ~7 days (paginated)
+    - /account/bills-archive — older history with begin=PNL epoch (2026-09-01)
+    Up to 40 pages × 100 per endpoint so history is not truncated at ~19.09.
+    """
     global _bills_cache
     mode = (mode or _account_mode()).lower()
     if mode not in ('demo', 'live'):
@@ -4892,48 +5154,100 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
         return list(cached.get('data') or [])
     bills: list = []
     seen: set = set()
+    # Epoch for archive begin (ms) — product start 2026-09-01
     try:
-        for endpoint, fn in (('bills', lambda c, **kw: c.get_bills(inst_type='SWAP', type='2', **kw)), ('archive', lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw))):
-            after = ''
-            for _ in range(10):
-                kw = {'limit': limit_per_page}
-                if after:
-                    kw['after'] = after
-                resp = None
-                for attempt in range(3):
+        from app.services.pnl_engine import epoch_ms as _epoch_ms
+        begin_ms = int(_epoch_ms())
+    except Exception:
+        begin_ms = int(datetime(2026, 9, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+    async def _pull(endpoint: str, fn, *, use_begin: bool, max_pages: int):
+        after = ''
+        pages = 0
+        while pages < max_pages:
+            pages += 1
+            kw = {'limit': limit_per_page}
+            if after:
+                kw['after'] = after
+            if use_begin and begin_ms:
+                kw['begin'] = str(begin_ms)
+            resp = None
+            for attempt in range(3):
+                try:
                     resp = await _okx_call_account(lambda c, e=fn, k=kw: e(c, **k), mode=mode)
-                    if not resp.get('error'):
-                        break
-                    msg = str(resp.get('message', ''))
-                    if '429' in msg or 'Too Many Requests' in msg:
-                        await asyncio.sleep(1.0 + attempt)
-                        continue
+                except Exception as e:
+                    resp = {'error': True, 'message': str(e)}
+                if not resp.get('error'):
                     break
-                if not resp or resp.get('error'):
-                    print(f'[bills] {mode}/{endpoint} error: {(resp or {}).get('message', '')}', flush=True)
-                    break
-                data = resp.get('data', [])
-                if not data:
-                    break
-                added = 0
-                for b in data:
-                    bid = b.get('billId', '')
-                    if bid in seen:
-                        continue
+                msg = str(resp.get('message', ''))
+                if '429' in msg or 'Too Many Requests' in msg:
+                    await asyncio.sleep(1.0 + attempt)
+                    continue
+                break
+            if not resp or resp.get('error'):
+                print(f'[bills] {mode}/{endpoint} error: {(resp or {}).get("message", "")}', flush=True)
+                break
+            data = resp.get('data', []) or []
+            if not data:
+                break
+            added = 0
+            for b in data:
+                bid = str(b.get('billId', '') or '')
+                if bid and bid in seen:
+                    continue
+                if bid:
                     seen.add(bid)
-                    if str(b.get('type', '')) == '2':
-                        b = dict(b)
-                        b['account_mode'] = mode
-                        b['_from_okx'] = True
-                        bills.append(b)
-                        added += 1
-                after = data[-1].get('billId', '')
-                if added == 0 or len(data) < limit_per_page:
+                # type=2 trade bills; keep rows even if type missing on archive edge cases
+                btype = str(b.get('type', '') or '2')
+                if btype not in ('2', ''):
+                    continue
+                b = dict(b)
+                b['account_mode'] = mode
+                b['_from_okx'] = True
+                b['_endpoint'] = endpoint
+                bills.append(b)
+                added += 1
+            after = str(data[-1].get('billId', '') or '')
+            if not after or len(data) < limit_per_page:
+                break
+            # Stop if oldest bill in page is before epoch
+            try:
+                oldest = int(data[-1].get('ts') or 0)
+                if oldest and begin_ms and oldest < begin_ms:
                     break
+            except (TypeError, ValueError):
+                pass
+        print(f'[bills] {mode}/{endpoint} pages={pages} total_so_far={len(bills)}', flush=True)
+
+    try:
+        # Recent (≤7d)
+        await _pull(
+            'bills',
+            lambda c, **kw: c.get_bills(inst_type='SWAP', type='2', **kw),
+            use_begin=False,
+            max_pages=15,
+        )
+        # Archive from epoch (covers 01.09 → ~20.09 gap)
+        await _pull(
+            'archive',
+            lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw),
+            use_begin=True,
+            max_pages=40,
+        )
     except Exception as e:
         import traceback
         print(f'[bills] {mode} fetch error: {e}', flush=True)
         traceback.print_exc()
+    # Oldest-first log for ops
+    try:
+        ts_list = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
+        if ts_list:
+            from datetime import datetime as _dt, timezone as _tz
+            a = _dt.fromtimestamp(ts_list[0] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
+            z = _dt.fromtimestamp(ts_list[-1] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
+            print(f'[bills] {mode} range {a} → {z} n={len(bills)}', flush=True)
+    except Exception:
+        pass
     if isinstance(_bills_cache, dict):
         _bills_cache[mode] = {'ts': _time.time(), 'data': bills}
     return bills
@@ -5000,6 +5314,9 @@ async def sync_exchange_close_trades() -> int:
             if clord.startswith(pfx):
                 bot_label = label
                 break
+        # Retired Scale-In must not feed AI Discretionary totals in AI_ONLY_MODE
+        if AI_ONLY_MODE and bot_label in ('AI Scale-In 1H', 'AI Scale-In'):
+            bot_label = ''
         if not bot_label:
             inst = info.get('inst_id') or ''
             best_cl = ''
@@ -5435,47 +5752,144 @@ async def get_pnl(request: Request=None):
         return dict(data)
 
 async def _compute_pnl():
-    """Single-source PnL via pnl_engine (epoch 2026-09-01, MSK calendar, AI bots only)."""
+    """PnL from unified set T: AI Discretionary closed trades in app DB.
+
+    Same filter for dashboard cards, history list, bot KPI, mini app.
+    Day/week by Moscow calendar. Unrealized from open exchange positions.
+    """
     global _pnl_cache, _exchange_sync_ts
+    from app.services.pnl_engine import (
+        aggregate_rows,
+        epoch_ms as _ep_ms,
+        filter_pnl_rows,
+        PNL_EPOCH_ISO as _EP_ISO,
+    )
     _mode = _account_mode()
+    _ep = int(_ep_ms())
     try:
         _exchange_sync_ts = 0
-        data = await pnl_engine.compute(db, account_mode=_mode, ai_only=bool(AI_ONLY_MODE), sync_fn=sync_exchange_close_trades, reclassify_fn=getattr(db, 'reclassify_exchange_bot_labels', None))
+        if isinstance(_pnl_cache, dict):
+            _pnl_cache.clear()
+        try:
+            await sync_exchange_close_trades()
+        except Exception as _se:
+            print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
+
+        raw: list = []
+        try:
+            if db and hasattr(db, 'get_exchange_close_trades_detail'):
+                raw.extend(await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or [])
+        except Exception as e:
+            print(f'[pnl] db exchange_close_trades: {e}', flush=True)
+        try:
+            if db and hasattr(db, 'get_trades'):
+                raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
+        except Exception as e:
+            print(f'[pnl] db trades: {e}', flush=True)
+
+        rows, diag = filter_pnl_rows(raw, mode=_mode, ai_only=True)
+        agg = aggregate_rows(rows, ai_only=True)
+        total = round(float(agg.get('total') or 0), 2)
+        day = round(float(agg.get('1d') or 0), 2)
+        week = round(float(agg.get('week') or 0), 2)
+        d7 = round(float(agg.get('7d') or 0), 2)
+        d30 = round(float(agg.get('30d') or 0), 2)
+        before_week = round(float(agg.get('before_week') or 0), 2)
+        fees = round(float(agg.get('fees') or 0), 2)
+        n = int(agg.get('trades_counted') or len(rows))
+        per_bot = agg.get('per_bot') or {'AI Discretionary 1H': total}
+
+        data = {
+            'total': total,
+            'account_total': total,
+            '1d': day,
+            '7d': d7,
+            '30d': d30,
+            'week': week,
+            'before_week': before_week,
+            'trades_week': int(agg.get('trades_week') or 0),
+            'trades_before_week': int(agg.get('trades_before_week') or 0),
+            'week_basis': 'calendar_week_msk_monday',
+            'week_start': str(agg.get('week_start') or ''),
+            'unrealized': 0.0,
+            'funding': 0.0,
+            'economic_approx': total,
+            'strategy_realized': total,
+            'source': 'app_closed_trades',
+            'pnl_tz': 'Europe/Moscow',
+            'fees': fees,
+            'fees_informational': True,
+            'pnl_includes_fee': True,
+            'per_bot': per_bot if per_bot else {'AI Discretionary 1H': total},
+            'per_bot_all': per_bot if per_bot else {'AI Discretionary 1H': total},
+            'active_bots': list(per_bot.keys()) if per_bot else ['AI Discretionary 1H'],
+            'trades_counted': n,
+            'pnl_epoch': _EP_ISO,
+            'engine': 'unified_filter_v1',
+            'account_mode': _mode,
+            'closes_raw': len(raw),
+            'eligible_n': diag.get('eligible_n'),
+            'excluded_n': diag.get('excluded_n'),
+            'excluded_pnl': diag.get('excluded_pnl'),
+            'exclude_reasons': diag.get('exclude_reasons'),
+            'filter': diag.get('filter'),
+            'trades': [
+                {
+                    'time': r.get('close_ts') or r.get('ts'),
+                    'inst': (r.get('inst_id') or '').replace('-USDT-SWAP', ''),
+                    'side': r.get('side') or '',
+                    'pnl': round(float(r.get('pnl') or 0), 4),
+                    'account_mode': r.get('account_mode') or _mode,
+                    'bot': r.get('bot') or 'AI Discretionary 1H',
+                    'ord_id': r.get('ord_id') or '',
+                    'reason': 'closed',
+                }
+                for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:80]
+            ],
+        }
+        print(
+            f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
+            f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
+            f"excl_pnl={diag.get('excluded_pnl')}",
+            flush=True,
+        )
     except Exception as e:
-        print(f'[pnl] engine error: {e}', flush=True)
+        print(f'[pnl] unified error: {e}', flush=True)
         import traceback
         traceback.print_exc()
-        data = {'total': 0, '1d': 0, '7d': 0, '30d': 0, 'week': 0, 'unrealized': 0, 'per_bot': {'AI Discretionary 1H': 0, 'AI Scale-In 1H': 0}, 'active_bots': ['AI Discretionary 1H', 'AI Scale-In 1H'], 'source': 'error', 'pnl_epoch': PNL_EPOCH_ISO, 'error': str(e)}
+        data = {
+            'total': 0, '1d': 0, '7d': 0, '30d': 0, 'week': 0, 'unrealized': 0,
+            'per_bot': {'AI Discretionary 1H': 0},
+            'active_bots': ['AI Discretionary 1H'],
+            'source': 'error', 'pnl_epoch': PNL_EPOCH_ISO, 'error': str(e),
+            'account_mode': _mode,
+        }
     try:
         unreal = 0.0
         client = client_manager.get_client() if client_manager else None
         if client:
             pos = await client.get_positions(inst_type='SWAP')
-            _pos_rows = [] if (isinstance(pos, dict) and pos.get('error')) else (
-                (pos.get('data') or []) if isinstance(pos, dict) else (pos or []))
-            for p in _pos_rows:
-                try:
-                    unreal += float(p.get('upl') or 0)
-                except (TypeError, ValueError, AttributeError):
-                    pass
+            if not pos.get('error'):
+                for p in (pos.get('data') or []):
+                    try:
+                        if abs(float(p.get('pos') or 0)) < 1e-12:
+                            continue
+                        unreal += float(p.get('upl') or 0)
+                    except (TypeError, ValueError):
+                        pass
         data['unrealized'] = round(unreal, 2)
-        data['economic_approx'] = round(float(data.get('total') or 0) + unreal, 2)
     except Exception as e:
         print(f'[pnl] unrealized: {e}', flush=True)
         data.setdefault('unrealized', 0.0)
-    data['account_mode'] = _mode
     try:
-        if AI_ONLY_MODE:
-            pb = data.get('per_bot') or {}
-            s = float(pb.get('AI Discretionary 1H') or 0) + float(pb.get('AI Scale-In 1H') or 0)
-            tot = float(data.get('total') or 0)
-            if abs(s - tot) > 0.05:
-                print(f'[pnl] INVARIANT FIX per_bot sum {s:.2f} != total {tot:.2f}', flush=True)
-                data['total'] = round(s, 2)
-                data['strategy_realized'] = round(s, 2)
+        if isinstance(_pnl_cache, dict):
+            _pnl_cache['data'] = data
+            _pnl_cache['ts'] = _time.time()
     except Exception:
         pass
     return data
+
+
 
 @app.get('/api/pnl/reconcile', dependencies=[Depends(require_admin)])
 async def pnl_reconcile():
@@ -6175,6 +6589,60 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
             if isinstance(_fp, dict):
                 _fp['account_mode'] = _fp.get('account_mode') or mode
                 _fp['_from_okx'] = True
+        # Backfill closes from exchange_close_trades (persisted since epoch) missing in bills window
+        try:
+            from app.services.pnl_engine import epoch_ms as _epm
+            _ep = int(_epm())
+            if db and hasattr(db, 'get_exchange_close_trades_detail'):
+                _ects = await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or []
+                _have = {str(x.get('ord_id') or '').strip() for x in fills_paired if isinstance(x, dict)}
+                _added = 0
+                for _r in _ects:
+                    _am = str(_r.get('account_mode') or 'demo').lower()
+                    if mode == 'live' and _am != 'live':
+                        continue
+                    if mode != 'live' and _am not in ('', 'demo'):
+                        continue
+                    oid = str(_r.get('ord_id') or '').strip()
+                    if oid and oid in _have:
+                        continue
+                    try:
+                        _pnl = float(_r.get('pnl') or 0)
+                    except (TypeError, ValueError):
+                        _pnl = 0.0
+                    if abs(_pnl) < 1e-12:
+                        continue
+                    ts_ms = int(_r.get('close_ts') or 0)
+                    if ts_ms and ts_ms < _ep:
+                        continue
+                    inst = str(_r.get('inst_id') or '')
+                    fills_paired.append({
+                        'time': _ms_to_iso(ts_ms) if ts_ms else '',
+                        'entry_time': '',
+                        'side': '',
+                        'symbol': inst,
+                        'inst_id': inst,
+                        'size': float(_r.get('sz') or 0),
+                        'pnl': round(_pnl, 4),
+                        'ord_id': oid,
+                        'fee': float(_r.get('fee') or 0),
+                        'entry': 0,
+                        'entry_price': 0,
+                        'exit_price': float(_r.get('avg_px') or 0),
+                        'reason': 'closed',
+                        'pos_side': '',
+                        'bot': _r.get('bot_label') or 'AI Discretionary 1H',
+                        'account_mode': _am or mode,
+                        'source': 'exchange_close_trades',
+                        '_from_db': True,
+                    })
+                    if oid:
+                        _have.add(oid)
+                    _added += 1
+                if _added:
+                    print(f'[trades/paired] backfilled {_added} closes from exchange_close_trades', flush=True)
+        except Exception as _bf_e:
+            print(f'[trades/paired] backfill: {_bf_e}', flush=True)
         for t in fills_paired:
             inst = t.get('inst_id', '') or t.get('symbol', '')
             is_open = t.get('reason') == 'open'

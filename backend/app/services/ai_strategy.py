@@ -1,10 +1,11 @@
-"""AI Discretionary Strategy — 1H multi-coin (BTC ETH SOL OKB DOGE XRP BCH DAI) with LLM decisions.
+"""AI Discretionary Strategy — 1H majors (BTC ETH SOL XRP) with LLM decisions.
 
 Safety envelope (anti-liquidation oriented):
   - capital baseline $10_000, max leverage 3x
-  - stop distance clamped 1.5–5%; size from risk budget
-  - max 1–2 positions; AI_EXECUTE=0 → decide+log only (no orders)
+  - stop distance clamped ~1.6–3.5%; size from risk budget (~1.5%)
+  - max 1 position; AI_EXECUTE=0 → decide+log only (no orders)
   - risk_guard.assert_can_open on entries
+  - v1.10 defensive: early trail/BE, daily loss limit −2%
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
-from .pnl_utils import extract_fill_avg, close_pnl, fee_cost
+from .pnl_utils import extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills
 from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status, mock_decide
 import json
@@ -26,6 +27,21 @@ from .risk_guard import assert_can_open
 from .analysis_logger import get_logger
 
 AI_BOT_ID = "ai_strategy"
+
+def _exec_evt(kind: str, coin: str = "", side: str = "", reason: str = "", **extra) -> dict:
+    """Small structured log row for open/mirror execution trail."""
+    from datetime import datetime, timezone
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "coin": coin,
+        "side": side,
+        "reason": reason,
+    }
+    if extra:
+        row.update(extra)
+    return row
+
 
 def _ai_state_path() -> str:
     """Prefer persistent disk; /tmp is wiped on every Render deploy."""
@@ -71,11 +87,9 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.9-no-countertrend"
+STRATEGY_VERSION = "v1.15-llm-deep"
 STRATEGY_DESC = (
-    "AI Discretionary v1.3 — агрессивнее: unblocked-first, "
-    "мягкий ADX при сильном align, до 2 позиций, риск ~2%, "
-    "индикаторный выход и self-adapt."
+    "AI Discretionary 1H v1.11 — BTC/ETH/SOL/XRP: без close→reopen, удержание тренда, докупалка при продолжении сигнала, риск ~1.5%."
 )
 
 CT_VAL = {
@@ -88,13 +102,54 @@ LOT_SZ = {
 }
 
 
+def _fmt_px(px: float, coin: str = "") -> str:
+    """Human price for TG — more digits for BTC-like, fewer for cheap alts."""
+    try:
+        p = float(px or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if p <= 0:
+        return "0"
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 10:
+        return f"{p:.4f}".rstrip("0").rstrip(".")
+    if p >= 1:
+        return f"{p:.5f}".rstrip("0").rstrip(".")
+    return f"{p:.6f}".rstrip("0").rstrip(".")
+
+
+def compute_close_metrics(pos, coin: str, exit_px: float, fee=0, fills=None):
+    """Entry / exit / net PnL for Telegram and books — always contract-aware.
+
+    Prefer OKX fillPnl when fill rows exist; else size * ctVal * price delta − fee.
+    """
+    entry = float(getattr(pos, "entry_price", 0) or 0)
+    sz = float(getattr(pos, "size", 0) or 0)
+    side = getattr(pos, "side", "long")
+    try:
+        exit_px = float(exit_px or 0)
+    except (TypeError, ValueError):
+        exit_px = 0.0
+    if fills:
+        try:
+            net, avg, fee_c, _filled = pnl_from_okx_fills(fills, exit_px)
+            if net is not None:
+                return entry, float(avg or exit_px), round(float(net), 2), float(fee_c)
+        except Exception:
+            pass
+    ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+    pnl = close_pnl(side, sz, entry, exit_px, fee, ct)
+    return entry, exit_px, round(float(pnl), 2), float(fee_cost(fee))
+
+
 @dataclass
 class AIConfig:
     symbols: list = None
     capital: float = 10000.0
     max_leverage: float = 3.0
-    max_positions: int = 2                 # v1.3: allow 2 concurrent
-    risk_per_trade: float = 0.02           # ~2% equity at stop
+    max_positions: int = 1                 # v1.10: single position focus
+    risk_per_trade: float = 0.012          # ~1.2% equity at stop (v1.14 chop protect)
     allocation_pct: float = 0.35           # max margin / equity per pos
     bar: str = "1H"
     candle_limit: int = 120
@@ -102,52 +157,77 @@ class AIConfig:
     # Phase-1 efficiency: decide on closed 1H bar, not every poll
     decide_on_bar_close: bool = True
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
-    llm_min_interval_sec: int = 180        # hard floor between LLM calls even if bars glitch
-    daily_loss_limit_pct: float = 0.03     # block new opens after -3% day (realized session)
+    llm_min_interval_sec: int = 180        # hard floor between LLM calls (entry)
+    llm_manage_interval_sec: int = 90       # v1.15: more frequent LLM while in a position
+
+    daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
     btc_roc_veto: float = 0.20             # BTC ROC% against side → block open (short blocked if btc_roc >= this)
-    min_confidence: float = 0.62
-    min_adx: float = 18.0                  # restore stronger trend filter
+    min_confidence: float = 0.68           # fewer marginal opens
+    min_adx: float = 20.0                  # stronger trend required
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 14.0
-    adx_align_bypass: float = 0.72         # align >= this may bypass min_adx down to soft floor
+    adx_soft_floor: float = 16.0
+    adx_align_bypass: float = 0.78         # only very strong align softens ADX
     min_roc_abs: float = 0.15
-    min_stop_pct: float = 0.018
-    max_stop_pct: float = 0.05
-    min_take_pct: float = 0.035
+    min_stop_pct: float = 0.016
+    max_stop_pct: float = 0.035            # cut max pain per trade
+    min_take_pct: float = 0.028            # closer TP — bank wins earlier
     max_hold_hours: float = 12.0            # phase4: hard time-stop
-    time_stop_stale_hours: float = 8.0      # close if no meaningful progress
-    time_stop_min_progress_pct: float = 0.15  # need at least this UPL% to keep past stale
+    time_stop_stale_hours: float = 5.0      # do not bleed for 8h
+    time_stop_min_progress_pct: float = 0.20
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
-    min_hold_minutes: float = 25.0
-    exit_min_profit_pct: float = 0.12
+    min_hold_minutes: float = 20.0
+    exit_min_profit_pct: float = 0.10      # lock small gains on structure flip
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.6
-    trail_lock_pct: float = 0.20
+    trail_activate_pct: float = 0.40       # start locking earlier
+    trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
+    # Anti-churn: close→same-side reopen wastes fees when trend continues
+    reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
+    reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
+    # Do not indicator-exit at a loss if same-side trend still confirmed
+    hold_loss_if_align: float = 0.60       # align >= this → skip soft/hard ind exit while red
+    hold_loss_min_adx: float = 22.0        # v1.14: no hold-in-loss in weak trend
+    hold_loss_block_chop: bool = True      # v1.14: never hold red in chop regime
+    force_exit_adverse_atr: float = 0.60   # v1.14: if loss >0.6×ATR allow ind_exit despite align
+    # Scale-in on continuation instead of close+reopen
+    scale_in_enabled: bool = True
+    scale_in_min_align: float = 0.70
+    scale_in_max_adds: int = 1
+    scale_in_frac: float = 0.45            # add ~45% of current size
+    scale_in_min_hold_min: float = 30.0    # only after position seasoned
+    # ATR framework (1H crypto) — stops/trail/scale relative to volatility
+    atr_period: int = 14
+    atr_stop_mult: float = 1.15            # stop ≈ 1.15×ATR (clamped to min/max_stop_pct)
+    atr_take_mult: float = 1.90            # take ≈ 1.9×ATR → RR ~1.65 before clamp
+    scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
+    breakeven_atr_mult: float = 0.28       # move stop to BE after +0.28×ATR in favor
+    trail_atr_mult: float = 0.55           # trail distance from peak = 0.55×ATR
+    trail_activate_atr_mult: float = 0.45  # start trailing after +0.45×ATR profit
+    time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
     adx_period: int = 14
     roc_period: int = 12
     rsi_period: int = 14
-    quant_min_align: float = 0.55
+    quant_min_align: float = 0.62
     block_chop_opens: bool = True
     # v1.1 self-adapt (bounded) — slightly wider for aggressive
     adapt_enabled: bool = True
     adapt_window: int = 12
     adapt_min_trades: int = 4
-    conf_floor: float = 0.58
+    conf_floor: float = 0.64               # adapt cannot loosen below this
     conf_ceil: float = 0.78
-    align_floor: float = 0.42
+    align_floor: float = 0.55
     align_ceil: float = 0.70
     size_cap_floor: float = 0.08
     size_cap_ceil: float = 0.18
@@ -156,7 +236,9 @@ class AIConfig:
 
     def __post_init__(self):
         if self.symbols is None:
-            self.symbols = list(ALLOWED_SYMBOLS)
+            # Majors first — fewer noisy alts (DOGE/BCH/DAI) after drawdown period
+            majors = [s for s in ("BTC", "ETH", "SOL", "XRP") if s in set(ALLOWED_SYMBOLS)]
+            self.symbols = majors or list(ALLOWED_SYMBOLS)
 
 
 @dataclass
@@ -175,6 +257,7 @@ class AIPosition:
     peak_price: float = 0.0
     unrealized_pnl: float = 0.0
     sl_algo_id: str = ""
+    scale_adds: int = 0
     tp_algo_id: str = ""
 
 
@@ -200,6 +283,7 @@ class AIStrategy:
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._positions: dict[str, AIPosition] = {}
+        self._last_closes: dict = {}  # coin -> {side,ts,pnl,reason}
         # ── LIVE mirror state (separate from the demo/primary account) ──
         # The live account mirrors every primary open/close. It uses its own
         # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
@@ -561,6 +645,15 @@ class AIStrategy:
 
             self._last_activity = datetime.now(timezone.utc).isoformat()
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
+            # Pending LIVE mirror gaps → poll every 8s (not 1–3 min)
+            try:
+                if await self._mirror_enabled() and self._positions:
+                    _miss = [c for c in self._positions if c not in self._live_positions]
+                    if _miss:
+                        _sleep = min(_sleep, 8)
+                        print(f"[AI-LIVE] pending mirror {_miss} — next tick in {_sleep}s", flush=True)
+            except Exception:
+                pass
             import time as _t
             _next_ts = _t.time() + _sleep
             self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
@@ -753,7 +846,7 @@ class AIStrategy:
                 adx = self._adx(highs, lows, closes, cfg.adx_period)
                 rsi = self._rsi(closes, getattr(cfg, "rsi_period", 14))
                 macd_l, macd_s, macd_h = self._macd(closes)
-                atr = self._atr(highs, lows, closes, 14)
+                atr = self._atr(highs, lows, closes, int(getattr(cfg, "atr_period", 14) or 14))
                 bb_m, bb_u, bb_l = self._bb(closes, 20, 2.0)
 
                 # volume ratio vs 20-bar avg
@@ -830,6 +923,14 @@ class AIStrategy:
                     except Exception:
                         return None
 
+                # Last 5 closed closes for LLM structure context
+                bar_closes = [_r(x) for x in closes[-6:-1]] if len(closes) >= 6 else [_r(x) for x in closes[:-1][-5:]]
+                ema_slope = None
+                try:
+                    if e21 and len(ema21) >= 4 and ema21[-4]:
+                        ema_slope = round((float(e21) - float(ema21[-4])) / float(ema21[-4]) * 100.0, 4)
+                except Exception:
+                    ema_slope = None
                 out[coin] = {
                     "close": _r(c),
                     "closed_bar_ts": closed_bar_ts,
@@ -838,6 +939,8 @@ class AIStrategy:
                     "ema200": _r(e200),
                     "ema_fast": _r(e21),  # compat exits
                     "ema_slow": _r(e50),
+                    "ema_slope": ema_slope,
+                    "bar_closes": bar_closes,
                     "roc_3": _r(roc[-1]),
                     "roc": _r(roc[-1]),
                     "adx": _r(adx[-1]),
@@ -1428,6 +1531,25 @@ class AIStrategy:
             else:
                 candidates.append(row)
         candidates.sort(key=lambda x: float(x.get("align") or 0), reverse=True)
+        # Short natural-language hints so LLM focuses on edge cases
+        hints = []
+        try:
+            g = str((quant or {}).get("global_regime") or "")
+            if g:
+                hints.append(f"global_regime={g}")
+            btc_r = (quant or {}).get("btc_roc")
+            if btc_r is not None:
+                hints.append(f"btc_roc={btc_r}")
+            for row in (candidates or [])[:3]:
+                hints.append(
+                    f"allowed:{row.get('coin')} {row.get('side')} align={row.get('align')} adx={row.get('adx')}"
+                )
+            for row in (blocked or [])[:2]:
+                hints.append(f"blocked:{row.get('coin')} {row.get('side')}")
+            for p in open_list[:2]:
+                hints.append(f"open:{p.get('coin')} {p.get('side')} entry={p.get('entry_price')}")
+        except Exception:
+            pass
         return {
             "equity": round(self._equity, 2),
             "capital": self._capital,
@@ -1438,15 +1560,17 @@ class AIStrategy:
             "candidates_allowed": candidates,
             "candidates_blocked": blocked,
             "indicators": self._latest_indicators,
+            "analysis_hints": hints,
             "adaptive": self._adapt,
             "reflection": self._reflection,
             "daily_lessons": list(getattr(self, "_daily_lessons", None) or []),
-            "journal_tail": list(getattr(self, "_journal", None) or [])[-5:],
+            "journal_tail": list(getattr(self, "_journal", None) or [])[-8:],
             "server_time": datetime.now(timezone.utc).isoformat(),
             "provider": self._provider(),
             "llm": llm_status(),
             "execute": self._execute_enabled(),
             "policy_hint": (
+                "Analyze structure+momentum+risk using indicators and analysis_hints. "
                 "Prefer opens only from candidates_allowed. "
                 "Ignore candidates_blocked unless managing existing positions."
             ),
@@ -1485,7 +1609,11 @@ class AIStrategy:
         lot = LOT_SZ.get(coin, 0.01)
         stop_pct = max(0.015, min(0.05, abs(stop_pct)))
         eq = float(equity) if equity else self._equity
-        risk_usd = eq * cfg.risk_per_trade
+        # v1.14: hard cap risk at 1.2% even if env/DB still has 2%
+        _r = float(getattr(cfg, "risk_per_trade", 0.012) or 0.012)
+        if _r > 0.012:
+            _r = 0.012
+        risk_usd = eq * _r
         # notional such that stop_pct * notional ≈ risk_usd
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
         max_margin = eq * cfg.allocation_pct
@@ -1542,6 +1670,130 @@ class AIStrategy:
             sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
             cl_ord_id=cl_id, is_close=is_close,
         )
+
+
+    async def _maybe_scale_in(self, client, coin: str, decision: dict) -> bool:
+        """Add to existing position when trend continues — cheaper than close+reopen."""
+        pos = self._positions.get(coin)
+        if not pos:
+            return False
+        cfg = self.config
+        side = str(decision.get("side") or pos.side).lower()
+        if side != pos.side:
+            return False
+        adds = int(getattr(pos, "scale_adds", 0) or 0)
+        if adds >= int(getattr(cfg, "scale_in_max_adds", 1) or 1):
+            self._record_exec("scale_skip", coin=coin, side=side, reason="max_adds")
+            return False
+        try:
+            opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+            held = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+        except Exception:
+            held = 999.0
+        if held < float(getattr(cfg, "scale_in_min_hold_min", 30) or 30):
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_early:{held:.0f}m")
+            return False
+        ind = self._latest_indicators.get(coin) or {}
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align = ash if side == "short" else al
+        min_al = float(getattr(cfg, "scale_in_min_align", 0.70) or 0.70)
+        if align < min_al:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"weak_align:{align:.2f}")
+            return False
+        # Don't average down aggressively when already deep red
+        px = float(ind.get("close") or 0) or float(pos.entry_price or 0)
+        upl = self._unrealized_pct(pos, px)
+        if upl < -1.2:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_red:{upl:+.2f}%")
+            return False
+        # No averaging down past 0.5×ATR against entry (even if UPL% not yet -1.2)
+        try:
+            atr = float(ind.get("atr") or 0)
+            entry = float(pos.entry_price or 0)
+            max_adv = float(getattr(cfg, "scale_in_max_adverse_atr", 0.5) or 0.5)
+            if upl < 0 and atr > 0 and entry > 0 and max_adv > 0:
+                adverse = (entry - px) if side == "long" else (px - entry)
+                if adverse > max_adv * atr:
+                    self._record_exec(
+                        "scale_skip", coin=coin, side=side,
+                        reason=f"adverse_atr:{adverse:.4f}>{max_adv}*atr={atr:.4f}",
+                    )
+                    print(
+                        f"[AI] scale_skip {coin}: adverse {adverse:.4f} > {max_adv}×ATR {atr:.4f} "
+                        f"(upl={upl:+.2f}%)",
+                        flush=True,
+                    )
+                    return False
+        except Exception as e:
+            print(f"[AI] scale atr gate: {e}", flush=True)
+        frac = float(getattr(cfg, "scale_in_frac", 0.45) or 0.45)
+        add_sz = round(float(pos.size) * frac, 8)
+        lot = LOT_SZ.get(coin, 0.01)
+        if add_sz < lot:
+            add_sz = lot
+        if not self._execute_enabled():
+            print(f"[AI] SIGNAL scale_in {side} {coin} +{add_sz} align={align:.2f}", flush=True)
+            return False
+        order_side = "buy" if side == "long" else "sell"
+        try:
+            resp = await self._place(client, pos.inst_id, order_side, add_sz, side)
+        except Exception as e:
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(e)[:80])
+            return False
+        if resp.get("error"):
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(resp.get("message") or "")[:80])
+            return False
+        fills = resp.get("data") or []
+        fill_px, fee, _ = extract_fill_avg(fills, px)
+        if not fill_px:
+            fill_px = px
+        # Weighted average entry
+        old_sz = float(pos.size or 0)
+        old_entry = float(pos.entry_price or 0)
+        new_sz = old_sz + add_sz
+        if new_sz > 0 and old_entry > 0 and fill_px > 0:
+            pos.entry_price = (old_entry * old_sz + fill_px * add_sz) / new_sz
+        pos.size = new_sz
+        pos.scale_adds = adds + 1
+        # Widen stop slightly from new avg (keep risk coherent)
+        stop_pct = abs(pos.stop_price - old_entry) / old_entry if old_entry and pos.stop_price else 0.02
+        if pos.side == "long":
+            pos.stop_price = pos.entry_price * (1 - stop_pct)
+        else:
+            pos.stop_price = pos.entry_price * (1 + stop_pct)
+        self._record_exec(
+            "scale_in", coin=coin, side=side, size=add_sz,
+            reason=f"align={align:.2f}_upl={upl:+.2f}%_avg={pos.entry_price:.4f}",
+        )
+        print(
+            f"[AI] SCALE-IN {side} {coin} +{add_sz} @ {fill_px} → sz={new_sz} avg={pos.entry_price:.4f} "
+            f"align={align:.2f} upl={upl:+.2f}%",
+            flush=True,
+        )
+        # Mirror scale-in on LIVE only if that coin is already mirrored
+        try:
+            if await self._mirror_enabled() and self._live_ready() and coin in (self._live_positions or {}):
+                lc = self._live_client()
+                lpos = self._live_positions[coin]
+                if lc and lpos:
+                    oside = "buy" if side == "long" else "sell"
+                    resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    if not resp_l.get("error"):
+                        fills_l = resp_l.get("data") or []
+                        fpx, _, _ = extract_fill_avg(fills_l, fill_px)
+                        fpx = fpx or fill_px
+                        osz = float(lpos.size or 0)
+                        oen = float(lpos.entry_price or 0)
+                        nsz = osz + add_sz
+                        if nsz > 0 and oen > 0:
+                            lpos.entry_price = (oen * osz + fpx * add_sz) / nsz
+                        lpos.size = nsz
+                        lpos.scale_adds = int(getattr(lpos, "scale_adds", 0) or 0) + 1
+                        print(f"[AI-LIVE] SCALE-IN {coin} +{add_sz} @ {fpx}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] scale_in mirror: {e}", flush=True)
+        return True
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str):
@@ -1743,7 +1995,7 @@ class AIStrategy:
             await self._place_exchange_sl_tp(client, pos)
         except Exception as e:
             print(f"[AI] exchange SL/TP placement: {e}", flush=True)
-        # Mirror to LIVE after primary fill (re-bind client if needed)
+        # Mirror to LIVE after primary fill — must be near-instant (market moves fast)
         try:
             if not await self._mirror_enabled():
                 _m = "disabled_by_user"
@@ -1751,6 +2003,7 @@ class AIStrategy:
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
                 await self._try_refresh_live_client()
+                ok = False
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
                     _m = "mirror_ok" if ok else "mirror_fail"
@@ -1760,9 +2013,128 @@ class AIStrategy:
                     _m = "live_not_ready"
                     self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
                     print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
+                # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
+                if not ok:
+                    try:
+                        asyncio.create_task(
+                            self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                        )
+                    except Exception as _te:
+                        print(f"[AI-LIVE] schedule fast_retry: {_te}", flush=True)
         except Exception as e:
             self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
+            try:
+                asyncio.create_task(
+                    self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                )
+            except Exception:
+                pass
+
+
+    async def _notify_close_tg(
+        self,
+        pos: "AIPosition",
+        coin: str,
+        reason: str,
+        fill_px: float,
+        pnl: float,
+        *,
+        account_mode: str = "demo",
+        bot_name_suffix: str = "",
+    ) -> None:
+        """Always try to send close notification (reply to open if possible)."""
+        if not self.notifier:
+            print(f"[AI] TG close skipped: no notifier ({coin})", flush=True)
+            return
+        # Allow channel-only setups (token + channel) not just chat_id
+        tok = getattr(self.notifier, "token", "") or ""
+        has_target = bool(
+            getattr(self.notifier, "chat_id", "")
+            or getattr(self.notifier, "channel_id", "")
+        )
+        if not tok or not has_target:
+            print(
+                f"[AI] TG close skipped: token={bool(tok)} target={has_target} ({coin})",
+                flush=True,
+            )
+            return
+        try:
+            signal_id = int(getattr(pos, "signal_id", 0) or 0)
+            _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+            if not _reply:
+                try:
+                    _reply = int(
+                        await self.notifier.resolve_open_message_id(
+                            self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    _reply = 0
+            if _reply:
+                print(f"[AI] TG close: reply_to={_reply} signal={signal_id} {coin}", flush=True)
+            else:
+                print(f"[AI] TG close: plain send (no open msg) signal={signal_id} {coin}", flush=True)
+            bot_name = self.BOT_NAME + (bot_name_suffix or "")
+            # Recompute PnL with contract value if caller used bare (exit-entry)*sz
+            entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
+                pos, coin, fill_px, fee=0, fills=None,
+            )
+            # Prefer caller pnl when it already used close_pnl / fillPnl (non-trivial)
+            try:
+                caller_pnl = float(pnl or 0)
+            except (TypeError, ValueError):
+                caller_pnl = 0.0
+            # If caller left pnl~0 but price moved, or magnitude is way off vs contract formula → use formula
+            use_pnl = caller_pnl
+            if abs(pnl_m) > 1e-9:
+                if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
+                    use_pnl = pnl_m
+                elif abs(caller_pnl) > 0 and abs(pnl_m) > 0:
+                    # if caller is ~ct_val off (forgot ct), ratio near ct → replace
+                    ratio = abs(caller_pnl / pnl_m) if pnl_m else 0
+                    if ratio > 5 or ratio < 0.2:
+                        use_pnl = pnl_m
+            entry_show = entry_m if entry_m > 0 else float(getattr(pos, "entry_price", 0) or 0)
+            exit_show = exit_m if exit_m > 0 else float(fill_px or 0)
+            _txt = self.notifier.close_msg(
+                coin=coin,
+                side=getattr(pos, "side", "long"),
+                entry=_fmt_px(entry_show, coin),
+                exit_px=_fmt_px(exit_show, coin),
+                pnl=round(float(use_pnl), 2),
+                reason=reason,
+                bot_name=bot_name,
+                signal_id=signal_id,
+                account_mode=account_mode,
+                account_key=account_mode,
+                size=float(getattr(pos, "size", 0) or 0),
+            )
+            print(
+                f"[AI] TG close metrics {coin}: entry={entry_show} exit={exit_show} "
+                f"pnl_caller={caller_pnl:.4f} pnl_ct={pnl_m:.4f} use={use_pnl:.4f}",
+                flush=True,
+            )
+            mid = await self.notifier.send_trade(
+                _txt,
+                reply_to_message_id=_reply or None,
+                account_mode=account_mode if account_mode in ("demo", "live") else "demo",
+            )
+            if not mid:
+                # Retry plain (no reply) — open message may be gone or channel-only
+                await asyncio.sleep(0.8)
+                mid = await self.notifier.send_trade(
+                    _txt,
+                    reply_to_message_id=None,
+                    account_mode=account_mode if account_mode in ("demo", "live") else "demo",
+                )
+                print(f"[AI] TG close RETRY plain mid={mid} {coin}", flush=True)
+            print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} mode={account_mode} ({reason})", flush=True)
+            if not mid:
+                print(f"[AI] TG close FAILED still 0 for {coin} — check TELEGRAM_TOKEN/CHAT/CHANNEL", flush=True)
+        except Exception as e:
+            print(f"[AI] TG close error {coin}: {e}", flush=True)
 
     async def _close(self, client, coin: str, reason: str):
         pos = self._positions.get(coin)
@@ -1774,7 +2146,14 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
         if not self._execute_enabled():
-            print(f"[AI] SIGNAL close {coin} ({reason}) execute=0", flush=True)
+            print(f"[AI] SIGNAL close {coin} ({reason}) execute=0 — still TG notify", flush=True)
+            mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+            _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+            mode, _k = self._account_mode_tag()
+            try:
+                await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode=mode)
+            except Exception as e:
+                print(f"[AI] TG close (execute=0): {e}", flush=True)
             del self._positions[coin]
             if self.db:
                 try:
@@ -1793,13 +2172,50 @@ class AIStrategy:
                     has_pos = True
                     break
             if not has_pos:
-                print(f"[AI] close skip {coin}: exchange pos already gone (algo fired?)", flush=True)
+                # Exchange SL/TP (or manual) already closed — still notify TG
+                print(f"[AI] close {coin}: exchange pos already gone (algo/manual) — notify TG", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                try:
+                    ticker = await client.get_ticker(pos.inst_id)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        mark = float(_td[0].get("last") or mark) or mark
+                except Exception:
+                    pass
+                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+                signal_id = int(getattr(pos, "signal_id", 0) or 0)
+                mode, key = self._account_mode_tag()
+                # Persist close for PnL integrity
+                if self.db:
+                    try:
+                        await self.db.save_trade(
+                            bot_id=self.BOT_ID,
+                            side=("sell" if pos.side == "long" else "buy"),
+                            sz=pos.size, px=mark,
+                            ord_id="", inst_id=pos.inst_id, ord_type="market",
+                            fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                            state="closed", signal_id=signal_id or None,
+                            account_mode=mode, account_key=key,
+                        )
+                    except Exception as e:
+                        print(f"[AI] db close (algo): {e}", flush=True)
+                await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
+                try:
+                    self._last_closes[coin] = {
+                        "side": getattr(pos, "side", ""),
+                        "ts": time.time(),
+                        "pnl": float(pnl or 0),
+                        "reason": str(reason or "exchange_stop"),
+                    }
+                except Exception:
+                    pass
                 del self._positions[coin]
                 if self.db:
                     try:
                         await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
                     except Exception:
                         pass
+                print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [already flat]", flush=True)
                 return
         except Exception as e:
             print(f"[AI] close exchange-check: {e}", flush=True)
@@ -1808,6 +2224,35 @@ class AIStrategy:
                                  is_close=True)
         if resp.get("error"):
             print(f"[AI] close error {coin}: {resp.get('message')}", flush=True)
+            # If exchange already flat (race with algo SL), still notify + cleanup
+            try:
+                ep2 = await client.get_positions(inst_id=pos.inst_id)
+                still = False
+                for ep_ in (ep2.get("data") or []):
+                    if abs(float(ep_.get("pos") or 0)) > 0:
+                        still = True
+                        break
+                if not still:
+                    mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                    try:
+                        ticker = await client.get_ticker(pos.inst_id)
+                        _td = ticker.get("data") or []
+                        if _td:
+                            mark = float(_td[0].get("last") or mark) or mark
+                    except Exception:
+                        pass
+                    _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+                    mode, _k = self._account_mode_tag()
+                    await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
+                    del self._positions[coin]
+                    if self.db:
+                        try:
+                            await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
+                        except Exception:
+                            pass
+                    print(f"[AI] CLOSE {coin} after err — already flat pnl={pnl:+.2f}", flush=True)
+            except Exception as e2:
+                print(f"[AI] close error recovery: {e2}", flush=True)
             return
         fills = resp.get("data") or []
         # Prefer last indicator/mark so PnL is not stuck at entry when fill payload is empty
@@ -1827,7 +2272,16 @@ class AIStrategy:
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
-        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
+        # Prefer exchange-reported fillPnl when present (matches OKX history)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
@@ -1915,29 +2369,17 @@ class AIStrategy:
                     )
             except Exception as e:
                 print(f"[AI] exchange_close tag: {e}", flush=True)
-        if self.notifier:
-            try:
-                if not getattr(self.notifier, 'configured', True):
-                    raise RuntimeError('tg not configured')
-                _reply = int(getattr(pos, "tg_message_id", 0) or 0)
-                if not _reply and self.notifier:
-                    _reply = await self.notifier.resolve_open_message_id(
-                        self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
-                    )
-                if not _reply:
-                    print(f"[AI] TG close: no open message_id (signal={signal_id})", flush=True)
-                else:
-                    print(f"[AI] TG close: reply_to={_reply} signal={signal_id}", flush=True)
-                _txt = self.notifier.close_msg(
-                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
-                    exit_px=round(fill_px, 4), pnl=round(pnl, 2), reason=reason,
-                    bot_name=self.BOT_NAME, signal_id=signal_id,
-                    account_mode=self._account_mode_tag()[0],
-                    account_key=self._account_mode_tag()[1],
-                )
-                await self.notifier.send_trade(_txt, reply_to_message_id=_reply or None, account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo")
-            except Exception as e:
-                print(f"[AI] TG close: {e}", flush=True)
+        mode, _key = self._account_mode_tag()
+        await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode=mode)
+        try:
+            self._last_closes[coin] = {
+                "side": getattr(pos, "side", ""),
+                "ts": time.time(),
+                "pnl": float(pnl or 0),
+                "reason": str(reason or ""),
+            }
+        except Exception:
+            pass
         del self._positions[coin]
         if self.db:
             try:
@@ -2201,9 +2643,23 @@ class AIStrategy:
                     has_pos = True
                     break
             if not has_pos:
-                print(f"[AI-LIVE] close skip {coin}: exchange pos already gone", flush=True)
+                print(f"[AI-LIVE] close {coin}: exchange pos already gone — notify TG", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                try:
+                    ticker = await lc.get_ticker(pos.inst_id)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        mark = float(_td[0].get("last") or mark) or mark
+                except Exception:
+                    pass
+                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+                await self._notify_close_tg(
+                    pos, coin, reason or "exchange_stop", mark, pnl,
+                    account_mode="live", bot_name_suffix=" (LIVE)",
+                )
                 self._live_positions.pop(coin, None)
-                return False
+                self._persist_live()
+                return True
         except Exception as e:
             print(f"[AI-LIVE] close exchange-check: {e}", flush=True)
         live_bid = self._live_bot_id()
@@ -2246,8 +2702,16 @@ class AIStrategy:
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
-        pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
-                         CT_VAL.get(coin, 0.01))
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
+                             CT_VAL.get(coin, 0.01))
         self._live_equity += pnl
         self._live_session_pnl += pnl
         self._live_lifetime_pnl += pnl
@@ -2297,23 +2761,10 @@ class AIStrategy:
             await release_open(self.db, live_bid, pos.inst_id, pos.side)
         except Exception:
             pass
-        if self.notifier and getattr(self.notifier, 'configured', True):
-            try:
-                _txt = self.notifier.close_msg(
-                    coin=coin, side=pos.side, entry=round(pos.entry_price, 4),
-                    exit_px=round(fill_px, 4), pnl=round(pnl, 2),
-                    reason=reason,
-                    bot_name=self.BOT_NAME + " (LIVE)",
-                    signal_id=signal_id,
-                    account_mode="live", account_key="live",
-                )
-                await self.notifier.send_trade(
-                    _txt,
-                    reply_to_message_id=getattr(pos, "tg_message_id", 0) or None,
-                    account_mode="live",
-                )
-            except Exception as e:
-                print(f"[AI-LIVE] TG close: {e}", flush=True)
+        await self._notify_close_tg(
+            pos, coin, reason, fill_px, pnl,
+            account_mode="live", bot_name_suffix=" (LIVE)",
+        )
         self._live_positions.pop(coin, None)
         self._persist_live()
         print(f"[AI-LIVE] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
@@ -2385,7 +2836,7 @@ class AIStrategy:
             data = (resp or {}).get("data") or []
             seen: set[str] = set()
             allowed = set(self.config.symbols or []) or {
-                "BTC", "ETH", "SOL", "OKB", "DOGE", "XRP", "BCH", "DAI",
+                "BTC", "ETH", "SOL", "XRP",
             }
             for ep in data:
                 inst = ep.get("instId") or ""
@@ -2455,7 +2906,25 @@ class AIStrategy:
             # drop memory positions that vanished on exchange
             for coin in list(self._live_positions.keys()):
                 if coin not in seen:
+                    pos = self._live_positions.get(coin)
                     print(f"[AI-LIVE] reconcile drop {coin} (gone on exchange)", flush=True)
+                    if pos:
+                        exit_px = float(getattr(pos, "entry_price", 0) or 0)
+                        try:
+                            ticker = await lc.get_ticker(pos.inst_id)
+                            _td = (ticker or {}).get("data") or []
+                            if _td:
+                                exit_px = float(_td[0].get("last") or exit_px) or exit_px
+                        except Exception:
+                            pass
+                        _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
+                        try:
+                            await self._notify_close_tg(
+                                pos, coin, "exchange_stop", exit_px, pnl,
+                                account_mode="live", bot_name_suffix=" (LIVE)",
+                            )
+                        except Exception as _nte:
+                            print(f"[AI-LIVE] reconcile TG notify: {_nte}", flush=True)
                     self._live_positions.pop(coin, None)
             try:
                 await self._persist_live_async()
@@ -2464,31 +2933,168 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] reconcile: {e}", flush=True)
 
+
+    async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
+        """Re-check AI/quant gates with *current* indicators before a delayed LIVE open.
+
+        Immediate mirror (same tick as demo fill) skips this. Fast-retry / gap-fill
+        must pass — otherwise market may have flipped and blind clone is unsafe.
+        """
+        side = (side or "").lower()
+        if side not in ("long", "short"):
+            return False, "bad_side"
+        # Fresh indicators if we have a client
+        try:
+            client = await self._client()
+            if client:
+                await self._fetch_indicators(client)
+        except Exception as e:
+            print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
+        ind = self._latest_indicators.get(coin) or {}
+        if not ind:
+            return False, "no_indicators"
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        adx = float(ind.get("adx") or 0)
+        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+        # Slightly softer for mirror revalidate (already had a demo signal)
+        min_align = max(0.45, min_align - 0.05)
+        align = al if side == "long" else ash
+        if align < min_align - 1e-9:
+            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
+        # ADX gate with same soft-bypass as open path
+        best = max(al, ash)
+        try:
+            if self._adx_blocks_open(adx, best):
+                return False, f"adx_block:{adx:.1f}"
+        except Exception:
+            pass
+        # Regime clash: don't open long in clear bear / short in clear bull
+        reg = str(ind.get("regime") or "").lower()
+        if side == "long" and reg in ("bear", "bearish", "down"):
+            if al < min_align + 0.08:
+                return False, f"regime_bear_vs_long:{reg}"
+        if side == "short" and reg in ("bull", "bullish", "up"):
+            if ash < min_align + 0.08:
+                return False, f"regime_bull_vs_short:{reg}"
+        # Price still near demo entry? (avoid chasing >1.2% adverse move)
+        demo_pos = self._positions.get(coin)
+        try:
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
+            last = float(ind.get("close") or ind.get("last") or 0)
+            if entry > 0 and last > 0:
+                move = (last - entry) / entry
+                if side == "long" and move < -0.012:
+                    return False, f"price_ran_away_long:{move:.3%}"
+                if side == "short" and move > 0.012:
+                    return False, f"price_ran_away_short:{move:.3%}"
+        except Exception:
+            pass
+        return True, f"ok_align={align:.2f}_adx={adx:.1f}"
+
+    async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
+                                  take_pct: float, reason: str) -> None:
+        """Retry LIVE mirror within seconds after a failed primary mirror.
+
+        Delays: 2s, 5s, 12s — total <20s. Aborts if demo flat or live already has coin.
+        """
+        for delay in (2.0, 5.0, 12.0):
+            try:
+                await asyncio.sleep(delay)
+            except Exception:
+                return
+            if not self._running:
+                return
+            if coin not in self._positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: demo already flat", flush=True)
+                return
+            if coin in self._live_positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: already on live", flush=True)
+                return
+            if not await self._mirror_enabled():
+                return
+            try:
+                await self._try_refresh_live_client()
+                if not self._live_ready():
+                    print(f"[AI-LIVE] fast_retry {coin}: live not ready (t+{delay:.0f}s)", flush=True)
+                    continue
+                demo_pos = self._positions.get(coin)
+                if demo_pos:
+                    entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+                    stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+                    take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+                    if entry > 0 and stop_p > 0:
+                        stop_pct = abs(stop_p - entry) / entry
+                    if entry > 0 and take_p > 0:
+                        take_pct = abs(take_p - entry) / entry
+                    side = getattr(demo_pos, "side", side)
+                # Delayed entry: re-confirm with current AI/quant data
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] fast_retry SKIP {coin} t+{delay:.0f}s: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] fast_retry AI ok {coin}: {gate_reason}", flush=True)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
+                    reason=f"fast_retry_{reason}",
+                )
+                print(f"[AI-LIVE] fast_retry {coin} t+{delay:.0f}s → {ok}", flush=True)
+                if ok:
+                    return
+            except Exception as e:
+                print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
+
     async def _clone_missing_to_live(self):
-        """After hydrate: clone demo positions that are missing from live."""
-        if not self._live_ready():
+        """Clone demo positions that are missing from live (hydrate + gap-fill)."""
+        if not await self._mirror_enabled():
             return
-        # Adopt whatever is already on the live account FIRST — otherwise a
-        # pre-existing (un-hydrated) position would get a duplicate market order.
+        if not self._live_ready():
+            await self._try_refresh_live_client()
+        if not self._live_ready():
+            print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            return
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
             print(f"[AI-LIVE] clone_missing pre-reconcile: {e}", flush=True)
-        for coin, demo_pos in self._positions.items():
+        import time as _t
+        if not hasattr(self, "_clone_attempt_ts"):
+            self._clone_attempt_ts = {}
+        now = _t.time()
+        for coin, demo_pos in list(self._positions.items()):
             if coin in self._live_positions:
                 continue
-            if demo_pos.size <= 0:
+            if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
-            entry = demo_pos.entry_price
-            stop_pct = abs(demo_pos.stop_price - entry) / entry if entry > 0 and demo_pos.stop_price > 0 else 0.03
-            take_pct = abs(demo_pos.take_price - entry) / entry if entry > 0 and demo_pos.take_price > 0 else 0.06
-            print(f"[AI-LIVE] clone_missing {coin}: {demo_pos.side} sz={demo_pos.size} "
+            last = float(self._clone_attempt_ts.get(coin) or 0)
+            if now - last < 15:
+                continue
+            self._clone_attempt_ts[coin] = now
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+            stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+            take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+            stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.03
+            take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.06
+            side = getattr(demo_pos, "side", "long")
+            print(f"[AI-LIVE] clone_missing {coin}: {side} demo_sz={demo_pos.size} "
                   f"entry={entry:.4f}", flush=True)
             try:
-                await self._open_live(
-                    coin, demo_pos.side, stop_pct, take_pct,
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] clone_missing SKIP {coin}: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] clone_missing AI ok {coin}: {gate_reason}", flush=True)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
                     reason="clone_missing_from_demo",
                 )
+                print(f"[AI-LIVE] clone_missing result {coin}={ok}", flush=True)
             except Exception as e:
                 print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
 
@@ -2628,6 +3234,57 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] ensure_default_stops {getattr(pos, 'coin', '?')}: {e}", flush=True)
 
+
+    def _atr_pct(self, coin: str, entry: float = 0.0) -> float:
+        """ATR as fraction of price (entry or last close)."""
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        try:
+            atr = float(ind.get("atr") or 0)
+            px = float(entry or ind.get("close") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if atr <= 0 or px <= 0:
+            return 0.0
+        return atr / px
+
+    def _stops_from_atr(self, coin: str, entry: float, stop_pct: float = 0.0, take_pct: float = 0.0) -> tuple[float, float]:
+        """Blend LLM/quant stop/take with ATR multiples, clamp to config bounds.
+
+        Prefer ATR when available so quiet markets get tighter stops and
+        volatile markets get room without exceeding max_stop_pct.
+        """
+        cfg = self.config
+        min_s = float(getattr(cfg, "min_stop_pct", 0.016) or 0.016)
+        max_s = float(getattr(cfg, "max_stop_pct", 0.035) or 0.035)
+        min_t = float(getattr(cfg, "min_take_pct", 0.028) or 0.028)
+        atr_p = self._atr_pct(coin, entry)
+        if atr_p > 0:
+            s_atr = atr_p * float(getattr(cfg, "atr_stop_mult", 1.15) or 1.15)
+            t_atr = atr_p * float(getattr(cfg, "atr_take_mult", 1.90) or 1.90)
+            # Blend: if LLM gave a stop, average with ATR; else pure ATR
+            try:
+                sp = float(stop_pct or 0)
+            except (TypeError, ValueError):
+                sp = 0.0
+            try:
+                tp = float(take_pct or 0)
+            except (TypeError, ValueError):
+                tp = 0.0
+            if sp > 0:
+                stop_pct = 0.5 * sp + 0.5 * s_atr
+            else:
+                stop_pct = s_atr
+            if tp > 0:
+                take_pct = 0.5 * tp + 0.5 * t_atr
+            else:
+                take_pct = t_atr
+        stop_pct = min(max_s, max(min_s, abs(float(stop_pct or min_s))))
+        take_pct = max(min_t, abs(float(take_pct or min_t)))
+        # Enforce RR ≥ 1.35 after fees buffer
+        if take_pct < stop_pct * 1.35:
+            take_pct = stop_pct * 1.5
+        return stop_pct, take_pct
+
     def _unrealized_pct(self, pos, px: float) -> float:
         if not px or not pos.entry_price:
             return 0.0
@@ -2697,11 +3354,59 @@ class AIStrategy:
             soft = True
             hard = True
 
+        # Same-side trend still strong? Do not exit at a loss on indicator noise —
+        # that causes close→reopen churn and double fees when short/long continues.
+        # v1.14: hold-in-loss ONLY outside chop and with ADX>=min; force exit if adverse >0.6×ATR.
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align_side = ash if pos.side == "short" else al
+        hold_al = float(getattr(cfg, "hold_loss_if_align", 0.60) or 0)
+        reg = str(ind.get("regime") or "").lower()
+        min_adx_hold = float(getattr(cfg, "hold_loss_min_adx", 22.0) or 0)
+        block_chop = bool(getattr(cfg, "hold_loss_block_chop", True))
+        # Adverse move in ATR units while red
+        adverse_atr = 0.0
+        try:
+            atr = float(ind.get("atr") or 0)
+            entry = float(pos.entry_price or 0)
+            if atr > 0 and entry > 0 and upl < 0:
+                adverse = (entry - px) if pos.side == "long" else (px - entry)
+                if adverse > 0:
+                    adverse_atr = adverse / atr
+        except Exception:
+            adverse_atr = 0.0
+        force_adv = float(getattr(cfg, "force_exit_adverse_atr", 0.60) or 0.60)
+        too_deep = force_adv > 0 and adverse_atr >= force_adv
+        trend_still_ok = (
+            hold_al > 0
+            and align_side >= hold_al
+            and (not block_chop or reg not in ("chop", "unknown", ""))
+            and (min_adx_hold <= 0 or adx >= min_adx_hold)
+            and not too_deep
+        )
+
         # In profit + any soft signal → take the small win
         if soft and upl >= min_p:
             return "ind_exit:" + "+".join(reasons[:3])
+        # Deep adverse in ATR terms → cut even on single hard signal / soft cluster
+        if too_deep and (hard or (soft and len(reasons) >= 1)) and upl < 0:
+            print(
+                f"[AI] force ind_exit {pos.coin} {pos.side}: adverse_atr={adverse_atr:.2f} "
+                f">={force_adv} upl={upl:+.2f}% reg={reg} adx={adx:.1f}",
+                flush=True,
+            )
+            return "ind_exit:adverse_atr+" + "+".join(reasons[:2] or ["deep"])
         # Strong multi-signal against even if flat/small red — cut before full SL
+        # BUT skip if we are red AND trend still confirmed (non-chop, ADX ok, not too deep)
         if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
+            if upl < 0 and trend_still_ok:
+                print(
+                    f"[AI] hold through ind noise {pos.coin} {pos.side}: "
+                    f"upl={upl:+.2f}% align={align_side:.2f} reg={reg} adx={adx:.1f} "
+                    f"adv_atr={adverse_atr:.2f} reasons={reasons[:3]}",
+                    flush=True,
+                )
+                return None
             return "ind_exit:" + "+".join(reasons[:3])
         return None
 
@@ -2730,12 +3435,25 @@ class AIStrategy:
                 if stale_h > 0 and held_h >= stale_h:
                     upl0 = self._unrealized_pct(pos, px)
                     if upl0 < min_prog:
-                        print(
-                            f"[AI] time_stop_stale {coin} held={held_h:.1f}h upl={upl0:+.2f}%",
-                            flush=True,
-                        )
-                        await self._close(client, coin, "time_stop_stale")
-                        continue
+                        # Symmetric to hold-in-loss: if trend still aligned, don't time-stop
+                        al = float(ind.get("align_long") or 0)
+                        ash = float(ind.get("align_short") or 0)
+                        align_side = ash if pos.side == "short" else al
+                        hold_al = float(getattr(self.config, "time_stop_hold_align", 0.70) or 0)
+                        if hold_al > 0 and align_side >= hold_al:
+                            print(
+                                f"[AI] time_stop HOLD {coin} {pos.side}: held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}>={hold_al}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[AI] time_stop_stale {coin} held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}",
+                                flush=True,
+                            )
+                            await self._close(client, coin, "time_stop_stale")
+                            continue
             except Exception as e:
                 print(f"[AI] time_stop check: {e}", flush=True)
 
@@ -2746,22 +3464,61 @@ class AIStrategy:
                 pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
 
             upl = self._unrealized_pct(pos, px)
-            act = float(getattr(self.config, "trail_activate_pct", 0.8) or 0)
-            lock = float(getattr(self.config, "trail_lock_pct", 0.25) or 0)
-            if act > 0 and upl >= act and pos.entry_price:
-                old_stop = pos.stop_price
+            atr_p = self._atr_pct(coin, float(pos.entry_price or px or 0))
+            # Favorable move in ATR units
+            fav_atr = 0.0
+            if atr_p > 0 and pos.entry_price and px:
                 if pos.side == "long":
-                    be = pos.entry_price * (1 + lock / 100.0)
-                    trail = (pos.peak_price or px) * (1 - lock / 100.0)
-                    new_stop = max(be, trail)
-                    if new_stop > pos.stop_price:
-                        pos.stop_price = new_stop
+                    fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
                 else:
-                    be = pos.entry_price * (1 - lock / 100.0)
-                    trail = (pos.peak_price or px) * (1 + lock / 100.0)
-                    new_stop = min(be, trail)
-                    if new_stop < pos.stop_price:
-                        pos.stop_price = new_stop
+                    fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
+            # Early BE after +breakeven_atr_mult × ATR (fallback 0.28)
+            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.28) or 0.28)
+            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= 0.35):
+                if pos.side == "long":
+                    be = float(pos.entry_price) * 1.0005
+                    if be > float(pos.stop_price or 0):
+                        pos.stop_price = be
+                else:
+                    be = float(pos.entry_price) * 0.9995
+                    if not pos.stop_price or be < float(pos.stop_price):
+                        pos.stop_price = be
+            # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.45) or 0.45)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 0.55) or 0.55)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 0.4) or 0)
+            lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
+            trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
+            if trail_on and pos.entry_price:
+                old_stop = pos.stop_price
+                if atr_p > 0 and trail_m > 0:
+                    # Distance from peak in price units
+                    dist = trail_m * atr_p * float(pos.entry_price)
+                    if pos.side == "long":
+                        be = pos.entry_price * 1.0005
+                        trail = float(pos.peak_price or px) - dist
+                        new_stop = max(be, trail)
+                        if new_stop > float(pos.stop_price or 0):
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * 0.9995
+                        trail = float(pos.peak_price or px) + dist
+                        new_stop = min(be, trail) if pos.stop_price else trail
+                        if not pos.stop_price or new_stop < float(pos.stop_price):
+                            pos.stop_price = new_stop
+                else:
+                    if pos.side == "long":
+                        be = pos.entry_price * (1 + lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 - lock / 100.0)
+                        new_stop = max(be, trail)
+                        if new_stop > pos.stop_price:
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * (1 - lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 + lock / 100.0)
+                        new_stop = min(be, trail)
+                        if new_stop < pos.stop_price:
+                            pos.stop_price = new_stop
                 # Amend exchange SL order if stop moved
                 if pos.stop_price != old_stop:
                     try:
@@ -2904,41 +3661,19 @@ class AIStrategy:
                         exit_px = float(_td[0].get("last") or 0)
                 except Exception:
                     pass
-                pnl = 0.0
-                try:
-                    sz = float(getattr(pos, "size", 0) or 0)
-                    entry = float(getattr(pos, "entry_price", 0) or 0)
-                    if sz and entry and exit_px:
-                        if side == "long":
-                            pnl = (exit_px - entry) * abs(sz)
-                        else:
-                            pnl = (entry - exit_px) * abs(sz)
-                except Exception:
-                    pass
+                _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                 print(
                     f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
                     f"(was {side} sz={getattr(pos, 'size', 0)} pnl={pnl:+.2f})",
                     flush=True,
                 )
-                if self.notifier:
-                    try:
-                        _txt = self.notifier.close_msg(
-                            coin=coin, side=side,
-                            entry=round(float(getattr(pos, "entry_price", 0) or 0), 4),
-                            exit_px=round(exit_px, 4),
-                            pnl=round(pnl, 2),
-                            reason="manual_close",
-                            bot_name=self.BOT_NAME,
-                            signal_id=getattr(pos, "signal_id", 0),
-                            account_mode=self._account_mode_tag()[0],
-                            account_key=self._account_mode_tag()[1],
-                        )
-                        await self.notifier.send_trade(
-                            _txt,
-                            account_mode=self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo",
-                        )
-                    except Exception as _nte:
-                        print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
+                try:
+                    mode = self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo"
+                    await self._notify_close_tg(
+                        pos, coin, "manual_close", exit_px, pnl, account_mode=mode,
+                    )
+                except Exception as _nte:
+                    print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
                 self._positions.pop(coin, None)
                 try:
                     if self.db:
@@ -3224,6 +3959,17 @@ class AIStrategy:
                 await self._reconcile_live_from_exchange()
         except Exception as _le:
             print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
+        # Gap-fill: demo open without live twin (failed mirror / late connect)
+        try:
+            if await self._mirror_enabled():
+                await self._try_refresh_live_client()
+                if self._live_ready() and self._positions:
+                    missing = [c for c in self._positions if c not in self._live_positions]
+                    if missing:
+                        print(f"[AI-LIVE] gap-fill missing on live: {missing}", flush=True)
+                        await self._clone_missing_to_live()
+        except Exception as _ge:
+            print(f"[AI-LIVE] gap-fill: {_ge}", flush=True)
         # Once per process-ish: sweep unclaimed exchange positions
         try:
             n = int(getattr(self, "_orphan_tick", 0) or 0) + 1
@@ -3277,7 +4023,11 @@ class AIStrategy:
         fresh = self._new_closed_bars() if decide_bar else list((self._latest_indicators or {}).keys())
         import time as _time
         now_ts = _time.time()
-        min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
+        # v1.15: tighter LLM cadence when managing an open position
+        if self._positions:
+            min_gap = float(getattr(self.config, "llm_manage_interval_sec", 90) or 90)
+        else:
+            min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
         gap_ok = (now_ts - float(getattr(self, "_last_llm_ts", 0) or 0)) >= min_gap
         # Always allow manage path more often if we have open positions and a fresh bar
         need_llm = bool(fresh) and gap_ok
@@ -3402,7 +4152,7 @@ class AIStrategy:
                         continue
                     if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr):
                         continue
-                    if al < max(min_al, 0.78):
+                    if al < max(min_al, 0.85):
                         continue
                     if al < min_cf and al < 0.88:
                         continue
@@ -3484,6 +4234,41 @@ class AIStrategy:
                     return
             except Exception as e:
                 print(f"[{self.BOT_NAME}] sibling check: {e}", flush=True)
+            side_dec = str(decision.get("side") or "").lower()
+            # Scale-in: already in same coin+side and trend continues → add size, don't churn
+            if coin in self._positions and getattr(self._positions[coin], "side", "") == side_dec:
+                if getattr(self.config, "scale_in_enabled", True):
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in: {e}", flush=True)
+                else:
+                    self._record_exec("open_skip", coin=coin, side=side_dec, reason="already_in")
+                return
+            # Anti-churn: just closed same side → wait (unless align is exceptional)
+            try:
+                lc = (self._last_closes or {}).get(coin) or {}
+                if lc and str(lc.get("side") or "").lower() == side_dec:
+                    age_min = (time.time() - float(lc.get("ts") or 0)) / 60.0
+                    cd = float(getattr(self.config, "reopen_cooldown_min", 75) or 75)
+                    ind0 = self._latest_indicators.get(coin) or {}
+                    al0 = float(ind0.get("align_long") or 0)
+                    ash0 = float(ind0.get("align_short") or 0)
+                    align0 = ash0 if side_dec == "short" else al0
+                    ov = float(getattr(self.config, "reopen_align_override", 0.82) or 0.82)
+                    if age_min < cd and align0 < ov:
+                        self._record_exec(
+                            "open_skip", coin=coin, side=side_dec,
+                            reason=f"reopen_cooldown:{age_min:.0f}m<{cd:.0f}m_align={align0:.2f}",
+                        )
+                        print(
+                            f"[AI] skip reopen {coin} {side_dec}: cooldown {age_min:.0f}/{cd:.0f}m "
+                            f"align={align0:.2f} last_pnl={lc.get('pnl')}",
+                            flush=True,
+                        )
+                        return
+            except Exception as e:
+                print(f"[AI] reopen cooldown check: {e}", flush=True)
             if len(self._positions) >= self.config.max_positions:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="max_positions")
@@ -3534,13 +4319,21 @@ class AIStrategy:
                 if side == "short" and roc > 0:
                     self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
                     return
-            stop_pct = float(decision.get("stop_pct") or 0.03)
-            take_pct = float(decision.get("take_pct") or 0.06)
-            stop_pct = min(float(self.config.max_stop_pct), max(float(self.config.min_stop_pct), stop_pct))
-            take_pct = max(float(self.config.min_take_pct), take_pct)
-            # need RR at least ~1.3 after fees
-            if take_pct < stop_pct * 1.3:
-                take_pct = stop_pct * 1.5
+            try:
+                _entry_hint = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+            except (TypeError, ValueError):
+                _entry_hint = 0.0
+            stop_pct, take_pct = self._stops_from_atr(
+                coin,
+                _entry_hint,
+                stop_pct=float(decision.get("stop_pct") or 0),
+                take_pct=float(decision.get("take_pct") or 0),
+            )
+            print(
+                f"[AI] ATR stops {coin}: atr_pct={self._atr_pct(coin, _entry_hint):.4f} "
+                f"stop={stop_pct:.4f} take={take_pct:.4f}",
+                flush=True,
+            )
             await self._open(
                 client, coin, side,
                 stop_pct=stop_pct, take_pct=take_pct,
@@ -4241,8 +5034,40 @@ class AIStrategy:
 
 
     def _status_pulse(self, decision: dict) -> str:
-        """Краткий динамический статус — меняется при изменении рынка. Не бросает."""
+        """Короткий статус на русском для карточки бота (без англ. терминов)."""
         decision = decision or {"action": "hold"}
+
+        def _prob_word(score: float | None) -> str:
+            if score is None:
+                return "неясной"
+            try:
+                s = float(score)
+            except (TypeError, ValueError):
+                return "неясной"
+            if s >= 0.75:
+                return "высокой"
+            if s >= 0.55:
+                return "средней"
+            return "низкой"
+
+        def _side_ru(side: str) -> str:
+            s = str(side or "").lower()
+            if s in ("long", "buy"):
+                return "лонг"
+            if s in ("short", "sell"):
+                return "шорт"
+            return ""
+
+        def _coin_side(obj):
+            if isinstance(obj, dict):
+                coin = obj.get("coin") or obj.get("symbol") or "?"
+                side = str(obj.get("side") or obj.get("pos_side") or "").lower()
+            else:
+                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
+                side = str(getattr(obj, "side", "") or "").lower()
+            coin = str(coin).replace("-USDT-SWAP", "").replace("-USD-SWAP", "").upper()
+            return coin, _side_ru(side) or "—"
+
         try:
             q = self._build_quant() or {}
         except Exception as e:
@@ -4254,36 +5079,30 @@ class AIStrategy:
             print(f"[AI] pulse board: {e}", flush=True)
             board = []
 
-        reg = str(q.get("global_regime") or "неизвестно").lower()
+        reg = str(q.get("global_regime") or "unknown").lower()
         reg_ru = {
             "bull": "бычий", "bear": "медвежий", "chop": "боковик",
             "unknown": "неясный", "неизвестно": "неясный",
-        }.get(reg, reg)
-        preset = (self._adapt or {}).get("preset") or "normal"
-        preset_ru = {
-            "conservative": "осторожный",
-            "normal": "обычный",
-            "aggressive": "агрессивный",
-        }.get(str(preset).lower(), str(preset))
+        }.get(reg, "неясный")
+
         act = str(decision.get("action") or "hold").lower()
-        conf = decision.get("confidence")
         try:
-            conf_f = float(conf) if conf is not None else None
+            conf_f = float(decision.get("confidence")) if decision.get("confidence") is not None else None
         except (TypeError, ValueError):
             conf_f = None
 
-        # If action references a coin that no longer exists, treat as hold
+        # Stale action → hold
         if act in ("close", "reduce", "open"):
-            _sym_check = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
-            _pos_map = getattr(self, "_positions", None) or {}
-            if act in ("close", "reduce") and _sym_check and _sym_check not in _pos_map:
+            _sym = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+            _pos = getattr(self, "_positions", None) or {}
+            if act in ("close", "reduce") and _sym and _sym not in _pos:
                 act = "hold"
-            elif act == "open" and _sym_check and _sym_check in _pos_map:
+            elif act == "open" and _sym and _sym in _pos:
                 act = "hold"
 
         best_free = None
         best_any = None
-        for b in board:
+        for b in board or []:
             try:
                 sc = float(b.get("align_score") or 0)
             except (TypeError, ValueError):
@@ -4294,114 +5113,83 @@ class AIStrategy:
                 if best_free is None or sc > best_free[0]:
                     best_free = (sc, b)
 
-        def _coin_side(obj):
-            if isinstance(obj, dict):
-                coin = obj.get("coin") or obj.get("symbol") or "?"
-                side = str(obj.get("side") or "").lower()
-            else:
-                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
-                side = str(getattr(obj, "side", None) or "").lower()
-            coin = str(coin).replace("-USDT-SWAP", "").replace("-USDT", "")
-            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else (side or "—"))
-            return coin, side_ru
+        pos_map = getattr(self, "_positions", None) or {}
+        items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+        open_list = []
+        for pos in items:
+            try:
+                sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
+            except (TypeError, ValueError):
+                sz = 0.0
+            if abs(sz) > 1e-12:
+                open_list.append(pos)
 
-        lines = [f"Рынок: {reg_ru}, режим: {preset_ru}."]
+        # ── Open / close actions ──
+        if act == "open":
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            side_ru = _side_ru(decision.get("side") or "")
+            prob = _prob_word(conf_f)
+            conf_txt = f"{conf_f:.0%}" if conf_f is not None else "—"
+            msg = f"Готовим вход: {sym} {side_ru}. Вероятность {prob}, оценка ИИ {conf_txt}."
+            if decision.get("veto_reason"):
+                msg += " Вход пока заблокирован фильтром."
+            return msg[:280]
 
-        # Only THIS bot's non-zero positions (never report Scale-In / foreign as ours)
-        def _owned_open_list():
-            pos_map = getattr(self, "_positions", None) or {}
-            items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
-            out = []
-            for pos in items:
-                try:
-                    sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
-                except (TypeError, ValueError):
-                    sz = 0.0
-                if abs(sz) <= 1e-12:
-                    continue
-                out.append(pos)
-            return out
+        if act in ("close", "reduce"):
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            verb = "закрываем" if act == "close" else "сокращаем"
+            return f"Решение: {verb} {sym}."[:280]
 
-        open_list = _owned_open_list()
+        # ── Hold ──
+        if open_list:
+            parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
+            msg = f"В работе: {', '.join(parts)}. Новых входов нет — жду сигнал на выход."
+            return msg[:280]
 
-        if act == "hold":
-            if open_list:
-                parts = []
-                for pos in open_list:
-                    coin, side_ru = _coin_side(pos)
-                    parts.append(f"{coin} {side_ru}")
-                line = (
-                    f"Мои позиции: {', '.join(parts)}. "
-                    "Новых входов нет — управляю / жду условия выхода."
-                )
-            else:
-                line = "Позиций у этого бота нет."
-                if best_free:
-                    b = best_free[1]
-                    side = b.get("best_side") or "—"
-                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    coin = b.get("coin") or "?"
-                    # Compute next 1H bar close time
-                    next_bar_info = ""
-                    try:
-                        from datetime import datetime, timezone, timedelta
-                        now = datetime.now(timezone.utc)
-                        bar = getattr(self.config, "bar", "1H") or "1H"
-                        if bar == "1H":
-                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                        elif bar == "4H":
-                            h = (now.hour // 4 + 1) * 4
-                            next_bar = now.replace(hour=h, minute=0, second=0, microsecond=0)
-                            if h >= 24:
-                                next_bar += timedelta(days=1)
-                                next_bar = next_bar.replace(hour=0)
-                        else:
-                            next_bar = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-                        wait_min = int((next_bar - now).total_seconds() / 60)
-                        next_bar_info = f" (решение через ~{wait_min} мин, {next_bar.strftime('%H:%M')} UTC)"
-                    except Exception:
-                        pass
-                    line += (
-                        f" Доступно: {coin} {side_ru} ({best_free[0]:.2f}) "
-                        f"— жду подтверждения LLM/quant{next_bar_info}."
-                    )
-                elif best_any:
-                    b = best_any[1]
-                    side = b.get("best_side") or "—"
-                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-                    line += (
-                        f" Лучший {b.get('coin')} {side_ru} ({best_any[0]:.2f}) "
-                        "— заблокирован (ADX/align)."
-                    )
+        # Flat market scan
+        if best_free:
+            sc, b = best_free
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            conf_part = ""
+            if conf_f is not None:
+                conf_part = f" Оценка ИИ {conf_f:.0%}."
+            # wait until next bar if useful
+            wait = ""
+            try:
+                from datetime import datetime, timezone, timedelta
+                now = datetime.now(timezone.utc)
+                bar = getattr(self.config, "bar", "1H") or "1H"
+                if str(bar).upper() in ("4H", "4h"):
+                    h = (now.hour // 4 + 1) * 4
+                    nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=h)
+                    if h >= 24:
+                        nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
                 else:
-                    line += " Явных кандидатов нет."
-            lines.append(line)
-        elif act == "open":
-            sym = decision.get("symbol") or "?"
-            side = decision.get("side") or ""
-            side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side)
-            lines.append(
-                f"Сигнал на вход: {sym} {side_ru}"
-                + (f" (уверенность {conf_f:.2f})." if conf_f is not None else ".")
-            )
-            veto_reason = decision.get("veto_reason")
-            if veto_reason:
-                lines.append(f"Заблокирован квантом: {veto_reason}.")
-            if open_list:
-                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
-                lines.append(f"Уже открыто: {', '.join(parts)}.")
-        elif act in ("close", "reduce"):
-            sym = decision.get("symbol") or "?"
-            lines.append(
-                f"Решение: {'закрыть' if act == 'close' else 'сократить'} {sym}."
-            )
-        else:
-            lines.append(f"Действие: {act}.")
-            if open_list:
-                parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
-                lines.append(f"Открыто: {', '.join(parts)}.")
+                    nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                mins = max(0, int((nxt - now).total_seconds() / 60))
+                if mins > 0:
+                    wait = f" Следующая проверка ~через {mins} мин."
+            except Exception:
+                pass
+            return (
+                f"Рынок: {reg_ru}. Ожидаем {side_ru} по {coin} с {prob} вероятностью "
+                f"(совпадение {sc:.0%}).{conf_part}{wait}"
+            )[:280]
 
-        return " ".join(lines)
+        if best_any:
+            sc, b = best_any
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            return (
+                f"Рынок: {reg_ru}. Кандидат {coin} {side_ru} с {prob} вероятностью "
+                f"({sc:.0%}) — проходит проверку, пока не допущен к входу."
+            )[:280]
+
+        return f"Рынок: {reg_ru}. Явных сигналов нет — наблюдаю."[:280]
+
 
     def _safe_pulse_text(self) -> str:
         """Always recompute live pulse for UI (do not reuse stale last_decision.pulse)."""

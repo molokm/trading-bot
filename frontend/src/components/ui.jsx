@@ -85,7 +85,7 @@ export function EnhancedMetricCard({
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-1.5 min-w-0">
           {Icon && <Icon size={13} className={`${iconColor} flex-shrink-0 opacity-70`} />}
-          <span className="label truncate">{label}</span>
+          <span className="label metric-label">{label}</span>
           {tip && <Tip text={tip} />}
         </div>
         {sparkData && sparkData.length > 1 && (

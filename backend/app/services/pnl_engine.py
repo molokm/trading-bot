@@ -7,13 +7,13 @@ STABILITY LOCK — do not reintroduce:
 - attributing untagged closes only when AI_ONLY (resolve_bot fallback)
 
 
-Rules:
-1. Realized PnL from exchange_close_trades (OKX close bills), optionally
-   supplemented from DB trades when exchange is empty after epoch.
+Rules (unified filter — one set T for cards, history, bot KPI, TG):
+1. Realized closes only (non-zero pnl), from app DB (exchange_close_trades + trades).
 2. Epoch: 2026-09-01 00:00:00 UTC — closes before this are ignored.
-3. Label priority: clOrdId (ais/ai/…) → stored bot_label → AI_ONLY fallback.
-4. Calendar periods in Europe/Moscow.
-5. All UI cards must use /api/pnl from this engine only.
+3. Bot = AI Discretionary only (clOrdId ai* not ais*, or stored label).
+4. account_mode matches context (demo XOR live).
+5. Calendar periods in Europe/Moscow.
+6. All UI surfaces must use the same eligible set T.
 """
 from __future__ import annotations
 
@@ -21,12 +21,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
 
-PNL_EPOCH_ISO = "2026-09-12T00:00:00+00:00"  # clean slate after multi-bot mix
+PNL_EPOCH_ISO = "2026-09-01T00:00:00+00:00"  # product start — include full AI demo history
 PNL_TZ = ZoneInfo("Europe/Moscow")
 
 _CLORD_MAP = (
-    # ais legacy Scale-In fills fold into the single remaining AI bot
-    ("ais", "AI Discretionary 1H"),
+    # NOTE: "ais" (retired Scale-In) must NOT match via startswith("ai")
+    # — handled explicitly in label_from_clord.
     ("ai", "AI Discretionary 1H"),
     ("rot", "Momentum"),
     ("momentum", "Momentum"),
@@ -38,7 +38,7 @@ AI_ONLY_LABELS = ("AI Discretionary 1H",)
 
 _BOT_ID_MAP = {
     "ai_strategy": "AI Discretionary 1H",
-    "ai_scale_strategy": "AI Discretionary 1H",  # retired — fold into AI
+    "ai_scale_strategy": "",  # retired — do not attribute to AI
     "ai_discretionary": "AI Discretionary 1H",
 }
 
@@ -48,11 +48,22 @@ def epoch_ms() -> int:
 
 
 def label_from_clord(cl_ord_id: str) -> str:
+    """Map OKX clOrdId prefix → bot label.
+
+    Critical: ``ais…`` (retired Scale-In) must NOT be attributed to AI.
+    Plain ``startswith('ai')`` would false-positive on ``ais``.
+    """
     cl = (cl_ord_id or "").strip().lower()
     if not cl:
         return ""
-    for pfx, label in _CLORD_MAP:
+    # Retired Scale-In — exclude from AI Discretionary totals
+    if cl.startswith("ais"):
+        return ""
+    # Longest known prefix first
+    for pfx, label in sorted(_CLORD_MAP, key=lambda x: -len(x[0])):
         if cl.startswith(pfx):
+            # Boundary: next char should not extend another token oddly;
+            # ai123 / ai_ok / ai-… all ok.
             return label
     return ""
 
@@ -64,7 +75,9 @@ def normalize_bot_label(raw: str) -> str:
     if s in AI_ONLY_LABELS:
         return s
     low = s.lower()
-    if "scale" in low or "discretionary" in low or s in ("AI", "ai_strategy", "AI Scale-In 1H"):
+    if "scale" in low or s in ("AI Scale-In 1H", "ai_scale_strategy"):
+        return ""  # retired — do not fold into AI totals
+    if "discretionary" in low or s in ("AI", "ai_strategy"):
         return "AI Discretionary 1H"
     if s in _BOT_ID_MAP:
         return _BOT_ID_MAP[s]
@@ -89,35 +102,17 @@ def _to_msk_date(ts_ms: int):
 
 
 def resolve_bot(row: dict, *, ai_only: bool) -> str:
-    """clOrdId (longest prefix) → stored bot_label. Never guess Discretionary.
+    """Attribute close → bot.
 
-    Untagged closes must not steal Scale-In PnL. Attribute only with evidence.
+    Rules (AI_ONLY):
+      - clOrdId ``ais*`` → never count (retired Scale-In)
+      - clOrdId ``ai*``  → AI Discretionary
+      - else trust stored bot_label / bot_id when it is AI Discretionary
+        (covers closes without clOrdId and recovered labels)
     """
-    # Hard: all 2026-09-11 closes → Scale-In (session owned by SCL per Telegram)
-    ts = str(row.get("close_ts") or row.get("exit_time") or row.get("time") or row.get("timestamp") or "")
-    try:
-        cts = int(row.get("close_ts") or 0)
-        if cts > 10_000_000_000:
-            from datetime import datetime, timezone
-            ts = datetime.fromtimestamp(cts / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
-        elif cts > 0:
-            from datetime import datetime, timezone
-            ts = datetime.fromtimestamp(cts, tz=timezone.utc).strftime("%Y-%m-%d")
-    except Exception:
-        pass
-    if "2026-09-11" in str(ts) or "11.09.26" in str(ts):
-        return "AI Discretionary 1H"
-
-    # Hard: ETH ≈ -414 is Scale-In (ops correction 11.09.2026)
-    try:
-        pnl = float(row.get("pnl") or 0)
-    except (TypeError, ValueError):
-        pnl = 0.0
-    inst = str(row.get("inst_id") or row.get("symbol") or "")
-    if "ETH" in inst.upper() and abs(pnl - (-414.06)) < 12.0:
-        return "AI Discretionary 1H"
-
-    cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "")
+    cl = str(row.get("cl_ord_id") or row.get("clOrdId") or "").strip().lower()
+    if cl.startswith("ais"):
+        return ""
     tagged = label_from_clord(cl)
     if tagged:
         return tagged
@@ -127,9 +122,161 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
     if stored and not ai_only:
         return stored
     bid = str(row.get("bot_id") or "")
-    if bid in _BOT_ID_MAP:
-        return _BOT_ID_MAP[bid]
+    mapped = _BOT_ID_MAP.get(bid) or ""
+    if mapped in AI_ONLY_LABELS:
+        return mapped
+    if mapped and not ai_only:
+        return mapped
     return ""
+
+
+
+def normalize_close_row(r: dict) -> Optional[dict]:
+    """Normalize a DB/API close row into the canonical shape used by aggregate_rows.
+
+    Returns None if the row has no usable pnl.
+    """
+    if not isinstance(r, dict):
+        return None
+    try:
+        pnl = float(
+            r.get("realized_pnl")
+            if r.get("realized_pnl") not in (None, "")
+            else (r.get("pnl") if r.get("pnl") not in (None, "") else 0)
+        )
+    except (TypeError, ValueError):
+        return None
+    if abs(pnl) < 1e-12:
+        return None
+    ts_ms = _parse_ts_ms(
+        r.get("close_time_ms")
+        or r.get("close_ts")
+        or r.get("ts")
+        or r.get("timestamp")
+        or r.get("time")
+    )
+    if not ts_ms:
+        for k in ("closed_at", "time", "timestamp"):
+            v = r.get(k)
+            if not v or isinstance(v, (int, float)):
+                continue
+            try:
+                ts_ms = int(
+                    datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000
+                )
+                break
+            except Exception:
+                continue
+    mode = str(r.get("account_mode") or r.get("mode") or "demo").strip().lower()
+    if mode not in ("demo", "live"):
+        mode = "demo"
+    inst = str(r.get("inst_id") or r.get("instId") or r.get("symbol") or r.get("inst") or r.get("coin") or "")
+    side = str(r.get("side") or r.get("posSide") or r.get("pos_side") or "").lower()
+    return {
+        "pnl": pnl,
+        "fee": abs(float(r.get("fee") or 0) or 0),
+        "close_ts": ts_ms,
+        "ts": ts_ms,
+        "cl_ord_id": str(r.get("cl_ord_id") or r.get("clOrdId") or "").strip(),
+        "bot_label": str(r.get("bot_label") or r.get("bot") or r.get("strategy_name") or "").strip(),
+        "bot_id": str(r.get("bot_id") or "").strip(),
+        "inst_id": inst,
+        "ord_id": str(r.get("ord_id") or r.get("ordId") or "").strip(),
+        "account_mode": mode,
+        "side": side,
+    }
+
+
+def pnl_eligible(
+    row: dict,
+    *,
+    mode: str = "demo",
+    ai_only: bool = True,
+    require_ts: bool = True,
+) -> tuple[bool, str]:
+    """Unified membership test for set T (cards + history + KPI).
+
+    Returns (ok, reason). reason is empty when ok.
+    """
+    if not isinstance(row, dict):
+        return False, "not_dict"
+    try:
+        pnl = float(row.get("pnl") or 0)
+    except (TypeError, ValueError):
+        return False, "bad_pnl"
+    if abs(pnl) < 1e-12:
+        return False, "zero_pnl"
+    ts_ms = _parse_ts_ms(row.get("close_ts") or row.get("ts") or row.get("timestamp"))
+    ep = epoch_ms()
+    if require_ts and (not ts_ms or ts_ms < ep):
+        return False, "before_epoch_or_no_ts"
+    row_mode = str(row.get("account_mode") or "demo").strip().lower()
+    if row_mode not in ("demo", "live"):
+        row_mode = "demo"
+    want = (mode or "demo").strip().lower()
+    if want in ("demo", "live") and row_mode != want:
+        return False, f"mode:{row_mode}!={want}"
+    bot = resolve_bot(row, ai_only=ai_only)
+    if ai_only and bot not in AI_ONLY_LABELS:
+        return False, "not_ai"
+    if not bot and ai_only:
+        return False, "no_bot"
+    return True, ""
+
+
+def filter_pnl_rows(
+    rows: list[dict],
+    *,
+    mode: str = "demo",
+    ai_only: bool = True,
+) -> tuple[list[dict], dict]:
+    """Normalize + filter to set T. Returns (eligible_rows, diagnostics)."""
+    out: list[dict] = []
+    excluded_n = 0
+    excluded_pnl = 0.0
+    reasons: dict[str, int] = {}
+    seen_oid: set[str] = set()
+    for raw in rows or []:
+        norm = normalize_close_row(raw) if "close_ts" not in (raw or {}) or "pnl" not in (raw or {}) else None
+        row = norm or (dict(raw) if isinstance(raw, dict) else None)
+        if not row:
+            excluded_n += 1
+            reasons["normalize_fail"] = reasons.get("normalize_fail", 0) + 1
+            continue
+        # If already canonical, still re-normalize numbers
+        if norm is None:
+            n2 = normalize_close_row(raw)
+            if n2:
+                row = n2
+        ok, reason = pnl_eligible(row, mode=mode, ai_only=ai_only)
+        if not ok:
+            excluded_n += 1
+            try:
+                excluded_pnl += float(row.get("pnl") or 0)
+            except (TypeError, ValueError):
+                pass
+            reasons[reason or "other"] = reasons.get(reason or "other", 0) + 1
+            continue
+        oid = str(row.get("ord_id") or "")
+        if oid and oid in seen_oid:
+            excluded_n += 1
+            reasons["dup_ord"] = reasons.get("dup_ord", 0) + 1
+            continue
+        if oid:
+            seen_oid.add(oid)
+        bot = resolve_bot(row, ai_only=ai_only) or "AI Discretionary 1H"
+        row["bot"] = bot
+        row["bot_label"] = bot
+        out.append(row)
+    diag = {
+        "eligible_n": len(out),
+        "excluded_n": excluded_n,
+        "excluded_pnl": round(excluded_pnl, 2),
+        "exclude_reasons": reasons,
+        "mode": mode,
+        "filter": "AI Discretionary · mode=%s · since %s" % (mode, PNL_EPOCH_ISO[:10]),
+    }
+    return out, diag
 
 
 def aggregate_rows(
@@ -149,9 +296,13 @@ def aggregate_rows(
 
     per_bot: dict[str, float] = {k: 0.0 for k in AI_ONLY_LABELS} if ai_only else {}
     realized_1d = realized_week = realized_7d = realized_30d = 0.0
+    realized_before_week = 0.0
     total_fees = account_all = 0.0
     counted = skipped_before_epoch = skipped_other = 0
     used_fallback_label = 0
+    counted_week = counted_before = 0
+    # Keep a few largest losers for diagnostics (absolute pnl)
+    sample_losers: list[dict] = []
 
     for r in rows or []:
         try:
@@ -162,8 +313,8 @@ def aggregate_rows(
             continue
 
         ts_ms = _parse_ts_ms(r.get("close_ts") or r.get("ts") or r.get("timestamp"))
-        # Epoch filter only when we have a timestamp; ts=0 kept (legacy rows)
-        if ts_ms and ts_ms < ep:
+        # Require a real timestamp after epoch — ts=0 legacy rows inflated totals
+        if not ts_ms or ts_ms < ep:
             skipped_before_epoch += 1
             continue
 
@@ -197,6 +348,20 @@ def aggregate_rows(
             realized_1d += pnl
         if d >= week_start_d:
             realized_week += pnl
+            counted_week += 1
+        else:
+            realized_before_week += pnl
+            counted_before += 1
+            if pnl < -1.0:
+                sample_losers.append({
+                    "pnl": round(pnl, 2),
+                    "ts": ts_ms,
+                    "date": str(d),
+                    "inst": str(r.get("inst_id") or "")[:24],
+                    "bot": bot,
+                    "ord": str(r.get("ord_id") or "")[:16],
+                    "cl": str(r.get("cl_ord_id") or "")[:20],
+                })
         age = (now - datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)).total_seconds()
         if age <= 604800:
             realized_7d += pnl
@@ -219,8 +384,12 @@ def aggregate_rows(
         "7d": round(realized_7d, 2),
         "30d": round(realized_30d, 2),
         "week": round(realized_week, 2),
+        "before_week": round(realized_before_week, 2),
+        "trades_week": counted_week,
+        "trades_before_week": counted_before,
         "week_basis": "calendar_week_msk_monday",
         "week_start": week_start.isoformat(),
+        "sample_losers_before_week": sorted(sample_losers, key=lambda x: x["pnl"])[:8],
         "7d_rolling": round(realized_7d, 2),
         "unrealized": 0.0,
         "funding": 0.0,
