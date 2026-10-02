@@ -554,16 +554,17 @@ class AIStrategy:
         return r
 
     async def _mirror_enabled(self) -> bool:
-        """True if user has not explicitly disconnected the LIVE mirror."""
+        """True if user has EXPLICITLY connected the LIVE mirror (flag == '1').
+
+        Fail-closed: any error reading the flag → mirror OFF.
+        """
         if not self.db:
-            return self._live_client() is not None
+            return False
         try:
             en = await self.db.get_setting("live_mirror_enabled")
-            if str(en or "").strip().lower() in ("0", "false", "no", "off"):
-                return False
+            return str(en or "").strip().lower() in ("1", "true", "yes", "on")
         except Exception:
-            pass
-        return True
+            return False
 
     async def _try_refresh_live_client(self) -> bool:
         """Call main's ensure callback if wired; return whether live client is ready."""
@@ -2445,6 +2446,9 @@ class AIStrategy:
                          take_pct: float, reason: str) -> bool:
         """Mirror a primary (demo) open onto the connected LIVE account.
         Called at the end of `_open` when the primary fill succeeded."""
+        if not await self._mirror_enabled():
+            print("[AI-LIVE] open_skip: mirror disabled by user", flush=True)
+            return False
         lc = self._live_client()
         if not lc:
             try:
@@ -2644,6 +2648,9 @@ class AIStrategy:
 
     async def _close_live(self, coin: str, reason: str) -> bool:
         """Mirror a primary (demo) close onto the connected LIVE account."""
+        if not await self._mirror_enabled():
+            print("[AI-LIVE] close_skip: mirror disabled by user", flush=True)
+            return False
         lc = self._live_client()
         pos = self._live_positions.get(coin)
         if not lc or not pos:
@@ -3082,13 +3089,31 @@ class AIStrategy:
                 print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
 
     async def _clone_missing_to_live(self):
-        """Clone demo positions that are missing from live (hydrate + gap-fill)."""
+        """Clone demo positions that are missing from live (hydrate + gap-fill).
+
+        Watermark (К2): only clone positions opened AFTER explicit mirror connect.
+        The watermark is stored as `live_mirror_connected_at` (Unix timestamp)
+        set when user presses "Подключить LIVE". Positions opened before that
+        timestamp are NOT cloned — user said "Лайв только вручную, без клонирования".
+        """
         if not await self._mirror_enabled():
             return
         if not self._live_ready():
             await self._try_refresh_live_client()
         if not self._live_ready():
             print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            return
+        # Watermark: only clone positions opened AFTER explicit mirror connect
+        watermark = 0
+        if self.db:
+            try:
+                raw = await self.db.get_setting("live_mirror_connected_at")
+                if raw:
+                    watermark = int(float(raw))
+            except Exception:
+                pass
+        if watermark == 0:
+            print("[AI-LIVE] clone_missing: no watermark (mirror never explicitly connected) — SKIP all", flush=True)
             return
         try:
             await self._reconcile_live_from_exchange()
@@ -3102,6 +3127,17 @@ class AIStrategy:
             if coin in self._live_positions:
                 continue
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
+                continue
+            # Watermark gate: only clone positions opened AFTER explicit connect
+            try:
+                opened_at = getattr(demo_pos, "opened_at", None)
+                if opened_at:
+                    opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
+                    if opened_ts < watermark:
+                        print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
+                        continue
+            except Exception as _we:
+                print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
                 continue
             last = float(self._clone_attempt_ts.get(coin) or 0)
             if now - last < 15:

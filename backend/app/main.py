@@ -383,30 +383,16 @@ async def startup():
         print(f'[startup] live mirror creds: source={_lm_source} key={('yes' if _lm_key else 'no')}', flush=True)
         if _lm_key and _lm_secret and _lm_pass:
             try:
-                # Auto-enable mirror after redeploy unless user explicitly disconnected
-                try:
-                    _en = await db.get_setting('live_mirror_enabled') if db else None
-                    _en_l = str(_en or '').strip().lower()
-                    if _en_l in ('0', 'false', 'no', 'off'):
-                        print('[startup] live mirror: keys present but disabled by user — skip auto-start', flush=True)
-                    else:
-                        if _en_l not in ('1', 'true', 'yes', 'on'):
-                            await db.set_setting('live_mirror_enabled', '1')
-                            print('[startup] live mirror: enabled flag set to 1 (auto after redeploy)', flush=True)
-                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
-                        lc_check = live_manager.get_client() if live_manager else None
-                        if lc_check and (not getattr(lc_check, 'demo', True)):
-                            print('[startup] live mirror client ready', flush=True)
-                        else:
-                            live_manager = OKXClientManager.new_instance()
-                            print('[startup] live mirror init rejected (demo=true), cleared', flush=True)
-                except Exception as _en_e:
-                    print(f'[startup] live mirror enable/init: {_en_e}', flush=True)
-                    try:
-                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
-                        print('[startup] live mirror client ready (fallback init)', flush=True)
-                    except Exception as e2:
-                        print(f'[startup] live mirror init: {e2}', flush=True)
+                # Strict opt-in: NEVER auto-enable mirror on startup.
+                # User must explicitly press "Подключить LIVE" in UI.
+                _en = await db.get_setting('live_mirror_enabled') if db else None
+                _en_l = str(_en or '').strip().lower()
+                if _en_l in ('0', 'false', 'no', 'off'):
+                    print('[startup] live mirror: disabled by user (enabled=0) — skip', flush=True)
+                else:
+                    # Flag is set but user didn't explicitly disconnect.
+                    # DO NOT auto-enable. Wait for explicit Connect in UI.
+                    print('[startup] live mirror: flag set but not explicitly connected — waiting for user', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror init: {e}', flush=True)
         else:
@@ -824,35 +810,38 @@ async def startup():
         for attempt in range(8):
             await asyncio.sleep(5 if attempt == 0 else 8)
             try:
-                # If keys exist and user never disconnected, ensure enabled=1
+                # Only heal if user explicitly enabled (flag == '1')
                 try:
                     en = await db.get_setting('live_mirror_enabled') if db else None
                     en_l = str(en or '').strip().lower()
-                    if en_l not in ('0', 'false', 'no', 'off'):
-                        k = await db.get_setting('live_mirror_key') if db else None
-                        if not k:
-                            # try encrypted path already loaded
-                            k = _live_key
-                        if k and en_l not in ('1', 'true', 'yes', 'on'):
-                            await db.set_setting('live_mirror_enabled', '1')
-                            print('[startup] live mirror heal: auto-enabled (keys present)', flush=True)
+                    if en_l in ('1', 'true', 'yes', 'on'):
+                        ok = await _ensure_live_mirror_client()
+                        if ok:
+                            if ai_bot:
+                                _wire_ai_live_cb(ai_bot)
+                            print(f'[startup] live mirror heal: OK (attempt {attempt + 1})', flush=True)
+                            break
+                        print(f'[startup] live mirror heal: not ready (attempt {attempt + 1})', flush=True)
+                    else:
+                        print(f'[startup] live mirror heal: disabled by user (enabled={en_l}) — skipping', flush=True)
+                        break
                 except Exception as _fe:
                     print(f'[startup] live mirror heal flag: {_fe}', flush=True)
-                ok = await _ensure_live_mirror_client()
-                if ok:
-                    if ai_bot:
-                        _wire_ai_live_cb(ai_bot)
-                    print(f'[startup] live mirror heal: OK (attempt {attempt + 1})', flush=True)
                     break
-                print(f'[startup] live mirror heal: not ready (attempt {attempt + 1})', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror heal: {e}', flush=True)
         while True:
             await asyncio.sleep(60)
             try:
-                ok = await _ensure_live_mirror_client()
-                if ok and ai_bot:
-                    _wire_ai_live_cb(ai_bot)
+                en = await db.get_setting('live_mirror_enabled') if db else None
+                en_l = str(en or '').strip().lower()
+                if en_l in ('1', 'true', 'yes', 'on'):
+                    ok = await _ensure_live_mirror_client()
+                    if ok and ai_bot:
+                        _wire_ai_live_cb(ai_bot)
+                else:
+                    # Disabled — do not attempt reconnect
+                    pass
             except Exception as e:
                 print(f'[LIVE] heal loop: {e}', flush=True)
 
@@ -2479,19 +2468,15 @@ async def live_status():
     except Exception:
         lc = None
     # Do not auto-heal if user explicitly disconnected
-    _mirror_on = True
+    _mirror_on = False
     try:
         en = await db.get_setting('live_mirror_enabled') if db else None
-        if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
-            _mirror_on = False
+        if str(en or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+            _mirror_on = True
     except Exception:
         pass
-    if _mirror_on and (lc is None or getattr(lc, 'demo', False) or not getattr(lc, 'has_credentials', lambda: False)()):
-        try:
-            await _ensure_live_mirror_client()
-            lc = live_manager.get_client() if live_manager else None
-        except Exception as e:
-            print(f'[LIVE] status ensure: {e}', flush=True)
+    # NO auto-heal: if user didn't explicitly enable, do not try to connect.
+    # User must press "Подключить LIVE" in UI.
     if not _mirror_on:
         lc = None
     connected = lc is not None and not getattr(lc, 'demo', False) and getattr(lc, 'has_credentials', lambda: False)()
@@ -2983,6 +2968,9 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         try:
             await db.set_setting('live_mirror_capital', str(round(capital, 2)))
             await db.set_setting('live_mirror_enabled', '1')
+            # Watermark: only clone demo positions opened AFTER explicit connect
+            import time as _t
+            await db.set_setting('live_mirror_connected_at', str(int(_t.time())))
             try:
                 await _save_live_creds(key, secret, passphrase)
                 # Also keep plaintext as fallback for when TOKEN_ENCRYPTION_KEY
