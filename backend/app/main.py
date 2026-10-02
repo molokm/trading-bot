@@ -1605,7 +1605,7 @@ async def me_dashboard(request: Request):
             # Prefer dashboard PnL engine (same source as main page) for DEMO totals
             try:
                 # Force demo numbers when showcase is demo-oriented
-                pnl_data = await _compute_pnl()
+                pnl_data = await _get_pnl_cached()
                 if isinstance(pnl_data, dict):
                     mode = str(pnl_data.get('account_mode') or _account_mode() or 'demo').lower()
                     if mode != 'live':
@@ -5307,6 +5307,7 @@ async def sync_exchange_close_trades() -> int:
         if clord and (not close_by_ord[oid]['cl_ord_id']):
             close_by_ord[oid]['cl_ord_id'] = clord
     rows = []
+    recovered_labels: list = []
     for oid, info in close_by_ord.items():
         clord = (info['cl_ord_id'] or '').lower()
         bot_label = ''
@@ -5336,7 +5337,7 @@ async def sync_exchange_close_trades() -> int:
                         info['cl_ord_id'] = cid
                         break
             if bot_label:
-                print(f'[exchange-sync] recovered label={bot_label} from entry clOrdId={best_cl} inst={inst}', flush=True)
+                recovered_labels.append((bot_label, inst))
         avg_px = info['px_sum'] / info['px_n'] if info['px_n'] > 0 else 0.0
         close_ts = 0
         if info['ts']:
@@ -5348,6 +5349,14 @@ async def sync_exchange_close_trades() -> int:
             bot_label = ''
         rows.append({'ord_id': oid, 'inst_id': info['inst_id'], 'cl_ord_id': info['cl_ord_id'], 'bot_label': bot_label, 'pnl': round(info['pnl'], 6), 'fee': round(info['fee'], 6), 'sz': round(info['sz'], 6), 'avg_px': round(avg_px, 6), 'close_ts': close_ts, 'sub_type': info['sub_type'], 'account_mode': info.get('account_mode') or _account_mode(), 'account_key': 'showcase' if _account_mode() == 'demo' else 'live'})
     print(f'[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}', flush=True)
+    if recovered_labels:
+        _rc: dict = {}
+        for _label, _inst in recovered_labels:
+            _rc[_label] = _rc.get(_label, 0) + 1
+        print('[exchange-sync] recovered %d labels: %s' % (
+            len(recovered_labels),
+            ', '.join(f'{k}x{v}' for k, v in _rc.items()),
+        ), flush=True)
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)
@@ -5724,12 +5733,14 @@ async def get_pnl(request: Request=None):
             out = dict(_pnl_cache['data'])
             out['account_mode'] = _mode
             return out
+        # prev MUST be read before the recompute — it is the previous cached
+        # snapshot the sticky-PnL check compares against.
+        prev = (_pnl_cache or {}).get('data') if (_pnl_cache or {}).get('mode') == _mode else None
         data = await _compute_pnl()
         if isinstance(data, dict):
             data = dict(data)
             data['account_mode'] = _mode
         try:
-            prev = (_pnl_cache or {}).get('data') if (_pnl_cache or {}).get('mode') == _mode else None
             if isinstance(prev, dict) and isinstance(data, dict):
                 prev_tot = abs(float(prev.get('total') or prev.get('strategy_realized') or 0))
                 new_tot = abs(float(data.get('total') or data.get('strategy_realized') or 0))
@@ -5756,8 +5767,14 @@ async def _compute_pnl():
 
     Same filter for dashboard cards, history list, bot KPI, mini app.
     Day/week by Moscow calendar. Unrealized from open exchange positions.
+
+    Pure compute — never touches _pnl_cache (callers own the cache) and never
+    resets the exchange-sync TTL. sync_exchange_close_trades() is already
+    TTL-gated (60s); resetting both here made every single request do a full
+    OKX bills sync + full recompute, and clearing _pnl_cache also wiped the
+    'mode' key the cache readers require — so the cache could never hit.
     """
-    global _pnl_cache, _exchange_sync_ts
+    global _pnl_last_unified
     from app.services.pnl_engine import (
         aggregate_rows,
         epoch_ms as _ep_ms,
@@ -5767,9 +5784,6 @@ async def _compute_pnl():
     _mode = _account_mode()
     _ep = int(_ep_ms())
     try:
-        _exchange_sync_ts = 0
-        if isinstance(_pnl_cache, dict):
-            _pnl_cache.clear()
         try:
             await sync_exchange_close_trades()
         except Exception as _se:
@@ -5851,12 +5865,19 @@ async def _compute_pnl():
                 for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:80]
             ],
         }
-        print(
-            f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
-            f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
-            f"excl_pnl={diag.get('excluded_pnl')}",
-            flush=True,
+        _sig = (
+            _mode, total, day, week, n,
+            diag.get('eligible_n'), diag.get('excluded_n'),
+            round(float(diag.get('excluded_pnl') or 0), 2),
         )
+        if _sig != _pnl_last_unified:
+            _pnl_last_unified = _sig
+            print(
+                f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
+                f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
+                f"excl_pnl={diag.get('excluded_pnl')}",
+                flush=True,
+            )
     except Exception as e:
         print(f'[pnl] unified error: {e}', flush=True)
         import traceback
@@ -5885,13 +5906,32 @@ async def _compute_pnl():
     except Exception as e:
         print(f'[pnl] unrealized: {e}', flush=True)
         data.setdefault('unrealized', 0.0)
-    try:
-        if isinstance(_pnl_cache, dict):
-            _pnl_cache['data'] = data
-            _pnl_cache['ts'] = _time.time()
-    except Exception:
-        pass
     return data
+
+
+async def _get_pnl_cached() -> dict:
+    """TTL-cached PnL, single-flight. Used by ai/status KPI and the mini-app
+    dashboard; /api/pnl keeps its own sticky-PnL path but reads/writes the
+    same _pnl_cache entry, so all pollers share one recompute."""
+    global _pnl_cache
+    _mode = _account_mode()
+    now_s = _time.time()
+    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+        out = dict(_pnl_cache['data'])
+        out['account_mode'] = _mode
+        return out
+    async with _pnl_lock:
+        now_s = _time.time()
+        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+            out = dict(_pnl_cache['data'])
+            out['account_mode'] = _mode
+            return out
+        data = await _compute_pnl()
+        if isinstance(data, dict):
+            data = dict(data)
+            data['account_mode'] = _mode
+            _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
+        return data
 
 
 
@@ -6032,13 +6072,8 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
     status = dict(status or {})
     try:
-        # Use cached PnL if fresh, otherwise compute (single-flight)
-        _mode = _account_mode()
-        now_s = _time.time()
-        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-            dash = dict(_pnl_cache['data'])
-        else:
-            dash = await _compute_pnl()
+        # Cached PnL (single-flight, shared with /api/pnl)
+        dash = await _get_pnl_cached()
         per = (dash or {}).get('per_bot') or {}
         mode = str((dash or {}).get('account_mode') or _account_mode()).lower()
         val = float(per.get(bot_label) or 0)
@@ -6179,6 +6214,9 @@ _PAIRED_TTL = 20
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
 _PNL_TTL = 30
+# last printed "[pnl] UNIFIED ..." signature — log only on change (it used to
+# print on every request because the PnL cache never hit)
+_pnl_last_unified: tuple = ()
 
 _live_okx_cache: dict = {'ts': 0.0, 'trades': []}
 _LIVE_OKX_TTL = 60.0
