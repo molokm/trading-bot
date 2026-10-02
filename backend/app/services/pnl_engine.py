@@ -40,6 +40,7 @@ _BOT_ID_MAP = {
     "ai_strategy": "AI Discretionary 1H",
     "ai_scale_strategy": "",  # retired — do not attribute to AI
     "ai_discretionary": "AI Discretionary 1H",
+    "ai_strategy_live": "AI Discretionary 1H",  # LIVE mirror writes this bot_id
 }
 
 

@@ -5825,7 +5825,13 @@ async def _compute_pnl(mode: str = None):
             print(f'[pnl] db exchange_close_trades: {e}', flush=True)
         try:
             if db and hasattr(db, 'get_trades'):
-                raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
+                if _mode == 'live':
+                    # Mirror records closes under bot_id='ai_strategy_live'
+                    # (see AIStrategy._live_bot_id) — a bot_id='ai_strategy'
+                    # filter would always return nothing for live.
+                    raw.extend(await db.get_trades(limit=2000, account_mode='live') or [])
+                else:
+                    raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
         except Exception as e:
             print(f'[pnl] db trades: {e}', flush=True)
 
@@ -5840,6 +5846,29 @@ async def _compute_pnl(mode: str = None):
         fees = round(float(agg.get('fees') or 0), 2)
         n = int(agg.get('trades_counted') or len(rows))
         per_bot = agg.get('per_bot') or {'AI Discretionary 1H': total}
+        source = 'app_closed_trades'
+
+        if _mode == 'live' and n <= 0:
+            # No live-tagged closes in the DB yet (mirror closes not written /
+            # just started). Fall back to the same OKX bills math as
+            # /api/live/status so the LIVE card never shows a fake 0 while
+            # live_status reports a non-zero realized PnL.
+            try:
+                st = await live_status()
+                if st.get('connected') and (st.get('total_pnl') or st.get('lifetime_trades')):
+                    total = round(float(st.get('total_pnl') or 0), 2)
+                    day = round(float(st.get('pnl_1d') or st.get('session_pnl') or 0), 2)
+                    week = round(float(st.get('pnl_week') or st.get('week') or 0), 2)
+                    n = int(st.get('lifetime_trades') or 0)
+                    fees = round(float(st.get('lifetime_fees') or 0), 2)
+                    per_bot = {'AI Discretionary 1H': total}
+                    source = 'okx_live_bills'
+                    print(
+                        f'[pnl] LIVE bills fallback: total={total} 1d={day} week={week} n={n}',
+                        flush=True,
+                    )
+            except Exception as _fe:
+                print(f'[pnl] LIVE bills fallback: {_fe}', flush=True)
 
         data = {
             'total': total,
@@ -5857,7 +5886,7 @@ async def _compute_pnl(mode: str = None):
             'funding': 0.0,
             'economic_approx': total,
             'strategy_realized': total,
-            'source': 'app_closed_trades',
+            'source': source,
             'pnl_tz': 'Europe/Moscow',
             'fees': fees,
             'fees_informational': True,
@@ -5909,6 +5938,9 @@ async def _compute_pnl(mode: str = None):
     try:
         unreal = 0.0
         client = client_manager.get_client() if client_manager else None
+        if _mode == 'live':
+            # UPL must come from the mirror account, not the demo client.
+            client = live_manager.get_client() if live_manager else None
         if client:
             pos = await client.get_positions(inst_type='SWAP')
             if not pos.get('error'):

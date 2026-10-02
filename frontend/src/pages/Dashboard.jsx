@@ -1169,14 +1169,17 @@ export default function Dashboard({ health, connected, isGuest }) {
   // LIVE numbers for dual DEMO/LIVE metric display
   const liveConnected = !!(liveStatus?.connected)
   const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
-  // Prefer stable /api/pnl?mode=live; fall back to liveStatus only if engine not loaded yet
-  const liveToday = (livePnl && livePnl['1d'] != null)
-    ? Number(livePnl['1d'])
+  // Prefer stable /api/pnl?mode=live; fall back to liveStatus when the engine
+  // has not counted a single LIVE close yet — otherwise a 0/0 would look like
+  // "mirror PnL is zero" while liveStatus already reports a realized PnL.
+  const liveEngineOk = !!(livePnl && livePnl.total != null && Number(livePnl.trades_counted || 0) > 0)
+  const liveToday = liveEngineOk
+    ? Number(livePnl['1d'] ?? 0)
     : Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
-  const liveWeek = (livePnl && livePnl.week != null)
-    ? Number(livePnl.week)
+  const liveWeek = liveEngineOk
+    ? Number(livePnl.week ?? 0)
     : Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
-  const liveTotal = (livePnl && livePnl.total != null)
+  const liveTotal = liveEngineOk
     ? Number(livePnl.total)
     : Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
   const liveEquity = Number(liveStatus?.equity ?? 0)
