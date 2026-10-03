@@ -344,9 +344,8 @@ class OKXClient:
         # Block new risk-increasing orders when kill switch / daily loss limits hit.
         # reduce_only / explicit closes always pass. is_close marks a position
         # reduction in hedge mode (where OKX forbids the reduceOnly flag).
-        _coin = inst_id.split("-")[0] if inst_id else ""
-        assert_can_open(coin=_coin, side=side, notional_usd=None, leverage=None,
-                        daily_pnl=None, is_reduce_only=bool(reduce_only or is_close))
+        symbol = inst_id.split("-")[0] if inst_id else None
+        assert_can_open(is_reduce_only=bool(reduce_only or is_close), symbol=symbol)
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:

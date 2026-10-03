@@ -1844,7 +1844,7 @@ class AIStrategy:
                               entry=entry, stop_pct=stop_pct)
             return
         try:
-            assert_can_open(is_reduce_only=False)
+            assert_can_open(is_reduce_only=False, ai_bot=self, symbol=coin)
         except Exception as e:
             self._record_exec("open_skip", coin=coin, side=side, reason=f"risk:{e}")
             return
