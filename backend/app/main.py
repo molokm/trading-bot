@@ -3451,6 +3451,24 @@ async def risk_kill(request: Request, data: dict=None):
     await write_audit(request, 'risk.kill_switch', detail=f'enabled={enabled}')
     return {'ok': True, **risk_get_status().to_dict()}
 
+@app.get('/api/health/circuit-breaker')
+async def health_circuit_breaker():
+    """Circuit Breaker state for OKX client (demo and live)."""
+    cb_data = {}
+    try:
+        if client_manager and client_manager._client:
+            cb = client_manager._client._circuit_breaker
+            cb_data['owner'] = cb.stats
+    except Exception as e:
+        cb_data['owner_error'] = str(e)
+    try:
+        if showcase_manager and showcase_manager._client:
+            cb = showcase_manager._client._circuit_breaker
+            cb_data['showcase'] = cb.stats
+    except Exception as e:
+        cb_data['showcase_error'] = str(e)
+    return {'circuit_breakers': cb_data}
+
 async def _load_live_creds_from_db() -> None:
     """Restore LIVE keys: encrypted first, then plaintext live_mirror_* fallback."""
     global _live_key, _live_secret, _live_pass
