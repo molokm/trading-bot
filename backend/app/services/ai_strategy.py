@@ -14,6 +14,8 @@ import math
 import os
 import threading
 import time
+import uuid
+import re
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -87,7 +89,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.19-audit-harden"
+STRATEGY_VERSION = "v1.20-demo-trade-id"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
     "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
@@ -278,6 +280,7 @@ class AIPosition:
     tp_algo_id: str = ""
     owner_checked: bool = False   # cache _entry_fill_owner — historical fact
     owner_prefix: str = ""
+    demo_trade_id: str = ""       # shared id: DEMO clOrdId=aid{id}, LIVE=ail{id}
 
 
 class AIStrategy:
@@ -369,6 +372,30 @@ class AIStrategy:
     def _clord_prefix(self) -> str:
         """OKX clOrdId prefix for this bot's orders (must not be a prefix of another bot)."""
         return "ai"
+
+    @staticmethod
+    def _new_demo_trade_id() -> str:
+        """12 hex chars — fits OKX clOrdId max 32 with aid/ail prefix."""
+        return uuid.uuid4().hex[:12]
+
+    @staticmethod
+    def _clord_demo(trade_id: str) -> str:
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"aid{tid}"[:32]
+
+    @staticmethod
+    def _clord_live(trade_id: str) -> str:
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"ail{tid}"[:32]
+
+    @staticmethod
+    def _trade_id_from_clord(cl_ord_id: str) -> str:
+        """Extract shared demo_trade_id from aid*/ail* clOrdId."""
+        s = re.sub(r"[^a-zA-Z0-9]", "", str(cl_ord_id or ""))
+        low = s.lower()
+        if low.startswith("aid") or low.startswith("ail"):
+            return s[3:15]
+        return ""
 
     def start(self):
         if self._running:
@@ -1686,7 +1713,7 @@ class AIStrategy:
         except Exception:
             return 0.0
 
-    async def _place(self, client, inst_id, side, sz, pos_side, is_close=False):
+    async def _place(self, client, inst_id, side, sz, pos_side, is_close=False, cl_ord_id: str = None):
         """
         Strict rule: live client can ONLY be called through mirror logic (_open_live, _close_live, _mirror_fast_retry, scale-in mirror).
         Direct calls on live client are BLOCKED unless coming from mirror logic.
@@ -1697,7 +1724,7 @@ class AIStrategy:
             return {"error": "Direct live trading blocked — only mirror trades allowed"}
 
         coin = inst_id.split("-")[0]
-        cl_id = f"ai{int(time.time() * 1000)}"
+        cl_id = (cl_ord_id or f"ai{int(time.time() * 1000)}")[:32]
         return await client.place_order(
             inst_id=inst_id, side=side, ord_type="market",
             sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
@@ -1872,8 +1899,10 @@ class AIStrategy:
             except Exception:
                 pass
         pos_side_try = side
+        trade_id = self._new_demo_trade_id()
+        cl_demo = self._clord_demo(trade_id)
         try:
-            resp = await self._place(client, inst, order_side, sz, pos_side_try)
+            resp = await self._place(client, inst, order_side, sz, pos_side_try, cl_ord_id=cl_demo)
         except Exception as e:
             self._record_exec("open_error", coin=coin, side=side, reason=str(e),
                               size=sz, leverage=lev)
@@ -1886,7 +1915,7 @@ class AIStrategy:
                     resp = await client.place_order(
                         inst_id=inst, side=order_side, ord_type="market",
                         sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=None,
-                        cl_ord_id=f"ai{int(time.time() * 1000)}",
+                        cl_ord_id=cl_demo,
                     )
                 except Exception as e2:
                     self._record_exec("open_error", coin=coin, side=side,
@@ -1904,7 +1933,7 @@ class AIStrategy:
                         pass
                     try:
                         resp = await self._place(client, inst, order_side, sz2,
-                                                 pos_side_try)
+                                                 pos_side_try, cl_ord_id=cl_demo)
                         if not resp.get("error"):
                             sz, lev = sz2, lev2
                     except Exception:
@@ -1964,6 +1993,7 @@ class AIStrategy:
             entry_price=fill_px, stop_price=stop, take_price=take,
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
             peak_price=fill_px, signal_id=int(signal_id or 0),
+            demo_trade_id=str(trade_id or ""),
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
@@ -2523,6 +2553,16 @@ class AIStrategy:
         inst = f"{coin}-USDT-SWAP"
         order_side = "buy" if side == "long" else "sell"
         live_bid = self._live_bot_id()
+        demo_pos = self._positions.get(coin)
+        trade_id = str(getattr(demo_pos, "demo_trade_id", "") or "") if demo_pos else ""
+        if not trade_id:
+            trade_id = self._new_demo_trade_id()
+            if demo_pos:
+                try:
+                    demo_pos.demo_trade_id = trade_id
+                except Exception:
+                    pass
+        cl_live = self._clord_live(trade_id)
         for ps in (side, "net", None):
             try:
                 await lc.set_leverage(inst, lev, mgn_mode="cross",
@@ -2532,7 +2572,7 @@ class AIStrategy:
         # Strict: mark mirror call active so _place allows this live trade
         self._mirror_call_active = True
         try:
-            resp = await self._place(lc, inst, order_side, sz, side)
+            resp = await self._place(lc, inst, order_side, sz, side, cl_ord_id=cl_live)
         except Exception as e:
             print(f"[AI-LIVE] open_error {coin}: {e}", flush=True)
             self._mirror_call_active = False
@@ -2547,7 +2587,7 @@ class AIStrategy:
                         inst_id=inst, side=order_side, ord_type="market",
                         sz=self._fmt_sz(coin, sz), td_mode="cross",
                         pos_side=None,
-                        cl_ord_id=f"ai{int(time.time() * 1000)}",
+                        cl_ord_id=cl_live,
                     )
                 except Exception as e2:
                     print(f"[AI-LIVE] open_error net-retry {coin}: {e2}", flush=True)
@@ -2564,7 +2604,7 @@ class AIStrategy:
                         pass
                     self._mirror_call_active = True
                     try:
-                        resp = await self._place(lc, inst, order_side, sz2, side)
+                        resp = await self._place(lc, inst, order_side, sz2, side, cl_ord_id=cl_live)
                         if not resp.get("error"):
                             sz, lev = sz2, lev2
                     except Exception:
@@ -2616,6 +2656,7 @@ class AIStrategy:
             entry_price=fill_px, stop_price=stop, take_price=take,
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
             peak_price=fill_px, signal_id=int(signal_id or 0),
+            demo_trade_id=str(trade_id or ""),
         )
         ok_claim = await claim_open(self.db, live_bid, inst, side, sz, fill_px)
         if not ok_claim:
@@ -2945,6 +2986,58 @@ class AIStrategy:
                     if entry > 0:
                         old.entry_price = entry
                     continue
+
+                # v1.20: adopt ONLY if linked to a DEMO trade
+                # 1) DEMO holds same coin+side (rehydrate after redeploy)
+                # 2) OR already tracked in memory with demo_trade_id
+                # 3) OR live fills show clOrdId ail{id} matching DEMO aid{id}
+                demo_pos = self._positions.get(coin)
+                demo_ok = (
+                    demo_pos is not None
+                    and str(getattr(demo_pos, "side", "") or "").lower() == side
+                )
+                linked_id = ""
+                if old and getattr(old, "demo_trade_id", ""):
+                    linked_id = str(old.demo_trade_id)
+                if demo_ok and getattr(demo_pos, "demo_trade_id", ""):
+                    linked_id = linked_id or str(demo_pos.demo_trade_id)
+
+                if not demo_ok and not linked_id:
+                    # Try resolve via recent fills clOrdId (ail…)
+                    try:
+                        fills_resp = await lc.get_fills(inst, limit=20) if hasattr(lc, "get_fills") else {}
+                        for fr in (fills_resp or {}).get("data") or []:
+                            tid = self._trade_id_from_clord(
+                                fr.get("clOrdId") or fr.get("clOrdID") or ""
+                            )
+                            if not tid:
+                                continue
+                            # Match DEMO open with same trade_id
+                            for dp in self._positions.values():
+                                if str(getattr(dp, "demo_trade_id", "") or "") == tid:
+                                    if str(getattr(dp, "coin", "")).upper() == coin and str(getattr(dp, "side", "")).lower() == side:
+                                        linked_id = tid
+                                        demo_ok = True
+                                        break
+                            if linked_id:
+                                break
+                            # Accept pure ail* fill as our mirror even if demo memory empty
+                            # only when DEMO has ANY position on same coin+side
+                            if demo_pos and str(getattr(demo_pos, "side", "")).lower() == side:
+                                linked_id = tid
+                                demo_ok = True
+                                break
+                    except Exception as fe:
+                        print(f"[AI-LIVE] reconcile fills probe {coin}: {fe}", flush=True)
+
+                if not demo_ok and not (old and linked_id):
+                    print(
+                        f"[AI-LIVE] reconcile IGNORE orphan {coin} {side} sz={sz} "
+                        f"(no DEMO twin / no demo_trade_id link)",
+                        flush=True,
+                    )
+                    continue
+
                 pos = AIPosition(
                     coin=coin,
                     inst_id=inst or f"{coin}-USDT-SWAP",
@@ -2959,13 +3052,16 @@ class AIStrategy:
                     unrealized_pnl=unc,
                     tg_message_id=int(getattr(old, "tg_message_id", 0) or 0),
                     signal_id=int(getattr(old, "signal_id", 0) or 0),
+                    demo_trade_id=linked_id or (
+                        str(getattr(demo_pos, "demo_trade_id", "") or "") if demo_pos else ""
+                    ),
                 )
-                # Compute default stop/take from entry when adopting orphaned position
-                # (old=None on restart → stop/take=0 → hard stop never/takes immediately)
+                # Compute default stop/take from entry when adopting after restart
                 self._ensure_default_stops(pos)
                 self._live_positions[coin] = pos
                 print(
-                    f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} upl={unc:+.2f}",
+                    f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} "
+                    f"upl={unc:+.2f} trade_id={pos.demo_trade_id or '-'}",
                     flush=True,
                 )
                 try:
@@ -4780,6 +4876,19 @@ class AIStrategy:
                     take = float(old.get("take_price") or 0)
                     if not take or _m.isnan(take):
                         take = 0
+                    tid = str(old.get("demo_trade_id") or "")
+                    demo_twin = self._positions.get(coin)
+                    if not tid and not (
+                        demo_twin and str(getattr(demo_twin, "side", "")).lower() == side
+                    ):
+                        print(
+                            f"[AI-LIVE] hydrate SKIP {coin} {side}: no DEMO twin / "
+                            f"no stored demo_trade_id",
+                            flush=True,
+                        )
+                        continue
+                    if not tid and demo_twin:
+                        tid = str(getattr(demo_twin, "demo_trade_id", "") or "")
                     pos = AIPosition(
                         coin=coin, inst_id=f"{coin}-USDT-SWAP", side=side, size=sz,
                         entry_price=entry, stop_price=float(old.get("stop_price") or 0),
@@ -4788,12 +4897,13 @@ class AIStrategy:
                         peak_price=peak, unrealized_pnl=unc,
                         tg_message_id=int(old.get("tg_message_id") or 0),
                         signal_id=sr or 0,
+                        demo_trade_id=tid,
                     )
                     self._ensure_default_stops(pos)
                     self._live_positions[coin] = pos
                     used.add(coin)
                     print(f"[AI-LIVE] hydrate adopt {coin}: sz={sz} entry={entry} "
-                          f"pnl={unc:+.2f}", flush=True)
+                          f"pnl={unc:+.2f} trade_id={tid or '-'}", flush=True)
                 # report live exchange positions we cannot restore
                 for coin in ex_pos:
                     if coin not in used and coin not in self._live_positions:
