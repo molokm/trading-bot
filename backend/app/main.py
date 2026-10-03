@@ -10,7 +10,6 @@ import faulthandler
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
-from dataclasses import asdict
 _CRASH_LOG = os.path.join(os.environ.get('DATA_DIR', '/tmp'), 'crash_traceback.log')
 try:
     with open(_CRASH_LOG, 'w') as _cf:
@@ -52,22 +51,19 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager, OKXClient
 from app.services.backtest_service import run_backtest_async
 from app.database import db
-from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, get_blacklist, set_blacklist
-from app.services.strategy_manager import StrategyManager, PerUserClientManager, set_hydrate_deps
-from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, AI_SCALE_NAME, OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID, SCALP_NAME, SCALP_VERSION, SCALP_DESC, compute_book_metrics, VWAPMeanReversion, VWAPScalpConfig, VWAP_BOT_ID, VWAP_NAME, VWAP_VERSION, VWAP_DESC, SmartMoneyTracker, TrackerConfig, OKXCopyAPI, SM_BOT_ID, SM_NAME, SM_VERSION, get_mirror
+from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, set_blacklist
+from app.services.strategy_manager import StrategyManager, set_hydrate_deps
+from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
 from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
-from app.services.ai_agent import llm_status
 from app.services.telegram_notifier import TelegramNotifier
 from app.services import pnl_engine
 from app.services.pnl_engine import PNL_EPOCH_ISO
-from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
-from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
-from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
+from app.services.equity_tracker import EquityTracker
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch
 from app.services.analysis_logger import DEFAULT_PATH
-from app.services import trade_attribution as trade_attr
+
 from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, release_open
-from app.services.account_context import filter_rows_for_mode
 MOM_BOT_ID = 'momentum_strategy'
 load_dotenv()
 _docs_enabled = os.getenv('ENABLE_DOCS', 'false').lower() in ('1', 'true')
@@ -3171,7 +3167,7 @@ async def ai_logs(limit: int=200, event: str=None):
             mem = [d for d in mem if (d.get('event') or d.get('action')) == event or d.get('action') == event]
     file_rows = []
     try:
-        from app.services.analysis_logger import DEFAULT_PATH
+
         path = Path(DEFAULT_PATH)
         if path.exists():
             lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
