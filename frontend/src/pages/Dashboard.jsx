@@ -255,6 +255,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
   const [liveStatus, setLiveStatus] = useState(null)
+  const [livePnl, setLivePnl] = useState(null)
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
   const [smartMoneyStatus, setSmartMoneyStatus] = useState(null)
   const [vwapRevStatus, setVwapRevStatus] = useState(null)
@@ -395,11 +396,15 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [trades, liveTr, pnlData] = await Promise.all([
+      const [trades, liveTr, pnlData, livePnlData] = await Promise.all([
         api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
         api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
+        api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
       ])
+      if (livePnlData && !livePnlData.detail && livePnlData.total != null) {
+        setLivePnl({ ...livePnlData, account_mode: 'live' })
+      }
       const demoRows = trades?.trades || []
       const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
         ...t,
@@ -1139,12 +1144,18 @@ export default function Dashboard({ health, connected, isGuest }) {
   const pnlSource = pnl?.source || ''
   const fundingNote = Number(pnl?.funding || 0)
 
-  // LIVE numbers for dual DEMO/LIVE metric display
+  // LIVE numbers: same engine as DEMO (/api/pnl?mode=live), UPL/equity from mirror status
   const liveConnected = !!(liveStatus?.connected)
   const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
-  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
-  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
-  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
+  const liveToday = Number(
+    livePnl?.['1d'] ?? liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0,
+  )
+  const liveWeek = Number(
+    livePnl?.week ?? liveStatus?.week ?? liveStatus?.pnl_week ?? 0,
+  )
+  const liveTotal = Number(
+    livePnl?.total ?? liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0,
+  )
   const liveEquity = Number(liveStatus?.equity ?? 0)
 
   const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {

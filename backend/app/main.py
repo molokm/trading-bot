@@ -2753,32 +2753,33 @@ async def live_status():
             debug['positions_err'] = str(e)
             print(f'[LIVE] positions: {e}', flush=True)
 
-        # ── PnL: unified source — SAME rows as /api/stats?mode=live ──────────
-        # 1) DB: exchange_close_trades(live) + trades(<BOT_ID>_live), dedup by ord_id
-        # 2) Fallback (DB has no live closes yet): OKX bills grouped by close ordId
-        #    — full history via _fetch_all_trade_bills (bills + bills-archive), no 600 cap.
+        # ── PnL: SAME engine as DEMO (/api/pnl?mode=live → filter_pnl_rows) ──
+        # Primary: _get_pnl_cached(mode='live') — identical rules, epoch 2026-09-01,
+        # AI-only, account_mode isolation, dedup by ord_id.
+        # Fallback (no live closes in DB yet): OKX bills grouped by close ordId.
         _pnl_src = None
         try:
             from app.services import pnl_engine as _pe
         except Exception:
             _pe = None
-        mirror = None
-        if db and _pe is not None:
-            try:
-                mirror = await _pe.mirror_stats(db, account_mode='live', ai_only=bool(AI_ONLY_MODE))
-            except Exception as _me:
-                debug['mirror_err'] = str(_me)
-                print(f'[LIVE] mirror_stats: {_me}', flush=True)
-        if mirror and int(mirror.get('trades') or 0) > 0:
-            realized = float(mirror.get('total') or 0)
-            realized_today = float(mirror.get('1d') or 0)
-            realized_week = float(mirror.get('week') or 0)
-            lifetime_trades = int(mirror.get('trades') or 0)
-            wins = int(mirror.get('wins') or 0)
-            fees = float(mirror.get('fees') or 0)
-            _pnl_src = str(mirror.get('source') or 'db_unified')
-            debug['mirror_rows'] = int(mirror.get('rows_exchange') or 0)
-            debug['mirror_db_rows'] = int(mirror.get('rows_db_extra') or 0)
+        try:
+            eng = await _get_pnl_cached(mode='live')
+        except Exception as _ee:
+            eng = None
+            debug['engine_err'] = str(_ee)
+            print(f'[LIVE] pnl_engine: {_ee}', flush=True)
+        if isinstance(eng, dict) and int(eng.get('trades_counted') or 0) > 0:
+            realized = float(eng.get('total') or eng.get('strategy_realized') or 0)
+            realized_today = float(eng.get('1d') or 0)
+            realized_week = float(eng.get('week') or 0)
+            lifetime_trades = int(eng.get('trades_counted') or 0)
+            # wins not always in engine payload — derive best-effort
+            wins = int(eng.get('wins') or 0)
+            fees = float(eng.get('fees') or 0)
+            _pnl_src = 'pnl_engine_live'
+            debug['engine_eligible'] = eng.get('eligible_n')
+            debug['engine_excluded'] = eng.get('excluded_n')
+            debug['engine_source'] = eng.get('source')
         elif _pe is not None and lc is not None:
             try:
                 _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
@@ -2855,6 +2856,7 @@ async def live_status():
     _result = {
         'connected': connected,
         'demo': False,
+        'account_mode': 'live',
         'equity': round(float(equity or 0), 2),
         'capital': round(float(capital or 0), 2),
         'total_pnl': total_pnl,
@@ -2870,6 +2872,8 @@ async def live_status():
         'win_rate': win_rate,
         'open_positions': positions_out,
         'pnl_source': _pnl_src or ('okx_live' if connected else 'no_connection'),
+        'pnl_epoch': '2026-09-01T00:00:00+00:00',
+        'engine': 'unified_filter_v1',
         'enabled': True,
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
