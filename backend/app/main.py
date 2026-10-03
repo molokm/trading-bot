@@ -1123,7 +1123,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/health/circuit-breaker', '/api/risk/status', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
+PUBLIC_API_PATHS = {'/api/health', '/api/health/circuit-breaker', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
 GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
@@ -3747,6 +3747,35 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
                     await _get_pnl_cached()
                 except Exception as e:
                     print(f'[mode] warm pnl cache: {e}', flush=True)
+                # Warm other caches
+                try:
+                    # Warm positions cache (already done via get_positions above)
+                    pass
+                except Exception as e:
+                    print(f'[mode] warm positions cache: {e}', flush=True)
+                try:
+                    # Warm fills cache
+                    from app.services.okx_client import OKXClient
+                    client = client_manager.get_client() if client_manager else None
+                    if client:
+                        try:
+                            await client.get_fills(limit=50)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f'[mode] warm fills cache: {e}', flush=True)
+                try:
+                    # Warm portfolio cache (positions + balance)
+                    from app.services.okx_client import OKXClient
+                    client = client_manager.get_client() if client_manager else None
+                    if client:
+                        try:
+                            await client.get_positions('SWAP')
+                            await client.get_balance()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f'[mode] warm portfolio cache: {e}', flush=True)
             except Exception as e:
                 print(f'[mode] warm: {e}', flush=True)
         asyncio.create_task(_warm_mode())
