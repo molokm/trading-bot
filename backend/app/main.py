@@ -10,7 +10,6 @@ import faulthandler
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
-from dataclasses import asdict
 _CRASH_LOG = os.path.join(os.environ.get('DATA_DIR', '/tmp'), 'crash_traceback.log')
 try:
     with open(_CRASH_LOG, 'w') as _cf:
@@ -52,22 +51,19 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager, OKXClient
 from app.services.backtest_service import run_backtest_async
 from app.database import db
-from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, get_blacklist, set_blacklist
-from app.services.strategy_manager import StrategyManager, PerUserClientManager, set_hydrate_deps
-from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, STRATEGY_DESC, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, STRATEGY_DESC as IMPULSE_DESC, STRATEGY_NAME as IMPULSE_NAME, STRATEGY_VERSION as IMPULSE_VERSION, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, AI_SCALE_NAME, OrderBookScalpStrategy, ScalpConfig, SCALP_BOT_ID, SCALP_NAME, SCALP_VERSION, SCALP_DESC, compute_book_metrics, VWAPMeanReversion, VWAPScalpConfig, VWAP_BOT_ID, VWAP_NAME, VWAP_VERSION, VWAP_DESC, SmartMoneyTracker, TrackerConfig, OKXCopyAPI, SM_BOT_ID, SM_NAME, SM_VERSION, get_mirror
+from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, set_blacklist
+from app.services.strategy_manager import StrategyManager, set_hydrate_deps
+from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
 from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
-from app.services.ai_agent import llm_status
 from app.services.telegram_notifier import TelegramNotifier
 from app.services import pnl_engine
 from app.services.pnl_engine import PNL_EPOCH_ISO
-from app.services.strategy_cards import BACKTEST_SUMMARY as _BACKTEST_SUMMARY
 from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
-from app.services.equity_tracker import EquityTracker, SNAPSHOT_INTERVAL
-from app.services.risk_guard import get_status as risk_get_status, set_kill_switch, assert_can_open, update_daily_pnl
+from app.services.equity_tracker import EquityTracker
+from app.services.risk_guard import get_status as risk_get_status, set_kill_switch
 from app.services.analysis_logger import DEFAULT_PATH
-from app.services import trade_attribution as trade_attr
+
 from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, release_open
-from app.services.account_context import filter_rows_for_mode
 MOM_BOT_ID = 'momentum_strategy'
 load_dotenv()
 _docs_enabled = os.getenv('ENABLE_DOCS', 'false').lower() in ('1', 'true')
@@ -383,30 +379,16 @@ async def startup():
         print(f'[startup] live mirror creds: source={_lm_source} key={('yes' if _lm_key else 'no')}', flush=True)
         if _lm_key and _lm_secret and _lm_pass:
             try:
-                # Auto-enable mirror after redeploy unless user explicitly disconnected
-                try:
-                    _en = await db.get_setting('live_mirror_enabled') if db else None
-                    _en_l = str(_en or '').strip().lower()
-                    if _en_l in ('0', 'false', 'no', 'off'):
-                        print('[startup] live mirror: keys present but disabled by user — skip auto-start', flush=True)
-                    else:
-                        if _en_l not in ('1', 'true', 'yes', 'on'):
-                            await db.set_setting('live_mirror_enabled', '1')
-                            print('[startup] live mirror: enabled flag set to 1 (auto after redeploy)', flush=True)
-                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
-                        lc_check = live_manager.get_client() if live_manager else None
-                        if lc_check and (not getattr(lc_check, 'demo', True)):
-                            print('[startup] live mirror client ready', flush=True)
-                        else:
-                            live_manager = OKXClientManager.new_instance()
-                            print('[startup] live mirror init rejected (demo=true), cleared', flush=True)
-                except Exception as _en_e:
-                    print(f'[startup] live mirror enable/init: {_en_e}', flush=True)
-                    try:
-                        await live_manager.init_client(_lm_key, _lm_secret, _lm_pass, False)
-                        print('[startup] live mirror client ready (fallback init)', flush=True)
-                    except Exception as e2:
-                        print(f'[startup] live mirror init: {e2}', flush=True)
+                # Strict opt-in: NEVER auto-enable mirror on startup.
+                # User must explicitly press "Подключить LIVE" in UI.
+                _en = await db.get_setting('live_mirror_enabled') if db else None
+                _en_l = str(_en or '').strip().lower()
+                if _en_l in ('0', 'false', 'no', 'off'):
+                    print('[startup] live mirror: disabled by user (enabled=0) — skip', flush=True)
+                else:
+                    # Flag is set but user didn't explicitly disconnect.
+                    # DO NOT auto-enable. Wait for explicit Connect in UI.
+                    print('[startup] live mirror: flag set but not explicitly connected — waiting for user', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror init: {e}', flush=True)
         else:
@@ -708,7 +690,7 @@ async def startup():
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
-                ai_bot = AIStrategy(config=ai_cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+                ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
                     import json as _json
@@ -802,7 +784,7 @@ async def startup():
                 execute=True,
             )
             ai_bot = AIStrategy(
-                config=ai_cfg, client_manager=showcase_manager, db=db,
+                config=ai_cfg, client_manager=client_manager, db=db,
                 notifier=telegram, live_client_manager=live_manager,
             )
             _wire_ai_live_cb(ai_bot)
@@ -824,35 +806,38 @@ async def startup():
         for attempt in range(8):
             await asyncio.sleep(5 if attempt == 0 else 8)
             try:
-                # If keys exist and user never disconnected, ensure enabled=1
+                # Only heal if user explicitly enabled (flag == '1')
                 try:
                     en = await db.get_setting('live_mirror_enabled') if db else None
                     en_l = str(en or '').strip().lower()
-                    if en_l not in ('0', 'false', 'no', 'off'):
-                        k = await db.get_setting('live_mirror_key') if db else None
-                        if not k:
-                            # try encrypted path already loaded
-                            k = _live_key
-                        if k and en_l not in ('1', 'true', 'yes', 'on'):
-                            await db.set_setting('live_mirror_enabled', '1')
-                            print('[startup] live mirror heal: auto-enabled (keys present)', flush=True)
+                    if en_l in ('1', 'true', 'yes', 'on'):
+                        ok = await _ensure_live_mirror_client()
+                        if ok:
+                            if ai_bot:
+                                _wire_ai_live_cb(ai_bot)
+                            print(f'[startup] live mirror heal: OK (attempt {attempt + 1})', flush=True)
+                            break
+                        print(f'[startup] live mirror heal: not ready (attempt {attempt + 1})', flush=True)
+                    else:
+                        print(f'[startup] live mirror heal: disabled by user (enabled={en_l}) — skipping', flush=True)
+                        break
                 except Exception as _fe:
                     print(f'[startup] live mirror heal flag: {_fe}', flush=True)
-                ok = await _ensure_live_mirror_client()
-                if ok:
-                    if ai_bot:
-                        _wire_ai_live_cb(ai_bot)
-                    print(f'[startup] live mirror heal: OK (attempt {attempt + 1})', flush=True)
                     break
-                print(f'[startup] live mirror heal: not ready (attempt {attempt + 1})', flush=True)
             except Exception as e:
                 print(f'[startup] live mirror heal: {e}', flush=True)
         while True:
             await asyncio.sleep(60)
             try:
-                ok = await _ensure_live_mirror_client()
-                if ok and ai_bot:
-                    _wire_ai_live_cb(ai_bot)
+                en = await db.get_setting('live_mirror_enabled') if db else None
+                en_l = str(en or '').strip().lower()
+                if en_l in ('1', 'true', 'yes', 'on'):
+                    ok = await _ensure_live_mirror_client()
+                    if ok and ai_bot:
+                        _wire_ai_live_cb(ai_bot)
+                else:
+                    # Disabled — do not attempt reconnect
+                    pass
             except Exception as e:
                 print(f'[LIVE] heal loop: {e}', flush=True)
 
@@ -1134,7 +1119,7 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
+PUBLIC_API_PATHS = {'/api/health', '/api/health/circuit-breaker', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
 ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
 ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
 GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
@@ -1605,7 +1590,7 @@ async def me_dashboard(request: Request):
             # Prefer dashboard PnL engine (same source as main page) for DEMO totals
             try:
                 # Force demo numbers when showcase is demo-oriented
-                pnl_data = await _compute_pnl()
+                pnl_data = await _get_pnl_cached()
                 if isinstance(pnl_data, dict):
                     mode = str(pnl_data.get('account_mode') or _account_mode() or 'demo').lower()
                     if mode != 'live':
@@ -2412,7 +2397,7 @@ async def ai_start(data: dict=None):
                         print('[AI/start] live mirror init rejected (demo=true), skipping', flush=True)
             except Exception as e:
                 print(f'[AI/start] live mirror DB restore: {e}', flush=True)
-        ai_bot = AIStrategy(config=cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
         _wire_ai_live_cb(ai_bot)
         try:
             import json as _json
@@ -2466,11 +2451,11 @@ async def ai_stop():
 
 @app.get('/api/live/status')
 async def live_status():
-    """Public — returns live mirror connection state + stats (no secrets). Cached 10s."""
+    """Public — returns live mirror connection state + stats (no secrets). Cached 30s."""
     global ai_bot, live_manager
     # Short cache to avoid hammering OKX bills on every 30s frontend poll
     now_s = _time.time()
-    if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 10):
+    if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 30):
         return dict(_live_status_cache['data'])
     global ai_bot, live_manager
     lc = None
@@ -2479,19 +2464,15 @@ async def live_status():
     except Exception:
         lc = None
     # Do not auto-heal if user explicitly disconnected
-    _mirror_on = True
+    _mirror_on = False
     try:
         en = await db.get_setting('live_mirror_enabled') if db else None
-        if str(en or '').strip().lower() in ('0', 'false', 'no', 'off'):
-            _mirror_on = False
+        if str(en or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+            _mirror_on = True
     except Exception:
         pass
-    if _mirror_on and (lc is None or getattr(lc, 'demo', False) or not getattr(lc, 'has_credentials', lambda: False)()):
-        try:
-            await _ensure_live_mirror_client()
-            lc = live_manager.get_client() if live_manager else None
-        except Exception as e:
-            print(f'[LIVE] status ensure: {e}', flush=True)
+    # NO auto-heal: if user didn't explicitly enable, do not try to connect.
+    # User must press "Подключить LIVE" in UI.
     if not _mirror_on:
         lc = None
     connected = lc is not None and not getattr(lc, 'demo', False) and getattr(lc, 'has_credentials', lambda: False)()
@@ -2652,6 +2633,7 @@ async def live_status():
     wins = 0
     fees = 0.0
     capital = 0.0
+    _pnl_src = None
     # MSK day / week bounds for session + week realized
     try:
         from datetime import datetime, timezone, timedelta
@@ -2767,89 +2749,88 @@ async def live_status():
                     'source': 'exchange',
                 })
             debug['positions_n'] = len(positions_out)
-            if ai_bot and hasattr(ai_bot, '_reconcile_live_from_exchange'):
-                try:
-                    await ai_bot._reconcile_live_from_exchange()
-                except Exception as _re:
-                    print(f'[LIVE] reconcile: {_re}', flush=True)
         except Exception as e:
             debug['positions_err'] = str(e)
             print(f'[LIVE] positions: {e}', flush=True)
 
-        # Realized from bills (type=2) — tolerant parse
+        # ── PnL: unified source — SAME rows as /api/stats?mode=live ──────────
+        # 1) DB: exchange_close_trades(live) + trades(<BOT_ID>_live), dedup by ord_id
+        # 2) Fallback (DB has no live closes yet): OKX bills grouped by close ordId
+        #    — full history via _fetch_all_trade_bills (bills + bills-archive), no 600 cap.
+        _pnl_src = None
         try:
-            after = ''
-            seen = set()
-            for _page in range(6):
-                params_try = [
-                    {'instType': 'SWAP', 'type': '2', 'limit': '100'},
-                    {'instType': 'SWAP', 'limit': '100'},
-                ]
-                data = []
-                last_err = None
-                for pr in params_try:
-                    if after:
-                        pr = dict(pr)
-                        pr['after'] = after
-                    try:
-                        resp = await lc._request('GET', '/api/v5/account/bills', params=pr)
-                    except Exception as e:
-                        last_err = str(e)
+            from app.services import pnl_engine as _pe
+        except Exception:
+            _pe = None
+        mirror = None
+        if db and _pe is not None:
+            try:
+                mirror = await _pe.mirror_stats(db, account_mode='live', ai_only=bool(AI_ONLY_MODE))
+            except Exception as _me:
+                debug['mirror_err'] = str(_me)
+                print(f'[LIVE] mirror_stats: {_me}', flush=True)
+        if mirror and int(mirror.get('trades') or 0) > 0:
+            realized = float(mirror.get('total') or 0)
+            realized_today = float(mirror.get('1d') or 0)
+            realized_week = float(mirror.get('week') or 0)
+            lifetime_trades = int(mirror.get('trades') or 0)
+            wins = int(mirror.get('wins') or 0)
+            fees = float(mirror.get('fees') or 0)
+            _pnl_src = str(mirror.get('source') or 'db_unified')
+            debug['mirror_rows'] = int(mirror.get('rows_exchange') or 0)
+            debug['mirror_db_rows'] = int(mirror.get('rows_db_extra') or 0)
+        elif _pe is not None and lc is not None:
+            try:
+                _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
+                _close_by_ord = {}
+                for _b in _bills or []:
+                    if str(_b.get('subType') or '') not in ('5', '6'):
                         continue
-                    if not isinstance(resp, dict):
-                        continue
-                    if resp.get('error'):
-                        last_err = resp.get('message')
-                        continue
-                    if str(resp.get('code', '0')) not in ('0', ''):
-                        last_err = resp.get('msg') or resp.get('message')
-                        continue
-                    data = resp.get('data') or []
-                    break
-                if not data:
-                    if last_err:
-                        debug['bills_err'] = last_err
-                    break
-                for b in data:
-                    bid = str(b.get('billId') or '')
-                    if bid and bid in seen:
-                        continue
-                    if bid:
-                        seen.add(bid)
-                    btype = str(b.get('type') or '')
-                    if btype and btype not in ('2', '1'):
+                    _oid = str(_b.get('ordId') or '').strip()
+                    if not _oid:
                         continue
                     try:
-                        bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
+                        _bp = float(_b.get('pnl') or 0)
                     except (TypeError, ValueError):
-                        bp = 0.0
+                        _bp = 0.0
                     try:
-                        bf = abs(float(b.get('fee') or 0))
+                        _bf = abs(float(_b.get('fee') or 0))
                     except (TypeError, ValueError):
-                        bf = 0.0
-                    fees += bf
-                    # only count rows that moved PnL (closes / funding already filtered by type)
-                    if abs(bp) < 1e-12:
-                        continue
-                    realized += bp
-                    lifetime_trades += 1
-                    if bp > 0:
-                        wins += 1
+                        _bf = 0.0
+                    _row = _close_by_ord.get(_oid)
+                    if _row is None:
+                        _row = _close_by_ord[_oid] = {
+                            'ord_id': _oid,
+                            'inst_id': _b.get('instId') or '',
+                            'cl_ord_id': str(_b.get('clOrdId') or '').strip(),
+                            'pnl': 0.0, 'fee': 0.0, 'close_ts': 0,
+                            'account_mode': 'live', 'account_key': 'live',
+                        }
+                    _row['pnl'] += _bp
+                    _row['fee'] += _bf
                     try:
-                        bts = int(b.get('ts') or 0)
+                        _bts = int(_b.get('ts') or 0)
                     except (TypeError, ValueError):
-                        bts = 0
-                    if bts and _today_ms and bts >= _today_ms:
-                        realized_today += bp
-                    if bts and _week_ms and bts >= _week_ms:
-                        realized_week += bp
-                debug['bills_n'] = len(seen)
-                after = str(data[-1].get('billId') or '')
-                if len(data) < 100 or not after:
-                    break
-        except Exception as e:
-            debug['bills_err'] = str(e)
-            print(f'[LIVE] bills: {e}', flush=True)
+                        _bts = 0
+                    if _bts > int(_row.get('close_ts') or 0):
+                        _row['close_ts'] = _bts
+                    if not _row['cl_ord_id']:
+                        _row['cl_ord_id'] = str(_b.get('clOrdId') or '').strip()
+                _agg = _pe.summarize_close_rows(list(_close_by_ord.values()), ai_only=bool(AI_ONLY_MODE))
+                realized = float(_agg.get('total') or 0)
+                realized_today = float(_agg.get('1d') or 0)
+                realized_week = float(_agg.get('week') or 0)
+                lifetime_trades = int(_agg.get('trades') or 0)
+                wins = int(_agg.get('wins') or 0)
+                fees = float(_agg.get('fees') or 0)
+                _pnl_src = 'okx_live_bills'
+                debug['bills_n'] = len(_bills or [])
+                debug['mirror_close_orders'] = len(_close_by_ord)
+            except Exception as e:
+                debug['bills_err'] = str(e)
+                print(f'[LIVE] bills fallback: {e}', flush=True)
+        if _pnl_src is None:
+            _pnl_src = 'db_unified' if connected else 'no_connection'
 
         if ai_bot is not None:
             try:
@@ -2888,7 +2869,7 @@ async def live_status():
         'lifetime_fees': round(float(fees), 2),
         'win_rate': win_rate,
         'open_positions': positions_out,
-        'pnl_source': 'okx_live',
+        'pnl_source': _pnl_src or ('okx_live' if connected else 'no_connection'),
         'enabled': True,
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
@@ -2983,6 +2964,9 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         try:
             await db.set_setting('live_mirror_capital', str(round(capital, 2)))
             await db.set_setting('live_mirror_enabled', '1')
+            # Watermark: only clone demo positions opened AFTER explicit connect
+            import time as _t
+            await db.set_setting('live_mirror_connected_at', str(int(_t.time())))
             try:
                 await _save_live_creds(key, secret, passphrase)
                 # Also keep plaintext as fallback for when TOKEN_ENCRYPTION_KEY
@@ -3183,7 +3167,7 @@ async def ai_logs(limit: int=200, event: str=None):
             mem = [d for d in mem if (d.get('event') or d.get('action')) == event or d.get('action') == event]
     file_rows = []
     try:
-        from app.services.analysis_logger import DEFAULT_PATH
+
         path = Path(DEFAULT_PATH)
         if path.exists():
             lines = path.read_text(encoding='utf-8', errors='ignore').splitlines()
@@ -3463,6 +3447,24 @@ async def risk_kill(request: Request, data: dict=None):
     await write_audit(request, 'risk.kill_switch', detail=f'enabled={enabled}')
     return {'ok': True, **risk_get_status().to_dict()}
 
+@app.get('/api/health/circuit-breaker')
+async def health_circuit_breaker():
+    """Circuit Breaker state for OKX client (demo and live)."""
+    cb_data = {}
+    try:
+        if client_manager and client_manager._client:
+            cb = client_manager._client._circuit_breaker
+            cb_data['owner'] = cb.stats
+    except Exception as e:
+        cb_data['owner_error'] = str(e)
+    try:
+        if showcase_manager and showcase_manager._client:
+            cb = showcase_manager._client._circuit_breaker
+            cb_data['showcase'] = cb.stats
+    except Exception as e:
+        cb_data['showcase_error'] = str(e)
+    return {'circuit_breakers': cb_data}
+
 async def _load_live_creds_from_db() -> None:
     """Restore LIVE keys: encrypted first, then plaintext live_mirror_* fallback."""
     global _live_key, _live_secret, _live_pass
@@ -3736,6 +3738,40 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
                     await sync_exchange_close_trades()
                 except Exception:
                     pass
+                # Warm PnL cache for the new mode (prevents first-request latency)
+                try:
+                    await _get_pnl_cached()
+                except Exception as e:
+                    print(f'[mode] warm pnl cache: {e}', flush=True)
+                # Warm other caches
+                try:
+                    # Warm positions cache (already done via get_positions above)
+                    pass
+                except Exception as e:
+                    print(f'[mode] warm positions cache: {e}', flush=True)
+                try:
+                    # Warm fills cache
+                    from app.services.okx_client import OKXClient
+                    client = client_manager.get_client() if client_manager else None
+                    if client:
+                        try:
+                            await client.get_fills(limit=50)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f'[mode] warm fills cache: {e}', flush=True)
+                try:
+                    # Warm portfolio cache (positions + balance)
+                    from app.services.okx_client import OKXClient
+                    client = client_manager.get_client() if client_manager else None
+                    if client:
+                        try:
+                            await client.get_positions('SWAP')
+                            await client.get_balance()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f'[mode] warm portfolio cache: {e}', flush=True)
             except Exception as e:
                 print(f'[mode] warm: {e}', flush=True)
         asyncio.create_task(_warm_mode())
@@ -5307,6 +5343,7 @@ async def sync_exchange_close_trades() -> int:
         if clord and (not close_by_ord[oid]['cl_ord_id']):
             close_by_ord[oid]['cl_ord_id'] = clord
     rows = []
+    recovered_labels: list = []
     for oid, info in close_by_ord.items():
         clord = (info['cl_ord_id'] or '').lower()
         bot_label = ''
@@ -5336,7 +5373,7 @@ async def sync_exchange_close_trades() -> int:
                         info['cl_ord_id'] = cid
                         break
             if bot_label:
-                print(f'[exchange-sync] recovered label={bot_label} from entry clOrdId={best_cl} inst={inst}', flush=True)
+                recovered_labels.append((bot_label, inst))
         avg_px = info['px_sum'] / info['px_n'] if info['px_n'] > 0 else 0.0
         close_ts = 0
         if info['ts']:
@@ -5348,6 +5385,14 @@ async def sync_exchange_close_trades() -> int:
             bot_label = ''
         rows.append({'ord_id': oid, 'inst_id': info['inst_id'], 'cl_ord_id': info['cl_ord_id'], 'bot_label': bot_label, 'pnl': round(info['pnl'], 6), 'fee': round(info['fee'], 6), 'sz': round(info['sz'], 6), 'avg_px': round(avg_px, 6), 'close_ts': close_ts, 'sub_type': info['sub_type'], 'account_mode': info.get('account_mode') or _account_mode(), 'account_key': 'showcase' if _account_mode() == 'demo' else 'live'})
     print(f'[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}', flush=True)
+    if recovered_labels:
+        _rc: dict = {}
+        for _label, _inst in recovered_labels:
+            _rc[_label] = _rc.get(_label, 0) + 1
+        print('[exchange-sync] recovered %d labels: %s' % (
+            len(recovered_labels),
+            ', '.join(f'{k}x{v}' for k, v in _rc.items()),
+        ), flush=True)
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)
@@ -5677,13 +5722,12 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
 
 
 @app.get('/api/pnl/summary')
-async def pnl_summary(request: Request=None, mode: str = None):
+async def pnl_summary():
     """Lightweight PnL for dashboard metric cards (cached via get_pnl).
 
     Avoids clients re-implementing aggregation; same TTL as full /api/pnl.
-    Optional ``mode=demo|live`` — same as /api/pnl.
     """
-    full = await get_pnl(request=request, mode=mode)
+    full = await get_pnl()
     return {'total': full.get('total', 0), '1d': full.get('1d', 0), '7d': full.get('7d', 0), '30d': full.get('30d', 0), 'week': full.get('week', 0), 'unrealized': full.get('unrealized', 0), 'funding': full.get('funding', 0), 'funding_scope': full.get('funding_scope', 'account'), 'economic_approx': full.get('economic_approx', 0), 'strategy_realized': full.get('strategy_realized', full.get('total', 0)), 'per_bot': full.get('per_bot', {}), 'active_bots': full.get('active_bots', []), 'source': full.get('source', ''), 'sticky': full.get('sticky', False), 'account_mode': full.get('account_mode'), 'trades_counted': full.get('trades_counted', 0), 'engine': full.get('engine'), 'pnl_epoch': full.get('pnl_epoch'), 'pnl_tz': full.get('pnl_tz') or full.get('timezone'), 'timezone': full.get('timezone'), 'day_basis': full.get('day_basis'), 'cached': True, 'cache_ttl_sec': _PNL_TTL}
 
 def _active_bot_labels() -> set:
@@ -5710,57 +5754,29 @@ def _active_bot_labels() -> set:
     return labels
 
 @app.get('/api/pnl')
-async def get_pnl(request: Request=None, mode: str = None):
-    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only.
-
-    Optional query ``mode=demo|live`` forces account isolation (needed by dual
-    DEMO/LIVE cards on one page). Default = platform _account_mode().
-    """
+async def get_pnl(request: Request=None):
+    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
     global _pnl_cache
-    q = None
-    try:
-        if request is not None:
-            q = (request.query_params.get('mode') or '').strip().lower()
-    except Exception:
-        q = None
-    if mode:
-        q = str(mode).strip().lower()
-    if q in ('demo', 'live'):
-        _mode = q
-    else:
-        _mode = _account_mode()
+    _mode = _account_mode()
     now_s = _time.time()
-    # Support multi-mode cache: dict mode -> {ts, data}
-    cache_bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else None
-    if cache_bag:
-        entry = (cache_bag.get('by_mode') or {}).get(_mode)
-        if entry and (now_s - entry.get('ts', 0) < _PNL_TTL):
-            out = dict(entry['data'])
-            out['account_mode'] = _mode
-            return out
-    elif _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
         out = dict(_pnl_cache['data'])
         out['account_mode'] = _mode
         return out
     async with _pnl_lock:
         now_s = _time.time()
-        cache_bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else None
-        if cache_bag:
-            entry = (cache_bag.get('by_mode') or {}).get(_mode)
-            if entry and (now_s - entry.get('ts', 0) < _PNL_TTL):
-                out = dict(entry['data'])
-                out['account_mode'] = _mode
-                return out
-        elif _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
             out = dict(_pnl_cache['data'])
             out['account_mode'] = _mode
             return out
-        data = await _compute_pnl(mode=_mode)
+        # prev MUST be read before the recompute — it is the previous cached
+        # snapshot the sticky-PnL check compares against.
+        prev = (_pnl_cache or {}).get('data') if (_pnl_cache or {}).get('mode') == _mode else None
+        data = await _compute_pnl()
         if isinstance(data, dict):
             data = dict(data)
             data['account_mode'] = _mode
         try:
-            prev = (_pnl_cache or {}).get('data') if (_pnl_cache or {}).get('mode') == _mode else None
             if isinstance(prev, dict) and isinstance(data, dict):
                 prev_tot = abs(float(prev.get('total') or prev.get('strategy_realized') or 0))
                 new_tot = abs(float(data.get('total') or data.get('strategy_realized') or 0))
@@ -5779,39 +5795,31 @@ async def get_pnl(request: Request=None, mode: str = None):
                     data = kept
         except Exception:
             pass
-        # Multi-mode cache so demo+live cards stay stable on one page
-        bag = _pnl_cache if isinstance(_pnl_cache, dict) and 'by_mode' in _pnl_cache else {'by_mode': {}}
-        if not isinstance(bag.get('by_mode'), dict):
-            bag['by_mode'] = {}
-        bag['by_mode'][_mode] = {'ts': _time.time(), 'data': data}
-        # keep legacy fields for older readers
-        bag['ts'] = _time.time()
-        bag['data'] = data
-        bag['mode'] = _mode
-        _pnl_cache = bag
+        _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
         return dict(data)
 
-async def _compute_pnl(mode: str = None):
+async def _compute_pnl():
     """PnL from unified set T: AI Discretionary closed trades in app DB.
 
     Same filter for dashboard cards, history list, bot KPI, mini app.
     Day/week by Moscow calendar. Unrealized from open exchange positions.
+
+    Pure compute — never touches _pnl_cache (callers own the cache) and never
+    resets the exchange-sync TTL. sync_exchange_close_trades() is already
+    TTL-gated (60s); resetting both here made every single request do a full
+    OKX bills sync + full recompute, and clearing _pnl_cache also wiped the
+    'mode' key the cache readers require — so the cache could never hit.
     """
-    global _pnl_cache, _exchange_sync_ts
+    global _pnl_last_unified
     from app.services.pnl_engine import (
         aggregate_rows,
         epoch_ms as _ep_ms,
         filter_pnl_rows,
         PNL_EPOCH_ISO as _EP_ISO,
     )
-    _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
-    if _mode not in ('demo', 'live'):
-        _mode = _account_mode()
+    _mode = _account_mode()
     _ep = int(_ep_ms())
     try:
-        # Do NOT clear _pnl_cache here — concurrent readers would see empty
-        # mid-compute and the UI would flash 0 / alternate totals.
-        _exchange_sync_ts = 0
         try:
             await sync_exchange_close_trades()
         except Exception as _se:
@@ -5824,7 +5832,11 @@ async def _compute_pnl(mode: str = None):
         except Exception as e:
             print(f'[pnl] db exchange_close_trades: {e}', flush=True)
         try:
-            if db and hasattr(db, 'get_trades'):
+            if db and hasattr(db, 'get_trades_multi_bot'):
+                # live mirror writes closes under <BOT_ID>_live (ai_strategy._live_bot_id)
+                raw.extend(await db.get_trades_multi_bot(
+                    ['ai_strategy', 'ai_strategy_live'], limit=2000, account_mode=_mode) or [])
+            elif db and hasattr(db, 'get_trades'):
                 raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
         except Exception as e:
             print(f'[pnl] db trades: {e}', flush=True)
@@ -5889,12 +5901,19 @@ async def _compute_pnl(mode: str = None):
                 for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:80]
             ],
         }
-        print(
-            f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
-            f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
-            f"excl_pnl={diag.get('excluded_pnl')}",
-            flush=True,
+        _sig = (
+            _mode, total, day, week, n,
+            diag.get('eligible_n'), diag.get('excluded_n'),
+            round(float(diag.get('excluded_pnl') or 0), 2),
         )
+        if _sig != _pnl_last_unified:
+            _pnl_last_unified = _sig
+            print(
+                f"[pnl] UNIFIED mode={_mode} total={total} 1d={day} week={week} n={n} "
+                f"eligible={diag.get('eligible_n')} excluded={diag.get('excluded_n')} "
+                f"excl_pnl={diag.get('excluded_pnl')}",
+                flush=True,
+            )
     except Exception as e:
         print(f'[pnl] unified error: {e}', flush=True)
         import traceback
@@ -5923,13 +5942,32 @@ async def _compute_pnl(mode: str = None):
     except Exception as e:
         print(f'[pnl] unrealized: {e}', flush=True)
         data.setdefault('unrealized', 0.0)
-    try:
-        if isinstance(_pnl_cache, dict):
-            _pnl_cache['data'] = data
-            _pnl_cache['ts'] = _time.time()
-    except Exception:
-        pass
     return data
+
+
+async def _get_pnl_cached() -> dict:
+    """TTL-cached PnL, single-flight. Used by ai/status KPI and the mini-app
+    dashboard; /api/pnl keeps its own sticky-PnL path but reads/writes the
+    same _pnl_cache entry, so all pollers share one recompute."""
+    global _pnl_cache
+    _mode = _account_mode()
+    now_s = _time.time()
+    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+        out = dict(_pnl_cache['data'])
+        out['account_mode'] = _mode
+        return out
+    async with _pnl_lock:
+        now_s = _time.time()
+        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
+            out = dict(_pnl_cache['data'])
+            out['account_mode'] = _mode
+            return out
+        data = await _compute_pnl()
+        if isinstance(data, dict):
+            data = dict(data)
+            data['account_mode'] = _mode
+            _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
+        return data
 
 
 
@@ -6070,13 +6108,8 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
     status = dict(status or {})
     try:
-        # Use cached PnL if fresh, otherwise compute (single-flight)
-        _mode = _account_mode()
-        now_s = _time.time()
-        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-            dash = dict(_pnl_cache['data'])
-        else:
-            dash = await _compute_pnl()
+        # Cached PnL (single-flight, shared with /api/pnl)
+        dash = await _get_pnl_cached()
         per = (dash or {}).get('per_bot') or {}
         mode = str((dash or {}).get('account_mode') or _account_mode()).lower()
         val = float(per.get(bot_label) or 0)
@@ -6217,6 +6250,9 @@ _PAIRED_TTL = 20
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
 _PNL_TTL = 30
+# last printed "[pnl] UNIFIED ..." signature — log only on change (it used to
+# print on every request because the PnL cache never hit)
+_pnl_last_unified: tuple = ()
 
 _live_okx_cache: dict = {'ts': 0.0, 'trades': []}
 _LIVE_OKX_TTL = 60.0

@@ -40,6 +40,8 @@ _BOT_ID_MAP = {
     "ai_strategy": "AI Discretionary 1H",
     "ai_scale_strategy": "",  # retired — do not attribute to AI
     "ai_discretionary": "AI Discretionary 1H",
+    # LIVE mirror engine writes closes under <BOT_ID>_live (see ai_strategy._live_bot_id)
+    "ai_strategy_live": "AI Discretionary 1H",
 }
 
 
@@ -257,23 +259,13 @@ def filter_pnl_rows(
                 pass
             reasons[reason or "other"] = reasons.get(reason or "other", 0) + 1
             continue
-        # Dedupe across exchange_close_trades + trades table (same close, different ids)
-        oid = str(row.get("ord_id") or "").strip()
-        cl = str(row.get("cl_ord_id") or "").strip()
-        inst = str(row.get("inst_id") or "").strip()
-        try:
-            pnl_k = round(float(row.get("pnl") or 0), 4)
-        except (TypeError, ValueError):
-            pnl_k = 0.0
-        ts_k = int(row.get("close_ts") or row.get("ts") or 0) or 0
-        # Prefer ord_id; else composite fingerprint
-        key = oid if oid else f"{cl}|{inst}|{pnl_k}|{ts_k // 60000}"
-        if key and key in seen_oid:
+        oid = str(row.get("ord_id") or "")
+        if oid and oid in seen_oid:
             excluded_n += 1
             reasons["dup_ord"] = reasons.get("dup_ord", 0) + 1
             continue
-        if key:
-            seen_oid.add(key)
+        if oid:
+            seen_oid.add(oid)
         bot = resolve_bot(row, ai_only=ai_only) or "AI Discretionary 1H"
         row["bot"] = bot
         row["bot_label"] = bot
@@ -827,6 +819,33 @@ def aggregate_stats(
     }
 
 
+def _merge_close_rows(
+    exchange_rows: list[dict],
+    db_rows: list[dict],
+) -> tuple[list[dict], int]:
+    """Union of exchange closes + DB closes, deduped by ord_id (synthetic key fallback)."""
+    merged = list(exchange_rows or [])
+    seen: set[str] = set()
+    for r in merged:
+        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
+        if oid:
+            seen.add(oid)
+    extra = 0
+    for r in db_rows or []:
+        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
+        if oid and oid in seen:
+            continue
+        # synthetic key if no ord_id
+        if not oid:
+            oid = f"db-{r.get('bot_label') or r.get('bot_id')}-{r.get('close_ts') or r.get('pnl')}"
+            if oid in seen:
+                continue
+        seen.add(oid)
+        merged.append(r)
+        extra += 1
+    return merged, extra
+
+
 async def compute_stats(
     db,
     *,
@@ -845,43 +864,31 @@ async def compute_stats(
         except Exception as e:
             print(f"[pnl_engine] stats sync: {e}", flush=True)
 
+    mode = (account_mode or "demo").lower()
+    if mode != "live":
+        mode = "demo"
+
     rows = []
     try:
         rows = await db.get_exchange_pnl_timebucket(
-            bot_label=None, account_mode=None, epoch_ms=0,
+            bot_label=None,
+            account_mode=("live" if mode == "live" else None),
+            epoch_ms=0,
         ) or []
     except Exception as e:
         print(f"[pnl_engine] stats load: {e}", flush=True)
 
-    mode = (account_mode or "demo").lower()
     if mode == "live":
-        rows = [r for r in rows if str(r.get("account_mode") or "").lower() == "live"]
+        # SQL already filtered by account_mode; legacy rows without the column
+        # are treated as live (they were only written while in live mode).
+        rows = [r for r in rows if str(r.get("account_mode") or "live").lower() == "live"]
     else:
-        mode = "demo"
-        rows = [r for r in rows if str(r.get("account_mode") or "").lower() in ("", "demo")]
+        rows = [r for r in rows if str(r.get("account_mode") or "demo").lower() in ("", "demo")]
 
     # Always merge DB closes so bot-tagged closes appear immediately
     # (before OKX bills sync), without double-counting by ord_id.
     db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
-    merged = list(rows or [])
-    seen = set()
-    for r in merged:
-        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
-        if oid:
-            seen.add(oid)
-    extra = 0
-    for r in db_rows or []:
-        oid = str(r.get("ord_id") or r.get("ordId") or "").strip()
-        if oid and oid in seen:
-            continue
-        # synthetic key if no ord_id
-        if not oid:
-            oid = f"db-{r.get('bot_label') or r.get('bot_id')}-{r.get('close_ts') or r.get('pnl')}"
-            if oid in seen:
-                continue
-        seen.add(oid)
-        merged.append(r)
-        extra += 1
+    merged, extra = _merge_close_rows(rows, db_rows)
 
     out = aggregate_stats(
         merged, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
@@ -899,4 +906,78 @@ async def compute_stats(
     out["active_bots"] = list(AI_ONLY_LABELS) if ai_only else []
     out["rows_exchange"] = len(rows or [])
     out["rows_db_extra"] = extra
+    return out
+
+
+def summarize_close_rows(
+    rows: list[dict],
+    *,
+    ai_only: bool = True,
+) -> dict:
+    """Aggregate a list of close rows into the KPI block used by the LIVE mirror card."""
+    total = aggregate_stats(rows or [], ai_only=ai_only, period="all")
+    day = aggregate_stats(rows or [], ai_only=ai_only, period="today")
+    week = aggregate_stats(rows or [], ai_only=ai_only, period="week")
+    return {
+        "total": float(total.get("realized_pnl") or 0),
+        "1d": float(day.get("realized_pnl") or 0),
+        "week": float(week.get("realized_pnl") or 0),
+        "trades": int(total.get("trades") or 0),
+        "wins": int(total.get("wins") or 0),
+        "losses": int(total.get("losses") or 0),
+        "win_rate": float(total.get("win_rate") or 0),
+        "fees": float(total.get("fees") or 0),
+    }
+
+
+async def mirror_stats(
+    db,
+    *,
+    account_mode: str = "live",
+    ai_only: bool = True,
+) -> dict:
+    """Unified PnL for the LIVE mirror card — SAME rows/filters as the Stats page.
+
+    Sources (merged, deduped by ord_id):
+      1. exchange_close_trades rows of this account_mode (SQL-filtered)
+      2. closed rows in `trades` (bot_id <BOT_ID>_live …), merged without double-count
+
+    Returns total / 1d / week / trades / wins / win_rate / fees + source/rows debug.
+    Callers should treat source == "empty" as "no DB data" and fall back to OKX bills.
+    """
+    mode = (account_mode or "live").lower()
+    if mode not in ("demo", "live"):
+        mode = "live"
+
+    await ensure_epoch(db)
+    rows: list[dict] = []
+    try:
+        rows = await db.get_exchange_pnl_timebucket(
+            bot_label=None, account_mode=mode, epoch_ms=0,
+        ) or []
+    except Exception as e:
+        print(f"[pnl_engine] mirror load: {e}", flush=True)
+
+    if mode == "live":
+        rows = [r for r in rows if str(r.get("account_mode") or "live").lower() == "live"]
+    else:
+        rows = [r for r in rows if str(r.get("account_mode") or "demo").lower() in ("", "demo")]
+
+    db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
+    merged, extra = _merge_close_rows(rows, db_rows)
+
+    out = summarize_close_rows(merged, ai_only=ai_only)
+    if out["trades"] == 0:
+        out["source"] = "empty"
+    elif extra and rows:
+        out["source"] = "exchange_close_trades+db"
+    elif rows:
+        out["source"] = "exchange_close_trades"
+    else:
+        out["source"] = "db_trades_fallback"
+
+    out["account_mode"] = mode
+    out["rows_exchange"] = len(rows or [])
+    out["rows_db_extra"] = extra
+    out["pnl_epoch"] = PNL_EPOCH_ISO
     return out

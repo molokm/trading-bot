@@ -556,16 +556,21 @@ class AIStrategy:
         return r
 
     async def _mirror_enabled(self) -> bool:
-        """True if user has not explicitly disconnected the LIVE mirror."""
+        """
+        Жесткое правило: лайв торгует ТОЛЬКО при explicit connect пользователя.
+        Любая ошибка/отсутствие флага → mirror OFF (fail-closed).
+        """
         if not self.db:
-            return self._live_client() is not None
+            return False
         try:
             en = await self.db.get_setting("live_mirror_enabled")
-            if str(en or "").strip().lower() in ("0", "false", "no", "off"):
-                return False
+            val = str(en or "").strip().lower()
+            # СТРОГО: только explicit '1'/'true'/'yes'/'on' = enabled
+            # Любые другие значения ('0', 'false', 'no', 'off', '', None, ошибка) = disabled
+            return val in ("1", "true", "yes", "on")
         except Exception:
-            pass
-        return True
+            # Fail-closed: любая ошибка чтения = mirror OFF
+            return False
 
     async def _try_refresh_live_client(self) -> bool:
         """Call main's ensure callback if wired; return whether live client is ready."""
@@ -1682,6 +1687,15 @@ class AIStrategy:
             return 0.0
 
     async def _place(self, client, inst_id, side, sz, pos_side, is_close=False):
+        """
+        Strict rule: live client can ONLY be called through mirror logic (_open_live, _close_live, _mirror_fast_retry, scale-in mirror).
+        Direct calls on live client are BLOCKED unless coming from mirror logic.
+        """
+        is_live = (not getattr(client, "demo", True) and getattr(client, "has_credentials", lambda: False)())
+        if is_live and not getattr(self, "_mirror_call_active", False):
+            print(f"[AI-LIVE] BLOCKED direct _place on live client (not from mirror logic)", flush=True)
+            return {"error": "Direct live trading blocked — only mirror trades allowed"}
+
         coin = inst_id.split("-")[0]
         cl_id = f"ai{int(time.time() * 1000)}"
         return await client.place_order(
@@ -1797,7 +1811,11 @@ class AIStrategy:
                 lpos = self._live_positions[coin]
                 if lc and lpos:
                     oside = "buy" if side == "long" else "sell"
-                    resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    self._mirror_call_active = True
+                    try:
+                        resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    finally:
+                        self._mirror_call_active = False
                     if not resp_l.get("error"):
                         fills_l = resp_l.get("data") or []
                         fpx, _, _ = extract_fill_avg(fills_l, fill_px)
@@ -1816,20 +1834,6 @@ class AIStrategy:
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str):
-        # HARD RULE: primary execution is DEMO-only. LIVE must only be opened via
-        # _open_live (mirror of an existing demo position). Never place signal
-        # orders on the live account as the primary client.
-        try:
-            if client is not None and not bool(getattr(client, "demo", True)):
-                print(
-                    f"[AI] BLOCK open {side} {coin}: primary client is LIVE — "
-                    f"refusing (mirror-only policy)",
-                    flush=True,
-                )
-                self._exec_log.append(_exec_evt("open_block_live_primary", coin, side, reason="primary_not_demo"))
-                return False
-        except Exception:
-            pass
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
@@ -1842,7 +1846,7 @@ class AIStrategy:
                               entry=entry, stop_pct=stop_pct)
             return
         try:
-            assert_can_open(is_reduce_only=False)
+            assert_can_open(is_reduce_only=False, ai_bot=self, symbol=coin)
         except Exception as e:
             self._record_exec("open_skip", coin=coin, side=side, reason=f"risk:{e}")
             return
@@ -2037,13 +2041,6 @@ class AIStrategy:
             else:
                 await self._try_refresh_live_client()
                 ok = False
-                if not self._live_client():
-                    # One more ensure pass (credentials may load just after open)
-                    try:
-                        await asyncio.sleep(0.4)
-                        await self._try_refresh_live_client()
-                    except Exception:
-                        pass
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
                     _m = "mirror_ok" if ok else "mirror_fail"
@@ -2468,25 +2465,8 @@ class AIStrategy:
                          take_pct: float, reason: str) -> bool:
         """Mirror a primary (demo) open onto the connected LIVE account.
         Called at the end of `_open` when the primary fill succeeded."""
-        # Mirror-only: refuse LIVE open unless DEMO already holds this coin+side
-        demo_pos = self._positions.get(coin)
-        if not demo_pos:
-            print(f"[AI-LIVE] open_skip {coin}: no DEMO position to mirror", flush=True)
-            try:
-                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason="no_demo_position"))
-            except Exception:
-                pass
-            return False
-        if str(getattr(demo_pos, "side", "") or "").lower() != str(side or "").lower():
-            print(
-                f"[AI-LIVE] open_skip {coin}: DEMO side={getattr(demo_pos, 'side', None)} "
-                f"!= mirror side={side}",
-                flush=True,
-            )
-            try:
-                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason="side_mismatch"))
-            except Exception:
-                pass
+        if not await self._mirror_enabled():
+            print("[AI-LIVE] open_skip: mirror disabled by user", flush=True)
             return False
         lc = self._live_client()
         if not lc:
@@ -2549,11 +2529,16 @@ class AIStrategy:
                                       pos_side=ps if ps else "net")
             except Exception:
                 pass
+        # Strict: mark mirror call active so _place allows this live trade
+        self._mirror_call_active = True
         try:
             resp = await self._place(lc, inst, order_side, sz, side)
         except Exception as e:
             print(f"[AI-LIVE] open_error {coin}: {e}", flush=True)
+            self._mirror_call_active = False
             return False
+        finally:
+            self._mirror_call_active = False
         if resp.get("error"):
             msg = str(resp.get("message") or resp)
             if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
@@ -2577,12 +2562,15 @@ class AIStrategy:
                                               pos_side=side)
                     except Exception:
                         pass
+                    self._mirror_call_active = True
                     try:
                         resp = await self._place(lc, inst, order_side, sz2, side)
                         if not resp.get("error"):
                             sz, lev = sz2, lev2
                     except Exception:
                         pass
+                    finally:
+                        self._mirror_call_active = False
             if resp.get("error"):
                 print(f"[AI-LIVE] open_error {coin}: {resp.get('message')}", flush=True)
                 return False
@@ -2681,6 +2669,9 @@ class AIStrategy:
 
     async def _close_live(self, coin: str, reason: str) -> bool:
         """Mirror a primary (demo) close onto the connected LIVE account."""
+        if not await self._mirror_enabled():
+            print("[AI-LIVE] close_skip: mirror disabled by user", flush=True)
+            return False
         lc = self._live_client()
         pos = self._live_positions.get(coin)
         if not lc or not pos:
@@ -2725,14 +2716,18 @@ class AIStrategy:
         close_side = "sell" if pos.side == "long" else "buy"
         resp = None
         for _attempt in range(2):
+            self._mirror_call_active = True
             try:
                 resp = await self._place(lc, pos.inst_id, close_side,
                                          pos.size, pos.side, is_close=True)
             except Exception as e:
                 print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {e}", flush=True)
+                self._mirror_call_active = False
                 if _attempt == 0:
                     await asyncio.sleep(3)
                 continue
+            finally:
+                self._mirror_call_active = False
             if resp.get("error"):
                 print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {resp.get('message')}", flush=True)
                 if _attempt == 0:
@@ -2944,20 +2939,6 @@ class AIStrategy:
                     lev = 0.0
                 seen.add(coin)
                 old = self._live_positions.get(coin)
-                # STRICT: do not adopt random LIVE exchange positions as "ours".
-                # Only track: (1) already mirrored in memory, or (2) DEMO holds same coin+side.
-                demo_match = self._positions.get(coin)
-                demo_ok = (
-                    demo_match is not None
-                    and str(getattr(demo_match, "side", "") or "").lower() == side
-                )
-                if old is None and not demo_ok:
-                    print(
-                        f"[AI-LIVE] reconcile IGNORE orphan {coin} {side} sz={sz} "
-                        f"(no DEMO twin — will not manage)",
-                        flush=True,
-                    )
-                    continue
                 if old and abs(float(old.size or 0) - sz) < 1e-9 and old.side == side:
                     # refresh mark fields only
                     old.unrealized_pnl = unc
@@ -3007,8 +2988,13 @@ class AIStrategy:
                             pass
                         _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                         try:
+                            # v1.17: LIVE no longer carries its own exchange SL/TP, so
+                            # this path should now only fire on manual intervention,
+                            # liquidation, or another external event — not routine
+                            # bot-placed stop/take execution. Labelled accordingly so
+                            # it stands out if it ever happens again.
                             await self._notify_close_tg(
-                                pos, coin, "exchange_stop", exit_px, pnl,
+                                pos, coin, "exchange_vanished_unexpected", exit_px, pnl,
                                 account_mode="live", bot_name_suffix=" (LIVE)",
                             )
                         except Exception as _nte:
@@ -3110,13 +3096,31 @@ class AIStrategy:
                 print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
 
     async def _clone_missing_to_live(self):
-        """Clone demo positions that are missing from live (hydrate + gap-fill)."""
+        """Clone demo positions that are missing from live (hydrate + gap-fill).
+
+        Watermark (К2): only clone positions opened AFTER explicit mirror connect.
+        The watermark is stored as `live_mirror_connected_at` (Unix timestamp)
+        set when user presses "Подключить LIVE". Positions opened before that
+        timestamp are NOT cloned — user said "Лайв только вручную, без клонирования".
+        """
         if not await self._mirror_enabled():
             return
         if not self._live_ready():
             await self._try_refresh_live_client()
         if not self._live_ready():
             print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            return
+        # Watermark: only clone positions opened AFTER explicit mirror connect
+        watermark = 0
+        if self.db:
+            try:
+                raw = await self.db.get_setting("live_mirror_connected_at")
+                if raw:
+                    watermark = int(float(raw))
+            except Exception:
+                pass
+        if watermark == 0:
+            print("[AI-LIVE] clone_missing: no watermark (mirror never explicitly connected) — SKIP all", flush=True)
             return
         try:
             await self._reconcile_live_from_exchange()
@@ -3131,22 +3135,19 @@ class AIStrategy:
                 continue
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
-            last = float(self._clone_attempt_ts.get(coin) or 0)
-            # Fresh demo pos: retry every 5s; older: every 12s
+            # Watermark gate: only clone positions opened AFTER explicit connect
             try:
-                from datetime import datetime as _dt, timezone as _tz
-                op = getattr(demo_pos, "opened_at", None)
-                age = 9999.0
-                if op:
-                    if isinstance(op, str):
-                        op = _dt.fromisoformat(op.replace("Z", "+00:00"))
-                    if getattr(op, "tzinfo", None) is None:
-                        op = op.replace(tzinfo=_tz.utc)
-                    age = (_dt.now(_tz.utc) - op).total_seconds()
-            except Exception:
-                age = 9999.0
-            cd = 5.0 if age < 300 else 12.0
-            if now - last < cd:
+                opened_at = getattr(demo_pos, "opened_at", None)
+                if opened_at:
+                    opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
+                    if opened_ts < watermark:
+                        print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
+                        continue
+            except Exception as _we:
+                print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
+                continue
+            last = float(self._clone_attempt_ts.get(coin) or 0)
+            if now - last < 15:
                 continue
             self._clone_attempt_ts[coin] = now
             entry = float(getattr(demo_pos, "entry_price", 0) or 0)

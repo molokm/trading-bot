@@ -660,7 +660,7 @@ class Database:
         Unlike get_exchange_pnl (pre-aggregated), this returns individual rows
         so the caller can bucket by 1d/7d/30d/week using close_ts."""
         sql = """
-            SELECT ord_id, inst_id, bot_label, cl_ord_id, pnl, fee, close_ts
+            SELECT ord_id, inst_id, bot_label, cl_ord_id, pnl, fee, close_ts, account_mode
             FROM exchange_close_trades WHERE 1=1
         """
         params: tuple = ()

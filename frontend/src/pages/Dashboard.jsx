@@ -261,11 +261,9 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
-  const [livePnl, setLivePnl] = useState(null)
   // Drop PnL + trade log when switching Demo ↔ Live — never mix modes
   useEffect(() => {
     setPnl(null)
-    setLivePnl(null)
     setTradeLog([])
     setPositions([])
   }, [demoMode])
@@ -397,11 +395,10 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [trades, liveTr, pnlData, livePnlData] = await Promise.all([
+      const [trades, liveTr, pnlData] = await Promise.all([
         api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
-        api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
-        api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
+        api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
       ])
       const demoRows = trades?.trades || []
       const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
@@ -424,73 +421,45 @@ export default function Dashboard({ health, connected, isGuest }) {
       }
       setTradeLog([...byKey.values()])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        // Accept pnl_engine / app_closed_trades / exchange — never bot-status seeds
+        // ONLY accept pnl_engine payloads — never bot-status seeds
         const src = String(pnlData.source || '')
-        const okSrc = (
-          src.startsWith('exchange')
-          || src.startsWith('db_trades')
-          || src === 'app_closed_trades'
-          || src === 'error'
-          || !!pnlData.engine
-          || !!pnlData.pnl_epoch
-        )
-        if (okSrc) {
-          const gotMode = String(pnlData.account_mode || 'demo').toLowerCase()
-          // Dual dashboard: demo totals always applied to `pnl` state (left side of cards)
-          // Live half comes from liveStatus — do not reject demo payload when UI mode differs
-          setPnl(prev => {
-            const newTot = Math.abs(Number(pnlData.total ?? 0))
-            const oldTot = Math.abs(Number(prev?.total ?? 0))
-            const newSrc = String(pnlData.source || '')
-            // Sticky: never flash 0 over a real total on transient errors
-            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none' || newSrc === '')) {
-              return prev
-            }
-            return { ...pnlData, account_mode: gotMode || 'demo' }
-          })
+        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
+        if (okSrc || pnlData.pnl_epoch) {
+          const wantMode = demoMode ? 'demo' : 'live'
+          const gotMode = String(pnlData.account_mode || '').toLowerCase()
+          // Ignore payload from the other account mode
+          if (gotMode && gotMode !== wantMode) {
+            console.warn('[pnl] ignore mismatched mode', gotMode, 'want', wantMode)
+          } else {
+            setPnl(prev => {
+              const newTot = Math.abs(Number(pnlData.total ?? 0))
+              const oldTot = Math.abs(Number(prev?.total ?? 0))
+              const newSrc = String(pnlData.source || '')
+              const prevMode = String(prev?.account_mode || '').toLowerCase()
+              // Zero on purpose when live has no closes — do not keep demo total
+              if (prevMode && prevMode !== wantMode) {
+                return { ...pnlData, account_mode: gotMode || wantMode }
+              }
+              if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none')) {
+                return prev
+              }
+              return { ...pnlData, account_mode: gotMode || wantMode }
+            })
+          }
         }
       } else if (health?.sm_diag && (health.sm_diag.pnl_total != null || health.sm_diag.pnl_per_bot)) {
         const sd = health.sm_diag
-        setPnl(prev => {
-          // Never overwrite a real /api/pnl payload with health fallback
-          if (prev && prev.source && !['health_fallback', 'error', 'none', ''].includes(String(prev.source))) {
-            return prev
-          }
-          return {
-            total: Number(sd.pnl_total ?? 0),
-            '1d': Number(sd.pnl_1d ?? 0),
-            week: Number(sd.pnl_week ?? 0),
-            '7d': Number(sd.pnl_week ?? 0),
-            '30d': Number(sd.pnl_total ?? 0),
-            unrealized: Number(sd.pnl_unrealized ?? 0),
-            per_bot: sd.pnl_per_bot || {},
-            per_bot_all: sd.pnl_per_bot || {},
-            source: sd.pnl_source || 'health_fallback',
-          }
+        setPnl({
+          total: Number(sd.pnl_total ?? 0),
+          '1d': Number(sd.pnl_1d ?? 0),
+          week: Number(sd.pnl_week ?? 0),
+          '7d': Number(sd.pnl_week ?? 0),
+          '30d': Number(sd.pnl_total ?? 0),
+          unrealized: Number(sd.pnl_unrealized ?? 0),
+          per_bot: sd.pnl_per_bot || {},
+          per_bot_all: sd.pnl_per_bot || {},
+          source: sd.pnl_source || 'health_fallback',
         })
-      }
-      // LIVE PnL from same engine (?mode=live) — independent of liveStatus bills noise
-      if (livePnlData && !livePnlData.detail && (livePnlData.total != null || livePnlData['1d'] != null || livePnlData.per_bot)) {
-        const srcL = String(livePnlData.source || '')
-        const okLive = (
-          srcL.startsWith('exchange')
-          || srcL.startsWith('db_trades')
-          || srcL === 'app_closed_trades'
-          || srcL === 'error'
-          || !!livePnlData.engine
-          || !!livePnlData.pnl_epoch
-        )
-        if (okLive) {
-          setLivePnl(prev => {
-            const newTot = Math.abs(Number(livePnlData.total ?? 0))
-            const oldTot = Math.abs(Number(prev?.total ?? 0))
-            const newSrc = String(livePnlData.source || '')
-            if (prev && oldTot > 0.01 && newTot < 0.01 && (newSrc === 'error' || newSrc === 'none' || newSrc === '')) {
-              return prev
-            }
-            return { ...livePnlData, account_mode: 'live' }
-          })
-        }
       }
       setDataFreshAt(Date.now())
     } catch {}
@@ -635,10 +604,12 @@ export default function Dashboard({ health, connected, isGuest }) {
   }
   // ── Single source: /api/pnl (pnl_engine, epoch 2026-09-01) ──
   const wantPnlMode = demoMode ? 'demo' : 'live'
-  // Dual DEMO/LIVE page: left metrics are always DEMO aggregate from /api/pnl?mode=demo
   const pnlModeOk = (() => {
     const m = String(pnl?.account_mode || '').toLowerCase()
-    return !m || m === 'demo' || !!pnl?.engine || String(pnl?.source || '').includes('closed')
+    // Live: require explicit live — missing mode = treat as not ready (show 0)
+    if (!demoMode) return m === 'live'
+    // Demo: demo or untagged legacy payload
+    return !m || m === 'demo'
   })()
 
   // DEMO total from the SAME closed trades shown on the dashboard (authoritative for UI).
@@ -675,30 +646,33 @@ export default function Dashboard({ health, connected, isGuest }) {
     return { total: Math.round(s * 100) / 100, n }
   })()
 
-  // Single source of truth: /api/pnl (backend pnl_engine). Do NOT re-sum tradeLog —
-  // that list loads async, can double-count, and makes Total PnL jump on every poll.
   const discPnlResolved = (() => {
-    if (!pnlModeOk) return 0
-    if (pnl?.per_bot?.['AI Discretionary 1H'] != null) {
-      return Number(pnl.per_bot['AI Discretionary 1H'])
+    const src = String(pnl?.source || '')
+    if (pnlModeOk && pnl?.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
+      return Number(pnl.per_bot?.['AI Discretionary 1H'] ?? pnl.total ?? 0)
     }
-    if (pnl?.total != null && Number.isFinite(Number(pnl.total))) return Number(pnl.total)
-    return 0
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
+    return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
   })()
   const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
-    if (pnl?.trades_counted != null) return Number(pnl.trades_counted)
-    if (!demoMode) return Number(aiStatus?.lifetime_trades ?? 0)
-    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0)
+    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
+    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
   })()
   const pnlTotal = (() => {
     if (!pnlModeOk) return 0
-    // Always prefer server aggregate (app_closed_trades / okx_bills / exchange)
-    if (pnl && pnl.total != null && Number.isFinite(Number(pnl.total))) {
+    // Prefer direct OKX bills / exchange engine — authoritative since 01.09.2026
+    const src = String(pnl?.source || '')
+    if (pnl && pnl.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
       return Number(pnl.total)
     }
-    return discPnlResolved
+    if (demoMode && demoRealizedFromTrades.n > 0) {
+      return demoRealizedFromTrades.total
+    }
+    if (AI_ONLY_MODE) return discPnlResolved
+    if (pnl && pnl.total != null) return Number(pnl.total)
+    return discPnlResolved + scalePnlResolved
   })()
   const pnlDay = (() => {
     if (!pnlModeOk) return 0
@@ -742,7 +716,9 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      const v = Number(per['AI Discretionary 1H'] ?? pnl?.total ?? 0)
+      const v = (demoMode && demoRealizedFromTrades.n > 0)
+        ? demoRealizedFromTrades.total
+        : Number(per['AI Discretionary 1H'] ?? 0)
       rows.push({ name: 'AI Discretionary 1H', val: v })
       return rows
     }
@@ -776,13 +752,12 @@ export default function Dashboard({ health, connected, isGuest }) {
   }, [pnl, validationStatus?.total_pnl])
 
   const aiCardPnl = useMemo(() => {
+    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     const per = pnl?.per_bot || {}
     if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
     if (per.ai_strategy != null) return Number(per.ai_strategy)
-    if (pnl?.total != null && Number.isFinite(Number(pnl.total))) return Number(pnl.total)
-    // last resort only — never preferred over /api/pnl
     return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
+  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl, demoMode, demoRealizedFromTrades])
 
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.
@@ -1169,16 +1144,9 @@ export default function Dashboard({ health, connected, isGuest }) {
   // LIVE numbers for dual DEMO/LIVE metric display
   const liveConnected = !!(liveStatus?.connected)
   const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
-  // Prefer stable /api/pnl?mode=live; fall back to liveStatus only if engine not loaded yet
-  const liveToday = (livePnl && livePnl['1d'] != null)
-    ? Number(livePnl['1d'])
-    : Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
-  const liveWeek = (livePnl && livePnl.week != null)
-    ? Number(livePnl.week)
-    : Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
-  const liveTotal = (livePnl && livePnl.total != null)
-    ? Number(livePnl.total)
-    : Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
+  const liveToday = Number(liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0)
+  const liveWeek = Number(liveStatus?.week ?? liveStatus?.pnl_week ?? 0)
+  const liveTotal = Number(liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0)
   const liveEquity = Number(liveStatus?.equity ?? 0)
 
   const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
@@ -1669,8 +1637,8 @@ export default function Dashboard({ health, connected, isGuest }) {
                 <div className="grid grid-cols-4 gap-1.5">
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
                     <div className="text-[var(--txt-muted)]">PnL</div>
-                    <div className={`mono font-semibold ${liveTotal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-                      {liveTotal >= 0 ? '+' : ''}{Number(liveTotal || 0).toFixed(2)}
+                    <div className={`mono font-semibold ${(liveStatus?.total_pnl ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {(liveStatus?.total_pnl ?? 0) >= 0 ? '+' : ''}{Number(liveStatus?.total_pnl ?? 0).toFixed(2)}
                     </div>
                   </div>
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
