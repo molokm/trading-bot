@@ -560,6 +560,7 @@ function BotCard({
 export default function BotsPage({ connected, isGuest }) {
   const { t } = useTranslation()
   const [aiStatus, setAiStatus] = useState(null)
+  const [demoPnl, setDemoPnl] = useState(null)
   const [aiLoading, setAiLoading] = useState(false)
   const [liveStatus, setLiveStatus] = useState(null)
   const [liveLoading, setLiveLoading] = useState(false)
@@ -579,12 +580,17 @@ export default function BotsPage({ connected, isGuest }) {
   const [confirmStopAll, setConfirmStopAll] = useState(false)
 
   const refreshStatus = useCallback(async () => {
-    const [a, ls] = await Promise.all([
+    const [a, ls, pnl] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
+      // Same engine as dashboard Sum PnL (DEMO since 2026-09-01)
+      api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
     ])
     if (a) setAiStatus(a)
     if (ls) setLiveStatus(ls)
+    if (pnl && !pnl.detail && (pnl.total != null || pnl.per_bot)) {
+      setDemoPnl(pnl)
+    }
     setApiAlive(!!a)
   }, [])
 
@@ -714,10 +720,22 @@ const aiRunning = !!aiStatus?.running
             aiStatus?.execute ? 'execute' : 'signals',
           ]}
           tagline={coins.join(' · ')}
-          pnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
-          trades={aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
-          winRate={aiStatus?.win_rate}
-          sparklinePnl={aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0}
+          pnl={(
+            demoPnl?.per_bot?.['AI Discretionary 1H']
+            ?? demoPnl?.total
+            ?? aiStatus?.lifetime_pnl
+            ?? aiStatus?.total_pnl
+            ?? 0
+          )}
+          trades={demoPnl?.trades_counted ?? aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0}
+          winRate={demoPnl?.win_rate ?? aiStatus?.win_rate}
+          sparklinePnl={(
+            demoPnl?.per_bot?.['AI Discretionary 1H']
+            ?? demoPnl?.total
+            ?? aiStatus?.lifetime_pnl
+            ?? aiStatus?.total_pnl
+            ?? 0
+          )}
           startedAt={aiRunning ? aiStartedAt : null}
           openPositions={aiStatus?.open_positions || []}
           managed={aiStatus?.running}

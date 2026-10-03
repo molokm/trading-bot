@@ -751,13 +751,14 @@ export default function Dashboard({ health, connected, isGuest }) {
     return Number(validationStatus?.total_pnl ?? 0)
   }, [pnl, validationStatus?.total_pnl])
 
+  // Same source as dashboard Sum PnL: /api/pnl engine (epoch 2026-09-01), NOT lifetime_pnl
   const aiCardPnl = useMemo(() => {
-    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
     const per = pnl?.per_bot || {}
     if (per['AI Discretionary 1H'] != null) return Number(per['AI Discretionary 1H'])
     if (per.ai_strategy != null) return Number(per.ai_strategy)
+    if (pnl?.total != null && pnlModeOk) return Number(pnl.total)
     return Number(aiStatus?.lifetime_pnl ?? aiStatus?.total_pnl ?? 0)
-  }, [pnl, aiStatus?.lifetime_pnl, aiStatus?.total_pnl, demoMode, demoRealizedFromTrades])
+  }, [pnl, pnlModeOk, aiStatus?.lifetime_pnl, aiStatus?.total_pnl])
 
     // Closed trades for the card: OKX-paired log only (no in-memory bot log merges).
   // Local momentumTrades previously injected phantom closes not on OKX / History.

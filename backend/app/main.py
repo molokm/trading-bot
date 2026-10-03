@@ -5722,12 +5722,12 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
 
 
 @app.get('/api/pnl/summary')
-async def pnl_summary():
+async def pnl_summary(request: Request=None, mode: str = None):
     """Lightweight PnL for dashboard metric cards (cached via get_pnl).
 
-    Avoids clients re-implementing aggregation; same TTL as full /api/pnl.
+    Optional mode=demo|live — same isolation as /api/pnl.
     """
-    full = await get_pnl()
+    full = await get_pnl(request=request, mode=mode)
     return {'total': full.get('total', 0), '1d': full.get('1d', 0), '7d': full.get('7d', 0), '30d': full.get('30d', 0), 'week': full.get('week', 0), 'unrealized': full.get('unrealized', 0), 'funding': full.get('funding', 0), 'funding_scope': full.get('funding_scope', 'account'), 'economic_approx': full.get('economic_approx', 0), 'strategy_realized': full.get('strategy_realized', full.get('total', 0)), 'per_bot': full.get('per_bot', {}), 'active_bots': full.get('active_bots', []), 'source': full.get('source', ''), 'sticky': full.get('sticky', False), 'account_mode': full.get('account_mode'), 'trades_counted': full.get('trades_counted', 0), 'engine': full.get('engine'), 'pnl_epoch': full.get('pnl_epoch'), 'pnl_tz': full.get('pnl_tz') or full.get('timezone'), 'timezone': full.get('timezone'), 'day_basis': full.get('day_basis'), 'cached': True, 'cache_ttl_sec': _PNL_TTL}
 
 def _active_bot_labels() -> set:
@@ -5754,61 +5754,28 @@ def _active_bot_labels() -> set:
     return labels
 
 @app.get('/api/pnl')
-async def get_pnl(request: Request=None):
-    """Cached dashboard PnL (single-flight). Prefer /api/pnl/summary for cards-only."""
-    global _pnl_cache
-    _mode = _account_mode()
-    now_s = _time.time()
-    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-        out = dict(_pnl_cache['data'])
-        out['account_mode'] = _mode
-        return out
-    async with _pnl_lock:
-        now_s = _time.time()
-        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-            out = dict(_pnl_cache['data'])
-            out['account_mode'] = _mode
-            return out
-        # prev MUST be read before the recompute — it is the previous cached
-        # snapshot the sticky-PnL check compares against.
-        prev = (_pnl_cache or {}).get('data') if (_pnl_cache or {}).get('mode') == _mode else None
-        data = await _compute_pnl()
-        if isinstance(data, dict):
-            data = dict(data)
-            data['account_mode'] = _mode
-        try:
-            if isinstance(prev, dict) and isinstance(data, dict):
-                prev_tot = abs(float(prev.get('total') or prev.get('strategy_realized') or 0))
-                new_tot = abs(float(data.get('total') or data.get('strategy_realized') or 0))
-                src = str(data.get('source') or '')
-                if prev_tot > 0.01 and new_tot < 0.01 and (src in ('none', 'epoch_empty', '', 'error')):
-                    kept = dict(prev)
-                    kept['account_mode'] = _mode
-                    kept['sticky'] = True
-                    kept['sticky_from'] = src or 'empty'
-                    kept['1d'] = data.get('1d', 0)
-                    kept['week'] = data.get('week', 0)
-                    kept['7d'] = data.get('7d', data.get('7d_rolling', 0))
-                    kept['7d_rolling'] = data.get('7d_rolling', kept.get('7d'))
-                    kept['week_start'] = data.get('week_start')
-                    kept['week_basis'] = data.get('week_basis') or 'calendar_week_pnl_tz_monday'
-                    data = kept
-        except Exception:
-            pass
-        _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
-        return dict(data)
+async def get_pnl(request: Request=None, mode: str = None):
+    """Cached dashboard PnL. Optional mode=demo|live for dual DEMO/LIVE cards."""
+    q = None
+    try:
+        if request is not None:
+            q = (request.query_params.get('mode') or '').strip().lower()
+    except Exception:
+        q = None
+    if mode:
+        q = str(mode).strip().lower()
+    if q not in ('demo', 'live'):
+        q = None
+    data = await _get_pnl_cached(mode=q)
+    return dict(data) if isinstance(data, dict) else data
 
-async def _compute_pnl():
+
+async def _compute_pnl(mode: str = None):
     """PnL from unified set T: AI Discretionary closed trades in app DB.
 
     Same filter for dashboard cards, history list, bot KPI, mini app.
     Day/week by Moscow calendar. Unrealized from open exchange positions.
-
-    Pure compute — never touches _pnl_cache (callers own the cache) and never
-    resets the exchange-sync TTL. sync_exchange_close_trades() is already
-    TTL-gated (60s); resetting both here made every single request do a full
-    OKX bills sync + full recompute, and clearing _pnl_cache also wiped the
-    'mode' key the cache readers require — so the cache could never hit.
+    mode=demo|live forces account isolation (dual cards on one page).
     """
     global _pnl_last_unified
     from app.services.pnl_engine import (
@@ -5817,7 +5784,9 @@ async def _compute_pnl():
         filter_pnl_rows,
         PNL_EPOCH_ISO as _EP_ISO,
     )
-    _mode = _account_mode()
+    _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
+    if _mode not in ('demo', 'live'):
+        _mode = _account_mode()
     _ep = int(_ep_ms())
     try:
         try:
@@ -6108,11 +6077,12 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
     status = dict(status or {})
     try:
-        # Cached PnL (single-flight, shared with /api/pnl)
-        dash = await _get_pnl_cached()
+        # DEMO showcase PnL — same as dashboard left cards (/api/pnl?mode=demo)
+        # AI bot card must NOT flip to LIVE totals when platform mode switches.
+        dash = await _get_pnl_cached(mode='demo')
         per = (dash or {}).get('per_bot') or {}
-        mode = str((dash or {}).get('account_mode') or _account_mode()).lower()
-        val = float(per.get(bot_label) or 0)
+        mode = 'demo'
+        val = float(per.get(bot_label) or (dash or {}).get('total') or 0)
         status['total_pnl'] = round(val, 2)
         status['lifetime_pnl'] = round(val, 2)
         status['total_pnl_source'] = 'pnl_engine'
