@@ -3022,7 +3022,7 @@ class AIStrategy:
 
 
     async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
-        """Gate a *delayed* LIVE mirror open (fast-retry / gap-fill) — v1.17.
+        """Gate a *delayed* LIVE mirror open (fast-retry / gap-fill) — v1.17+.
 
         IMPORTANT: this is a mirror, not a second opinion. The trade was
         already decided once, when it opened on demo. This function must NOT
@@ -3030,10 +3030,14 @@ class AIStrategy:
         permanently skip mirroring demo positions whenever the AI/quant gate's
         opinion drifted during the retry window — a real demo/live desync bug,
         since nothing else ever retried after a skip here).
-        The only thing this still checks is whether the price has run away so
-        far from the demo entry that opening LIVE here would be a structurally
-        different (not just delayed) trade. Immediate mirror (same tick as
-        demo fill) skips this entirely, same as before.
+
+        The gates here are SOFTER than initial entry:
+        - align threshold slightly lower (was -0.05, now -0.03)
+        - ADX gate with same soft-bypass as open path
+        - Regime clash check (avoid long in clear bear / short in clear bull)
+        - Price ran away guard (kept from v1.17: >1.2% adverse move)
+
+        Immediate mirror (same tick as demo fill) skips this entirely.
         """
         side = (side or "").lower()
         if side not in ("long", "short"):
@@ -3045,6 +3049,34 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
         ind = self._latest_indicators.get(coin) or {}
+
+        # --- AI/Quant gates (softer than initial entry) ---
+        if ind:
+            al = float(ind.get("align_long") or 0)
+            ash = float(ind.get("align_short") or 0)
+            adx = float(ind.get("adx") or 0)
+            min_align = float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+            # Slightly softer for mirror revalidate (already had a demo signal)
+            min_align = max(0.45, min_align - 0.03)
+            align = al if side == "long" else ash
+            if align < min_align - 1e-9:
+                return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
+            # ADX gate with same soft-bypass as open path
+            best = max(al, ash)
+            try:
+                if self._adx_blocks_open(adx, best):
+                    return False, f"adx_block:{adx:.1f}"
+            except Exception:
+                pass
+            # Regime clash: don't open long in clear bear / short in clear bull
+            reg = str(ind.get("regime") or "").lower()
+            if side == "long" and reg in ("bear", "bearish", "down"):
+                if al < min_align + 0.05:
+                    return False, f"regime_bear_vs_long:{reg}"
+            if side == "short" and reg in ("bull", "bullish", "up"):
+                if ash < min_align + 0.05:
+                    return False, f"regime_bull_vs_short:{reg}"
+
         # Price still near demo entry? (avoid chasing >1.2% adverse move — this
         # is the one guard kept: beyond this, LIVE would carry meaningfully
         # more risk than demo did at entry, not just a few seconds' delay)
@@ -3060,7 +3092,7 @@ class AIStrategy:
                     return False, f"price_ran_away_short:{move:.3%}"
         except Exception:
             pass
-        return True, "ok_mirror_no_relitigation"
+        return True, "ok_mirror_revalidated"
 
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
                                   take_pct: float, reason: str) -> None:
