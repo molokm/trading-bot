@@ -3724,6 +3724,11 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
                     await sync_exchange_close_trades()
                 except Exception:
                     pass
+                # Warm PnL cache for the new mode (prevents first-request latency)
+                try:
+                    await _get_pnl_cached()
+                except Exception as e:
+                    print(f'[mode] warm pnl cache: {e}', flush=True)
             except Exception as e:
                 print(f'[mode] warm: {e}', flush=True)
         asyncio.create_task(_warm_mode())
