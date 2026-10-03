@@ -398,7 +398,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       const [trades, liveTr, pnlData] = await Promise.all([
         api.getPairedTrades(500).catch(() => null),
         api.liveTrades().catch(() => null),
-        api.getPnlSummary().catch(() => api.getPnl()).catch(() => null),
+        api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
       ])
       const demoRows = trades?.trades || []
       const liveRows = (liveTr?.trades || liveTr || []).map(t => ({

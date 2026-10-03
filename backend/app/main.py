@@ -5797,7 +5797,8 @@ async def _compute_pnl(mode: str = None):
         raw: list = []
         try:
             if db and hasattr(db, 'get_exchange_close_trades_detail'):
-                raw.extend(await db.get_exchange_close_trades_detail(epoch_ms=_ep, limit=2000) or [])
+                raw.extend(await db.get_exchange_close_trades_detail(
+                    epoch_ms=_ep, limit=2000, account_mode=_mode) or [])
         except Exception as e:
             print(f'[pnl] db exchange_close_trades: {e}', flush=True)
         try:

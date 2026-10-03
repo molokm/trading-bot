@@ -706,7 +706,7 @@ class Database:
         row = await self._fetchone(sql, params)
         return int(row["cnt"]) if row else 0
 
-    async def get_exchange_close_trades_detail(self, bot_label: str = None, epoch_ms: int = 0, limit: int = 500) -> list[dict]:
+    async def get_exchange_close_trades_detail(self, bot_label: str = None, epoch_ms: int = 0, limit: int = 500, account_mode: str = None) -> list[dict]:
         """Get individual close trades from exchange_close_trades."""
         sql = "SELECT * FROM exchange_close_trades WHERE 1=1"
         params = ()
@@ -717,6 +717,13 @@ class Database:
             else:
                 sql += " AND bot_label = ?"
                 params += (bot_label,)
+        if account_mode in ("demo", "live"):
+            if self._pg_mode:
+                sql += f" AND account_mode = ${len(params)+1}"
+                params += (account_mode,)
+            else:
+                sql += " AND account_mode = ?"
+                params += (account_mode,)
         if epoch_ms:
             if self._pg_mode:
                 sql += f" AND close_ts >= ${len(params)+1}"
