@@ -624,39 +624,6 @@ export default function Dashboard({ health, connected, isGuest }) {
     return !m || m === 'demo'
   })()
 
-  // DEMO total from the SAME closed trades shown on the dashboard (authoritative for UI).
-  // Server /api/pnl has drifted (Scale-In mix / label bugs); day/week from server still used.
-  const demoRealizedFromTrades = (() => {
-    let s = 0
-    let n = 0
-    const EPOCH = Date.parse('2026-09-01T00:00:00Z')
-    for (const tr of (tradeLog || [])) {
-      const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
-      if (mode === 'live') continue
-      const reason = String(tr.reason || '').toLowerCase()
-      // count closed only
-      const isClosed = reason === 'closed' || reason === 'close' || tr.exit_price != null || tr.exit_px != null || tr.exit != null
-      if (!isClosed && reason === 'open') continue
-      if (reason === 'open') continue
-      const bot = String(tr.bot || tr.bot_label || tr.strategy || tr.bot_name || 'AI Discretionary 1H')
-      // Skip non-AI strategies if explicitly labeled
-      if (/scale-?in|momentum|impulse|validation|scalp|умн|smart.?money|vwap/i.test(bot) && !/discretionary|^ai\b/i.test(bot)) continue
-      let ts = tr.exit_time || tr.time || tr.close_ts || tr.timestamp || 0
-      if (typeof ts === 'string' && ts) {
-        const p = Date.parse(ts)
-        if (!Number.isNaN(p)) ts = p
-        else ts = 0
-      }
-      ts = Number(ts) || 0
-      if (ts > 0 && ts < 1e12) ts *= 1000
-      if (ts > 0 && ts < EPOCH) continue
-      const pnl = Number(tr.pnl)
-      if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
-      s += pnl
-      n += 1
-    }
-    return { total: Math.round(s * 100) / 100, n }
-  })()
 
   // Single source of truth: /api/pnl engine (same as Bots card).
   // Do NOT sum tradeLog client-side — that path mixed untagged/legacy rows and drifted to -$1193.
@@ -718,9 +685,13 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      const v = (demoMode && demoRealizedFromTrades.n > 0)
-        ? demoRealizedFromTrades.total
-        : Number(per['AI Discretionary 1H'] ?? 0)
+      // Same engine total as Sum PnL — never client tradeLog sum
+      const v = Number(
+        per['AI Discretionary 1H']
+        ?? per.ai_strategy
+        ?? pnl?.total
+        ?? 0,
+      )
       rows.push({ name: 'AI Discretionary 1H', val: v })
       return rows
     }
@@ -730,7 +701,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       rows.push({ name, val: Number(val || 0) })
     }
     return rows.sort((a, b) => Math.abs(b.val) - Math.abs(a.val))
-  }, [pnl, demoMode, demoRealizedFromTrades])
+  }, [pnl, pnlModeOk])
 
   // Bot card realized PnL: prefer /api/pnl per_bot (same as Total PnL breakdown)
   const momentumCardPnl = useMemo(() => {
