@@ -423,7 +423,14 @@ export default function Dashboard({ health, connected, isGuest }) {
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         // ONLY accept pnl_engine payloads — never bot-status seeds
         const src = String(pnlData.source || '')
-        const okSrc = src.startsWith('exchange') || src.startsWith('db_trades') || src === 'error' || !!pnlData.engine
+        const okSrc = (
+          src.startsWith('exchange')
+          || src.startsWith('db_trades')
+          || src.startsWith('app_closed')
+          || src === 'error'
+          || !!pnlData.engine
+          || !!pnlData.pnl_epoch
+        )
         if (okSrc || pnlData.pnl_epoch) {
           const wantMode = demoMode ? 'demo' : 'live'
           const gotMode = String(pnlData.account_mode || '').toLowerCase()
@@ -646,33 +653,23 @@ export default function Dashboard({ health, connected, isGuest }) {
     return { total: Math.round(s * 100) / 100, n }
   })()
 
+  // Single source of truth: /api/pnl engine (same as Bots card).
+  // Do NOT sum tradeLog client-side — that path mixed untagged/legacy rows and drifted to -$1193.
   const discPnlResolved = (() => {
-    const src = String(pnl?.source || '')
-    if (pnlModeOk && pnl?.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
-      return Number(pnl.per_bot?.['AI Discretionary 1H'] ?? pnl.total ?? 0)
-    }
-    if (demoMode && demoRealizedFromTrades.n > 0) return demoRealizedFromTrades.total
-    return pnlModeOk ? Number(pnl?.per_bot?.['AI Discretionary 1H'] ?? 0) : 0
+    if (!pnlModeOk) return 0
+    if (pnl?.per_bot?.['AI Discretionary 1H'] != null) return Number(pnl.per_bot['AI Discretionary 1H'])
+    if (pnl?.total != null) return Number(pnl.total)
+    return 0
   })()
   const scalePnlResolved = 0
   const discTradesResolved = (() => {
     if (!pnlModeOk) return 0
-    if (!demoMode) return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? 0)
-    return Number(aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? pnl?.trades_counted ?? 0)
+    return Number(pnl?.trades_counted ?? aiStatus?.lifetime_trades ?? aiStatus?.total_trades ?? 0)
   })()
   const pnlTotal = (() => {
     if (!pnlModeOk) return 0
-    // Prefer direct OKX bills / exchange engine — authoritative since 01.09.2026
-    const src = String(pnl?.source || '')
-    if (pnl && pnl.total != null && (src.startsWith('okx_bills') || src.startsWith('exchange'))) {
-      return Number(pnl.total)
-    }
-    if (demoMode && demoRealizedFromTrades.n > 0) {
-      return demoRealizedFromTrades.total
-    }
-    if (AI_ONLY_MODE) return discPnlResolved
     if (pnl && pnl.total != null) return Number(pnl.total)
-    return discPnlResolved + scalePnlResolved
+    return discPnlResolved
   })()
   const pnlDay = (() => {
     if (!pnlModeOk) return 0
