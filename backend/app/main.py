@@ -5914,29 +5914,56 @@ async def _compute_pnl(mode: str = None):
     return data
 
 
-async def _get_pnl_cached() -> dict:
-    """TTL-cached PnL, single-flight. Used by ai/status KPI and the mini-app
-    dashboard; /api/pnl keeps its own sticky-PnL path but reads/writes the
-    same _pnl_cache entry, so all pollers share one recompute."""
+async def _get_pnl_cached(mode: str = None) -> dict:
+    """TTL-cached PnL per account mode (demo|live).
+
+    Used by ai/status KPI, mini-app, /api/pnl. mode= forces isolation for dual cards.
+    """
     global _pnl_cache
-    _mode = _account_mode()
+    _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
+    if _mode not in ('demo', 'live'):
+        _mode = _account_mode()
     now_s = _time.time()
-    if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-        out = dict(_pnl_cache['data'])
-        out['account_mode'] = _mode
-        return out
+
+    def _hit(cache, m, now):
+        if not isinstance(cache, dict):
+            return None
+        by = cache.get('by_mode')
+        if isinstance(by, dict):
+            entry = by.get(m)
+            if entry and (now - float(entry.get('ts') or 0) < _PNL_TTL):
+                out = dict(entry.get('data') or {})
+                out['account_mode'] = m
+                return out
+        if cache.get('mode') == m and (now - float(cache.get('ts') or 0) < _PNL_TTL):
+            out = dict(cache.get('data') or {})
+            out['account_mode'] = m
+            return out
+        return None
+
+    hit = _hit(_pnl_cache, _mode, now_s)
+    if hit is not None:
+        return hit
     async with _pnl_lock:
         now_s = _time.time()
-        if _pnl_cache and _pnl_cache.get('mode') == _mode and (now_s - _pnl_cache.get('ts', 0) < _PNL_TTL):
-            out = dict(_pnl_cache['data'])
-            out['account_mode'] = _mode
-            return out
-        data = await _compute_pnl()
+        hit = _hit(_pnl_cache, _mode, now_s)
+        if hit is not None:
+            return hit
+        data = await _compute_pnl(mode=_mode)
         if isinstance(data, dict):
             data = dict(data)
             data['account_mode'] = _mode
-            _pnl_cache = {'ts': _time.time(), 'data': data, 'mode': _mode}
-        return data
+        else:
+            data = {'total': 0, 'per_bot': {}, 'account_mode': _mode, 'source': 'error'}
+        bag = _pnl_cache if isinstance(_pnl_cache, dict) else {}
+        by = bag.get('by_mode') if isinstance(bag.get('by_mode'), dict) else {}
+        by[_mode] = {'ts': _time.time(), 'data': data}
+        bag['by_mode'] = by
+        bag['ts'] = _time.time()
+        bag['data'] = data
+        bag['mode'] = _mode
+        _pnl_cache = bag
+        return dict(data)
 
 
 
