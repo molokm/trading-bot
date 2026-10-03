@@ -573,8 +573,18 @@ async def compute(
 
     out = aggregate_rows(rows, ai_only=ai_only)
 
-    # DB fallback only when exchange empty — MUST match account_mode (live≠demo)
-    if out["trades_counted"] == 0 or abs(out["total"]) < 1e-9:
+    # DB fallback only when exchange source is genuinely EMPTY (no rows at
+    # all) — MUST match account_mode (live≠demo).
+    # v1.17: previously also triggered on abs(total) < 1e-9, treating a
+    # near-zero NET total as "source must be broken". That's wrong: wins and
+    # losses legitimately cancelling out to ~0 is a normal, valid outcome —
+    # especially lately (recent AI config had "negative expectancy despite
+    # 63% WR", i.e. totals hovering right around zero). Whenever the running
+    # total crossed zero, this flipped between two sources with different
+    # filtering/dedup logic (aggregate_rows vs _rows_from_db_trades's own
+    # state heuristics), producing a different number for the exact same
+    # underlying data on every refresh — the dashboard PnL "jumping" bug.
+    if out["trades_counted"] == 0:
         db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode or "demo")
         if db_rows:
             out2 = aggregate_rows(db_rows, ai_only=ai_only)

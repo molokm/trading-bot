@@ -109,9 +109,17 @@ async def remove_snapshot_position(db, bot_id: str, inst_id: str = None, side: s
 
 
 def orphan_close_enabled() -> bool:
-    # Default OFF — auto-closing "orphans" wiped real strategy positions after
-    # claim loss on deploy/PnL reset. Enable explicitly with ORPHAN_CLOSE=1.
-    v = (os.getenv("ORPHAN_CLOSE") or "0").strip().lower()
+    # v1.17: default ON. Was default OFF because auto-closing "orphans" once
+    # wiped real strategy positions after a claim/state loss on deploy —  that
+    # happened because the sweep used to run before self._positions had been
+    # hydrated back from the DB, so every live position looked orphaned for a
+    # moment. The caller (_manage_live_orphans) now gates on hydration being
+    # complete plus a 120s boot grace period, which was the actual missing
+    # safety check — so the sweep is safe to leave on by default again.
+    # Leaving a demo close's failed LIVE mirror unretried (the old default's
+    # side effect) let LIVE silently diverge from DEMO forever, which is worse.
+    # Set ORPHAN_CLOSE=0 to disable explicitly if ever needed.
+    v = (os.getenv("ORPHAN_CLOSE") or "1").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 

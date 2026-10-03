@@ -25,7 +25,16 @@ class OKXClient:
         self._ws_private = None
         self._ws_callbacks: Dict[str, list] = {}
         self._connected = False
-        self._client = httpx.AsyncClient(timeout=30.0)
+        # v1.17 perf: lazily created, cached PER EVENT LOOP (not per-request).
+        # Previously _request() created+tore down a fresh httpx.AsyncClient on
+        # every single call (even every retry attempt within one call) — each
+        # one pays a full TCP+TLS handshake (~50-300ms) that connection reuse
+        # would otherwise avoid. The original reason for not sharing a single
+        # client was event-loop binding errors across strategy threads; caching
+        # per-loop (recreating only if the running loop actually changed) keeps
+        # that safety while still reusing connections in the common case.
+        self._client: Optional[httpx.AsyncClient] = None
+        self._client_loop = None
 
     def _sign(self, timestamp: str, method: str, path: str, body: str = "") -> str:
         message = f"{timestamp}{method}{path}{body}"
@@ -50,6 +59,24 @@ class OKXClient:
             headers["x-simulated-trading"] = "1"
         return headers
 
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return an AsyncClient bound to the *currently running* event loop,
+        reused across calls. Recreated only if the loop changed (e.g. a
+        different strategy thread picked up this same OKXClient instance) or
+        the cached client was already closed — otherwise every call reuses
+        the same connection pool instead of paying a fresh TCP+TLS handshake.
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is None or self._client_loop is not loop or self._client.is_closed:
+            if self._client is not None and not self._client.is_closed:
+                try:
+                    await self._client.aclose()
+                except Exception:
+                    pass
+            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client_loop = loop
+        return self._client
+
     async def _request(self, method: str, path: str, params: dict = None,
                        body: dict = None) -> dict:
         url = f"{self.base_url}{path}"
@@ -61,7 +88,6 @@ class OKXClient:
 
         body_str = json.dumps(body) if body else ""
         sign_path = f"{path}?{qs}" if qs and method == "GET" else path
-        headers = self._headers(method, sign_path, body_str)
 
         # OKX business-level rate-limit / throttling codes worth retrying.
         RATE_LIMIT_CODES = {"50011", "50013", "50010", "50019"}
@@ -69,14 +95,20 @@ class OKXClient:
         last_err = None
         for attempt in range(4):
             try:
-                # Fresh client per request: the shared instance gets bound to a single
-                # event loop, but strategies run in their own threads/loops, which
-                # caused "Event is bound to a different event loop" errors.
-                async with httpx.AsyncClient(timeout=30.0) as _client:
-                    if method == "GET":
-                        resp = await _client.get(url, headers=headers)
-                    else:
-                        resp = await _client.post(url, headers=headers, content=body_str)
+                # v1.17: headers (incl. OK-ACCESS-TIMESTAMP + signature) are
+                # recomputed on every attempt, not just once before the loop.
+                # With up to ~9s of cumulative backoff across retries, a
+                # signature computed before the loop could go stale enough to
+                # fall outside OKX's accepted timestamp window by the final
+                # attempt, causing retries to spuriously fail on auth rather
+                # than actually resolving the original rate-limit/transient
+                # error.
+                headers = self._headers(method, sign_path, body_str)
+                _client = await self._get_client()
+                if method == "GET":
+                    resp = await _client.get(url, headers=headers)
+                else:
+                    resp = await _client.post(url, headers=headers, content=body_str)
                 data = resp.json()
 
                 # HTTP 429 → backoff and retry.
@@ -313,6 +345,11 @@ class OKXClient:
             await self._ws.close()
         if self._ws_private:
             await self._ws_private.close()
+        if self._client is not None and not self._client.is_closed:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
 
     @property
     def is_connected(self) -> bool:

@@ -86,8 +86,18 @@ class Database:
         print(f"[db] SQLite ready at {self.db_path}", flush=True)
 
     async def close(self):
-        # PG mode opens a fresh connection per operation (no persistent pool to
-        # close); SQLite keeps one connection that must be closed.
+        # v1.17: PG mode now keeps a long-lived pool per event loop (see
+        # _pg_connect) instead of a fresh connection per operation, so those
+        # pools need closing too; SQLite keeps one connection that must be
+        # closed.
+        if self._pg_mode and hasattr(self, "_pg_pools"):
+            for pool in list(self._pg_pools.values()):
+                try:
+                    if not pool._closed:
+                        await pool.close()
+                except Exception:
+                    pass
+            self._pg_pools.clear()
         if not self._pg_mode and self._conn:
             await self._conn.close()
 
@@ -459,34 +469,50 @@ class Database:
     # ── Query helpers ──
 
     async def _pg_connect(self):
-        """Create a fresh asyncpg connection for one operation.
+        """Return a pooled asyncpg connection handle, cached PER EVENT LOOP.
 
-        Strategies run in their own threads with separate event loops; a shared
-        pool bound to uvicorn's loop breaks with "attached to a different loop".
-        So, like OKXClient, we open a fresh connection per request."""
+        v1.17 perf: this used to open+close a brand-new asyncpg connection
+        (fresh TCP+TLS+Postgres-auth handshake, typically 50-300ms+ on Neon)
+        for literally every single DB operation — every tick's position
+        update, every trade log write, every settings read. That was because
+        strategies run in their own threads with separate event loops, and a
+        single shared pool bound to uvicorn's loop breaks with "attached to a
+        different loop". Fix: cache one pool per running loop (same pattern as
+        OKXClient._get_client), recreating only if the loop actually changed —
+        normal operation now reuses pooled connections instead of paying a
+        fresh handshake every query.
+
+        IMPORTANT: callers must NOT call .close() on what this returns — it's
+        a long-lived pool, not a single-use connection. Pool.fetchrow/fetch/
+        execute/fetchval already acquire+release a pooled connection
+        internally per call, which is why the 5 call sites below no longer
+        wrap this in try/finally: conn.close().
+        """
         import asyncpg
-        return await asyncpg.connect(DATABASE_URL)
+        loop = asyncio.get_running_loop()
+        if not hasattr(self, "_pg_pools"):
+            self._pg_pools = {}
+        pool = self._pg_pools.get(loop)
+        if pool is None or pool._closed:
+            pool = await asyncpg.create_pool(
+                DATABASE_URL, min_size=1, max_size=5, command_timeout=30)
+            self._pg_pools[loop] = pool
+        return pool
 
     async def _fetchone(self, sql: str, params: tuple = ()) -> Optional[dict]:
         if self._pg_mode:
-            conn = await self._pg_connect()
-            try:
-                row = await conn.fetchrow(sql, *params)
-                return dict(row) if row else None
-            finally:
-                await conn.close()
+            pool = await self._pg_connect()
+            row = await pool.fetchrow(sql, *params)
+            return dict(row) if row else None
         cur = await self._conn.execute(sql, params)
         row = await cur.fetchone()
         return dict(row) if row else None
 
     async def _fetchall(self, sql: str, params: tuple = ()) -> list[dict]:
         if self._pg_mode:
-            conn = await self._pg_connect()
-            try:
-                rows = await conn.fetch(sql, *params)
-                return [dict(r) for r in rows]
-            finally:
-                await conn.close()
+            pool = await self._pg_connect()
+            rows = await pool.fetch(sql, *params)
+            return [dict(r) for r in rows]
         cur = await self._conn.execute(sql, params)
         rows = await cur.fetchall()
         return [dict(r) for r in rows]
@@ -495,23 +521,16 @@ class Database:
         """Run write SQL. asyncpg autocommits each statement (no .commit()).
         aiosqlite needs an explicit await commit."""
         if self._pg_mode:
-            conn = await self._pg_connect()
-            try:
-                await conn.execute(sql, *params)
-            finally:
-                await conn.close()
+            pool = await self._pg_connect()
+            await pool.execute(sql, *params)
         else:
             await self._conn.execute(sql, params)
             await self._conn.commit()
 
     async def _execute_returning(self, sql: str, params: tuple = ()) -> int:
         if self._pg_mode:
-            conn = await self._pg_connect()
-            try:
-                val = await conn.fetchval(sql, *params)
-                return val
-            finally:
-                await conn.close()
+            pool = await self._pg_connect()
+            return await pool.fetchval(sql, *params)
         cur = await self._conn.execute(sql, params)
         await self._conn.commit()
         return cur.lastrowid
@@ -526,8 +545,11 @@ class Database:
             return 0
         now = datetime.now(timezone.utc).isoformat()
         if self._pg_mode:
-            conn = await self._pg_connect()
-            try:
+            pool = await self._pg_connect()
+            # One connection held for the whole batch (via explicit acquire)
+            # rather than a pool.execute() per row, which would acquire+
+            # release a pooled connection on every single insert.
+            async with pool.acquire() as conn:
                 for t in trades:
                     await conn.execute("""
                         INSERT INTO exchange_close_trades
@@ -547,8 +569,6 @@ class Database:
                         t.get("account_key") or "showcase",
                     ))
                 return len(trades)
-            finally:
-                await conn.close()
         else:
             for t in trades:
                 await self._execute(

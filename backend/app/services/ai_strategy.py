@@ -87,7 +87,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.18-mirror-strict"
+STRATEGY_VERSION = "v1.19-audit-harden"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
     "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
@@ -276,6 +276,8 @@ class AIPosition:
     sl_algo_id: str = ""
     scale_adds: int = 0
     tp_algo_id: str = ""
+    owner_checked: bool = False   # cache _entry_fill_owner — historical fact
+    owner_prefix: str = ""
 
 
 class AIStrategy:
@@ -2670,11 +2672,10 @@ class AIStrategy:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
               f"lev={lev} (mirror)", flush=True)
-        # Place exchange-level SL/TP on live account
-        try:
-            await self._place_exchange_sl_tp(lc, pos)
-        except Exception as e:
-            print(f"[AI-LIVE] exchange SL/TP: {e}", flush=True)
+        # v1.19: deliberately NOT placing exchange-level SL/TP on LIVE.
+        # Independent OKX algo on LIVE can close without DEMO — root cause of
+        # LIVE drifting alone. LIVE closes ONLY via _close_live() with DEMO.
+        # Trade-off: if bot process dies, LIVE has no exchange stop until restart.
         self._persist_live()
         return True
 
@@ -2852,13 +2853,28 @@ class AIStrategy:
         self._trade_log.append(entry)
 
     async def _manage_live_orphans(self, client):
-        """Safety net: close live positions whose coin is not in the primary
-        book (i.e. the demo close was never mirrored, or live position was
-        opened outside the bot). Only fires when orphan_close_enabled."""
+        """Safety net: close live positions whose coin is not in the primary book.
+
+        v1.19: default ORPHAN_CLOSE=on, but gated on hydration + 120s boot grace
+        so we never wipe real mirrors right after deploy before demo state loads.
+        """
         lc = self._live_client()
         if not lc:
             return
         if not orphan_close_enabled():
+            return
+        if not getattr(self, "_hydrated", False):
+            return
+        try:
+            started = getattr(self, "_started_at", None)
+            if started:
+                started_dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                if getattr(started_dt, "tzinfo", None) is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds()
+                if elapsed < 120:
+                    return
+        except Exception:
             return
         coins = list(self._live_positions.keys())
         for coin in coins:
@@ -3007,30 +3023,16 @@ class AIStrategy:
 
 
     async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
-        """Re-check gates before a *delayed* LIVE open (fast-retry / gap-fill).
+        """Gate a *delayed* LIVE mirror open (fast-retry / gap-fill) — v1.19.
 
-        Immediate mirror (same tick as demo fill) skips this.
-        v1.17: softer than entry quant — demo already accepted the signal; we only
-        block if the market clearly ran away or flipped hard against the side.
+        Mirror is not a second opinion. The trade was decided on DEMO. Do NOT
+        re-litigate align/ADX/regime (that permanently skipped LIVE opens when
+        the gate drifted during retries). Only block if price ran away >1.2%
+        from DEMO entry so LIVE would be a different trade.
         """
         side = (side or "").lower()
         if side not in ("long", "short"):
             return False, "bad_side"
-        demo_pos = self._positions.get(coin)
-        # Age of demo position (seconds)
-        age_s = 1e9
-        try:
-            from datetime import datetime as _dt, timezone as _tz
-            opened = getattr(demo_pos, "opened_at", None) if demo_pos else None
-            if opened:
-                if isinstance(opened, str):
-                    opened = _dt.fromisoformat(opened.replace("Z", "+00:00"))
-                if getattr(opened, "tzinfo", None) is None:
-                    opened = opened.replace(tzinfo=_tz.utc)
-                age_s = max(0.0, (_dt.now(_tz.utc) - opened).total_seconds())
-        except Exception:
-            age_s = 1e9
-
         try:
             client = await self._client()
             if client:
@@ -3038,55 +3040,19 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
         ind = self._latest_indicators.get(coin) or {}
-        # First 3 minutes: only block hard adverse price move (mirror must catch up)
-        soft_window = age_s <= 180.0
-        if not ind:
-            # Without indicators still allow early mirror if live is ready
-            if soft_window:
-                return True, "ok_no_ind_soft_window"
-            return False, "no_indicators"
-
-        al = float(ind.get("align_long") or 0)
-        ash = float(ind.get("align_short") or 0)
-        adx = float(ind.get("adx") or 0)
-        align = al if side == "long" else ash
-        # Soften align floor strongly for mirror lag (demo already traded)
-        min_align = float(self._effective_min_align()) if hasattr(self, "_effective_min_align") else float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
-        min_align = max(0.35, min_align - (0.15 if soft_window else 0.10))
-
-        # Price chase guard: 2.5% adverse in soft window, 3.5% after
-        max_adverse = 0.025 if soft_window else 0.035
+        demo_pos = self._positions.get(coin)
         try:
             entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
             last = float(ind.get("close") or ind.get("last") or 0)
             if entry > 0 and last > 0:
                 move = (last - entry) / entry
-                if side == "long" and move < -max_adverse:
+                if side == "long" and move < -0.012:
                     return False, f"price_ran_away_long:{move:.3%}"
-                if side == "short" and move > max_adverse:
+                if side == "short" and move > 0.012:
                     return False, f"price_ran_away_short:{move:.3%}"
         except Exception:
             pass
-
-        if soft_window:
-            # Early gap-fill: skip ADX/regime/align hardness — only price guard above
-            return True, f"ok_soft age={age_s:.0f}s align={align:.2f}"
-
-        if align < min_align - 1e-9:
-            return False, f"weak_align_{side}:{align:.2f}<{min_align:.2f}"
-        best = max(al, ash)
-        try:
-            # Softer ADX: only block if very weak and no align
-            if adx < 12 and align < min_align + 0.05:
-                return False, f"adx_block:{adx:.1f}"
-        except Exception:
-            pass
-        reg = str(ind.get("regime") or "").lower()
-        if side == "long" and reg in ("bear", "bearish", "down") and al < min_align + 0.05:
-            return False, f"regime_bear_vs_long:{reg}"
-        if side == "short" and reg in ("bull", "bullish", "up") and ash < min_align + 0.05:
-            return False, f"regime_bull_vs_short:{reg}"
-        return True, f"ok_align={align:.2f}_adx={adx:.1f}_age={age_s:.0f}s"
+        return True, "ok_mirror_no_relitigation"
 
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
                                   take_pct: float, reason: str) -> None:
@@ -4102,10 +4068,27 @@ class AIStrategy:
             _side = getattr(pos, "side", pos.get("side") if isinstance(pos, dict) else "")
             _sz = getattr(pos, "size", pos.get("size") if isinstance(pos, dict) else 0)
             _entry = getattr(pos, "entry_price", pos.get("entry_price") if isinstance(pos, dict) else 0)
-            try:
-                owner = await self._entry_fill_owner(client, _inst) if _inst else ""
-            except Exception:
-                owner = ""
+            is_dc = hasattr(pos, "owner_checked")
+            already = bool(getattr(pos, "owner_checked", False)) if is_dc else (
+                bool(pos.get("owner_checked")) if isinstance(pos, dict) else False
+            )
+            if already:
+                owner = getattr(pos, "owner_prefix", "") if is_dc else (
+                    pos.get("owner_prefix", "") if isinstance(pos, dict) else ""
+                )
+            else:
+                try:
+                    owner = await self._entry_fill_owner(client, _inst) if _inst else ""
+                except Exception:
+                    owner = ""
+                # Cache only definitive non-empty answer (empty may be transient API lag)
+                if owner:
+                    if is_dc:
+                        pos.owner_checked = True
+                        pos.owner_prefix = owner
+                    elif isinstance(pos, dict):
+                        pos["owner_checked"] = True
+                        pos["owner_prefix"] = owner
             my_pfx = (self._clord_prefix() or "").lower()
             if owner and my_pfx and owner != my_pfx:
                 self._positions.pop(coin, None)
