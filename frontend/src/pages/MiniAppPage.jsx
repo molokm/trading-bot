@@ -113,7 +113,7 @@ function MiniAppPageInner() {
       } else {
         // Fallback: assemble from public endpoints
         const [pnl, positions, trades, liveSt, aiSt] = await Promise.all([
-          api.getPnlSummary?.().catch(() => api.getPnl?.().catch(() => null)),
+          api.getPnlSummary?.({ mode: 'demo' }).catch(() => api.getPnl?.({ mode: 'demo' }).catch(() => null)),
           api.getPositions?.().catch(() => null),
           api.getPairedTrades?.(30).catch(() => null),
           api.liveStatus?.().catch(() => null),
