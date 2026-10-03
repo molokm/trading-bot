@@ -5,10 +5,157 @@ import time
 import asyncio
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from enum import Enum
 
 import httpx
 import websockets
 from app.services.risk_guard import assert_can_open
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"      # Нормальная работа
+    OPEN = "open"          # Короткий замыкание — быстрые ошибки
+    HALF_OPEN = "half_open"  # Тестовый запрос после таймаута
+
+
+class CircuitBreaker:
+    """
+    Circuit Breaker для защиты от каскадных ошибок при длительном дауне биржи.
+
+    Состояния:
+    - CLOSED: нормальная работа, считаем ошибки
+    - OPEN: превышен порог ошибок — быстрые ошибки без запросов к бирже
+    - HALF_OPEN: после timeout — тестовый запрос для проверки восстановления
+
+    Конфиг:
+    - failure_threshold: кол-во ошибок для перехода в OPEN (default: 5)
+    - success_threshold: кол-во успехов в HALF_OPEN для CLOSED (default: 2)
+    - timeout: секунд в OPEN до перехода в HALF_OPEN (default: 30s)
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        success_threshold: int = 2,
+        timeout: float = 30.0,
+        excluded_codes: set = None,
+    ):
+        self.failure_threshold = failure_threshold
+        self.success_threshold = success_threshold
+        self.timeout = timeout
+        self.excluded_codes = excluded_codes or set()
+
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_time: Optional[float] = None
+        self._lock = asyncio.Lock()
+
+        # Stats
+        self._total_calls = 0
+        self._total_failures = 0
+        self._total_rejected = 0
+
+    @property
+    def state(self) -> CircuitState:
+        return self._state
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "state": self._state.value,
+            "failure_count": self._failure_count,
+            "success_count": self._success_count,
+            "total_calls": self._total_calls,
+            "total_failures": self._total_failures,
+            "total_rejected": self._total_rejected,
+            "last_failure_time": self._last_failure_time,
+        }
+
+    async def call(self, func, *args, **kwargs):
+        """Выполняет функцию с защитой circuit breaker."""
+        async with self._lock:
+            self._total_calls += 1
+
+            # Проверяем переход OPEN -> HALF_OPEN
+            if self._state == CircuitState.OPEN:
+                if self._last_failure_time and (time.time() - self._last_failure_time) >= self.timeout:
+                    self._state = CircuitState.HALF_OPEN
+                    self._success_count = 0
+                    print(f"[CircuitBreaker] OPEN -> HALF_OPEN (timeout {self.timeout}s elapsed)", flush=True)
+                else:
+                    self._total_rejected += 1
+                    raise RuntimeError(f"Circuit breaker OPEN (rejected)")
+
+        try:
+            result = await func(*args, **kwargs)
+        except Exception as e:
+            await self._on_failure()
+            raise
+
+        # Проверяем результат на ошибку бизнес-уровня
+        if isinstance(result, dict) and result.get("error"):
+            error_msg = str(result.get("message", ""))
+            # Не считаем ошибки бизнес-уровня (insufficient margin, etc) как failure
+            if not self._is_business_error(result):
+                await self._on_failure()
+            return result
+
+        await self._on_success()
+        return result
+
+    def _is_business_error(self, result: dict) -> bool:
+        """Ошибки бизнес-уровня (недостаток маржи, неверные параметры) — не считаем failure."""
+        msg = str(result.get("message", "")).lower()
+        business_codes = {"58001", "58002", "58003", "58004", "58005",  # margin/position
+                          "30001", "30002", "30003",  # param errors
+                          "58101", "58102",  # leverage
+                          "51008"}  # margin quota
+        for code in self.excluded_codes:
+            if code.lower() in str(result).lower():
+                return True
+        for code in business_codes:
+            if code in str(result).lower():
+                return True
+        return False
+
+    async def _on_success(self):
+        async with self._lock:
+            self._failure_count = 0
+            if self._state == CircuitState.HALF_OPEN:
+                self._success_count += 1
+                if self._success_count >= self.success_threshold:
+                    self._state = CircuitState.CLOSED
+                    self._success_count = 0
+                    print(f"[CircuitBreaker] HALF_OPEN -> CLOSED (success threshold reached)", flush=True)
+
+    async def _on_failure(self):
+        async with self._lock:
+            self._failure_count += 1
+            self._total_failures += 1
+            self._last_failure_time = time.time()
+
+            if self._state == CircuitState.HALF_OPEN:
+                # Любая ошибка в HALF_OPEN -> обратно в OPEN
+                self._state = CircuitState.OPEN
+                self._success_count = 0
+                print(f"[CircuitBreaker] HALF_OPEN -> OPEN (failure in half-open)", flush=True)
+            elif self._state == CircuitState.CLOSED:
+                if self._failure_count >= self.failure_threshold:
+                    self._state = CircuitState.OPEN
+                    print(f"[CircuitBreaker] CLOSED -> OPEN (threshold {self.failure_threshold} reached)", flush=True)
+
+    def reset(self):
+        """Ручной сброс в CLOSED (для админки/тестов)."""
+        self._state = CircuitState.CLOSED
+        self._failure_count = 0
+        self._success_count = 0
+        self._last_failure_time = None
+
+    def force_open(self):
+        """Принудительно открыть (для тестов/админки)."""
+        self._state = CircuitState.OPEN
+        self._last_failure_time = time.time()
 
 
 class OKXClient:
@@ -26,6 +173,16 @@ class OKXClient:
         self._ws_callbacks: Dict[str, list] = {}
         self._connected = False
         self._client = httpx.AsyncClient(timeout=30.0)
+
+        # Circuit Breaker для защиты от каскадных ошибок
+        self._circuit_breaker = CircuitBreaker(
+            failure_threshold=5,      # 5 ошибок -> OPEN
+            success_threshold=2,      # 2 успеха в half-open -> CLOSED
+            timeout=30.0,             # 30с в OPEN -> HALF_OPEN
+            excluded_codes={"58001", "58002", "58003", "58004", "58005",
+                           "30001", "30002", "30003",
+                           "58101", "58102", "51008", "58008", "58009"},
+        )
 
     def _sign(self, timestamp: str, method: str, path: str, body: str = "") -> str:
         message = f"{timestamp}{method}{path}{body}"
@@ -52,66 +209,74 @@ class OKXClient:
 
     async def _request(self, method: str, path: str, params: dict = None,
                        body: dict = None) -> dict:
-        url = f"{self.base_url}{path}"
-        qs = ""
-        if params:
-            qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
-            if qs:
-                url += f"?{qs}"
+        """
+        Выполняет HTTP запрос через Circuit Breaker.
+        Circuit Breaker защищает от каскадных ошибок при длительном дауне биржи.
+        """
+        async def _do_request() -> dict:
+            url = f"{self.base_url}{path}"
+            qs = ""
+            if params:
+                qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
+                if qs:
+                    url += f"?{qs}"
 
-        body_str = json.dumps(body) if body else ""
-        sign_path = f"{path}?{qs}" if qs and method == "GET" else path
-        headers = self._headers(method, sign_path, body_str)
+            body_str = json.dumps(body) if body else ""
+            sign_path = f"{path}?{qs}" if qs and method == "GET" else path
+            headers = self._headers(method, sign_path, body_str)
 
-        # OKX business-level rate-limit / throttling codes worth retrying.
-        RATE_LIMIT_CODES = {"50011", "50013", "50010", "50019"}
+            # OKX business-level rate-limit / throttling codes worth retrying.
+            RATE_LIMIT_CODES = {"50011", "50013", "50010", "50019"}
 
-        last_err = None
-        for attempt in range(4):
-            try:
-                # Fresh client per request: the shared instance gets bound to a single
-                # event loop, but strategies run in their own threads/loops, which
-                # caused "Event is bound to a different event loop" errors.
-                async with httpx.AsyncClient(timeout=30.0) as _client:
-                    if method == "GET":
-                        resp = await _client.get(url, headers=headers)
-                    else:
-                        resp = await _client.post(url, headers=headers, content=body_str)
-                data = resp.json()
+            last_err = None
+            for attempt in range(4):
+                try:
+                    # Fresh client per request: the shared instance gets bound to a single
+                    # event loop, but strategies run in their own threads/loops, which
+                    # caused "Event is bound to a different event loop" errors.
+                    async with httpx.AsyncClient(timeout=30.0) as _client:
+                        if method == "GET":
+                            resp = await _client.get(url, headers=headers)
+                        else:
+                            resp = await _client.post(url, headers=headers, content=body_str)
+                    data = resp.json()
 
-                # HTTP 429 → backoff and retry.
-                if resp.status_code == 429:
-                    wait = 1.0 + attempt * 2.0
-                    last_err = f"HTTP 429 rate limited (attempt {attempt + 1})"
-                    await asyncio.sleep(wait)
-                    continue
-
-                if data.get("code") != "0":
-                    code = str(data.get("code", ""))
-                    # OKX rate-limit / throttle codes → retry with backoff.
-                    if code in RATE_LIMIT_CODES and attempt < 3:
+                    # HTTP 429 -> backoff and retry.
+                    if resp.status_code == 429:
                         wait = 1.0 + attempt * 2.0
-                        last_err = f"OKX {code} throttled (attempt {attempt + 1})"
+                        last_err = f"HTTP 429 rate limited (attempt {attempt + 1})"
                         await asyncio.sleep(wait)
                         continue
-                    detail = data.get("msg", "Unknown error")
-                    sdata = data.get("data") or []
-                    if sdata:
-                        scode = sdata[0].get("sCode", "")
-                        smsg = sdata[0].get("sMsg", "")
-                        if scode or smsg:
-                            detail = f"{detail} [{scode}: {smsg}]"
-                    return {"error": True, "message": detail, "data": sdata}
 
-                return {"error": False, "data": data.get("data", [])}
-            except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout,
-                    httpx.ReadTimeout, httpx.TransportError) as e:
-                last_err = str(e)
-                await asyncio.sleep(1.0 + attempt)
-            except Exception as e:
-                return {"error": True, "message": str(e)}
+                    if data.get("code") != "0":
+                        code = str(data.get("code", ""))
+                        # OKX rate-limit / throttle codes -> retry with backoff.
+                        if code in {"50011", "50013", "50010", "50019"} and attempt < 3:
+                            wait = 1.0 + attempt * 2.0
+                            last_err = f"OKX {code} throttled (attempt {attempt + 1})"
+                            await asyncio.sleep(wait)
+                            continue
+                        detail = data.get("msg", "Unknown error")
+                        sdata = data.get("data") or []
+                        if sdata:
+                            scode = sdata[0].get("sCode", "")
+                            smsg = sdata[0].get("sMsg", "")
+                            if scode or smsg:
+                                detail = f"{detail} [{scode}: {smsg}]"
+                            return {"error": True, "message": detail, "data": sdata}
 
-        return {"error": True, "message": f"request failed after retries: {last_err}"}
+                    return {"error": False, "data": data.get("data", [])}
+                except (httpx.HTTPStatusError, httpx.ConnectError, httpx.ConnectTimeout,
+                        httpx.ReadTimeout, httpx.TransportError) as e:
+                    last_err = str(e)
+                    await asyncio.sleep(1.0 + attempt)
+                except Exception as e:
+                    return {"error": True, "message": str(e)}
+
+            return {"error": True, "message": f"request failed after retries: {last_err}"}
+
+        # Используем Circuit Breaker
+        return await self._circuit_breaker.call(_do_request)
 
     async def get_balance(self) -> dict:
         return await self._request("GET", "/api/v5/account/balance")
