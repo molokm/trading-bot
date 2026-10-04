@@ -3746,17 +3746,81 @@ class AIStrategy:
 
 
     async def _other_ai_owns(self, inst_id: str, side: str) -> bool:
-        """True if a DIFFERENT bot (not this one, not its live-mirror twin)
-        holds a DB claim on this instrument."""
+        """True if a DIFFERENT *active* bot holds a live claim on this instrument.
+
+        Stale rows from retired bots (Scale-In, Momentum, Impulse, …) used to
+        block opens forever with sibling_bot_owns even when no position exists
+        on the exchange — fixed by purging retired claims and ignoring rows
+        when the book is empty on OKX.
+        """
         if not self.db:
             return False
         try:
             ours = {str(self.BOT_ID), str(self._live_bot_id())}
+            # Bots we removed from the product — their positions rows are garbage
+            retired_prefixes = (
+                "ai_scale", "momentum", "rotation", "impulse", "validation",
+                "orderbook", "scalp", "smart_money", "vwap", "macd",
+            )
             sql = ("SELECT bot_id FROM positions WHERE inst_id = $1"
                    if self.db._pg_mode else
                    "SELECT bot_id FROM positions WHERE inst_id = ?")
             rows = await self.db._fetchall(sql, (inst_id,))
-            return any(str(r["bot_id"]) not in ours for r in (rows or []))
+            blockers = []
+            for r in (rows or []):
+                bid = str((r or {}).get("bot_id") or "")
+                if not bid or bid in ours:
+                    continue
+                low = bid.lower()
+                if any(low.startswith(p) or f"_{p}" in low for p in retired_prefixes):
+                    try:
+                        del_sql = (
+                            "DELETE FROM positions WHERE inst_id = $1 AND bot_id = $2"
+                            if self.db._pg_mode else
+                            "DELETE FROM positions WHERE inst_id = ? AND bot_id = ?"
+                        )
+                        await self.db._execute(del_sql, (inst_id, bid))
+                        print(f"[AI] purged stale claim {bid} on {inst_id}", flush=True)
+                    except Exception as e:
+                        print(f"[AI] purge claim {bid}: {e}", flush=True)
+                    continue
+                blockers.append(bid)
+            if not blockers:
+                return False
+            # Double-check exchange: if no open size, claims are stale → purge & allow
+            try:
+                client = await self._client()
+                if client:
+                    resp = await client.get_positions("SWAP")
+                    has_open = False
+                    for ep in (resp or {}).get("data") or []:
+                        if str(ep.get("instId") or "") != str(inst_id):
+                            continue
+                        try:
+                            if abs(float(ep.get("pos") or 0)) > 0:
+                                has_open = True
+                                break
+                        except (TypeError, ValueError):
+                            pass
+                    if not has_open:
+                        for bid in blockers:
+                            try:
+                                del_sql = (
+                                    "DELETE FROM positions WHERE inst_id = $1 AND bot_id = $2"
+                                    if self.db._pg_mode else
+                                    "DELETE FROM positions WHERE inst_id = ? AND bot_id = ?"
+                                )
+                                await self.db._execute(del_sql, (inst_id, bid))
+                            except Exception:
+                                pass
+                        print(
+                            f"[AI] purged {len(blockers)} empty-exchange claims on {inst_id}",
+                            flush=True,
+                        )
+                        return False
+            except Exception as e:
+                print(f"[AI] sibling exchange check: {e}", flush=True)
+            return bool(blockers)
         except Exception:
             return False
 
