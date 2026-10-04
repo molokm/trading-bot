@@ -75,6 +75,7 @@ const en = {
   'login.https_note': 'All data is transmitted over HTTPS',
 
   // ── Dashboard ──
+  'dash.top_signals': 'Top signals',
   'dash.balance': 'Balance',
   'dash.balance_tip': 'Total portfolio value at market prices',
   'dash.unrealized': 'Unrealized PnL',
@@ -457,7 +458,7 @@ const en = {
   'bots.param.donchian_n.label': 'Donchian window (days)',
   'bots.param.donchian_n.tip': 'Breakout of the N-day high (excluding the current bar) — entry condition.',
   'bots.param.tp_pct.label': 'First take-profit (TP1)',
-  'bots.param.tp_pct.tip': 'Profit level at which the TP1 fraction of the position is closed.',
+  'bots.param.tp1_pct.tip': 'Profit level at which the TP1 fraction of the position is closed.',
   'bots.param.tp_ratio.label': 'TP1 fraction',
   'bots.param.tp_ratio.tip': 'Which fraction of the position is closed at the first take-profit.',
   'bots.param.tp2_pct.label': 'Second take-profit (TP2)',

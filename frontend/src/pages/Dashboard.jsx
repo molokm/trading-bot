@@ -84,7 +84,7 @@ function TopSignals({ signals, t }) {
                 <span>{t('dash.regime') || 'Режим'}: <span className="text-[var(--txt)] mono">{s.regime}</span></span>
                 <span>ADX: <span className="text-[var(--txt)] mono">{s.adx}</span></span>
                 {s.change_pct != null && (
-                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)'}>
+                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]}>
                     {s.change_pct >= 0 ? '+' : ''}{s.change_pct}%
                   </span>
                 )}
@@ -96,7 +96,8 @@ function TopSignals({ signals, t }) {
               ) : (
                 <span className="text-[0.55rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
               )}
-              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
+              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>Align {alignPct}%</span>
+              <span className="text-[0.5rem] text-[var(--txt-muted)]">Готовность</span>
               <div className="w-12 h-1.5 rounded-full bg-[var(--border)] overflow-hidden flex-shrink-0">
                 <div className="h-full rounded-full transition-all" style={{
                   width: `${scorePct}%`,
@@ -198,24 +199,43 @@ function DashBotPanel({
               const isLong = s.side === 'long'
               const scorePct = Math.round((s.score || 0) * 100)
               const alignPct = Math.round((s.align_score || 0) * 100)
+              const filtersPassed = s.filters_passed
+              const filtersTotal = s.filters_total
+              const weakAdx = typeof s.adx === 'number' && s.adx < 20
               return (
-                <div key={s.coin + i} className="flex items-center gap-1.5 py-0.5">
-                  <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
-                  <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                    {isLong ? 'L' : 'S'}
-                  </span>
-                  <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
-                  <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
-                  <div className="flex-1" />
-                  <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
-                  <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
-                    <div className="h-full rounded-full" style={{
-                      width: `${scorePct}%`,
-                      backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
-                    }} />
+                <details key={s.coin + i} className="group">
+                  <summary className="flex items-center gap-1.5 py-0.5 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                    <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
+                    <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                      {isLong ? 'L' : 'S'}
+                    </span>
+                    <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+                    <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
+                    <div className="flex-1" />
+                    <span className="text-[0.55rem] text-[var(--txt-muted)]">Готовность</span>
+                    <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
+                      <div className="h-full rounded-full" style={{
+                        width: `${scorePct}%`,
+                        backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
+                      }} />
+                    </div>
+                    <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+                  </summary>
+                  <div className="pl-[1.6rem] pb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.55rem] text-[var(--txt-muted)]">
+                    <span>Align {alignPct}%</span>
+                    <span className={weakAdx ? 'text-[var(--loss)]' : ''}>
+                      ADX {s.adx != null ? Number(s.adx).toFixed(0) : '—'}{weakAdx ? ' (слабый тренд)' : ''}
+                    </span>
+                    {filtersTotal != null && (
+                      <span className={filtersPassed < filtersTotal ? 'text-[var(--loss)]' : ''}>
+                        Фильтры {filtersPassed}/{filtersTotal}
+                      </span>
+                    )}
+                    {s.blocked_reason && (
+                      <span className="text-[var(--loss)]">блок: {s.blocked_reason}</span>
+                    )}
                   </div>
-                  <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
-                </div>
+                </details>
               )
             })}
           </div>

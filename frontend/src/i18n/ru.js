@@ -75,6 +75,7 @@ const ru = {
   'login.https_note': 'Все данные передаются по HTTPS',
 
   // ── Dashboard ──
+  'dash.top_signals': 'Сигналы на вход',
   'dash.balance': 'Баланс',
   'dash.balance_tip': 'Общая стоимость портфеля по рыночным ценам',
   'dash.unrealized': 'Нереализ. PnL',
@@ -457,7 +458,7 @@ const ru = {
   'bots.param.donchian_n.label': 'Donchian-окно (дней)',
   'bots.param.donchian_n.tip': 'Пробой максимума за N дней (без текущего бара) — условие входа.',
   'bots.param.tp_pct.label': 'Первый тейк (TP1)',
-  'bots.param.tp_pct.tip': 'Уровень прибыли, при котором закрывается доля TP1 позиции.',
+  'bots.param.tp1_pct.tip': 'Уровень прибыли, при котором закрывается доля TP1 позиции.',
   'bots.param.tp_ratio.label': 'Доля TP1',
   'bots.param.tp_ratio.tip': 'Какая доля позиции закрывается на первом тейке.',
   'bots.param.tp2_pct.label': 'Второй тейк (TP2)',
