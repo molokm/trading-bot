@@ -3600,6 +3600,15 @@ async def _ensure_live_mirror_client() -> bool:
                 pass
         except Exception as e:
             print(f'[LIVE] ensure attach bot: {e}', flush=True)
+    try:
+        if db:
+            raw = await db.get_setting('live_mirror_connected_at')
+            if not raw:
+                import time as _t
+                await db.set_setting('live_mirror_connected_at', str(int(_t.time())))
+                print('[LIVE] ensure: seeded live_mirror_connected_at', flush=True)
+    except Exception as _we:
+        print(f'[LIVE] ensure watermark: {_we}', flush=True)
     print('[LIVE] ensure: mirror client ready', flush=True)
     return True
 

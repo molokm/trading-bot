@@ -22,7 +22,7 @@ from typing import Optional
 
 from .telegram_notifier import TelegramNotifier
 from .pnl_utils import extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills
-from .position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
+from .position_claim import claim_open, release_open, claim_or_flatten, flatten_position, sweep_exchange_orphans, orphan_close_enabled
 from .ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status, mock_decide
 import json
 from .risk_guard import assert_can_open
@@ -2083,25 +2083,48 @@ class AIStrategy:
             await self._place_exchange_sl_tp(client, pos)
         except Exception as e:
             print(f"[AI] exchange SL/TP placement: {e}", flush=True)
-        # Mirror to LIVE after primary fill — must be near-instant (market moves fast)
+        # Mirror to LIVE after primary fill — near-instant; then background retries
         try:
             if not await self._mirror_enabled():
                 _m = "disabled_by_user"
-                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
+                self._record_exec("mirror_skip", coin=coin, side=side, reason=_m)
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
                 await self._try_refresh_live_client()
                 ok = False
-                if self._live_client():
-                    ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
-                    _m = "mirror_ok" if ok else "mirror_fail"
-                    self._exec_log.append(_exec_evt(_m, coin, side, reason=reason))
-                    print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
-                else:
-                    _m = "live_not_ready"
-                    self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
-                    print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
-                # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
+                last_reason = "live_not_ready"
+                # Up to 3 immediate attempts (0 / 0.8s / 1.6s) before background
+                for attempt in range(3):
+                    if coin not in self._positions:
+                        last_reason = "demo_flat"
+                        break
+                    if coin in self._live_positions:
+                        ok = True
+                        break
+                    if not self._live_client():
+                        await self._try_refresh_live_client()
+                    if not self._live_client():
+                        last_reason = "live_not_ready"
+                        await asyncio.sleep(0.8 * (attempt + 1))
+                        continue
+                    try:
+                        ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
+                        last_reason = "mirror_ok" if ok else "mirror_fail"
+                    except Exception as _oe:
+                        last_reason = str(_oe)[:100]
+                        ok = False
+                    print(
+                        f"[AI-LIVE] mirror attempt {attempt+1}/3 result={ok} "
+                        f"{side} {coin} ({last_reason})",
+                        flush=True,
+                    )
+                    if ok:
+                        break
+                    await asyncio.sleep(0.8 * (attempt + 1))
+                self._record_exec(
+                    "mirror_ok" if ok else "mirror_fail",
+                    coin=coin, side=side, reason=last_reason,
+                )
                 if not ok:
                     try:
                         asyncio.create_task(
@@ -2110,7 +2133,7 @@ class AIStrategy:
                     except Exception as _te:
                         print(f"[AI-LIVE] schedule fast_retry: {_te}", flush=True)
         except Exception as e:
-            self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
+            self._record_exec("mirror_error", coin=coin, side=side, reason=str(e)[:120])
             print(f"[AI-LIVE] open_mirror: {e}", flush=True)
             try:
                 asyncio.create_task(
@@ -2948,6 +2971,31 @@ class AIStrategy:
         self._persist_live()
 
 
+
+    async def _cancel_live_algo_orders(self) -> int:
+        """Cancel pending TP/SL algo on LIVE so they cannot close/open independently."""
+        lc = self._live_client()
+        if not lc or not hasattr(lc, "get_algo_orders"):
+            return 0
+        cancelled = 0
+        try:
+            resp = await lc.get_algo_orders(ord_type="conditional", inst_type="SWAP")
+            rows = (resp or {}).get("data") or []
+            for row in rows:
+                algo_id = row.get("algoId") or row.get("algo_id")
+                inst = row.get("instId") or ""
+                if not algo_id or not inst:
+                    continue
+                try:
+                    await lc.cancel_algo_order(inst, str(algo_id))
+                    cancelled += 1
+                    print(f"[AI-LIVE] cancelled algo {algo_id} on {inst}", flush=True)
+                except Exception as e:
+                    print(f"[AI-LIVE] cancel algo {algo_id}: {e}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] list algo orders: {e}", flush=True)
+        return cancelled
+
     async def _reconcile_live_from_exchange(self) -> None:
         """Adopt open LIVE SWAP positions from the mirror account into memory.
 
@@ -2959,6 +3007,15 @@ class AIStrategy:
         lc = self._live_client()
         if not lc:
             return
+        # One-shot cleanup of leftover exchange TP/SL that could trade alone
+        try:
+            if not getattr(self, "_live_algos_purged", False):
+                n = await self._cancel_live_algo_orders()
+                self._live_algos_purged = True
+                if n:
+                    print(f"[AI-LIVE] purged {n} leftover algo order(s)", flush=True)
+        except Exception as _ae:
+            print(f"[AI-LIVE] algo purge: {_ae}", flush=True)
         try:
             resp = await lc.get_positions("SWAP")
             if (resp or {}).get("error"):
@@ -3052,10 +3109,21 @@ class AIStrategy:
                         print(f"[AI-LIVE] reconcile fills probe {coin}: {fe}", flush=True)
 
                 if not demo_ok and not (old and linked_id):
+                    # LIVE must never trade alone. Close unlinked positions.
                     print(
-                        f"[AI-LIVE] reconcile IGNORE orphan {coin} {side} sz={sz} "
+                        f"[AI-LIVE] reconcile CLOSE orphan {coin} {side} sz={sz} "
                         f"(no DEMO twin / no demo_trade_id link)",
                         flush=True,
+                    )
+                    try:
+                        self._mirror_call_active = True
+                        await flatten_position(lc, inst or f"{coin}-USDT-SWAP", side, sz)
+                    except Exception as _fe:
+                        print(f"[AI-LIVE] orphan flatten {coin}: {_fe}", flush=True)
+                    finally:
+                        self._mirror_call_active = False
+                    self._record_exec(
+                        "live_orphan_closed", coin=coin, side=side, reason="no_demo_twin",
                     )
                     continue
 
@@ -3237,8 +3305,22 @@ class AIStrategy:
             except Exception:
                 pass
         if watermark == 0:
-            print("[AI-LIVE] clone_missing: no watermark (mirror never explicitly connected) — SKIP all", flush=True)
-            return
+            # Mirror is enabled + live ready but watermark never persisted (old
+            # connects / auto-heal). Seed NOW so CURRENT demo opens can gap-fill;
+            # do not backfill ancient positions (opened_at check uses this ts).
+            try:
+                import time as _t
+                watermark = int(_t.time())
+                if self.db:
+                    await self.db.set_setting("live_mirror_connected_at", str(watermark))
+                print(
+                    f"[AI-LIVE] clone_missing: seeded watermark={watermark} "
+                    f"(was missing while mirror enabled)",
+                    flush=True,
+                )
+            except Exception as _se:
+                print(f"[AI-LIVE] clone_missing: cannot seed watermark: {_se} — SKIP", flush=True)
+                return
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
