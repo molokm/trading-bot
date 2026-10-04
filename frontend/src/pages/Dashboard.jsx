@@ -1115,17 +1115,17 @@ export default function Dashboard({ health, connected, isGuest }) {
   const pnlSource = pnl?.source || ''
   const fundingNote = Number(pnl?.funding || 0)
 
-  // LIVE numbers: same engine as DEMO (/api/pnl?mode=live), UPL/equity from mirror status
+  // LIVE numbers: prefer Mirror status (engine+bills), then /api/pnl?mode=live
   const liveConnected = !!(liveStatus?.connected)
   const liveUnreal = Number(liveStatus?.unrealized_pnl ?? liveStatus?.unrealized ?? 0)
   const liveToday = Number(
-    livePnl?.['1d'] ?? liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? 0,
+    liveStatus?.session_pnl ?? liveStatus?.pnl_1d ?? livePnl?.['1d'] ?? 0,
   )
   const liveWeek = Number(
-    livePnl?.week ?? liveStatus?.week ?? liveStatus?.pnl_week ?? 0,
+    liveStatus?.week ?? liveStatus?.pnl_week ?? livePnl?.week ?? 0,
   )
   const liveTotal = Number(
-    livePnl?.total ?? liveStatus?.strategy_realized ?? liveStatus?.total_pnl ?? 0,
+    liveStatus?.total_pnl ?? liveStatus?.strategy_realized ?? livePnl?.total ?? 0,
   )
   const liveEquity = Number(liveStatus?.equity ?? 0)
 

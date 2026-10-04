@@ -5850,7 +5850,60 @@ async def _compute_pnl(mode: str = None):
         except Exception as e:
             print(f'[pnl] db trades: {e}', flush=True)
 
+        # LIVE: merge OKX bills so Sum PnL matches Mirror card (DB alone is incomplete)
+        if _mode == 'live':
+            try:
+                lc = None
+                try:
+                    lc = live_manager.get_client() if live_manager else None
+                except Exception:
+                    lc = None
+                if lc is not None and not getattr(lc, 'demo', False):
+                    _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
+                    _seen = {str(r.get('ord_id') or r.get('ordId') or '') for r in raw if r}
+                    for _b in _bills or []:
+                        if str(_b.get('subType') or '') not in ('5', '6'):
+                            continue
+                        _oid = str(_b.get('ordId') or '').strip()
+                        if not _oid or _oid in _seen:
+                            continue
+                        try:
+                            _bp = float(_b.get('pnl') or 0)
+                        except (TypeError, ValueError):
+                            _bp = 0.0
+                        if abs(_bp) < 1e-12:
+                            continue
+                        try:
+                            _bts = int(_b.get('ts') or 0)
+                        except (TypeError, ValueError):
+                            _bts = 0
+                        if _bts and _bts < _ep:
+                            continue
+                        _cl = str(_b.get('clOrdId') or '').strip()
+                        _cl_l = _cl.lower()
+                        if _cl_l.startswith('ais'):
+                            continue
+                        # AI-tagged or AI-only untagged live closes
+                        if not (_cl_l.startswith('ai') or AI_ONLY_MODE):
+                            continue
+                        _seen.add(_oid)
+                        raw.append({
+                            'ord_id': _oid,
+                            'inst_id': _b.get('instId') or '',
+                            'cl_ord_id': _cl,
+                            'pnl': _bp,
+                            'fee': abs(float(_b.get('fee') or 0) or 0),
+                            'close_ts': _bts,
+                            'account_mode': 'live',
+                            'account_key': 'live',
+                            'bot_label': 'AI Discretionary 1H',
+                        })
+            except Exception as _be:
+                print(f'[pnl] live bills merge: {_be}', flush=True)
+
         rows, diag = filter_pnl_rows(raw, mode=_mode, ai_only=True)
+        # LIVE bills with bot_label but no ai* clOrd still need to pass: filter uses resolve_bot
+        # which accepts stored AI label — already set above.
         agg = aggregate_rows(rows, ai_only=True)
         total = round(float(agg.get('total') or 0), 2)
         day = round(float(agg.get('1d') or 0), 2)
@@ -5878,7 +5931,7 @@ async def _compute_pnl(mode: str = None):
             'funding': 0.0,
             'economic_approx': total,
             'strategy_realized': total,
-            'source': 'app_closed_trades',
+            'source': ('app_closed_trades+live_bills' if _mode == 'live' else 'app_closed_trades'),
             'pnl_tz': 'Europe/Moscow',
             'fees': fees,
             'fees_informational': True,
