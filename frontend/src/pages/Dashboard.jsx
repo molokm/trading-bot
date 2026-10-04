@@ -84,7 +84,7 @@ function TopSignals({ signals, t }) {
                 <span>{t('dash.regime') || 'Режим'}: <span className="text-[var(--txt)] mono">{s.regime}</span></span>
                 <span>ADX: <span className="text-[var(--txt)] mono">{s.adx}</span></span>
                 {s.change_pct != null && (
-                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]}>
+                  <span className={s.change_pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}>
                     {s.change_pct >= 0 ? '+' : ''}{s.change_pct}%
                   </span>
                 )}
