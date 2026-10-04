@@ -1680,8 +1680,14 @@ async def me_dashboard(request: Request):
         demo = {'error': str(e)}
     trades = []
     has_live = False
-    if role == 'admin' and user_id is None:
+    if role == 'admin':
+        # Owner admin session (token or cookie) — platform mirror
         has_live = bool(_live_key and _live_secret and _live_pass)
+        if not has_live and live_manager is not None:
+            try:
+                has_live = bool(live_manager.get_client())
+            except Exception:
+                has_live = False
     elif user_id and user_row:
         has_live = bool(user_row.get('okx_key_enc')) and not bool(user_row.get('okx_demo', 1))
     if has_live:
@@ -2155,7 +2161,16 @@ async def me_dashboard(request: Request):
                 print(f'[me/dashboard] live bills regroup: {_e}', flush=True)
 
         # ── Final LIVE totals: same engine as DEMO (mode=live, epoch, AI-only) ──
-        try:
+        # Only when this session has a LIVE account (admin mirror or user keys)
+        if has_live:
+          try:
+            # If mirror client is up, never leave connected=False just because bills failed
+            if not live.get('connected'):
+                try:
+                    if live_manager and live_manager.get_client():
+                        live['connected'] = True
+                except Exception:
+                    pass
             _eng_live = await _get_pnl_cached(mode='live')
             if isinstance(_eng_live, dict) and int(_eng_live.get('trades_counted') or 0) >= 0:
                 live['total_pnl'] = round(float(_eng_live.get('total') or 0), 2)
@@ -2172,7 +2187,7 @@ async def me_dashboard(request: Request):
                 live['win_rate'] = round(100.0 * _w / _n, 1) if _n else None
                 live['pnl_source'] = 'pnl_engine_live'
                 live['pnl_epoch'] = _eng_live.get('pnl_epoch') or '2026-09-01T00:00:00+00:00'
-        except Exception as _el:
+          except Exception as _el:
             print(f'[me/dashboard] live engine override: {_el}', flush=True)
 
         # If LIVE already appended ungrouped fills earlier, collapse them now

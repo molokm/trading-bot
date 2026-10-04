@@ -102,6 +102,8 @@ function MiniAppPageInner() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
 
+  const [authReady, setAuthReady] = useState(false)
+
   useEffect(() => {
     try { window.__MINI_APP__ = true } catch { /* ignore */ }
     try {
@@ -115,6 +117,29 @@ function MiniAppPageInner() {
         } catch { /* ignore */ }
       }
     } catch { /* ignore */ }
+
+    // Auth: Telegram initData → admin/user token so LIVE mirror data is allowed
+    let cancelled = false
+    ;(async () => {
+      try {
+        const tg = window.Telegram && window.Telegram.WebApp
+        const initData = tg && String(tg.initData || '').trim()
+        if (initData) {
+          const res = await api.telegramAuth(initData)
+          if (res && res.token) {
+            try {
+              localStorage.setItem('auth_token', res.token)
+              localStorage.setItem('auth_role', res.role || 'user')
+            } catch { /* ignore */ }
+          }
+        }
+      } catch (e) {
+        console.warn('[mini] telegram auth:', e)
+      } finally {
+        if (!cancelled) setAuthReady(true)
+      }
+    })()
+    return () => { cancelled = true }
   }, [])
 
   const load = useCallback(async () => {
@@ -169,15 +194,20 @@ function MiniAppPageInner() {
   }, [])
 
   useEffect(() => {
+    if (!authReady) return
     load()
     const id = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       load()
     }, 30000)
     return () => clearInterval(id)
-  }, [load])
+  }, [load, authReady])
 
-  const liveConnected = !!(data?.live?.connected)
+  const liveConnected = !!(
+    data?.live?.connected
+    || (data?.live?.equity != null && Number(data.live.equity) > 0)
+    || (Array.isArray(data?.live?.positions) && data.live.positions.length > 0)
+  )
 
   const metrics = useMemo(() => {
     const d = data?.demo || {}
