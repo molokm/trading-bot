@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
-  RefreshCw, Zap, Wifi, WifiOff, Bot, ArrowUpRight, ArrowDownRight,
+  RefreshCw, Zap, Wifi, WifiOff, ArrowUpRight, ArrowDownRight,
 } from 'lucide-react'
 import { api } from '../services/api'
 import { useTranslation } from '../hooks/useTranslation'
 
 function fmt(n, digits = 2) {
   if (n == null || Number.isNaN(Number(n))) return '—'
-  return Number(n).toLocaleString('en-US', {
+  return Number(n).toLocaleString('ru-RU', {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   })
@@ -21,11 +21,12 @@ function pnlClass(v) {
 
 function pnlSign(v) {
   const n = Number(v) || 0
-  if (!n) return '$0.00'
-  return (n > 0 ? '+$' : '-$') + fmt(Math.abs(n))
+  if (!n) return '$0,00'
+  const abs = fmt(Math.abs(n))
+  return (n > 0 ? '+$' : '−$') + abs
 }
 
-/** DEMO / LIVE fraction — same as iOS dashboard cards */
+/** DEMO / LIVE dual value — same as iOS dashboard metric cards */
 function dualPnl(demoVal, liveVal, liveConnected) {
   return (
     <span className="inline-flex items-baseline gap-0.5 flex-wrap mono leading-tight">
@@ -49,6 +50,20 @@ function withTimeout(promise, ms = 15000) {
       (e) => { clearTimeout(id); reject(e) },
     )
   })
+}
+
+function normSide(raw) {
+  const s = String(raw || '').toLowerCase()
+  if (s === 'long' || s === 'buy' || s === 'net') return 'long'
+  if (s === 'short' || s === 'sell') return 'short'
+  return ''
+}
+
+function parseTs(v) {
+  if (v == null || v === '') return 0
+  if (typeof v === 'number') return v < 1e12 ? v * 1000 : v
+  const p = Date.parse(String(v))
+  return Number.isNaN(p) ? 0 : p
 }
 
 class MiniAppErrorBoundary extends React.Component {
@@ -106,42 +121,46 @@ function MiniAppPageInner() {
     setLoading(true)
     setError(null)
     try {
-      const dash = await withTimeout(api.meDashboard().catch(() => api.getDashboard?.() || null))
-      // Prefer dedicated me/dashboard payload shaped for mini
-      if (dash && (dash.demo || dash.live || dash.trades)) {
-        setData(dash)
-      } else {
-        // Fallback: assemble from public endpoints
-        const [pnl, positions, trades, liveSt, aiSt] = await Promise.all([
-          api.getPnlSummary?.({ mode: 'demo' }).catch(() => api.getPnl?.({ mode: 'demo' }).catch(() => null)),
-          api.getPositions?.().catch(() => null),
-          api.getPairedTrades?.(30).catch(() => null),
-          api.liveStatus?.().catch(() => null),
-          api.aiStatus?.().catch(() => null),
-        ])
-        setData({
-          demo: {
-            pnl: pnl?.total,
-            session_pnl: pnl?.['1d'],
-            week: pnl?.week,
-            unrealized: pnl?.unrealized,
-            equity: null,
-            positions: positions?.positions || positions || [],
-            pulse: aiSt?.pulse || aiSt?.status_text || aiSt?.description || '',
-            running: !!(aiSt?.running || aiSt?.active),
-          },
-          live: {
-            connected: !!(liveSt?.connected || liveSt?.enabled),
-            total_pnl: liveSt?.total_pnl,
-            session_pnl: liveSt?.session_pnl,
-            week: liveSt?.week,
-            unrealized_pnl: liveSt?.unrealized_pnl ?? liveSt?.unrealized,
-            equity: liveSt?.equity,
-            positions: liveSt?.open_positions || liveSt?.positions || [],
-          },
-          trades: trades?.trades || trades || [],
-        })
-      }
+      const [dash, pnlDemo, pnlLive, positions, trades, liveSt, aiSt] = await Promise.all([
+        withTimeout(api.meDashboard().catch(() => null)).catch(() => null),
+        withTimeout(api.getPnlSummary?.({ mode: 'demo' }).catch(() => api.getPnl?.({ mode: 'demo' }).catch(() => null))).catch(() => null),
+        withTimeout(api.getPnlSummary?.({ mode: 'live' }).catch(() => api.getPnl?.({ mode: 'live' }).catch(() => null))).catch(() => null),
+        withTimeout(api.getPositions?.().catch(() => null)).catch(() => null),
+        withTimeout(api.getPairedTrades?.(40).catch(() => null)).catch(() => null),
+        withTimeout(api.liveStatus?.().catch(() => null)).catch(() => null),
+        withTimeout(api.aiStatus?.().catch(() => null)).catch(() => null),
+      ])
+
+      const posList = positions?.positions || positions || []
+      const tradeList = trades?.trades || trades || []
+
+      const demoFromDash = dash?.demo || {}
+      const liveFromDash = dash?.live || {}
+
+      setData({
+        demo: {
+          pnl: pnlDemo?.total ?? demoFromDash.pnl ?? dash?.pnl?.total,
+          session_pnl: pnlDemo?.['1d'] ?? demoFromDash.session_pnl,
+          week: pnlDemo?.week ?? demoFromDash.week,
+          unrealized: pnlDemo?.unrealized ?? demoFromDash.unrealized,
+          equity: demoFromDash.equity ?? null,
+          positions: demoFromDash.positions?.length ? demoFromDash.positions : posList,
+          pulse: aiSt?.pulse || aiSt?.status_text_ru || aiSt?.status_text || aiSt?.description || demoFromDash.pulse || '',
+          running: !!(aiSt?.running || aiSt?.active || demoFromDash.running),
+        },
+        live: {
+          connected: !!(liveSt?.connected || liveFromDash.connected),
+          total_pnl: pnlLive?.total ?? liveSt?.total_pnl ?? liveFromDash.total_pnl,
+          session_pnl: pnlLive?.['1d'] ?? liveSt?.session_pnl ?? liveFromDash.session_pnl,
+          week: pnlLive?.week ?? liveSt?.week ?? liveFromDash.week,
+          unrealized_pnl: liveSt?.unrealized_pnl ?? liveSt?.unrealized ?? liveFromDash.unrealized,
+          equity: liveSt?.equity ?? liveFromDash.equity,
+          positions: liveSt?.open_positions || liveSt?.positions || liveFromDash.positions || [],
+        },
+        trades: Array.isArray(dash?.trades) && dash.trades.length
+          ? dash.trades
+          : tradeList,
+      })
     } catch (e) {
       setError(String(e?.message || e || 'load failed'))
     } finally {
@@ -167,43 +186,20 @@ function MiniAppPageInner() {
     if (!unreal && Array.isArray(d.positions)) {
       unreal = d.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
     }
-    // Sum closed DEMO trades when server total is missing
-    let totalFromTrades = null
-    const all = Array.isArray(data?.trades) ? data.trades : []
-    if (all.length) {
-      let s = 0
-      let n = 0
-      const EPOCH = Date.parse('2026-09-01T00:00:00Z')
-      for (const tr of all) {
-        const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase()
-        if (mode === 'live') continue
-        if (String(tr.reason || '').toLowerCase() === 'open') continue
-        let ts = Number(tr.time || tr.exit_time || tr.ts || 0) || 0
-        if (ts > 0 && ts < 1e12) ts *= 1000
-        if (typeof tr.time === 'string') {
-          const p = Date.parse(tr.time)
-          if (!Number.isNaN(p)) ts = p
-        }
-        if (ts > 0 && ts < EPOCH) continue
-        const pnl = Number(tr.pnl)
-        if (!Number.isFinite(pnl) || Math.abs(pnl) < 1e-9) continue
-        s += pnl
-        n += 1
-      }
-      if (n > 0) totalFromTrades = Math.round(s * 100) / 100
+    let liveUnreal = Number(L.unrealized_pnl ?? L.unrealized ?? 0)
+    if (!liveUnreal && Array.isArray(L.positions)) {
+      liveUnreal = L.positions.reduce((s, p) => s + Number(p.upl || p.unrealized_pnl || 0), 0)
     }
     return {
-      total: totalFromTrades != null ? totalFromTrades : Number(d.pnl ?? 0),
+      total: Number(d.pnl ?? 0),
       today: Number(d.session_pnl ?? 0),
       week: Number(d.week ?? d.pnl_week ?? 0),
       unreal,
-      equity: d.equity ?? null,
       liveConnected,
       liveTotal: Number(L.total_pnl ?? L.strategy_realized ?? 0),
       liveToday: Number(L.session_pnl ?? L.pnl_1d ?? 0),
       liveWeek: Number(L.week ?? L.pnl_week ?? 0),
-      liveUnreal: Number(L.unrealized_pnl ?? L.unrealized ?? 0),
-      liveEquity: L.equity != null ? Number(L.equity) : null,
+      liveUnreal,
     }
   }, [data, liveConnected])
 
@@ -212,17 +208,29 @@ function MiniAppPageInner() {
     const push = (list, mode) => {
       if (!Array.isArray(list)) return
       list.forEach((p, i) => {
-        const coin = (p.inst_id || p.instId || p.symbol || p.coin || '').replace('-USDT-SWAP', '')
-        const side = String(p.pos_side || p.side || p.posSide || '').toLowerCase()
-        const isLong = side === 'long' || side === 'net' || side === 'buy'
+        const coin = String(p.inst_id || p.instId || p.symbol || p.coin || '')
+          .replace('-USDT-SWAP', '')
+          .replace('-USD-SWAP', '')
+        const side = normSide(p.pos_side || p.side || p.posSide)
+        const isLong = side === 'long'
+        const size = Number(p.size ?? p.pos ?? p.sz ?? 0)
+        const entry = Number(p.entry_price ?? p.avgPx ?? p.entry ?? 0)
+        const mark = Number(p.mark_price ?? p.markPx ?? p.last ?? p.mark ?? 0)
+        let notional = Number(p.notional ?? p.notionalUsd ?? p.margin ?? 0)
+        if (!notional || !Number.isFinite(notional)) {
+          const px = mark || entry
+          const ct = Number(p.ctVal || p.ct_val || 1) || 1
+          notional = Math.abs(size) * px * ct
+        }
         out.push({
-          key: `${mode}-${coin || i}-${side}-${p.size || p.pos || i}`,
+          key: `${mode}-${coin || i}-${side}-${size}-${i}`,
           coin: coin || '—',
           side: isLong ? 'long' : 'short',
           sideLabel: isLong ? 'LONG' : 'SHORT',
-          size: Number(p.size ?? p.pos ?? p.sz ?? 0),
-          entry: Number(p.entry_price ?? p.avgPx ?? p.entry ?? 0),
-          mark: Number(p.mark_price ?? p.markPx ?? p.last ?? 0),
+          size,
+          entry,
+          mark,
+          notional,
           upl: Number(p.upl ?? p.unrealized_pnl ?? p.pnl ?? 0),
           mode,
         })
@@ -239,20 +247,22 @@ function MiniAppPageInner() {
       .filter((tr) => String(tr.reason || '').toLowerCase() !== 'open')
       .map((tr, i) => {
         const mode = String(tr.account_mode || tr.mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
-        const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
-        const isLong = sideRaw === 'long' || sideRaw === 'buy'
-        const isShort = sideRaw === 'short' || sideRaw === 'sell'
-        const inst = (tr.inst_id || tr.symbol || tr.coin || '').replace('-USDT-SWAP', '')
+        let side = normSide(tr.pos_side)
+        if (!side) side = normSide(tr.side)
+        const inst = String(tr.inst_id || tr.symbol || tr.coin || '')
+          .replace('-USDT-SWAP', '')
+          .replace('-USD-SWAP', '')
         return {
           key: `${mode}-${tr.ord_id || i}-${tr.time || tr.exit_time || i}`,
           inst: inst || '—',
-          side: isLong ? 'long' : isShort ? 'short' : '',
-          sideLabel: isLong ? 'LONG' : isShort ? 'SHORT' : '—',
+          side,
+          sideLabel: side === 'long' ? 'LONG' : side === 'short' ? 'SHORT' : '—',
           pnl: Number(tr.pnl || 0),
           mode,
-          time: tr.exit_time || tr.time || '',
+          ts: parseTs(tr.exit_time || tr.time || tr.ts),
         }
       })
+      .sort((a, b) => (b.ts || 0) - (a.ts || 0))
     return mapped.slice(0, 3)
   }, [data?.trades])
 
@@ -280,7 +290,7 @@ function MiniAppPageInner() {
     )
   }
 
-  const pulse = data?.demo?.pulse || data?.demo?.description || ''
+  const pulse = data?.demo?.pulse || ''
   const demoOn = !!(data?.demo?.running)
 
   return (
@@ -291,7 +301,6 @@ function MiniAppPageInner() {
         paddingBottom: 'max(8px, env(safe-area-inset-bottom))',
       }}
     >
-      {/* Header — like iOS strip */}
       <div className="mini-header">
         <div className="flex items-center gap-1.5 min-w-0">
           <Zap size={14} className="text-[var(--info)] flex-shrink-0" />
@@ -322,76 +331,61 @@ function MiniAppPageInner() {
         </div>
       </div>
 
-      {/* 2×2 metrics — same as iOS dashboard */}
       <div className="mini-metrics">
         <div className="mini-metric">
-          <div className="label">Нереализ. · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.unreal, metrics.liveUnreal, liveConnected)}</div>
+          <span className="label">Нереализ. PnL</span>
+          <span className="value">{dualPnl(metrics.unreal, metrics.liveUnreal, liveConnected)}</span>
         </div>
         <div className="mini-metric">
-          <div className="label">Сегодня · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.today, metrics.liveToday, liveConnected)}</div>
+          <span className="label">PnL сегодня</span>
+          <span className="value">{dualPnl(metrics.today, metrics.liveToday, liveConnected)}</span>
         </div>
         <div className="mini-metric">
-          <div className="label">Сумма · демо/лайф</div>
-          <div className="value">{dualPnl(metrics.total, metrics.liveTotal, liveConnected)}</div>
+          <span className="label">PnL неделя</span>
+          <span className="value">{dualPnl(metrics.week, metrics.liveWeek, liveConnected)}</span>
         </div>
         <div className="mini-metric">
-          <div className="label">Equity · демо/лайф</div>
-          <div className="value mono text-[var(--txt)]">
-            <span title="Демо">{metrics.equity != null ? `$${fmt(metrics.equity, 0)}` : '—'}</span>
-            <span className="text-[var(--txt-muted)] mx-0.5 font-normal">/</span>
-            <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
-              {liveConnected && metrics.liveEquity != null ? `$${fmt(metrics.liveEquity, 0)}` : '—'}
-            </span>
-          </div>
+          <span className="label">Сумма PnL</span>
+          <span className="value">{dualPnl(metrics.total, metrics.liveTotal, liveConnected)}</span>
         </div>
       </div>
 
-      {/* AI status + Russian pulse */}
       <div className="mini-ai">
         <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span
-              className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                demoOn ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)]'
-              }`}
-            />
-            <Bot size={12} className="text-[var(--txt-muted)] flex-shrink-0" />
-            <span className="text-[0.7rem] font-semibold truncate">AI Discretionary</span>
-            <span
-              className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded ${
-                demoOn
-                  ? 'bg-[var(--profit-dim)] text-[var(--profit)]'
-                  : 'bg-[var(--surface-overlay)] text-[var(--txt-muted)]'
-              }`}
-            >
-              {demoOn ? 'ВКЛ' : 'ВЫКЛ'}
-            </span>
-          </div>
+          <span className="text-[0.7rem] font-bold truncate">AI Discretionary 1H</span>
+          <span
+            className={`text-[0.55rem] font-bold px-1.5 py-0.5 rounded-md border ${
+              demoOn
+                ? 'border-[var(--profit)]/40 text-[var(--profit)] bg-[var(--profit-dim)]'
+                : 'border-[var(--border)] text-[var(--txt-muted)]'
+            }`}
+          >
+            {demoOn ? '● РАБОТАЕТ' : '○ СТОП'}
+          </span>
         </div>
         {pulse ? (
-          <div className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-2">
+          <div className="text-[0.65rem] leading-snug text-[var(--txt-secondary)] line-clamp-3">
             {pulse}
           </div>
-        ) : null}
+        ) : (
+          <div className="text-[0.65rem] text-[var(--txt-muted)]">Статус обновляется…</div>
+        )}
       </div>
 
-      {/* Open positions */}
       <div className="mini-section mini-positions">
         <div className="mini-section-title">
           <span>Открытые позиции</span>
-          <span>{positions.length}</span>
+          <span>{positions.length || 0}</span>
         </div>
-        <div className="mini-panel flex-1 min-h-0 overflow-auto">
+        <div className="mini-panel" style={{ maxHeight: '100%', overflow: 'auto' }}>
           {positions.length === 0 ? (
-            <div className="py-3 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет позиций</div>
+            <div className="py-2.5 text-center text-[0.7rem] text-[var(--txt-muted)]">Нет открытых позиций</div>
           ) : (
             positions.map((p) => (
               <div key={p.key} className="mini-pos-row">
-                <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center justify-between gap-2 mb-0.5">
                   <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-[0.75rem] font-bold">{p.coin}</span>
+                    <span className="text-[0.75rem] font-bold truncate">{p.coin}</span>
                     <span
                       className={`text-[0.55rem] font-bold ${
                         p.side === 'long' ? 'text-[var(--profit)]' : 'text-[var(--loss)]'
@@ -409,20 +403,23 @@ function MiniAppPageInner() {
                     {pnlSign(p.upl)}
                   </span>
                 </div>
-                <div className="mt-0.5 flex flex-wrap gap-x-3 text-[0.58rem] text-[var(--txt-muted)] mono">
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[0.6rem] text-[var(--txt-muted)] mono">
                   <span>
-                    Размер <span className="text-[var(--txt)]">{p.size ? p.size.toFixed(3) : '—'}</span>
+                    Объём{' '}
+                    <span className="text-[var(--txt)]">
+                      {p.notional > 0 ? `$${fmt(p.notional, 0)}` : '—'}
+                    </span>
                   </span>
                   <span>
                     Вход{' '}
                     <span className="text-[var(--txt)]">
-                      {p.entry ? `$${p.entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
+                      {p.entry ? `$${fmt(p.entry)}` : '—'}
                     </span>
                   </span>
                   <span>
                     Марка{' '}
                     <span className="text-[var(--txt)]">
-                      {p.mark ? `$${p.mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}
+                      {p.mark ? `$${fmt(p.mark)}` : '—'}
                     </span>
                   </span>
                 </div>
@@ -432,7 +429,6 @@ function MiniAppPageInner() {
         </div>
       </div>
 
-      {/* Last 3 trades */}
       <div className="mini-section mini-trades">
         <div className="mini-section-title">
           <span>Сделки</span>

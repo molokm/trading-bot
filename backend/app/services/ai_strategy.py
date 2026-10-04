@@ -2834,6 +2834,14 @@ class AIStrategy:
                 )
                 if _tg_mid:
                     pos.tg_message_id = int(_tg_mid)
+                    try:
+                        await self.notifier.remember_open_db(
+                            self.db, pos.signal_id, _tg_mid,
+                            bot_id=self._live_bot_id(), coin=coin,
+                        )
+                    except Exception as _re:
+                        print(f"[AI-LIVE] TG remember_open: {_re}", flush=True)
+                    print(f"[AI-LIVE] TG open msg_id={_tg_mid} signal={pos.signal_id}", flush=True)
             except Exception as e:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
