@@ -219,12 +219,40 @@ async def flatten_position(client, inst_id: str, side: str, size: float) -> dict
 
 
 async def claim_or_flatten(db, client, bot_id: str, inst_id: str, side: str,
-                           size: float, entry: float) -> bool:
-    """Claim ownership; if DB claim fails, close on exchange so no silent orphans."""
-    ok = await claim_open(db, bot_id, inst_id, side, size, entry)
-    if ok:
-        return True
-    log.error("CLAIM FAILED after fill %s %s — flattening to prevent orphan", bot_id, inst_id)
+                           size: float, entry: float,
+                           soft_keep: bool = True) -> bool:
+    """Claim ownership after a successful exchange fill.
+
+    Retries DB claim a few times (Neon / pool blips after deploy).
+    soft_keep=True (default for intentional bot opens): if claim still fails,
+    do NOT flatten — caller keeps the position in memory and can mirror to LIVE.
+    Hard flatten only when soft_keep=False (orphan sweeper path).
+    """
+    import asyncio
+    ok = False
+    last_err = None
+    for attempt in range(4):
+        try:
+            ok = await claim_open(db, bot_id, inst_id, side, size, entry)
+            if ok:
+                if attempt:
+                    log.info("claim_open ok on retry %s %s attempt=%s", bot_id, inst_id, attempt)
+                return True
+        except Exception as e:
+            last_err = e
+            log.warning("claim_open attempt %s failed %s: %s", attempt, inst_id, e)
+        await asyncio.sleep(0.35 * (attempt + 1))
+    log.error(
+        "CLAIM FAILED after fill %s %s (last=%s) soft_keep=%s",
+        bot_id, inst_id, last_err, soft_keep,
+    )
+    if soft_keep:
+        # Persist best-effort snapshot so restore after deploy still works
+        try:
+            await upsert_snapshot_position(db, bot_id, inst_id, side, float(size), float(entry))
+        except Exception as e:
+            log.warning("soft snapshot after claim fail: %s", e)
+        return True  # allow open path + LIVE mirror to continue
     if client and orphan_close_enabled():
         await flatten_position(client, inst_id, side, size)
     return False

@@ -2014,12 +2014,16 @@ class AIStrategy:
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
-        ok_claim = await claim_or_flatten(self.db, client, self.BOT_ID, inst, side, sz, fill_px)
+        ok_claim = await claim_or_flatten(
+            self.db, client, self.BOT_ID, inst, side, sz, fill_px, soft_keep=True,
+        )
         if not ok_claim:
+            # Hard-fail path only (soft_keep disabled) — position was flattened
             print(f"[AI] CRITICAL: claim failed — flattened {coin} to avoid orphan", flush=True)
             self._positions.pop(coin, None)
             self._record_exec("open_claim_fail_flat", coin=coin, side=side)
             return
+        # soft_keep may return True without a durable DB row — still proceed to mirror
         self._trade_log.append({
             "account_mode": (
                 "demo"
