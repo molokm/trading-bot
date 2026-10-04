@@ -89,11 +89,12 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.20-demo-trade-id"
+STRATEGY_VERSION = "v1.21-regime-risk"
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.16 — BTC/ETH/SOL/XRP: шире TP и позже активация трейла/БУ "
-    "(лечим отрицательную экспектансию при высоком WR — v1.10 случайно обрезал выигрыши "
-    "вместо лоссов), риск ~1.2%, hold-in-trend при align≥0.60 с chop/ADX-гардами."
+    "AI Discretionary 1H v1.21 — BTC/ETH/SOL/XRP: wider TP/trail (v1.16), "
+    "честное зеркало LIVE (только по команде DEMO) + demo_trade_id, "
+    "risk-manager LLM-вето + asymmetric market-regime overlay "
+    "(bear/chop ужесточает пороги, не ослабляет), риск ~1.2%."
 )
 
 CT_VAL = {
@@ -1431,6 +1432,21 @@ class AIStrategy:
                     size_cap = min(size_cap, 0.08)
                     reasons.append(f"lifetime_wr={lwr:.0f}")
 
+        # v1.21: asymmetric market-regime overlay (BTC EMA structure).
+        # Unfavorable regime (bear/chop) can only TIGHTEN thresholds —
+        # never push toward more aggression than performance-based logic.
+        _btc_ind = (getattr(self, "_latest_indicators", None) or {}).get("BTC") or {}
+        btc_regime = str((_btc_ind.get("regime") if isinstance(_btc_ind, dict) else None) or "unknown")
+        if btc_regime in ("bear", "chop"):
+            regime_conf_floor = 0.70 if btc_regime == "bear" else 0.66
+            regime_align_floor = 0.60 if btc_regime == "bear" else 0.57
+            regime_size_cap = 0.06 if btc_regime == "bear" else 0.08
+            if conf < regime_conf_floor or align < regime_align_floor or size_cap > regime_size_cap:
+                conf = max(conf, regime_conf_floor)
+                align = max(align, regime_align_floor)
+                size_cap = min(size_cap, regime_size_cap)
+                reasons.append(f"regime_overlay:{btc_regime}")
+
         conf = max(float(cfg.conf_floor), min(float(cfg.conf_ceil), conf))
         align = max(float(cfg.align_floor), min(float(cfg.align_ceil), align))
         size_cap = max(float(cfg.size_cap_floor), min(float(cfg.size_cap_ceil), size_cap))
@@ -1442,6 +1458,7 @@ class AIStrategy:
             "quant_min_align": round(align, 3),
             "size_cap": round(size_cap, 3),
             "preset": preset,
+            "market_regime": btc_regime,
             "reason": reason,
             "stats": stats,
             "updated_at": datetime.now(timezone.utc).isoformat(),

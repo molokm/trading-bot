@@ -123,10 +123,13 @@ def _resolve_groq_model(model: str | None) -> str:
 
 SYSTEM_PROMPT_MANAGE = """You MANAGE an open OKX USDT-SWAP position (do not open a new coin).
 Think like a desk: structure → momentum → risk → action.
-Reply with ONE JSON object only (no markdown):
-{"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
-"size_pct":0.25-0.75,"confidence":0-1,
-"reason":"<=200 chars","thesis":"<=180 chars optional"}
+Reply with ONE JSON object only (no markdown). Write thesis/reason FIRST — reason
+through structure/momentum/risk before committing to action, not after:
+{"thesis":"<=180 chars optional: structure+momentum+risk read, in that order",
+"reason":"<=200 chars",
+"confidence":0-1,
+"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
+"size_pct":0.25-0.75}
 
 Analysis checklist (use fields in snapshot):
 - Structure: price vs EMA21/50/200, tf_4h.trend_up, BB position
@@ -146,13 +149,19 @@ Rules:
 
 SYSTEM_PROMPT = """You are an OKX USDT-SWAP discretionary desk. Analyze first, trade second.
 Prefer candidates_allowed; avoid candidates_blocked. You receive a full quant snapshot — use it.
-Reply with ONE JSON object only (no markdown):
-{"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
-"size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10,
-"confidence":0-1,"regime":"bull|bear|chop|unknown",
-"reason":"<=200 chars","thesis":"<=220 chars optional"}
 
-How to analyze (do this mentally before choosing action):
+Reply with ONE JSON object only (no markdown). Write the analysis fields FIRST —
+they are your scratchpad, use them to reason step by step BEFORE committing to
+action/side/sizing. Do not decide the action mentally first and backfill thesis
+to match it.
+{"thesis":"<=220 chars: structure+momentum+strength+risk, in that order",
+"reason":"<=200 chars: the >=2 concrete metrics that decided it",
+"regime":"bull|bear|chop|unknown",
+"confidence":0-1,
+"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
+"size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10}
+
+How to analyze (write this into thesis/reason, in order):
 A) Market structure per coin: close vs EMA21/50/200, BB location, tf_4h trend alignment
 B) Momentum: ROC, MACD histogram sign, RSI (avoid extremes against the trade)
 C) Strength: ADX, regime, vol_ratio (participation)
@@ -170,6 +179,26 @@ Hard rules:
 8) Respect adaptive.size_cap and daily_lessons RULE*.
 9) Prefer BTC/ETH leadership consistent with the chosen side when trading alts.
 10) Size down (near size_pct floor) when ADX is only moderate or regime mixed.
+
+Worked examples (follow this reasoning pattern, not these exact numbers):
+
+Example A — good open:
+thesis: "BTC>EMA21>50>200, 4H confirms. ROC+1.8%, MACD hist rising 3 bars, RSI 61 (room
+to 70). ADX 27 regime=bull. Funding flat, stop room 1.4xATR."
+reason: "ADX27 trend-confirmed, align_long 0.74, MACD hist rising"
+confidence: 0.74 -> action: open, side: long, size_pct_equity: 0.07
+
+Example B — correct hold despite a tempting setup:
+thesis: "ETH ROC +2.1% looks strong but 1H ADX only 14 (chop), 4H trend flat, RSI
+already 68 near extreme against fresh longs. BB mid, no clear structure break."
+reason: "ADX14<min, regime=chop, RSI stretched — no multi-factor edge"
+confidence: 0.41 -> action: hold (DEFAULT wins: single-factor momentum is not enough)
+
+Example C — avoid counter-trend chase:
+thesis: "SOL ROC -3% but BTC regime=bull and btc_roc +0.9% (leadership against this
+short). Align_short only 0.48. Funding -0.09% also against the short."
+reason: "fighting BTC leadership + weak align_short — high false-signal risk"
+confidence: 0.38 -> action: hold
 """
 
 def _clip(x: float, lo: float, hi: float) -> float:
@@ -346,8 +375,8 @@ def mock_decide(snapshot: dict) -> dict:
     }, open_syms)
 
 
-async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
-    """Ask LLM (or mock) for a decision given market snapshot."""
+async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict:
+    """Internal single LLM call — call_llm() adds self-consistency + risk veto."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
         # Auto: Groq first, then openrouter, else mock (BAI removed)
@@ -471,6 +500,118 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
         if used != provider:
             dec["reason"] = f"via_{used}: {dec.get('reason')}"
     return dec
+
+
+
+_RISK_MANAGER_PROMPT = """You are a risk manager. Your only job is to VETO bad opens.
+You do NOT propose trades. Default is approve (veto=false).
+Reply with ONE JSON object only:
+{"veto": false, "reason": "ok"}
+or
+{"veto": true, "reason": "<=120 chars concrete risk"}
+
+Veto ONLY for concrete reasons:
+- Correlated stack: already long/short same beta as proposed (e.g. long BTC + open long ETH)
+- Recent identical loss pattern in journal_tail/daily_lessons for this coin+side
+- Size vs confidence mismatch (high size_pct with confidence barely above threshold)
+- Clear regime clash (open long in strong bear / short in strong bull without exceptional align)
+Do NOT veto on mild uncertainty — that is the main agent's job.
+"""
+
+
+async def _risk_manager_veto(snapshot: dict, decision: dict, provider: Optional[str] = None) -> tuple:
+    """Third-step risk veto after self-consistency agreed on open. Fail-open."""
+    try:
+        open_pos = snapshot.get("open_positions") or []
+        payload = {
+            "proposed": {
+                "symbol": decision.get("symbol"),
+                "side": decision.get("side"),
+                "size_pct_equity": decision.get("size_pct_equity"),
+                "confidence": decision.get("confidence"),
+                "reason": decision.get("reason"),
+            },
+            "open_positions": open_pos,
+            "adaptive": snapshot.get("adaptive"),
+            "quant": snapshot.get("quant"),
+            "journal_tail": (snapshot.get("journal_tail") or [])[-6:],
+            "daily_lessons": (snapshot.get("daily_lessons") or [])[-4:],
+            "indicators_btc": (snapshot.get("indicators") or {}).get("BTC"),
+        }
+        user_msg = "Risk-check this proposed OPEN:\n" + json.dumps(payload, ensure_ascii=False)[:2500]
+        # Force manage-style short response via temporary prompt swap
+        global _ACTIVE_SYSTEM_PROMPT
+        prev = _ACTIVE_SYSTEM_PROMPT
+        _ACTIVE_SYSTEM_PROMPT = _RISK_MANAGER_PROMPT
+        try:
+            prov = (provider or os.getenv("AI_LLM_PROVIDER") or "groq").strip().lower()
+            if prov in ("", "mock"):
+                return False, "mock_skip"
+            raw = await _call_provider(prov, user_msg)
+        finally:
+            _ACTIVE_SYSTEM_PROMPT = prev
+        # parse JSON from raw
+        text = raw if isinstance(raw, str) else str(raw or "")
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            return False, "parse_skip"
+        obj = json.loads(text[start:end + 1])
+        if bool(obj.get("veto")):
+            return True, str(obj.get("reason") or "risk_veto")[:200]
+        return False, str(obj.get("reason") or "ok")[:120]
+    except Exception as e:
+        return False, f"risk_fail_open:{e}"[:120]
+
+
+async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
+    """LLM decision with self-consistency on new opens + risk-manager veto.
+
+    Second call only when action=open in entry mode (quota-friendly).
+    Risk veto only after both runs agree on open.
+    """
+    dec1 = await _call_llm_once(snapshot, provider)
+
+    open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
+    mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
+    if mode != "entry" or dec1.get("action") != "open":
+        return dec1
+
+    dec2 = await _call_llm_once(snapshot, provider)
+    agree = (
+        dec2.get("action") == "open"
+        and dec2.get("symbol") == dec1.get("symbol")
+        and dec2.get("side") == dec1.get("side")
+    )
+    if not agree:
+        dec1["action"] = "hold"
+        dec1["size_pct_equity"] = 0.0
+        dec1["reason"] = (
+            f"self_consistency_fail: run1={dec1.get('symbol')}/{dec1.get('side')} "
+            f"vs run2={dec2.get('symbol')}/{dec2.get('side')}/{dec2.get('action')}"
+        )[:240]
+        return dec1
+
+    for k in ("size_pct_equity", "stop_pct", "take_pct"):
+        try:
+            v1, v2 = float(dec1.get(k) or 0), float(dec2.get(k) or 0)
+            if v1 > 0 and v2 > 0:
+                dec1[k] = round((v1 + v2) / 2, 5)
+        except (TypeError, ValueError):
+            pass
+    try:
+        dec1["confidence"] = round(
+            min(float(dec1.get("confidence") or 0), float(dec2.get("confidence") or 0)), 3)
+    except (TypeError, ValueError):
+        pass
+    dec1["reason"] = f"consensus(2/2): {dec1.get('reason', '')}"[:240]
+
+    # Risk-manager veto (fail-open)
+    veto, why = await _risk_manager_veto(snapshot, dec1, provider)
+    if veto:
+        dec1["action"] = "hold"
+        dec1["size_pct_equity"] = 0.0
+        dec1["reason"] = f"risk_veto: {why}"[:240]
+    return dec1
 
 
 def _provider_chain(primary: str) -> list[str]:
