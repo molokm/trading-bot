@@ -89,7 +89,7 @@ def save_ai_state(payload: dict) -> None:
         print(f"[AI] state save: {e}", flush=True)
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.22-mirror-strict"
+STRATEGY_VERSION = "v1.23-mirror-gapfill"
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.21 — BTC/ETH/SOL/XRP: wider TP/trail (v1.16), "
     "честное зеркало LIVE (только по команде DEMO) + demo_trade_id, "
@@ -2632,7 +2632,20 @@ class AIStrategy:
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
+            # Gap-fill right after restart may run before indicators load
+            demo_pos0 = (self._positions or {}).get(coin)
+            entry = float(getattr(demo_pos0, "entry_price", 0) or 0) if demo_pos0 else 0
+        if entry <= 0:
+            try:
+                ticker = await lc.get_ticker(f"{coin}-USDT-SWAP")
+                rows = (ticker or {}).get("data") or []
+                if rows:
+                    entry = float(rows[0].get("last") or 0)
+            except Exception as e:
+                print(f"[AI-LIVE] ticker fallback: {e}", flush=True)
+        if entry <= 0:
             print("[AI-LIVE] open_skip: no market price", flush=True)
+            self._record_exec("mirror_fail", coin=coin, side=side, reason="no_price")
             return False
         live_eq = await self._ensure_live_equity()
         alloc = float(getattr(self, "_live_capital", 0) or 0)
@@ -2667,7 +2680,13 @@ class AIStrategy:
         print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
+            lot = float(LOT_SZ.get(coin, 0.1) or 0.1)
+            sz = lot
+            lev = max(1, int(getattr(self.config, "max_leverage", 3) or 3))
+            print(f"[AI-LIVE] size fallback min lot {coin} sz={sz} lev={lev}", flush=True)
+        if sz <= 0:
             print(f"[AI-LIVE] open_skip {coin}: size=0 (equity=${live_eq:.2f})", flush=True)
+            self._record_exec("mirror_fail", coin=coin, side=side, reason="size=0")
             return False
         inst = f"{coin}-USDT-SWAP"
         order_side = "buy" if side == "long" else "sell"
@@ -3338,15 +3357,7 @@ class AIStrategy:
                     if entry > 0 and take_p > 0:
                         take_pct = abs(take_p - entry) / entry
                     side = getattr(demo_pos, "side", side)
-                # Delayed entry: re-confirm with current AI/quant data
-                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
-                if not ok_gate:
-                    print(f"[AI-LIVE] fast_retry SKIP {coin} t+{delay:.0f}s: AI gate {gate_reason}", flush=True)
-                    self._exec_log.append(_exec_evt(
-                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
-                    ))
-                    continue
-                print(f"[AI-LIVE] fast_retry AI ok {coin}: {gate_reason}", flush=True)
+                # Pure copy — no price/AI revalidate on retries
                 ok = await self._open_live(
                     coin, side, stop_pct, take_pct,
                     reason=f"fast_retry_{reason}",
@@ -3358,46 +3369,20 @@ class AIStrategy:
                 print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
 
     async def _clone_missing_to_live(self):
-        """Clone demo positions that are missing from live (hydrate + gap-fill).
+        """Gap-fill: every DEMO open MUST exist on LIVE. Pure copy, no filters.
 
-        Watermark (К2): only clone positions opened AFTER explicit mirror connect.
-        The watermark is stored as `live_mirror_connected_at` (Unix timestamp)
-        set when user presses "Подключить LIVE". Positions opened before that
-        timestamp are NOT cloned — user said "Лайв только вручную, без клонирования".
+        Removed watermark + price-revalidate gates — they skipped legitimate
+        mirrors after redeploy (seed watermark=now → opened_ts < watermark).
         """
         if not await self._mirror_enabled():
+            print("[AI-LIVE] clone_missing: mirror disabled", flush=True)
             return
         if not self._live_ready():
             await self._try_refresh_live_client()
         if not self._live_ready():
             print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            self._record_exec("mirror_gap", coin="*", side="", reason="live_not_ready")
             return
-        # Watermark: only clone positions opened AFTER explicit mirror connect
-        watermark = 0
-        if self.db:
-            try:
-                raw = await self.db.get_setting("live_mirror_connected_at")
-                if raw:
-                    watermark = int(float(raw))
-            except Exception:
-                pass
-        if watermark == 0:
-            # Mirror is enabled + live ready but watermark never persisted (old
-            # connects / auto-heal). Seed NOW so CURRENT demo opens can gap-fill;
-            # do not backfill ancient positions (opened_at check uses this ts).
-            try:
-                import time as _t
-                watermark = int(_t.time())
-                if self.db:
-                    await self.db.set_setting("live_mirror_connected_at", str(watermark))
-                print(
-                    f"[AI-LIVE] clone_missing: seeded watermark={watermark} "
-                    f"(was missing while mirror enabled)",
-                    flush=True,
-                )
-            except Exception as _se:
-                print(f"[AI-LIVE] clone_missing: cannot seed watermark: {_se} — SKIP", flush=True)
-                return
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
@@ -3406,24 +3391,18 @@ class AIStrategy:
         if not hasattr(self, "_clone_attempt_ts"):
             self._clone_attempt_ts = {}
         now = _t.time()
+        gaps = [c for c, p in self._positions.items()
+                if c not in self._live_positions
+                and float(getattr(p, "size", 0) or 0) > 0]
+        if gaps:
+            print(f"[AI-LIVE] clone_missing gaps={gaps}", flush=True)
         for coin, demo_pos in list(self._positions.items()):
             if coin in self._live_positions:
                 continue
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
-            # Watermark gate: only clone positions opened AFTER explicit connect
-            try:
-                opened_at = getattr(demo_pos, "opened_at", None)
-                if opened_at:
-                    opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
-                    if opened_ts < watermark:
-                        print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
-                        continue
-            except Exception as _we:
-                print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
-                continue
             last = float(self._clone_attempt_ts.get(coin) or 0)
-            if now - last < 15:
+            if now - last < 8:
                 continue
             self._clone_attempt_ts[coin] = now
             entry = float(getattr(demo_pos, "entry_price", 0) or 0)
@@ -3431,25 +3410,30 @@ class AIStrategy:
             take_p = float(getattr(demo_pos, "take_price", 0) or 0)
             stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.03
             take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.06
-            side = getattr(demo_pos, "side", "long")
-            print(f"[AI-LIVE] clone_missing {coin}: {side} demo_sz={demo_pos.size} "
-                  f"entry={entry:.4f}", flush=True)
+            side = str(getattr(demo_pos, "side", "long") or "long")
+            print(
+                f"[AI-LIVE] clone_missing TRY {coin} {side} "
+                f"demo_sz={demo_pos.size} entry={entry:.4f}",
+                flush=True,
+            )
+            self._record_exec(
+                "mirror_gap_try", coin=coin, side=side,
+                reason=f"entry={entry}", size=float(demo_pos.size or 0),
+            )
             try:
-                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
-                if not ok_gate:
-                    print(f"[AI-LIVE] clone_missing SKIP {coin}: AI gate {gate_reason}", flush=True)
-                    self._exec_log.append(_exec_evt(
-                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
-                    ))
-                    continue
-                print(f"[AI-LIVE] clone_missing AI ok {coin}: {gate_reason}", flush=True)
+                # NO revalidate — pure mechanical copy of open DEMO book
                 ok = await self._open_live(
                     coin, side, stop_pct, take_pct,
                     reason="clone_missing_from_demo",
                 )
                 print(f"[AI-LIVE] clone_missing result {coin}={ok}", flush=True)
+                self._record_exec(
+                    "mirror_ok" if ok else "mirror_fail",
+                    coin=coin, side=side, reason="clone_missing",
+                )
             except Exception as e:
                 print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
+                self._record_exec("mirror_error", coin=coin, side=side, reason=str(e)[:120])
 
     def _persist_live(self):
         """Save live open positions snapshot (separate key from primary)."""
@@ -4384,10 +4368,16 @@ class AIStrategy:
             if await self._mirror_enabled():
                 await self._try_refresh_live_client()
                 if self._live_ready() and self._positions:
-                    missing = [c for c in self._positions if c not in self._live_positions]
+                    missing = [
+                        c for c, p in self._positions.items()
+                        if c not in self._live_positions
+                        and float(getattr(p, "size", 0) or 0) > 0
+                    ]
                     if missing:
                         print(f"[AI-LIVE] gap-fill missing on live: {missing}", flush=True)
                         await self._clone_missing_to_live()
+                elif self._positions and not self._live_ready():
+                    print("[AI-LIVE] gap-fill: LIVE not ready while DEMO has positions", flush=True)
         except Exception as _ge:
             print(f"[AI-LIVE] gap-fill: {_ge}", flush=True)
         # Once per process-ish: sweep unclaimed exchange positions
