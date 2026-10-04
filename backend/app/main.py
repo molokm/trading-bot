@@ -2762,10 +2762,11 @@ async def live_status():
             from app.services import pnl_engine as _pe
         except Exception:
             _pe = None
+        # Engine (DB) first
+        eng = None
         try:
             eng = await _get_pnl_cached(mode='live')
         except Exception as _ee:
-            eng = None
             debug['engine_err'] = str(_ee)
             print(f'[LIVE] pnl_engine: {_ee}', flush=True)
         if isinstance(eng, dict) and int(eng.get('trades_counted') or 0) > 0:
@@ -2773,14 +2774,17 @@ async def live_status():
             realized_today = float(eng.get('1d') or 0)
             realized_week = float(eng.get('week') or 0)
             lifetime_trades = int(eng.get('trades_counted') or 0)
-            # wins not always in engine payload — derive best-effort
             wins = int(eng.get('wins') or 0)
             fees = float(eng.get('fees') or 0)
             _pnl_src = 'pnl_engine_live'
             debug['engine_eligible'] = eng.get('eligible_n')
             debug['engine_excluded'] = eng.get('excluded_n')
             debug['engine_source'] = eng.get('source')
-        elif _pe is not None and lc is not None:
+            debug['engine_trades'] = lifetime_trades
+
+        # ALWAYS also read LIVE OKX bills when connected — DB may lag or miss
+        # closes (redeploy, adopt). Prefer the richer AI-attributed set.
+        if _pe is not None and lc is not None:
             try:
                 _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
                 _close_by_ord = {}
@@ -2806,6 +2810,7 @@ async def live_status():
                             'cl_ord_id': str(_b.get('clOrdId') or '').strip(),
                             'pnl': 0.0, 'fee': 0.0, 'close_ts': 0,
                             'account_mode': 'live', 'account_key': 'live',
+                            'bot_label': 'AI Discretionary 1H',  # mirror is AI-only
                         }
                     _row['pnl'] += _bp
                     _row['fee'] += _bf
@@ -2815,21 +2820,51 @@ async def live_status():
                         _bts = 0
                     if _bts > int(_row.get('close_ts') or 0):
                         _row['close_ts'] = _bts
-                    if not _row['cl_ord_id']:
-                        _row['cl_ord_id'] = str(_b.get('clOrdId') or '').strip()
-                _agg = _pe.summarize_close_rows(list(_close_by_ord.values()), ai_only=bool(AI_ONLY_MODE))
-                realized = float(_agg.get('total') or 0)
-                realized_today = float(_agg.get('1d') or 0)
-                realized_week = float(_agg.get('week') or 0)
-                lifetime_trades = int(_agg.get('trades') or 0)
-                wins = int(_agg.get('wins') or 0)
-                fees = float(_agg.get('fees') or 0)
-                _pnl_src = 'okx_live_bills'
+                    _cl = str(_b.get('clOrdId') or '').strip()
+                    if _cl:
+                        _row['cl_ord_id'] = _cl
+                # AI filter: keep rows with ai*/ail*/aid* clOrdId OR explicit bot_label
+                # (mirror opens always tag; orphan account noise excluded unless tagged)
+                _rows_ai = []
+                for _r in _close_by_ord.values():
+                    _cl = str(_r.get('cl_ord_id') or '').lower()
+                    if _cl.startswith('ais'):
+                        continue
+                    if _cl.startswith('ai') or _cl.startswith('ail') or _cl.startswith('aid'):
+                        _rows_ai.append(_r)
+                        continue
+                    # Untagged live closes: only count when mirror is the sole strategy
+                    # (AI_ONLY_MODE) — still require non-zero pnl after epoch
+                    if AI_ONLY_MODE and abs(float(_r.get('pnl') or 0)) > 1e-9:
+                        _r = dict(_r)
+                        _r['bot_label'] = 'AI Discretionary 1H'
+                        _rows_ai.append(_r)
+                _agg = _pe.summarize_close_rows(_rows_ai, ai_only=bool(AI_ONLY_MODE))
+                _b_tr = int(_agg.get('trades') or 0)
                 debug['bills_n'] = len(_bills or [])
                 debug['mirror_close_orders'] = len(_close_by_ord)
+                debug['bills_ai_trades'] = _b_tr
+                # Prefer bills when they have STRICTLY more trades (DB incomplete)
+                # or when engine had nothing.
+                if _b_tr > int(lifetime_trades or 0):
+                    realized = float(_agg.get('total') or 0)
+                    realized_today = float(_agg.get('1d') or 0)
+                    realized_week = float(_agg.get('week') or 0)
+                    lifetime_trades = _b_tr
+                    wins = int(_agg.get('wins') or 0)
+                    fees = float(_agg.get('fees') or 0)
+                    _pnl_src = 'okx_live_bills' if not _pnl_src else f'{_pnl_src}+bills'
+                elif not _pnl_src and _b_tr > 0:
+                    realized = float(_agg.get('total') or 0)
+                    realized_today = float(_agg.get('1d') or 0)
+                    realized_week = float(_agg.get('week') or 0)
+                    lifetime_trades = _b_tr
+                    wins = int(_agg.get('wins') or 0)
+                    fees = float(_agg.get('fees') or 0)
+                    _pnl_src = 'okx_live_bills'
             except Exception as e:
                 debug['bills_err'] = str(e)
-                print(f'[LIVE] bills fallback: {e}', flush=True)
+                print(f'[LIVE] bills merge: {e}', flush=True)
         if _pnl_src is None:
             _pnl_src = 'db_unified' if connected else 'no_connection'
 
