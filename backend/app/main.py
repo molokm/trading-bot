@@ -689,7 +689,7 @@ async def startup():
                     _slog(f'pre-AI live ensure: {_pre_ok}')
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
-                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
+                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '1')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
@@ -779,7 +779,7 @@ async def startup():
                 symbols=_syms, capital=_cap,
                 max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
                 max_positions=int(os.getenv("AI_MAX_POSITIONS", "1")),
-                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.02")),
+                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.012")),
                 poll_interval_sec=int(os.getenv("AI_POLL_SEC", "60")),
                 execute=True,
             )
@@ -863,7 +863,7 @@ async def startup():
                     env_ex = os.getenv('AI_EXECUTE', '1').strip().lower()
                     _exec_s = env_ex not in ('0', 'false', 'no', 'off')
                 from app.services.legacy_stubs import AIScaleStrategy, AIScaleConfig
-                scfg = AIScaleConfig(capital=float(os.getenv('AI_SCALE_CAPITAL', '5000')), max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=1, risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.02')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec_s, scale_enabled=True, max_adds=2)
+                scfg = AIScaleConfig(capital=float(os.getenv('AI_SCALE_CAPITAL', '5000')), max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=1, risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec_s, scale_enabled=True, max_adds=2)
                 ai_scale_bot = AIScaleStrategy(config=scfg, client_manager=client_manager, db=db, notifier=telegram)
                 ai_scale_bot.start()
                 _positions_cache = None
@@ -5397,18 +5397,23 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
         _bills_cache[mode] = {'ts': _time.time(), 'data': bills}
     return bills
 _CLORD_BOT_MAP = {'ais': 'AI Scale-In 1H', 'ai': 'AI Discretionary 1H', 'rot': 'Momentum', 'momentum': 'Momentum', 'imp': 'Impulse 1D', 'val': 'MACD+Donchian Validation', 'scl': 'Order Book Scalp', 'scalp': 'Order Book Scalp', 'vwap': 'VWAP Mean Reversion', 'sm': 'Умные деньги'}
-_exchange_sync_ts: float = 0
+# Per-mode TTL — demo/live bills sync independently (fix P0: #32)
+_exchange_sync_ts: dict[str, float] = {}
 _EXCHANGE_SYNC_TTL = 60
 
-async def sync_exchange_close_trades() -> int:
+async def sync_exchange_close_trades(mode: str = None) -> int:
     """Fetch all OKX trade bills (type=2), filter close trades (non-zero pnl),
     group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
+    mode=demo|live; when omitted uses _account_mode(). TTL is per-mode.
     Returns number of trades synced."""
-    global _exchange_sync_ts
+    _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
+    if _mode not in ('demo', 'live'):
+        _mode = _account_mode()
     now = _time.time()
-    if _exchange_sync_ts and now - _exchange_sync_ts < _EXCHANGE_SYNC_TTL:
+    last = _exchange_sync_ts.get(_mode, 0)
+    if last and now - last < _EXCHANGE_SYNC_TTL:
         return 0
-    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
+    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode)
     close_by_ord: dict = {}
     _bills_with_pnl = 0
     _sub_types_seen = set()
@@ -5464,25 +5469,28 @@ async def sync_exchange_close_trades() -> int:
         if AI_ONLY_MODE and bot_label in ('AI Scale-In 1H', 'AI Scale-In'):
             bot_label = ''
         if not bot_label:
+            # Build inst -> first eligible open fill clOrdId (one pass, O(N) not O(N×M))
+            if '_inst_clord_cache' not in locals():
+                _inst_clord_cache = {}
+                for b in bills:
+                    if str(b.get('subType') or '') not in ('3', '4'):
+                        continue
+                    cid = str(b.get('clOrdId') or '').strip().lower()
+                    if not cid:
+                        continue
+                    inst_k = b.get('instId') or ''
+                    if inst_k not in _inst_clord_cache:
+                        _inst_clord_cache[inst_k] = cid
             inst = info.get('inst_id') or ''
-            best_cl = ''
-            for b in bills:
-                if (b.get('instId') or '') != inst:
-                    continue
-                if str(b.get('subType') or '') not in ('3', '4'):
-                    continue
-                cid = str(b.get('clOrdId') or '').strip().lower()
-                if not cid:
-                    continue
-                best_cl = cid
+            cid = _inst_clord_cache.get(inst, '')
+            if cid:
                 for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
                     if cid.startswith(pfx):
                         bot_label = label
                         clord = cid
                         info['cl_ord_id'] = cid
+                        recovered_labels.append((bot_label, inst))
                         break
-            if bot_label:
-                recovered_labels.append((bot_label, inst))
         avg_px = info['px_sum'] / info['px_n'] if info['px_n'] > 0 else 0.0
         close_ts = 0
         if info['ts']:
@@ -5899,7 +5907,7 @@ async def _compute_pnl(mode: str = None):
     _ep = int(_ep_ms())
     try:
         try:
-            await sync_exchange_close_trades()
+            await sync_exchange_close_trades(mode=_mode)
         except Exception as _se:
             print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
 

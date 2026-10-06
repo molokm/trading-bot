@@ -88,15 +88,6 @@ _daily_pnl: Optional[float] = None
 _daily_pnl_ts: Optional[float] = None
 
 
-def _symbol_to_group(symbol: str) -> str:
-    """Map symbol (e.g., BTC-USDT-SWAP) to correlation group."""
-    base = symbol.split("-")[0].upper()
-    for group, symbols in CORRELATION_GROUPS.items():
-        if base in symbols:
-            return group
-    return "other"
-
-
 def _count_open_positions(ai_bot: Optional["AIStrategy"]) -> Dict:
     """Count open positions by symbol and correlation group."""
     if not ai_bot:
@@ -216,11 +207,6 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
         max_correlated_exposure_usd=_f("RISK_MAX_CORRELATED_EXPOSURE_USD", 0.0),
         current_correlated_exposure_usd=corr_exp,
     )
-
-
-_runtime_kill: Optional[bool] = None
-_daily_pnl: Optional[float] = None
-_daily_pnl_ts: Optional[float] = None
 
 
 def set_kill_switch(enabled: bool) -> None:

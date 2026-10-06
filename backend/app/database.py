@@ -153,6 +153,8 @@ class Database:
                 timestamp     TEXT NOT NULL,
                 FOREIGN KEY (bot_id) REFERENCES bots(id)
             );
+            CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
 
             CREATE TABLE IF NOT EXISTS positions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,6 +238,8 @@ class Database:
                 sub_type      TEXT NOT NULL DEFAULT '5',
                 synced_at     TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_ect_mode_ts ON exchange_close_trades(account_mode, close_ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_ect_bot_label ON exchange_close_trades(bot_label);
         """)
         await self._conn.commit()
         try:
@@ -305,6 +309,8 @@ class Database:
                 timestamp     TEXT NOT NULL
             )
         """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id)")
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -445,6 +451,8 @@ class Database:
                 synced_at     TEXT NOT NULL
             )
         """)
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ect_mode_ts ON exchange_close_trades(account_mode, close_ts DESC)")
+        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ect_bot_label ON exchange_close_trades(bot_label)")
 
         try:
             await self._ensure_account_isolation_columns_pg(conn)
@@ -570,17 +578,24 @@ class Database:
                     ))
                 return len(trades)
         else:
-            for t in trades:
-                await self._execute(
-                    """INSERT OR REPLACE INTO exchange_close_trades
-                       (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at, account_mode, account_key)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
-                     t["pnl"], t["fee"], t["sz"], t["avg_px"],
-                     t["close_ts"], t["sub_type"], now,
-                     t.get("account_mode") or "demo",
-                     t.get("account_key") or "showcase")
-                )
+            if trades:
+                await self._conn.execute("BEGIN")
+                try:
+                    for t in trades:
+                        await self._execute(
+                            """INSERT OR REPLACE INTO exchange_close_trades
+                           (ord_id, inst_id, cl_ord_id, bot_label, pnl, fee, sz, avg_px, close_ts, sub_type, synced_at, account_mode, account_key)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (t["ord_id"], t["inst_id"], t["cl_ord_id"], t["bot_label"],
+                             t["pnl"], t["fee"], t["sz"], t["avg_px"],
+                             t["close_ts"], t["sub_type"], now,
+                             t.get("account_mode") or "demo",
+                             t.get("account_key") or "showcase")
+                        )
+                    await self._conn.commit()
+                except Exception:
+                    await self._conn.rollback()
+                    raise
             return len(trades)
 
     async def get_exchange_pnl(self, bot_label: str = None, epoch_ms: int = 0) -> list[dict]:

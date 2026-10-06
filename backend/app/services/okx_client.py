@@ -3,6 +3,7 @@ import base64
 import json
 import time
 import asyncio
+import urllib.parse
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -241,8 +242,9 @@ class OKXClient:
             url = f"{self.base_url}{path}"
             qs = ""
             if params:
-                qs = "&".join(f"{k}={v}" for k, v in params.items() if v is not None)
-                if qs:
+                filtered = {k: v for k, v in params.items() if v is not None}
+                if filtered:
+                    qs = urllib.parse.urlencode(filtered)
                     url += f"?{qs}"
             body_str = json.dumps(body) if body else ""
             sign_path = f"{path}?{qs}" if qs and method == "GET" else path
@@ -360,7 +362,10 @@ class OKXClient:
         # reduce_only / explicit closes always pass. is_close marks a position
         # reduction in hedge mode (where OKX forbids the reduceOnly flag).
         symbol = inst_id.split("-")[0] if inst_id else None
-        assert_can_open(is_reduce_only=bool(reduce_only or is_close), symbol=symbol)
+        try:
+            assert_can_open(is_reduce_only=bool(reduce_only or is_close), symbol=symbol)
+        except RuntimeError as e:
+            return {"error": True, "message": str(e), "code": "risk_guard"}
         return await self._request("POST", "/api/v5/trade/order", body=body)
 
     async def cancel_order(self, inst_id: str, ord_id: str) -> dict:
