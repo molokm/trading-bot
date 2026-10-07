@@ -526,9 +526,71 @@ class AIStrategy:
         return "demo", "showcase"
 
     async def _client(self):
+        """Primary engine is DEMO only — never route strategy decisions to LIVE."""
         if not self.client_manager:
             return None
-        return self.client_manager.get_client()
+        c = self.client_manager.get_client()
+        if c is not None and not getattr(c, "demo", True):
+            print("[AI] REFUSED live client as primary (DEMO-only engine)", flush=True)
+            return None
+        return c
+
+    def _require_demo_twin_open(self, coin: str, side: str) -> tuple:
+        """LIVE may open ONLY if DEMO already holds same coin+side. No AI gates."""
+        side = (side or "").lower()
+        pos = (self._positions or {}).get(coin)
+        if not pos:
+            return False, "no_demo_position"
+        if str(getattr(pos, "side", "") or "").lower() != side:
+            return False, "demo_side_mismatch"
+        try:
+            if float(getattr(pos, "size", 0) or 0) <= 0:
+                return False, "demo_size_zero"
+        except (TypeError, ValueError):
+            return False, "demo_size_bad"
+        return True, "ok"
+
+    def _require_demo_flat_for_close(self, coin: str) -> tuple:
+        """LIVE close only when DEMO flat or explicit paired-close marker."""
+        if getattr(self, "_demo_closing_coin", None) == coin:
+            return True, "paired_close"
+        if coin not in (self._positions or {}):
+            return True, "demo_flat"
+        return False, "demo_still_open"
+
+    async def _live_market_order(
+        self, lc, *, inst, order_side, sz, pos_side, cl_ord_id, coin, is_close, reason,
+    ) -> dict:
+        """Single chokepoint for every LIVE market order."""
+        side = (pos_side or "long").lower()
+        if side not in ("long", "short"):
+            side = "long"
+        if is_close:
+            ok, why = self._require_demo_flat_for_close(coin)
+            if not ok:
+                # Paired close from _close: allow even if DEMO still in memory
+                if getattr(self, "_demo_closing_coin", None) == coin:
+                    ok, why = True, "paired_close"
+            if not ok:
+                print(f"[AI-LIVE] BLOCK close {coin}: {why}", flush=True)
+                self._record_exec("live_block_close", coin=coin, side=side, reason=why)
+                return {"error": True, "message": f"blocked:{why}"}
+        else:
+            ok, why = self._require_demo_twin_open(coin, side)
+            if not ok:
+                print(f"[AI-LIVE] BLOCK open {coin}: {why} ({reason})", flush=True)
+                self._record_exec("live_block_open", coin=coin, side=side, reason=why)
+                return {"error": True, "message": f"blocked:{why}"}
+        self._mirror_call_active = True
+        try:
+            return await self._place(
+                lc, inst, order_side, sz, side,
+                is_close=is_close, cl_ord_id=cl_ord_id,
+            ) or {}
+        except Exception as e:
+            return {"error": True, "message": str(e)[:200]}
+        finally:
+            self._mirror_call_active = False
 
     def _live_bot_id(self) -> str:
         """Distinct bot_id for live mirror records (positions table has no account_mode)."""
@@ -1859,6 +1921,10 @@ class AIStrategy:
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str):
+        if client is not None and not getattr(client, "demo", True):
+            print(f"[AI] BLOCK open on non-demo client {coin}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side, reason="live_client_forbidden")
+            return
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
@@ -2567,51 +2633,14 @@ class AIStrategy:
                                       pos_side=ps if ps else "net")
             except Exception:
                 pass
-        # Strict: mark mirror call active so _place allows this live trade
-        self._mirror_call_active = True
-        try:
-            resp = await self._place(lc, inst, order_side, sz, side, cl_ord_id=cl_live)
-        except Exception as e:
-            print(f"[AI-LIVE] open_error {coin}: {e}", flush=True)
-            self._mirror_call_active = False
-            return False
-        finally:
-            self._mirror_call_active = False
+        # Strict chokepoint: blocks if no DEMO twin position
+        resp = await self._live_market_order(
+            lc, inst=inst, order_side=order_side, sz=sz, pos_side=side,
+            cl_ord_id=cl_live, coin=coin, is_close=False, reason=reason,
+        )
         if resp.get("error"):
-            msg = str(resp.get("message") or resp)
-            if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
-                try:
-                    resp = await lc.place_order(
-                        inst_id=inst, side=order_side, ord_type="market",
-                        sz=self._fmt_sz(coin, sz), td_mode="cross",
-                        pos_side=None,
-                        cl_ord_id=cl_live,
-                    )
-                except Exception as e2:
-                    print(f"[AI-LIVE] open_error net-retry {coin}: {e2}", flush=True)
-                    return False
-            # 51008: margin/borrow quota — resize from real available balance, retry once
-            if resp.get("error") and "51008" in msg and avail_live > 0:
-                sz2, lev2 = self._size_order(coin, entry, stop_pct,
-                                             equity=avail_live * 0.9)
-                if sz2 > 0 and sz2 < sz:
-                    try:
-                        await lc.set_leverage(inst, lev2, mgn_mode="cross",
-                                              pos_side=side)
-                    except Exception:
-                        pass
-                    self._mirror_call_active = True
-                    try:
-                        resp = await self._place(lc, inst, order_side, sz2, side, cl_ord_id=cl_live)
-                        if not resp.get("error"):
-                            sz, lev = sz2, lev2
-                    except Exception:
-                        pass
-                    finally:
-                        self._mirror_call_active = False
-            if resp.get("error"):
-                print(f"[AI-LIVE] open_error {coin}: {resp.get('message')}", flush=True)
-                return False
+            print(f"[AI-LIVE] open blocked: {resp.get('message')}", flush=True)
+            return False
         fills = resp.get("data") or []
         fill_px, fee, _ = extract_fill_avg(fills, entry)
         if (not fill_px or fill_px <= 0) and fills:
@@ -2757,28 +2786,15 @@ class AIStrategy:
             return False
         live_bid = self._live_bot_id()
         close_side = "sell" if pos.side == "long" else "buy"
-        resp = None
-        for _attempt in range(2):
-            self._mirror_call_active = True
-            try:
-                resp = await self._place(lc, pos.inst_id, close_side,
-                                         pos.size, pos.side, is_close=True)
-            except Exception as e:
-                print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {e}", flush=True)
-                self._mirror_call_active = False
-                if _attempt == 0:
-                    await asyncio.sleep(3)
-                continue
-            finally:
-                self._mirror_call_active = False
-            if resp.get("error"):
-                print(f"[AI-LIVE] close_error {coin} attempt {_attempt+1}: {resp.get('message')}", flush=True)
-                if _attempt == 0:
-                    await asyncio.sleep(3)
-                continue
-            break
-        else:
-            print(f"[AI-LIVE] close FAILED {coin}: 2/2 attempts failed — LIVE position remains open on exchange", flush=True)
+        # Strict chokepoint: blocks if DEMO still open (not paired close)
+        self._demo_closing_coin = coin  # marker for paired close
+        resp = await self._live_market_order(
+            lc, inst=pos.inst_id, order_side=close_side, sz=pos.size, pos_side=pos.side,
+            cl_ord_id=None, coin=coin, is_close=True, reason=reason,
+        )
+        self._demo_closing_coin = None
+        if resp.get("error"):
+            print(f"[AI-LIVE] close blocked: {resp.get('message')}", flush=True)
             return False
         fills = resp.get("data") or []
         mark = float(
