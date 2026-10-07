@@ -9,8 +9,9 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      # PORT is set by Render; entrypoint uses PORT first
       - key: BACKEND_PORT
-        value: "8000"
+        value: "10000"
       - key: BACKEND_HOST
         value: "0.0.0.0"
       - key: OKX_DEMO
@@ -26,6 +27,14 @@ services:
       - key: TOKEN_ENCRYPTION_KEY
         sync: false
       - key: JWT_SECRET
+        sync: false
+      - key: RISK_KILL_SWITCH
+        sync: false
+      - key: RISK_MAX_DAILY_LOSS_USD
+        sync: false
+      - key: RISK_MAX_POSITION_USD
+        sync: false
+      - key: RISK_MAX_LEVERAGE
         sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
@@ -47,3 +56,8 @@ services:
         value: "30"
       - key: TRACKER_URL
         value: "https://trading-bot-mu99.onrender.com/tracker"
+      # Smart Money execution disabled — background tracker/mirror threads
+      # were crashing the free-tier instance. Section is being rebuilt as a
+      # lightweight read-only view. Set to 0 to re-enable execution.
+      - key: SM_EXECUTION_DISABLED
+        value: "1"

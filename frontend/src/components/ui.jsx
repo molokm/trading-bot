@@ -53,6 +53,62 @@ export function MetricCard({ label, value, change, changeType, tip, mono = true,
   )
 }
 
+/* ═══════ Enhanced Metric Card — same surface system as MetricCard ═══════ */
+export function EnhancedMetricCard({ 
+  label, 
+  value, 
+  change, 
+  changeType, 
+  tip, 
+  mono = true, 
+  sparkData, 
+  className,
+  icon: Icon,
+  trend,
+  subtitle
+}) {
+  const isPositive = changeType === 'positive'
+  const isNegative = changeType === 'negative'
+  const valueColor = isPositive
+    ? 'text-[var(--profit)]'
+    : isNegative
+    ? 'text-[var(--loss)]'
+    : 'text-[var(--txt)]'
+  const iconColor = isPositive
+    ? 'text-[var(--profit)]'
+    : isNegative
+    ? 'text-[var(--loss)]'
+    : 'text-[var(--txt-muted)]'
+
+  return (
+    <div className={`metric-card ${className || ''}`}>
+      <div className="flex items-center justify-between gap-2 mb-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          {Icon && <Icon size={13} className={`${iconColor} flex-shrink-0 opacity-70`} />}
+          <span className="label metric-label">{label}</span>
+          {tip && <Tip text={tip} />}
+        </div>
+        {sparkData && sparkData.length > 1 && (
+          <SparklineSvg data={sparkData} width={44} height={14} />
+        )}
+      </div>
+      <div className={`value ${mono ? 'mono' : ''} ${valueColor}`}>{value}</div>
+      {(subtitle || trend || change != null) && (
+        <div className="flex items-center gap-2 mt-1">
+          {change != null && (
+            <span className={`change ${isPositive ? 'text-[var(--profit)]' : isNegative ? 'text-[var(--loss)]' : 'text-[var(--txt-muted)]'}`}>
+              {change}
+            </span>
+          )}
+          {(subtitle || trend) && (
+            <span className="text-2xs text-[var(--txt-muted)] truncate">{subtitle || trend}</span>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 /* ═══════ Inline Sparkline SVG (used by MetricCard) ═══════ */
 function SparklineSvg({ data, width = 60, height = 20 }) {
   if (!data || data.length < 2) return null
@@ -280,6 +336,47 @@ export function EmptyState({ icon: Icon, text, sub }) {
 /* ═══════ Loader ═══════ */
 export function Loader() {
   return <div className="animate-spin w-5 h-5 border-2 border-[var(--info)] border-t-transparent rounded-full" />
+}
+
+/* ═══════ Skeleton Loader — shimmer effect for loading states ═══════ */
+export function Skeleton({ className = '', variant = 'default' }) {
+  const variantClass = variant === 'text' 
+    ? 'h-4 rounded' 
+    : variant === 'title'
+    ? 'h-6 rounded'
+    : variant === 'circle'
+    ? 'rounded-full aspect-square'
+    : variant === 'card'
+    ? 'h-32 rounded-xl'
+    : 'h-12 rounded-lg'
+  
+  return (
+    <div className={`skeleton-shimmer ${variantClass} ${className}`} />
+  )
+}
+
+/* ═══════ Skeleton Metric Card ═══════ */
+export function SkeletonMetricCard() {
+  return (
+    <div className="metric-card">
+      <Skeleton variant="text" className="w-24 mb-2" />
+      <Skeleton variant="title" className="w-32 mb-1" />
+      <Skeleton variant="text" className="w-16" />
+    </div>
+  )
+}
+
+/* ═══════ Skeleton Table Row ═══════ */
+export function SkeletonTableRow({ columns = 4 }) {
+  return (
+    <tr>
+      {Array.from({ length: columns }).map((_, i) => (
+        <td key={i} className="px-4 py-3">
+          <Skeleton variant="text" />
+        </td>
+      ))}
+    </tr>
+  )
 }
 
 /* ═══════ Strategy Description Tip ═══════ */

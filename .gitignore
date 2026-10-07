@@ -52,3 +52,5 @@ trading-bot-backups/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+
+BACKUP_*/
