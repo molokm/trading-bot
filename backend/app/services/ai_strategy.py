@@ -1,5 +1,31 @@
 """AI Discretionary Strategy — 1H majors (BTC ETH SOL XRP) with LLM decisions.
 
+====================================================================
+ARCHITECTURAL CONTRACT: LIVE MIRROR (CRITICAL — DO NOT REMOVE)
+====================================================================
+This strategy runs in DEMO mode only. LIVE trading is NOT autonomous.
+LIVE account is a STRICT MIRROR of DEMO positions — mechanical copy only.
+
+INVARIANTS (enforced at runtime, tested in tests/test_mirror_strict.py):
+1. LIVE OPEN is allowed ONLY if DEMO holds same coin+side (size>0).
+   Guard: _require_demo_twin_open() called from _live_market_order().
+2. LIVE CLOSE is allowed ONLY when DEMO is flat (or paired-close marker).
+   Guard: _require_demo_flat_for_close() called from _live_market_order().
+3. ALL LIVE market orders go through SINGLE CHOKEPOINT:
+   _live_market_order() — no other path to place live orders.
+4. Primary engine (_client()) REFUSES non-demo clients.
+   _open() blocks with "live_client_forbidden" if called with live client.
+5. Mirror enable flag is EXPLICIT opt-in (DB live_mirror_enabled='1'),
+   fail-closed on any error (_mirror_enabled()).
+
+ANY CHANGE TO THESE GUARDS MUST:
+- Update tests/test_mirror_strict.py
+- Pass CI mirror-strict test
+- Be reviewed for mirror safety
+
+Violating these invariants allows LIVE to trade independently → LOSS OF FUNDS.
+====================================================================
+
 Safety envelope (anti-liquidation oriented):
   - capital baseline $10_000, max leverage 3x
   - stop distance clamped ~1.6–3.5%; size from risk budget (~1.5%)
@@ -87,6 +113,46 @@ def save_ai_state(payload: dict) -> None:
         os.replace(tmp, path)
     except Exception as e:
         print(f"[AI] state save: {e}", flush=True)
+
+
+def _verify_mirror_guards() -> None:
+    """
+    CRITICAL: Runtime verification that mirror safety guards are present.
+    Runs on strategy init. Fails fast if any guard is missing (e.g. lost in rebase).
+    """
+    missing = []
+    # 1. _require_demo_twin_open
+    if not hasattr(AIStrategy, "_require_demo_twin_open"):
+        missing.append("_require_demo_twin_open")
+    # 2. _require_demo_flat_for_close
+    if not hasattr(AIStrategy, "_require_demo_flat_for_close"):
+        missing.append("_require_demo_flat_for_close")
+    # 3. _live_market_order (single chokepoint)
+    if not hasattr(AIStrategy, "_live_market_order"):
+        missing.append("_live_market_order")
+    # 4. _client() refuses non-demo (check source contains guard)
+    import inspect
+    client_src = inspect.getsource(AIStrategy._client) if hasattr(AIStrategy, "_client") else ""
+    if "REFUSED live client as primary" not in client_src:
+        missing.append("_client() live-refusal guard")
+    # 5. _open() blocks live_client_forbidden
+    open_src = inspect.getsource(AIStrategy._open) if hasattr(AIStrategy, "_open") else ""
+    if "live_client_forbidden" not in open_src:
+        missing.append("_open() live_client_forbidden guard")
+    # 6. _mirror_enabled() fail-closed
+    mirror_src = inspect.getsource(AIStrategy._mirror_enabled) if hasattr(AIStrategy, "_mirror_enabled") else ""
+    if "fail-closed" not in mirror_src and "False" not in mirror_src:
+        # more precise check
+        if "return False" not in mirror_src:
+            missing.append("_mirror_enabled() fail-closed")
+
+    if missing:
+        raise RuntimeError(
+            f"MIRROR GUARDS MISSING — LIVE TRADING UNSAFE: {', '.join(missing)}. "
+            "This is a CRITICAL safety failure. Do not deploy."
+        )
+    print(f"[AI] MIRROR GUARDS VERIFIED: all {6 - len(missing)} checks passed", flush=True)
+
 
 STRATEGY_NAME = "AI Discretionary 1H"
 STRATEGY_VERSION = "v1.21-tuned-exits"
@@ -365,6 +431,9 @@ class AIStrategy:
         self._daily_lessons = list(st.get("daily_lessons") or [])[-10:]
         self._last_lesson_day = str(st.get("last_lesson_day") or "")
         self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
+
+        # CRITICAL: verify mirror safety guards at init (fail-fast if lost in rebase)
+        _verify_mirror_guards()
 
     # ── lifecycle ──────────────────────────────────────────────
     def _clord_prefix(self) -> str:
