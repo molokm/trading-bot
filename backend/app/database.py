@@ -151,6 +151,10 @@ class Database:
                 pnl           REAL DEFAULT 0,
                 state         TEXT DEFAULT 'filled',
                 timestamp     TEXT NOT NULL,
+                -- account isolation (must exist before the indexes below: on a
+                -- fresh DB the index used to abort the whole schema script)
+                account_mode  TEXT NOT NULL DEFAULT 'demo',
+                account_key   TEXT NOT NULL DEFAULT 'showcase',
                 FOREIGN KEY (bot_id) REFERENCES bots(id)
             );
             CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC);
@@ -236,10 +240,60 @@ class Database:
                 avg_px        REAL NOT NULL DEFAULT 0,
                 close_ts      INTEGER NOT NULL DEFAULT 0,
                 sub_type      TEXT NOT NULL DEFAULT '5',
-                synced_at     TEXT NOT NULL
+                synced_at     TEXT NOT NULL,
+                -- account isolation (see the note on trades above)
+                account_mode  TEXT NOT NULL DEFAULT 'demo',
+                account_key   TEXT NOT NULL DEFAULT 'showcase'
             );
             CREATE INDEX IF NOT EXISTS idx_ect_mode_ts ON exchange_close_trades(account_mode, close_ts DESC);
             CREATE INDEX IF NOT EXISTS idx_ect_bot_label ON exchange_close_trades(bot_label);
+
+            -- These three existed only in the PostgreSQL schema, so on SQLite
+            -- (local runs and the quota fallback) audit log / Smart Money tables
+            -- were missing entirely: 'no such table: audit_log'.
+            CREATE TABLE IF NOT EXISTS tracked_traders (
+                unique_code    TEXT PRIMARY KEY,
+                alias          TEXT,
+                inst_type      TEXT DEFAULT 'SWAP',
+                roi_pct        REAL DEFAULT 0,
+                pnl_usd        REAL DEFAULT 0,
+                win_rate       REAL DEFAULT 0,
+                max_drawdown   REAL DEFAULT 0,
+                aum            REAL DEFAULT 0,
+                lead_days      INTEGER DEFAULT 0,
+                copy_traders   INTEGER DEFAULT 0,
+                verified       INTEGER DEFAULT 0,
+                verify_score   REAL DEFAULT 0,
+                tracked        INTEGER DEFAULT 1,
+                tracking_since REAL,
+                last_snapshot  REAL,
+                created_at     TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS copy_trades (
+                id            TEXT PRIMARY KEY,
+                trader_code   TEXT NOT NULL,
+                inst_id       TEXT NOT NULL,
+                side          TEXT NOT NULL,
+                size          TEXT,
+                entry_price   TEXT,
+                entry_time    REAL,
+                close_price   TEXT,
+                close_time    REAL,
+                pnl           REAL DEFAULT 0,
+                reason        TEXT,
+                created_at    TEXT NOT NULL,
+                FOREIGN KEY (trader_code) REFERENCES tracked_traders(unique_code)
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            TEXT NOT NULL,
+                actor         TEXT,
+                action        TEXT NOT NULL,
+                detail        TEXT,
+                meta          TEXT
+            );
         """)
         await self._conn.commit()
         try:
