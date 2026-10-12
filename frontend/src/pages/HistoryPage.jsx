@@ -21,7 +21,7 @@ export default function HistoryPage() {
     open: { label: t('reason.open') || 'Открыта', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
     tp: { label: t('reason.tp') || 'TP', color: 'text-[var(--profit)]', bg: 'bg-[var(--profit-dim)]' },
     sl: { label: t('reason.sl') || 'SL', color: 'text-[var(--loss)]', bg: 'bg-[var(--loss-dim)]' },
-    trail: { label: t('reason.trail') || 'Trail', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
+    trail: { label: t('reason.trail_stop'), color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },
     breakeven: { label: t('reason.breakeven') || 'BE', color: 'text-[var(--warn)]', bg: 'bg-[var(--warn-dim)]' },
     manual: { label: t('reason.manual') || 'Ручная', color: 'text-[var(--txt-secondary)]', bg: 'bg-[var(--surface-overlay)]' },
     rotation: { label: 'Ротация', color: 'text-[var(--info)]', bg: 'bg-[var(--info-dim)]' },

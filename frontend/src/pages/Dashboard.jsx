@@ -311,7 +311,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const REASON_MAP = {
     tp: { label: 'TP', color: 'text-[var(--profit)]' },
     sl: { label: 'SL', color: 'text-[var(--loss)]' },
-    trail: { label: t('reason.trail'), color: 'text-[var(--info)]' },
+    trail: { label: t('reason.trail_stop'), color: 'text-[var(--info)]' },
     breakeven: { label: 'BE', color: 'text-[var(--warn)]' },
     manual: { label: t('reason.manual'), color: 'text-[var(--txt-secondary)]' },
     roe_threshold: { label: 'ROE', color: 'text-accent-purple' },
