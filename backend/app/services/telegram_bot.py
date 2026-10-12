@@ -37,7 +37,6 @@ log = logging.getLogger("telegram_bot")
 PRO_PRICE_STARS = int(os.getenv("PRO_PRICE_STARS", "500"))
 PRO_PLAN_DAYS = int(os.getenv("PRO_PLAN_DAYS", "30"))
 PRO_LABEL = os.getenv("PRO_PLAN_LABEL", "Pro-тариф: мини-ап + свой счёт OKX 1 мес")
-TRACKER_URL = os.getenv("TRACKER_URL", "")
 
 PLANS = {
     "pro": (PRO_PRICE_STARS, PRO_PLAN_DAYS, PRO_LABEL),

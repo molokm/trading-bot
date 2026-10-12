@@ -111,12 +111,15 @@ Keep-alive на free tier: в коде **отсутствует**, нужен в
 | Риск | `RISK_KILL_SWITCH`, `RISK_MAX_DAILY_LOSS_USD`, `RISK_MAX_POSITION_USD`, `RISK_MAX_LEVERAGE`, `RISK_MAX_OPEN_POSITIONS`, `RISK_MAX_POS_PER_SYMBOL`, `RISK_MAX_CORRELATED_EXPOSURE_USD` |
 | Бот | `BOTS_AUTO_START`, `AI_AUTO_START`, `AI_FORCE_AUTOSTART`, `AI_EXECUTE`, `AI_CAPITAL`, `AI_MAX_LEVERAGE`, `AI_MAX_POSITIONS`, `AI_RISK_PER_TRADE`, `AI_POLL_SEC`, `ALLOW_MANUAL_ORDERS`, `OKX_DEMO` |
 | LLM | `AI_LLM_PROVIDER`, `AI_LLM_MODEL`, `AI_LLM_FALLBACKS`, `AI_LLM_PAYLOAD_CHARS`, `AI_FORCE_MODEL`, `AI_ALLOW_LARGE_MODEL`, `GROQ_BASE_URL`, `OPENAI_BASE_URL`, `OPENROUTER_BASE_URL` |
-| Прочее | `PORT`, `BACKEND_PORT`, `BACKEND_HOST`, `ENABLE_DOCS`, `CORS_ORIGINS`, `DATA_DIR`, `PRO_PRICE_STARS`, `PRO_PLAN_DAYS`, `PRO_PLAN_LABEL`, `TRACKER_URL`, `TRACKER_INTERVAL_SEC` |
+| Прочее | `PORT`, `BACKEND_PORT`, `BACKEND_HOST`, `ENABLE_DOCS`, `CORS_ORIGINS`, `DATA_DIR`, `ANALYSIS_LOG_PATH`, `PNL_TZ`, `ORPHAN_CLOSE`, `ALLOW_MANUAL_ORDERS`, `PRO_PRICE_STARS`, `PRO_PLAN_DAYS`, `PRO_PLAN_LABEL`, `TRACKER_INTERVAL_SEC`, `AI_PERSIST_USER_STOP`, `RESET_TRADING_STATS` |
 
-⚠ Мёртвые (объявлены в [.env.example](../.env.example) или [render.yaml](../render.yaml),
-но кодом не читаются): `SESSION_SECRET`, `AI_ONLY_MODE`, `SM_EXECUTION_DISABLED`,
-`SIGNAL_PRICE_STARS`, `SIGNAL_PLAN_DAYS`, `SIGNAL_INVITE_DAYS`, `ALLOW_INSECURE_SECRETS`,
-`RENDER_DISK_PATH`. См. [AUDIT.md](AUDIT.md).
+Полный шаблон с комментариями — [.env.example](../.env.example); минимальный для
+локального запуска — [backend/.env.example](../backend/.env.example).
+
+⚠ Осталось мёртвым: `RENDER_DISK_PATH` (в [render.yaml](../render.yaml) нет `disk:`).
+Удалены как неиспользуемые в этапе 2A: `TRACKER_URL`, `SIGNAL_PRICE_STARS`,
+`SIGNAL_PLAN_DAYS`, `SIGNAL_INVITE_DAYS`, `SM_EXECUTION_DISABLED`, `SESSION_SECRET`,
+`AI_ONLY_MODE` (режим задан в коде), `ALLOW_INSECURE_SECRETS`.
 
 ## 7. Локальный запуск и проверки
 

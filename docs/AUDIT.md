@@ -27,12 +27,16 @@ Python, frontend 6 235, 94 роута, 13 таблиц.
 
 ## Этап 2 — мёртвая обвязка и конфигурация
 
-- [ ] **`render.yaml`**: убрать мёртвые `SIGNAL_PRICE_STARS`, `SIGNAL_PLAN_DAYS`,
-      `SIGNAL_INVITE_DAYS`, `SM_EXECUTION_DISABLED`; `TRACKER_URL` ведёт на retired
-      `/api/tracker` → либо удалить переменную, либо убрать кнопку «Live results» из
-      меню бота.
-- [ ] **`.env.example`**: убрать `SESSION_SECRET`, `AI_ONLY_MODE` (в коде жёстко `True`),
-      `ALLOW_INSECURE_SECRETS`.
+- [x] **`render.yaml`** (2A, 2026-10-12): удалены нечитаемые `SIGNAL_PRICE_STARS`,
+      `SIGNAL_PLAN_DAYS`, `SIGNAL_INVITE_DAYS`, `SM_EXECUTION_DISABLED` и `TRACKER_URL`
+      (вёл на retired `/api/tracker`). Мёртвая константа `TRACKER_URL` убрана и из
+      `telegram_bot.py`.
+- [x] **`.env.example`** (2A): удалены `SESSION_SECRET`, `AI_ONLY_MODE`,
+      `ALLOW_INSECURE_SECRETS`, `SIGNAL_*`, `TRACKER_URL`; файл переписан как полный
+      справочник по живым переменным (риск-лимиты, LLM, cookie-сессии, Pro-тариф),
+      исправлено устаревшее описание поведения `TOKEN_ENCRYPTION_KEY`.
+      [backend/.env.example](../backend/.env.example) сокращён и ссылается на корневой
+      как на источник правды (раньше два шаблона расходились).
 - [ ] **Битый импорт** `app.services.smart_money_ledger` в
       [main.py:5758](../backend/app/main.py) — модуля нет, ошибка глотается `try/except`.
 - [ ] **`backend/static/`** — закоммиченная устаревшая сборка SPA (в ней страницы
