@@ -153,9 +153,79 @@ def _verify_mirror_guards() -> None:
         )
     print(f"[AI] MIRROR GUARDS VERIFIED: all {6 - len(missing)} checks passed", flush=True)
 
+def _parse_iso_ts(value) -> float:
+    """Return unix seconds for an ISO timestamp, or 0 on failure."""
+    if not value:
+        return 0.0
+    try:
+        s = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None = None) -> str:
+    """Prefer the real entry time from signal/trade history over 'now'.
+
+    After redeploy, restore used to stamp opened_at=now(), which reset
+    max_hold / time_stop and let winners bleed for days.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    candidates = []
+    if fallback:
+        candidates.append(str(fallback))
+    if db is not None:
+        try:
+            open_side = "buy" if side == "long" else "sell"
+            sid = await db.find_signal_id(inst_id, open_side)
+            if sid:
+                # signals table may expose created_at via get or raw
+                row = None
+                if hasattr(db, "get_signal"):
+                    row = await db.get_signal(sid)
+                if isinstance(row, dict):
+                    for k in ("created_at", "opened_at", "ts", "time"):
+                        if row.get(k):
+                            candidates.append(str(row[k]))
+                            break
+        except Exception:
+            pass
+        try:
+            if hasattr(db, "get_trades"):
+                trades = await db.get_trades(bot_id=AI_BOT_ID, limit=80)
+                for t in trades or []:
+                    if not isinstance(t, dict):
+                        continue
+                    t_inst = str(t.get("symbol") or t.get("inst_id") or "")
+                    if inst_id not in t_inst and inst_id.replace("-USDT-SWAP", "") not in t_inst:
+                        continue
+                    # open-ish rows
+                    reason = str(t.get("reason") or "").lower()
+                    if reason in ("closed", "stop", "take", "max_hold", "time_stop_stale"):
+                        continue
+                    for k in ("opened_at", "created_at", "time", "ts"):
+                        if t.get(k):
+                            candidates.append(str(t[k]))
+                            break
+                    break
+        except Exception:
+            pass
+    # Pick the oldest plausible timestamp (real open), ignore future noise
+    now_ts = datetime.now(timezone.utc).timestamp()
+    best = None
+    best_ts = None
+    for c in candidates:
+        ts = _parse_iso_ts(c)
+        if ts <= 0 or ts > now_ts + 60:
+            continue
+        if best_ts is None or ts < best_ts:
+            best_ts = ts
+            best = c
+    return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.21-tuned-exits"
+STRATEGY_VERSION = "v1.24-exit-giveback"
+
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.21 — BTC/ETH/SOL/XRP: exit_min_profit 0.30% (was 0.10%), "
     "allocation 30% (was 35%), trail_activate 0.85%/0.80×ATR (was 0.65%/0.70×ATR), "
@@ -252,7 +322,7 @@ class AIConfig:
                                             # losses"; that shrank wins further. Restored
                                             # above the pre-v1.10 0.035 baseline.
     max_hold_hours: float = 12.0            # phase4: hard time-stop
-    time_stop_stale_hours: float = 7.0      # v1.21: was 5.0 — give trends room to consolidate
+    time_stop_stale_hours: float = 4.0      # do not bleed for 8h
     time_stop_min_progress_pct: float = 0.20
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
@@ -263,8 +333,11 @@ class AIConfig:
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.85       # v1.21: was 0.65 — let winners breathe before trailing clamps
-    # trail_activate_atr_mult (OR'd together; the smaller of the two always wins)
+    trail_activate_pct: float = 0.50       # v1.16: 0.40→0.65 — kept in sync with
+                                            # trail_activate_atr_mult (OR'd together;
+                                            # the smaller of the two always wins, so
+                                            # leaving this low would have silently
+                                            # undone the ATR widening above)
     trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
@@ -274,6 +347,10 @@ class AIConfig:
     hold_loss_min_adx: float = 22.0        # v1.14: no hold-in-loss in weak trend
     hold_loss_block_chop: bool = True      # v1.14: never hold red in chop regime
     force_exit_adverse_atr: float = 0.60   # v1.14: if loss >0.6×ATR allow ind_exit despite align
+    # Peak giveback: if trade was +X% and gave back most of it → lock remainder
+    giveback_enable: bool = True
+    giveback_min_peak_pct: float = 0.80    # only after peak unrealized >= 0.80%
+    giveback_retain_frac: float = 0.35     # close when current upl <= 35% of peak
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
@@ -287,15 +364,16 @@ class AIConfig:
                                             # (was cut to 1.90 under v1.10's "closer TP"
                                             # fix, which worked against its own diagnosis)
     scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
-    breakeven_atr_mult: float = 0.45       # v1.16: 0.28→0.45 — give winners room before
+    breakeven_atr_mult: float = 0.35       # v1.16: 0.28→0.45 — give winners room before
                                             # locking BE (was triggering too early)
-    breakeven_min_pct: float = 0.55        # v1.16: named replacement for the old hardcoded
-                                             # upl>=0.35 OR-fallback (was firing before the
-                                             # ATR condition, defeating the widening above)
-    trail_atr_mult: float = 0.65           # v1.16: 0.55→0.65 — slightly wider trail
-                                             # distance once active, less whipsaw-prone
-    trail_activate_atr_mult: float = 0.80  # v1.21: was 0.70 — paired with trail_activate_pct 0.85
-    time_stop_hold_align: float = 0.70     # skip time_stop_stale if same-side align still strong
+    breakeven_min_pct: float = 0.40        # v1.16: named replacement for the old hardcoded
+                                            # upl>=0.35 OR-fallback (was firing before the
+                                            # ATR condition, defeating the widening above)
+    trail_atr_mult: float = 0.50           # v1.16: 0.55→0.65 — slightly wider trail
+                                            # distance once active, less whipsaw-prone
+    trail_activate_atr_mult: float = 0.55  # v1.16: 0.45→0.70 — let a trade breathe further
+                                            # before trailing starts clamping it down
+    time_stop_hold_align: float = 0.85     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
     ema_trend: int = 200
@@ -338,6 +416,7 @@ class AIPosition:
     signal_id: int = 0
     tg_message_id: int = 0
     peak_price: float = 0.0
+    peak_upl_pct: float = 0.0            # best unrealized % seen while open
     unrealized_pnl: float = 0.0
     sl_algo_id: str = ""
     scale_adds: int = 0
@@ -3724,6 +3803,29 @@ class AIStrategy:
                 pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
 
             upl = self._unrealized_pct(pos, px)
+            # Track peak unrealized % so we can detect giveback
+            try:
+                prev_peak = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                if upl > prev_peak:
+                    pos.peak_upl_pct = upl
+            except Exception:
+                pass
+            # Peak giveback exit — lock remaining profit when a winner fades
+            try:
+                if bool(getattr(self.config, "giveback_enable", True)):
+                    peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                    min_peak = float(getattr(self.config, "giveback_min_peak_pct", 0.80) or 0.80)
+                    retain = float(getattr(self.config, "giveback_retain_frac", 0.35) or 0.35)
+                    if peak_u >= min_peak and upl <= peak_u * retain:
+                        print(
+                            f"[AI] giveback exit {coin} {pos.side}: peak={peak_u:+.2f}% "
+                            f"now={upl:+.2f}% retain<={retain:.0%} of peak",
+                            flush=True,
+                        )
+                        await self._close(client, coin, f"giveback_peak_{peak_u:.1f}")
+                        continue
+            except Exception as e:
+                print(f"[AI] giveback check: {e}", flush=True)
             atr_p = self._atr_pct(coin, float(pos.entry_price or px or 0))
             # Favorable move in ATR units
             fav_atr = 0.0
@@ -4100,16 +4202,17 @@ class AIStrategy:
                         restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
                     except Exception as e:
                         print(f"[AI] restore signal_id: {e}", flush=True)
+                _oa = await _resolve_opened_at(self.db, inst_id, side)
                 self._positions[coin] = AIPosition(
                     coin=coin, inst_id=inst_id, side=side, size=sz,
                     entry_price=entry, stop_price=stop, take_price=take,
                     leverage=float(self.config.max_leverage or 2),
-                    opened_at=datetime.now(timezone.utc).isoformat(),
+                    opened_at=_oa,
                     peak_price=entry,
                     signal_id=restored_sid,
                 )
                 await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
-                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid}", flush=True)
+                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid} opened_at={_oa}", flush=True)
         except Exception as e:
             print(f"[AI] restore error: {e}", flush=True)
 
@@ -4131,11 +4234,12 @@ class AIStrategy:
                 restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
             except Exception as e:
                 print(f"[AI] restore signal_id: {e}", flush=True)
+        _oa = await _resolve_opened_at(self.db, inst_id, side)
         self._positions[coin] = AIPosition(
             coin=coin, inst_id=inst_id, side=side, size=sz,
             entry_price=entry, stop_price=stop, take_price=take,
             leverage=float(self.config.max_leverage or 2),
-            opened_at=datetime.now(timezone.utc).isoformat(),
+            opened_at=_oa,
             peak_price=entry,
             signal_id=restored_sid,
         )
@@ -4310,16 +4414,19 @@ class AIStrategy:
         else:
             min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
         gap_ok = (now_ts - float(getattr(self, "_last_llm_ts", 0) or 0)) >= min_gap
-        # Always allow manage path more often if we have open positions and a fresh bar
-        need_llm = bool(fresh) and gap_ok
-        if decide_bar and not fresh:
+        # While flat: only on new closed bar. While in a position: also allow
+        # manage cadence so exits are not stuck waiting for the next 1H close.
+        in_pos = bool(self._positions)
+        need_llm = (bool(fresh) or in_pos) and gap_ok
+        if decide_bar and not fresh and not in_pos:
             if self._tick_count % 10 == 0:
                 print(f"[AI] skip LLM — waiting for next closed {getattr(self.config, 'bar', '1H')} bar", flush=True)
             self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
             return
-        if not gap_ok and decide_bar:
+        if not gap_ok:
             if self._tick_count % 10 == 0:
                 print(f"[AI] skip LLM — min interval {min_gap:.0f}s", flush=True)
+            self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
             return
 
         snap = self._snapshot()  # include fresh adaptive + reflection
