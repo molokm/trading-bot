@@ -37,17 +37,25 @@ Python, frontend 6 235, 94 роута, 13 таблиц.
       исправлено устаревшее описание поведения `TOKEN_ENCRYPTION_KEY`.
       [backend/.env.example](../backend/.env.example) сокращён и ссылается на корневой
       как на источник правды (раньше два шаблона расходились).
-- [ ] **Битый импорт** `app.services.smart_money_ledger` в
-      [main.py:5758](../backend/app/main.py) — модуля нет, ошибка глотается `try/except`.
+- [x] **Мёртвый код** (2B, 2026-10-12): удалён битый импорт `smart_money_ledger`
+      (модуля нет), 13 неиспользуемых импортов в `main.py`, `ai_strategy.py`,
+      `okx_client.py`, `risk_guard.py`, `position_claim.py`; из `legacy_stubs.py` убраны
+      8 невызываемых сущностей (`ScalpConfig`, `VWAPScalpConfig`, `start_async`,
+      `stop_async`, `get_leaderboards`, `compute_book_metrics`, `OrderBookScalpStrategy`,
+      `VWAPMeanReversion`); удалены пустой пакет `backend/app/routes/` и мёртвый модуль
+      `alerts.py`; убран дублирующий `global` в `live_status`. Поверхность `legacy_stubs`,
+      нужная `main.py`, закреплена тестом
+      [tests/test_legacy_stubs_contract.py](../tests/test_legacy_stubs_contract.py)
+      (тестов стало 60).
+- [ ] **Мёртвые ключи i18n**: `scalp.*` (16), `nav.smartMoney`, `nav.backtest`,
+      `nav.chart`, `ui.strategy_desc.*` выведенных ботов; всего 371 из 662 ключей не
+      используется ни в одном `t('…')` (динамических ключей нет, кроме `t(p.labelKey)`).
 - [ ] **`backend/static/`** — закоммиченная устаревшая сборка SPA (в ней страницы
       `BacktestPage`, `ChartPage`, `SmartMoneyPage`, `TrackerPage`, которых уже нет).
       Обновить из `frontend/dist` или перестать хранить в git.
 - [ ] **Зависимости**: `ccxt`, `aiohttp`, `beautifulsoup4`, `yt-dlp` в
       [requirements.txt](../backend/requirements.txt) не используются; `websockets` —
       только мёртвым `subscribe_ticker()`.
-- [ ] **Мёртвый код**: 13 неиспользуемых импортов, 7 невызываемых функций в
-      `legacy_stubs.py`, пустой пакет `backend/app/routes/`, мёртвый модуль `alerts.py`,
-      мёртвые ключи i18n (`scalp.*`, `nav.smartMoney`, `nav.backtest`, `nav.chart`).
 - [ ] **`.deploy_trigger`** — файл-артефакт форс-передеплоя, никем не читается.
 - [ ] **Персистентность**: в `render.yaml` нет `disk:` → состояние в `/tmp`/`cwd/data`
       (журнал AI, blacklist, клеймы) теряется при передеплое. Решить: Render Disk или

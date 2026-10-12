@@ -4,7 +4,7 @@ import json
 import time
 import asyncio
 import urllib.parse
-from typing import Optional, List, Dict, Any
+from typing import Optional, Dict
 from datetime import datetime
 from enum import Enum
 

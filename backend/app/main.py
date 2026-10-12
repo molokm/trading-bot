@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import time as _time
-import uuid
 import faulthandler
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -49,12 +48,11 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
 from app.services.okx_client import OKXClientManager, OKXClient
-from app.services.backtest_service import run_backtest_async
 from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, set_blacklist
 from app.services.strategy_manager import StrategyManager, set_hydrate_deps
 from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
-from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID, STRATEGY_DESC as AI_DESC, STRATEGY_NAME as AI_NAME, STRATEGY_VERSION as AI_VERSION
+from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID
 from app.services.telegram_notifier import TelegramNotifier
 from app.services import pnl_engine
 from app.services.pnl_engine import PNL_EPOCH_ISO
@@ -1956,7 +1954,7 @@ async def me_dashboard(request: Request):
             }
             # Unified PnL filter: only AI Discretionary closes in set T
             try:
-                from app.services.pnl_engine import pnl_eligible, normalize_close_row
+                from app.services.pnl_engine import pnl_eligible
                 _cand = {
                     'pnl': entry['pnl'],
                     'close_ts': entry['time'],
@@ -2522,7 +2520,6 @@ async def live_status():
     now_s = _time.time()
     if _live_status_cache and (now_s - _live_status_cache.get('ts', 0) < 30):
         return dict(_live_status_cache['data'])
-    global ai_bot, live_manager
     lc = None
     try:
         lc = live_manager.get_client() if live_manager else None
@@ -3530,11 +3527,6 @@ async def health(request: Request):
 @app.get('/api/risk/status')
 async def risk_status():
     """Public-ish status for UI badges (no secrets)."""
-    daily = None
-    try:
-        from app.services import risk_guard as _rg
-    except Exception:
-        pass
     st = risk_get_status(daily_pnl=None)
     return st.to_dict()
 
@@ -5753,16 +5745,6 @@ async def admin_reset_trading_stats(data: dict=None):
                 print(f'[reset] re-claim {getattr(bot, 'BOT_ID', bot)}: {e}', flush=True)
         except Exception as e:
             print(f'[reset] mem {getattr(bot, 'BOT_ID', bot)}: {e}', flush=True)
-    try:
-        import os
-        from app.services.smart_money_ledger import LEDGER_PATH, get_sm_ledger
-        if os.path.exists(LEDGER_PATH):
-            os.remove(LEDGER_PATH)
-        import app.services.smart_money_ledger as sml
-        sml._ledger = None
-        get_sm_ledger()
-    except Exception as e:
-        print(f'[reset] sm ledger: {e}', flush=True)
     global _bot_stats_cache, _paired_cache, _pnl_cache
     try:
         _bot_stats_cache['ts'] = 0

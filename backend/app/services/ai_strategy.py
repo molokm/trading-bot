@@ -502,7 +502,7 @@ class AIStrategy:
         to the next one that has an API key and is not on cooldown.
         """
         from .ai_agent import (
-            is_provider_available, next_available_provider, PROVIDER_ROTATION_ORDER,
+            is_provider_available, next_available_provider,
         )
         # Preferred: config/env → groq → openrouter → openai (BAI removed)
         if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):

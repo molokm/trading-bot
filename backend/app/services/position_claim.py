@@ -7,7 +7,6 @@ Periodic sweeper closes OKX positions that no bot claims.
 from __future__ import annotations
 import logging
 import os
-from typing import Optional
 
 log = logging.getLogger("position_claim")
 

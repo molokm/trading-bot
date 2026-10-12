@@ -53,13 +53,6 @@ class AIScaleConfig(_BaseConfig):
     pass
 
 
-class ScalpConfig(_BaseConfig):
-    pass
-
-
-VWAPScalpConfig = ScalpConfig
-
-
 def make_validation_config(**kw):
     return type("ValidationConfig", (), kw)()
 
@@ -88,13 +81,7 @@ class _RetiredBot:
     def start(self):
         pass
 
-    async def start_async(self):
-        pass
-
     def stop(self):
-        pass
-
-    async def stop_async(self):
         pass
 
     def get_status(self):
@@ -121,20 +108,6 @@ class AIScaleStrategy(_RetiredBot):
         return {"running": False, "strategy": AI_SCALE_NAME, "retired": True}
 
 
-class OrderBookScalpStrategy(_RetiredBot):
-    pass
-
-
-class VWAPMeanReversion(_RetiredBot):
-    def get_status(self):
-        return {"running": False, "strategy": VWAP_NAME, "version": "off", "retired": True}
-
-
-def compute_book_metrics(*a, **k):
-    return {}
-
-
-# ── Smart Money ──────────────────────────────────────────────
 class TrackerConfig(_BaseConfig):
     pass
 
@@ -145,9 +118,6 @@ class OKXCopyAPI:
 
     async def request(self, *a, **k):
         return {"data": []}
-
-    async def get_leaderboards(self, *a, **k):
-        return []
 
     async def get_positions(self, *a, **k):
         return []

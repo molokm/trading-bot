@@ -13,10 +13,8 @@
 │   │   ├── database.py       # Database (asyncpg/aiosqlite), 13 таблиц, пул per-loop
 │   │   ├── orchestrator.py   # свечи/сканирование (наследие)
 │   │   ├── scanner.py        # сканер рынка (tickers SWAP)
-│   │   ├── alerts.py         # ⚠ мёртвый модуль (свои TG-отправки, никто не импортирует)
 │   │   ├── r_tracker.py      # R-multiple трекер (наследие)
 │   │   ├── routers/meta.py   # GET /api/meta/product
-│   │   ├── routes/           # ⚠ пустой пакет-дубль (наследие)
 │   │   └── services/         # см. таблицу ниже
 │   ├── static/               # ⚠ закоммиченная устаревшая сборка SPA (Docker перекрывает)
 │   ├── data/                 # SQLite для локального запуска (в .gitignore)
@@ -54,7 +52,7 @@
 | `services/position_claim.py` | 362 | Клеймы позиций между «ботами», защита от дублей |
 | `services/trade_attribution.py` | 339 | Привязка сделок к ботам, определение scale-ботов |
 | `services/risk_guard.py` | 280 | Kill-switch, дневной лимит, лимиты позиций/корреляции |
-| `services/legacy_stubs.py` | 167 | Заглушки выведенных стратегий (`_RetiredBot`) |
+| `services/legacy_stubs.py` | 155 | Заглушки выведенных стратегий (`_RetiredBot`); поверхность, нужная `main.py`, закреплена тестом [tests/test_legacy_stubs_contract.py](../tests/test_legacy_stubs_contract.py) |
 | `services/strategy_manager.py` · `equity_tracker.py` · `account_context.py` · `strategy_cards.py` · `analysis_logger.py` | 144 · 89 · 73 · 38 · 97 | Пер-юзерные боты, снапшоты equity, контекст счёта, тексты для TG, JSONL-журнал |
 | `services/backtest_service.py` | 7 | Заглушка `run_backtest_async` |
 

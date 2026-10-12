@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass, field
-from typing import Optional, Dict, List, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import Optional, Dict, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.services.ai_strategy import AIStrategy
