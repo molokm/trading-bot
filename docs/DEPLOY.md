@@ -84,6 +84,19 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 5. Проверить `bots.ai: true` и состояние `live_mirror` — после редеплоя бот и зеркало
    должны подняться автоматически, если были включены до него.
 
+В логах старта ожидаемо видеть:
+
+```
+[auth] route policies verified: 91 path(s), table entries: 96
+[db] PG init done            (или [db] SQLite ready at ...)
+[entrypoint] ... LISTEN_PORT=...
+```
+
+⚠ Если в логах `AUTH POLICY MISSING — every /api route must declare @policy(...)`, сервис
+**не поднимется намеренно**: у нового роута не объявлена политика доступа. Добавьте
+`@policy(...)` (см. [ARCHITECTURE.md](ARCHITECTURE.md), раздел 5) — это защита от
+случайно открытого эндпоинта, тот же принцип, что у гвардов LIVE-зеркала.
+
 ---
 
 ## Архив заметок

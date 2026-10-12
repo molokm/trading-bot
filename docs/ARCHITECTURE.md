@@ -84,16 +84,36 @@ Keep-alive на free tier: в коде **отсутствует**, нужен в
 `idx_ect_mode_ts`, `idx_ect_bot_label`. Часть рантайм-конфигурации живёт в таблице
 `settings` (в т.ч. `TELEGRAM_CHANNEL_ID`, offset Telegram, чёрный список JWT).
 
-## 5. HTTP API (94 роута)
+## 5. HTTP API и политики доступа (91 путь / 96 методов)
 
-- **Публичные**: `GET/HEAD /api/health`, `GET /api/health/circuit-breaker`,
-  `POST /api/auth/{login,guest,telegram,logout}`, `GET /api/auth/status`,
-  `GET /api/ai/status`, `GET /api/me/dashboard`, `GET /api/startup-log`,
-  `GET /api/meta/product`, SPA-fallback (`GET /{full_path}`), `/assets/*`.
-- **Авторизация**: глобальный middleware (JWT из `Authorization: Bearer` или cookie
-  `auth_token`) + точечный `Depends(require_admin)`; три ручных списка —
-  `ADMIN_ONLY_PATHS`, `ADMIN_ONLY_PREFIXES`, `GUEST_FORBIDDEN_PREFIXES`
-  (это хрупкое место, см. [AUDIT.md](AUDIT.md)).
+Каждый роут `/api/*` объявляет **ровно одну** политику декоратором из
+[backend/app/services/route_policy.py](../backend/app/services/route_policy.py):
+
+| Политика | Кто может | Примеры |
+|---|---|---|
+| `PUBLIC` | без токена | `/api/health`, `/api/auth/login|guest|telegram|logout`, `/api/ai/status`, `/api/me/dashboard`, `/api/meta/product` |
+| `AUTH` | admin, user, guest | `/api/live/status`, `/api/market/*` |
+| `AUTH_NO_GUEST` | admin, user | `/api/me/*`, `/api/pnl*`, `/api/positions*`, `/api/trades*`, `/api/stats`, `/api/reports/*`, `/api/chart/trades`, `/api/trade/*`, `/api/ai/diagnostics`, `/api/risk/status`, `/api/portfolio` |
+| `ADMIN` | только admin | `/api/admin/*`, `/api/debug/*`, все мутации (start/stop/config/close/order/reset), `/api/audit`, `/api/subs*`, `/api/telegram/*`, `/api/credentials/*`, `/api/mode`, `/api/analysis*` |
+
+```python
+@app.get('/api/positions')
+@policy(AUTH_NO_GUEST)      # декоратор политики — НИЖЕ route-декоратора
+async def get_positions(): ...
+```
+
+Механика: декоратор только помечает функцию (не оборачивает её, поэтому
+сигнатуры и DI не ломаются); при импорте строится таблица «путь+метод → политика»,
+по которой единый `auth_middleware` принимает решение (401/403). Если какой-то
+`/api`-роут остался без политики, `verify_route_policies()` **падает на старте**
+(`AUTH POLICY MISSING`) — сервис не поднимется, пока доступ не объявлен явно.
+Неопознанные `/api/*` пути (в т.ч. retired-заглушки) — default-deny: нужен токен.
+
+Раньше это были три ручных списка (`PUBLIC_API_PATHS`, `ADMIN_ONLY_PATHS`/
+`ADMIN_ONLY_PREFIXES`, `GUEST_FORBIDDEN_PREFIXES`) плюс `Depends(require_admin)`
+на 55 роутах; они удалены в этапе 3.
+
+- **JWT**: `Authorization: Bearer` или HttpOnly-cookie `auth_token` (24 ч).
 - **Группы**: `/api/ai/*` (статус, конфиг, старт/стоп, диагностика, логи),
   `/api/live/*` (статус/connect/disconnect — владелец LIVE-зеркала),
   `/api/me/*` (Mini App: профиль, ключи, режим, портфель, позиции, сделки, PnL),

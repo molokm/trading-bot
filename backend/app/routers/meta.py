@@ -1,10 +1,13 @@
 """Meta routes for the AI-only product."""
 from fastapi import APIRouter
 
+from app.services.route_policy import policy, PUBLIC
+
 router = APIRouter(tags=["meta"])
 
 
 @router.get("/api/meta/product")
+@policy(PUBLIC)
 async def product_meta():
     return {
         "product": "COPIX",

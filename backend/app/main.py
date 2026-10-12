@@ -42,7 +42,7 @@ import threading
 logger = logging.getLogger('app')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 from dotenv import load_dotenv
-from fastapi import Body, Request, Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Request, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -53,6 +53,10 @@ from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD
 from app.services.strategy_manager import StrategyManager, set_hydrate_deps
 from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
 from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID
+from app.services.route_policy import (
+    policy, PUBLIC, AUTH, AUTH_NO_GUEST, ADMIN,
+    RoutePolicyTable, role_allows, verify_route_policies,
+)
 from app.services.telegram_notifier import TelegramNotifier
 from app.services import pnl_engine
 from app.services.pnl_engine import PNL_EPOCH_ISO
@@ -194,14 +198,6 @@ async def write_audit(request: Request, action: str, detail: str='', meta: str='
     except Exception as e:
         print(f'[audit] write failed: {e}', flush=True)
 
-def require_admin(request: Request):
-    """FastAPI dependency: reject the request unless a valid admin token is present.
-
-    Attach via ``Depends(require_admin)`` on sensitive/mutating routes as
-    defense-in-depth alongside the global auth middleware.
-    """
-    if not is_admin(get_token(request)):
-        raise HTTPException(status_code=401, detail='Unauthorized')
 _SERVER_HITS = []
 
 @app.middleware('http')
@@ -218,7 +214,8 @@ async def _server_hit_logger(request: Request, call_next):
         entry['c'] = 'ERR'
         raise
 
-@app.get('/api/debug/server-hits', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/server-hits')
+@policy(ADMIN)
 async def debug_server_hits():
     """Return the most recent server-side API hits (for Mini App diagnostics)."""
     return {'hits': _SERVER_HITS[-80:]}
@@ -604,6 +601,8 @@ async def startup():
         _ai_force = os.getenv('AI_FORCE_AUTOSTART', '1' if AI_ONLY_MODE else '0').strip().lower() not in ('0', 'false', 'no', 'off')
         _persist_stop = os.getenv('AI_PERSIST_USER_STOP', '0').strip().lower() in ('1', 'true', 'yes', 'on')
         _user_stopped = False
+        _us = None  # must be bound: a failing settings read used to raise
+                    # UnboundLocalError below and kill AI auto-start entirely
         try:
             _us = await db.get_setting('ai_user_stopped')
             _user_stopped = str(_us or '').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -1117,29 +1116,40 @@ def _trade_matches_mode(tr: dict, mode: str) -> bool:
     if m in ('live', 'demo'):
         return m == mode
     return mode == 'demo'
-PUBLIC_API_PATHS = {'/api/health', '/api/health/circuit-breaker', '/api/auth/login', '/api/auth/guest', '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status', '/api/me/dashboard', '/api/meta/product', '/api/startup-log'}
-ADMIN_ONLY_PATHS = {'/api/credentials/status', '/api/credentials/test', '/api/credentials/init', '/api/trade/order', '/api/positions/close', '/api/positions/sweep-orphans', '/api/momentum/start', '/api/momentum/stop', '/api/momentum/config', '/api/rotation/start', '/api/rotation/stop', '/api/rotation/reset', '/api/rotation/config', '/api/impulse/start', '/api/impulse/stop', '/api/impulse/config', '/api/impulse/reset', '/api/validation/start', '/api/validation/stop', '/api/validation/reset', '/api/validation/config', '/api/validation/status', '/api/validation/trades', '/api/validation/indicators', '/api/db/reset-all', '/api/db/positions', '/api/telegram/status', '/api/telegram/config', '/api/telegram/test', '/api/telegram/simulate', '/api/telegram/menu', '/api/analysis/log', '/api/subs', '/api/subs/activate', '/api/subs/deactivate', '/api/subs/config', '/api/mode', '/api/audit', '/api/risk/kill', '/api/pnl/rebuild-strategy', '/api/admin/reset-trading-stats', '/api/ai/start', '/api/ai/stop', '/api/ai/decide', '/api/ai/correct-attribution', '/api/ai/logs', '/api/ai/logs/download'}
-ADMIN_ONLY_PREFIXES = ('/api/debug/', '/api/admin/', '/api/vwap_rev/')
-GUEST_FORBIDDEN_PREFIXES = ('/api/pnl', '/api/trades', '/api/positions', '/api/portfolio', '/api/momentum', '/api/rotation', '/api/impulse', '/api/validation', '/api/ai/', '/api/smart-money', '/api/reports', '/api/backtest', '/api/credentials', '/api/mode', '/api/audit', '/api/db/', '/api/me', '/api/trade', '/api/chart', '/api/risk')
+# ── Access policy: single source of truth is the @policy(...) decorator ──
+# The table is (re)built and verified at import time; see _verify_policies below.
+_policy_table = RoutePolicyTable()
 
 @app.middleware('http')
 async def auth_middleware(request: Request, call_next):
+    """Enforce the declared policy of the matched /api route.
+
+    Policies live on the endpoints themselves (``@policy(PUBLIC|AUTH|
+    AUTH_NO_GUEST|ADMIN)``), so there is exactly one place to declare access and
+    no hand-maintained path lists to keep in sync. An /api route without a policy
+    is impossible: ``_verify_policies`` refuses to boot (fail loud).
+    """
     path = request.url.path
-    if not path.startswith('/api/') or path in PUBLIC_API_PATHS:
+    if not path.startswith('/api/'):
+        return await call_next(request)
+    pol, _route_path = _policy_table.lookup(request.method, path)
+    if pol is None:
+        # Unmatched /api path (retired stub, typo, future route) → default-deny:
+        # a valid token is still required, exactly as before stage 3.
+        pol = AUTH
+    if pol == PUBLIC:
         return await call_next(request)
     role = validate(get_token(request))
+    if role_allows(pol, role):
+        return await call_next(request)
     if role is None:
         return JSONResponse(status_code=401, content={'detail': 'Unauthorized'})
-    if path in ADMIN_ONLY_PATHS or any((path.startswith(p) for p in ADMIN_ONLY_PREFIXES)):
-        if role != 'admin':
-            return JSONResponse(status_code=403, content={'detail': 'Forbidden'})
     if role == 'guest':
-        for p in GUEST_FORBIDDEN_PREFIXES:
-            if path == p or path.startswith(p + '/') or path.startswith(p):
-                return JSONResponse(status_code=403, content={'detail': 'Guest cannot access trading data. Sign in as admin.'})
-    return await call_next(request)
+        return JSONResponse(status_code=403, content={'detail': 'Guest cannot access trading data. Sign in as admin.'})
+    return JSONResponse(status_code=403, content={'detail': 'Forbidden'})
 
 @app.post('/api/auth/login')
+@policy(PUBLIC)
 async def auth_login(request: Request, data: dict):
     ip = request.client.host if request.client else 'unknown'
     if check_rate_limit(ip):
@@ -1156,6 +1166,7 @@ async def auth_login(request: Request, data: dict):
     raise HTTPException(status_code=401, detail='Invalid password')
 
 @app.post('/api/auth/guest')
+@policy(PUBLIC)
 async def auth_guest(request: Request):
     ip = request.client.host if request.client else 'unknown'
     if guest_rate_limited(ip):
@@ -1169,6 +1180,7 @@ async def auth_guest(request: Request):
     return _set_auth_cookie(resp, token)
 
 @app.get('/api/auth/status')
+@policy(PUBLIC)
 async def auth_status(request: Request):
     token = get_token(request)
     valid = validate(token)
@@ -1184,6 +1196,7 @@ async def auth_status(request: Request):
     return {'authenticated': valid, 'role': 'admin' if admin else 'user' if valid and user_id else 'guest' if valid else 'none', 'user_id': user_id, 'plan': plan, 'has_password': bool(PASSWORD)}
 
 @app.post('/api/auth/telegram')
+@policy(PUBLIC)
 async def auth_telegram(data: dict):
     """Authenticate a Telegram Mini App user via WebApp initData.
 
@@ -1223,6 +1236,7 @@ async def auth_telegram(data: dict):
     raise HTTPException(status_code=403, detail='Доступ к мини-апу только по Pro-подписке. Сигналы — бесплатно в боте.')
 
 @app.post('/api/auth/logout')
+@policy(PUBLIC)
 async def auth_logout(request: Request):
     token = get_token(request)
     try:
@@ -1317,6 +1331,7 @@ def _has_active_plan(user_row: dict) -> bool:
     return _is_active(user_row)
 
 @app.get('/api/me')
+@policy(AUTH_NO_GUEST)
 async def me_profile(request: Request):
     """Current user profile: plan, subscription status, creds state."""
     role, user_id, user_row = await _me_ctx(request)
@@ -1326,6 +1341,7 @@ async def me_profile(request: Request):
     return {'role': 'user', 'telegram_id': user_id, 'username': (user_row or {}).get('username'), 'first_name': (user_row or {}).get('first_name'), 'plan': (user_row or {}).get('plan', 'free'), 'active': _has_active_plan(user_row) if user_row else False, 'active_until': (user_row or {}).get('active_until'), 'creds_configured': creds, 'demo': bool((user_row or {}).get('okx_demo', 1)), 'capital': (user_row or {}).get('capital', 10000)}
 
 @app.post('/api/me/credentials')
+@policy(AUTH_NO_GUEST)
 async def me_credentials(request: Request, data: dict=None):
     """Connect the user's own OKX API keys (encrypted at rest)."""
     role, user_id, _ = await _me_ctx(request)
@@ -1358,6 +1374,7 @@ async def me_credentials(request: Request, data: dict=None):
     return {'message': 'OKX keys connected', 'demo': demo}
 
 @app.get('/api/me/mode')
+@policy(AUTH_NO_GUEST)
 async def me_get_mode(request: Request):
     """Current view mode for this caller (demo showcase vs personal live)."""
     client, mode, source = await resolve_view_client(request)
@@ -1370,6 +1387,7 @@ async def me_get_mode(request: Request):
     return {'mode': mode, 'source': source, 'demo': mode == 'demo', 'live': mode == 'live', 'live_configured': live_ready, 'can_switch_live': live_ready and (role == 'admin' or _has_active_plan(user_row))}
 
 @app.post('/api/me/mode')
+@policy(AUTH_NO_GUEST)
 async def me_set_mode(request: Request, data: dict=None):
     """Switch this user between showcase DEMO view and personal LIVE account.
 
@@ -1399,6 +1417,7 @@ async def me_set_mode(request: Request, data: dict=None):
     return {'ok': True, 'mode': 'demo', 'demo': True, 'live': False}
 
 @app.post('/api/me/credentials/test')
+@policy(AUTH_NO_GUEST)
 async def me_credentials_test(request: Request, data: dict=None):
     """Test provided (or saved) OKX credentials."""
     role, user_id, _ = await _me_ctx(request)
@@ -1428,6 +1447,7 @@ async def me_credentials_test(request: Request, data: dict=None):
     return {'ok': True, 'message': 'Connected successfully', 'demo': demo}
 
 @app.get('/api/me/portfolio')
+@policy(AUTH_NO_GUEST)
 async def me_portfolio(request: Request):
     role, user_id, _ = await _me_ctx(request)
     if user_id is None:
@@ -1448,6 +1468,7 @@ async def me_portfolio(request: Request):
     return {'totalEqUsd': float(acct.get('totalEq', 0)), 'details': details}
 
 @app.get('/api/me/positions')
+@policy(AUTH_NO_GUEST)
 async def me_positions(request: Request, inst_type: str='SWAP'):
     role, user_id, _ = await _me_ctx(request)
     if user_id is None:
@@ -1461,6 +1482,7 @@ async def me_positions(request: Request, inst_type: str='SWAP'):
     return {'positions': result.get('data', [])}
 
 @app.post('/api/me/positions/close')
+@policy(AUTH_NO_GUEST)
 async def me_positions_close(request: Request, data: dict=None):
     role, user_id, _ = await _me_ctx(request)
     if user_id is None:
@@ -1485,6 +1507,7 @@ def _user_strategy_statuses(ub):
     return (rot_status, imp_status)
 
 @app.get('/api/me/status')
+@policy(AUTH_NO_GUEST)
 async def me_status(request: Request):
     role, user_id, user_row = await _me_ctx(request)
     if user_id is None:
@@ -1501,6 +1524,7 @@ def _require_pro(request, user_row) -> None:
         raise HTTPException(status_code=403, detail='Тариф Pro неактивен — оплатите подписку')
 
 @app.get('/api/me/trades')
+@policy(AUTH_NO_GUEST)
 async def me_trades(request: Request, limit: int=50):
     """Trade history for the authenticated user's bots."""
     role, user_id, _ = await _me_ctx(request)
@@ -1529,6 +1553,7 @@ async def me_trades(request: Request, limit: int=50):
     return {'trades': trades[:limit]}
 
 @app.get('/api/me/pnl')
+@policy(AUTH_NO_GUEST)
 async def me_pnl(request: Request):
     """Realized PnL from the user's own trades (their bots only)."""
     role, user_id, _ = await _me_ctx(request)
@@ -1557,6 +1582,7 @@ async def me_pnl(request: Request):
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': 'user_bots'}
 
 @app.get('/api/me/dashboard')
+@policy(PUBLIC)
 async def me_dashboard(request: Request):
     """MiniApp dashboard: DEMO (shared server bot data) and LIVE (user's own OKX account)."""
     try:
@@ -2229,6 +2255,7 @@ async def me_dashboard(request: Request):
     return {'demo': demo, 'live': live, 'trades': trades[:40], 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
+@policy(PUBLIC)
 async def ai_status():
     """AI status. Prefer History-sourced PnL (same as /api/pnl Total) when available."""
     global ai_bot
@@ -2263,6 +2290,7 @@ async def ai_status():
     return await _apply_history_kpi(status, 'AI Discretionary 1H')
 
 @app.get('/api/startup-log')
+@policy(PUBLIC)
 async def startup_log():
     try:
         import json as _sj
@@ -2272,6 +2300,7 @@ async def startup_log():
         return {'log': [], 'error': str(e)}
 
 @app.get('/api/ai/diagnostics')
+@policy(AUTH_NO_GUEST)
 async def ai_diagnostics():
     """Per-coin veto diagnostics — shows exactly why each coin is or isn't trading."""
     global ai_bot
@@ -2285,7 +2314,8 @@ async def ai_diagnostics():
         traceback.print_exc()
         return {'error': str(e), 'running': getattr(ai_bot, '_running', False)}
 
-@app.post('/api/admin/reassign-trade', dependencies=[Depends(require_admin)])
+@app.post('/api/admin/reassign-trade')
+@policy(ADMIN)
 async def admin_reassign_trade(data: dict=None):
     """Reassign a closed trade between strategy bots (DB + override list)."""
     data = data or {}
@@ -2328,7 +2358,8 @@ async def admin_reassign_trade(data: dict=None):
         pass
     return {'ok': True, 'from_bot': from_bot, 'to_bot': to_bot, 'rule': rule, **stats}
 
-@app.post('/api/ai/correct-attribution', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/correct-attribution')
+@policy(ADMIN)
 async def ai_correct_attribution(data: dict=None):
     """Move mis-attributed trades (default SOL) off AI PnL onto Impulse."""
     global ai_bot
@@ -2348,7 +2379,8 @@ async def ai_correct_attribution(data: dict=None):
         pass
     return {'ok': True, 'offline': True, **stats, 'symbol': symbol, 'to_bot': to_bot}
 
-@app.post('/api/ai/start', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/start')
+@policy(ADMIN)
 async def ai_start(data: dict=None):
     try:
         global ai_bot
@@ -2499,7 +2531,8 @@ async def ai_start(data: dict=None):
         print(f'[AI] Start error: {error_detail}\n{traceback.format_exc()}', flush=True)
         raise HTTPException(status_code=500, detail=error_detail)
 
-@app.post('/api/ai/stop', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/stop')
+@policy(ADMIN)
 async def ai_stop():
     global ai_bot
     if ai_bot:
@@ -2513,6 +2546,7 @@ async def ai_stop():
     return {'message': 'AI stopped', 'running': False}
 
 @app.get('/api/live/status')
+@policy(AUTH)
 async def live_status():
     """Public — returns live mirror connection state + stats (no secrets). Cached 30s."""
     global ai_bot, live_manager
@@ -2975,7 +3009,8 @@ async def live_status():
     return _result
 
 
-@app.post('/api/live/connect', dependencies=[Depends(require_admin)])
+@app.post('/api/live/connect')
+@policy(ADMIN)
 async def live_connect(request: Request, data: dict = Body(default=None)):
     """Connect LIVE mirror. Body: {key, secret, passphrase, capital, confirm:'LIVE'}."""
     global ai_bot, live_manager, _live_key, _live_secret, _live_pass
@@ -3107,7 +3142,8 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
     }
 
 
-@app.post('/api/live/disconnect', dependencies=[Depends(require_admin)])
+@app.post('/api/live/disconnect')
+@policy(ADMIN)
 async def live_disconnect():
     """Disconnect LIVE mirror. Stops mirroring until explicit /api/live/connect.
 
@@ -3148,6 +3184,7 @@ async def live_disconnect():
     }
 
 @app.get('/api/live/trades')
+@policy(AUTH)
 async def live_trades():
     """Public — recent LIVE mirror trades."""
     if not db:
@@ -3163,7 +3200,8 @@ async def live_trades():
         print(f'[LIVE] trades: {e}', flush=True)
         return {'trades': []}
 
-@app.post('/api/ai/execute', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/execute')
+@policy(ADMIN)
 async def ai_execute(data: dict=None):
     """Toggle AI auto-trading (execute=on/off) at runtime. Optionally resets
     stale lifetime PnL (reset=1) — AI ran in signal mode so old data is bogus."""
@@ -3178,7 +3216,8 @@ async def ai_execute(data: dict=None):
     st = ai_bot.get_status()
     return {'ok': True, 'execute': st.get('execute'), 'total_pnl': st.get('total_pnl'), 'lifetime_pnl': st.get('lifetime_pnl'), 'message': f'AI auto-trade {('ON' if enabled else 'OFF')}' + (' (lifetime PnL reset to 0)' if d.get('reset') else '')}
 
-@app.get('/api/ai/config', dependencies=[Depends(require_admin)])
+@app.get('/api/ai/config')
+@policy(ADMIN)
 async def ai_get_config():
     """Admin-only. DEMO is the editable workspace; LIVE is promoted snapshot."""
     import json
@@ -3201,7 +3240,8 @@ async def ai_get_config():
         demo = runtime or {}
     return {'editable': bool(_env_demo), 'account_mode': 'demo' if _env_demo else 'live', 'demo': demo, 'live': live, 'runtime': runtime, 'policy': {'edit_only_in_demo': True, 'live_is_promoted_snapshot': True, 'admin_only': True}}
 
-@app.put('/api/ai/config', dependencies=[Depends(require_admin)])
+@app.put('/api/ai/config')
+@policy(ADMIN)
 async def ai_put_config(request: Request, data: dict=Body(default=None)):
     """Save AI settings — only allowed in DEMO mode (admin)."""
     import json
@@ -3225,7 +3265,8 @@ async def ai_put_config(request: Request, data: dict=Body(default=None)):
         pass
     return {'ok': True, 'saved': 'demo', 'account_mode': 'demo'}
 
-@app.post('/api/ai/config/promote', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/config/promote')
+@policy(ADMIN)
 async def ai_promote_config(request: Request):
     """Copy DEMO settings → LIVE snapshot. LIVE trading will use this snapshot."""
     import json
@@ -3249,7 +3290,8 @@ async def ai_promote_config(request: Request):
         pass
     return {'ok': True, 'promoted': True, 'message': 'Настройки DEMO скопированы в LIVE. В Live-режиме бот использует этот снимок.'}
 
-@app.get('/api/ai/logs', dependencies=[Depends(require_admin)])
+@app.get('/api/ai/logs')
+@policy(ADMIN)
 async def ai_logs(limit: int=200, event: str=None):
     """Export AI decision/trade logs for prompt tuning.
 
@@ -3283,7 +3325,8 @@ async def ai_logs(limit: int=200, event: str=None):
         print(f'[ai/logs] file read: {e}', flush=True)
     return {'memory': mem, 'file': file_rows, 'memory_n': len(mem), 'file_n': len(file_rows), 'execute': bool(ai_bot and ai_bot._execute_enabled()) if ai_bot else False, 'running': bool(ai_bot and getattr(ai_bot, '_running', False))}
 
-@app.get('/api/ai/logs/download', dependencies=[Depends(require_admin)])
+@app.get('/api/ai/logs/download')
+@policy(ADMIN)
 async def ai_logs_download(limit: int=500):
     """Download AI analysis lines as JSONL attachment."""
     from app.services.analysis_logger import DEFAULT_PATH
@@ -3300,7 +3343,8 @@ async def ai_logs_download(limit: int=500):
     body = '\n'.join(out_lines[-int(limit):]) + ('\n' if out_lines else '')
     return Response(content=body, media_type='application/x-ndjson', headers={'Content-Disposition': 'attachment; filename=ai_decisions.jsonl'})
 
-@app.post('/api/ai/decide', dependencies=[Depends(require_admin)])
+@app.post('/api/ai/decide')
+@policy(ADMIN)
 async def ai_decide_once():
     global ai_bot
     if not ai_bot or not getattr(ai_bot, '_running', False):
@@ -3352,7 +3396,8 @@ def _sm_okx_api() -> 'OKXCopyAPI':
     from app.services.legacy_stubs import OKXCopyAPI
     return OKXCopyAPI(api_key=_env_key or os.getenv('OKX_API_KEY', ''), secret_key=_env_secret or os.getenv('OKX_SECRET_KEY', '') or os.getenv('OKX_SECRET', ''), passphrase=_env_pass or os.getenv('OKX_PASSPHRASE', ''), demo=_env_demo)
 
-@app.post('/api/positions/reclaim', dependencies=[Depends(require_admin)])
+@app.post('/api/positions/reclaim')
+@policy(ADMIN)
 async def positions_reclaim(data: dict=Body(default=None)):
     """Force-bind an exchange position to a strategy (fixes wrong MAC/AI badge).
 
@@ -3433,7 +3478,8 @@ async def positions_reclaim(data: dict=Body(default=None)):
     _positions_cache = None
     return {'ok': bool(ok), 'inst_id': inst, 'side': side, 'to_bot': to_bot, 'size': sz, 'entry': entry, 'released': released, 'injected': injected}
 
-@app.get('/api/health/positions-claims', dependencies=[Depends(require_admin)])
+@app.get('/api/health/positions-claims')
+@policy(ADMIN)
 async def health_positions_claims():
     """Compare OKX open SWAP positions vs DB strategy claims."""
     from app.services.position_claim import norm_side
@@ -3469,6 +3515,7 @@ async def health_positions_claims():
     return {'ok': len(only_exchange) == 0, 'exchange_count': len(exchange), 'claims_count': len([c for c in claims if c.get('inst_id')]), 'only_on_exchange': only_exchange, 'only_in_db_claims': only_claims, 'exchange': exchange, 'claims': claims}
 
 @app.get('/api/health')
+@policy(PUBLIC)
 async def health(request: Request):
     """Liveness + connection + bot flags. Heavy PnL only with ?diag=1."""
     client = client_manager.get_client()
@@ -3525,12 +3572,14 @@ async def health(request: Request):
     return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
 
 @app.get('/api/risk/status')
+@policy(AUTH_NO_GUEST)
 async def risk_status():
     """Public-ish status for UI badges (no secrets)."""
     st = risk_get_status(daily_pnl=None)
     return st.to_dict()
 
-@app.post('/api/risk/kill', dependencies=[Depends(require_admin)])
+@app.post('/api/risk/kill')
+@policy(ADMIN)
 async def risk_kill(request: Request, data: dict=None):
     """Enable/disable runtime kill switch (blocks new entries, not closes)."""
     data = data or {}
@@ -3540,6 +3589,7 @@ async def risk_kill(request: Request, data: dict=None):
     return {'ok': True, **risk_get_status().to_dict()}
 
 @app.get('/api/health/circuit-breaker')
+@policy(PUBLIC)
 async def health_circuit_breaker():
     """Circuit Breaker state for OKX client (demo and live)."""
     cb_data = {}
@@ -3680,7 +3730,8 @@ def _active_owner_creds() -> tuple:
         return (_live_key, _live_secret, _live_pass, False)
     return (_env_key, _env_secret, _env_pass, False)
 
-@app.get('/api/credentials/status', dependencies=[Depends(require_admin)])
+@app.get('/api/credentials/status')
+@policy(ADMIN)
 async def credentials_status():
     """Showcase DEMO (env) vs owner LIVE keys status."""
     await _load_live_creds_from_db()
@@ -3688,7 +3739,8 @@ async def credentials_status():
     live_ok = bool(_live_key and _live_secret and _live_pass)
     return {'configured': showcase or live_ok, 'showcase_configured': showcase, 'live_configured': live_ok, 'demo': _env_demo, 'mode': 'demo' if _env_demo else 'live', 'note': 'Витрина DEMO всегда из env OKX. Live — ваши ключи, переключение в Настройках.'}
 
-@app.post('/api/credentials/test', dependencies=[Depends(require_admin)])
+@app.post('/api/credentials/test')
+@policy(ADMIN)
 async def credentials_test(data: dict=Body(default=None)):
     data = data or {}
     key = (data.get('apiKey') or data.get('api_key') or data.get('key') or '').strip()
@@ -3714,7 +3766,8 @@ async def credentials_test(data: dict=Body(default=None)):
     except Exception as e:
         return {'success': False, 'message': str(e)}
 
-@app.post('/api/credentials/init', dependencies=[Depends(require_admin)])
+@app.post('/api/credentials/init')
+@policy(ADMIN)
 async def credentials_init(request: Request, data: dict=Body(default=None)):
     """Save owner credentials.
 
@@ -3758,12 +3811,14 @@ async def credentials_init(request: Request, data: dict=Body(default=None)):
     await write_audit(request, 'credentials.init', detail='live=owner')
     return {'message': 'Live-ключи сохранены. DEMO-витрина не изменена. Переключитесь в Live в шапке.', 'demo': False, 'mode': 'live', 'live_configured': True}
 
-@app.get('/api/mode', dependencies=[Depends(require_admin)])
+@app.get('/api/mode')
+@policy(ADMIN)
 async def get_trading_mode():
     await _load_live_creds_from_db()
     return {'demo': _env_demo, 'okx_demo': _env_demo, 'live': not _env_demo, 'showcase_configured': bool((_demo_key or _env_key) and (_demo_secret or _env_secret)), 'live_configured': bool(_live_key and _live_secret and _live_pass), 'mode': 'demo' if _env_demo else 'live'}
 
-@app.post('/api/mode', dependencies=[Depends(require_admin)])
+@app.post('/api/mode')
+@policy(ADMIN)
 async def set_trading_mode(request: Request, data: dict=Body(default=None)):
     """Switch owner client between showcase DEMO and personal LIVE.
 
@@ -3902,12 +3957,14 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
         print(f'[mode.switch] AI position resync: {e}', flush=True)
     return {'ok': True, 'demo': _env_demo, 'live': not _env_demo, 'mode': 'demo' if _env_demo else 'live', 'live_configured': bool(_live_key and _live_secret and _live_pass), 'account_mode': _account_mode()}
 
-@app.get('/api/audit', dependencies=[Depends(require_admin)])
+@app.get('/api/audit')
+@policy(ADMIN)
 async def get_audit(limit: int=100):
     rows = await db.list_audit(limit=limit)
     return {'items': rows}
 
 @app.get('/api/portfolio')
+@policy(AUTH_NO_GUEST)
 async def get_portfolio(request: Request):
     global _portfolio_cache, _portfolio_cache_ts
     now_s = _time.time()
@@ -4122,7 +4179,8 @@ async def _orphan_sweep_loop():
             print(f'[orphan-sweep] error: {e}', flush=True)
         await _asyncio.sleep(120)
 
-@app.post('/api/positions/sweep-orphans', dependencies=[Depends(require_admin)])
+@app.post('/api/positions/sweep-orphans')
+@policy(ADMIN)
 async def sweep_orphans():
     """Close exchange positions not claimed by any strategy (anti-orphan)."""
     client = client_manager.get_client()
@@ -4140,6 +4198,7 @@ async def sweep_orphans():
     return {'closed': closed, 'n': len(closed)}
 
 @app.get('/api/positions')
+@policy(AUTH_NO_GUEST)
 async def get_positions(request: Request, inst_type: str='SWAP'):
     global _positions_cache, _positions_cache_ts, _POS_RECLAIM_TS
     now_s = _time.time()
@@ -4468,7 +4527,8 @@ async def get_positions(request: Request, inst_type: str='SWAP'):
         out['account_mode'] = _view_mode
     return out
 
-@app.post('/api/positions/bind', dependencies=[Depends(require_admin)])
+@app.post('/api/positions/bind')
+@policy(ADMIN)
 async def positions_bind(data: dict=None):
     """Force-bind an OKX position to a strategy (claim + Momentum memory if needed)."""
     data = data or {}
@@ -4519,7 +4579,8 @@ async def positions_bind(data: dict=None):
     _positions_cache = None
     return {'ok': True, 'inst_id': inst, 'side': side, 'bot_id': bid, 'size': sz, 'entry': entry}
 
-@app.post('/api/positions/close', dependencies=[Depends(require_admin)])
+@app.post('/api/positions/close')
+@policy(ADMIN)
 async def close_position(data: dict):
     account = str(data.get('account') or '').lower()
     client = None
@@ -4598,6 +4659,7 @@ _live_status_cache: dict = {}
 _SM_DISCOVER_LOCK = None
 
 @app.get('/api/market/ticker')
+@policy(AUTH)
 async def get_ticker(inst_id: str='BTC-USDT'):
     now_s = _time.time()
     if _ticker_cache.get(inst_id) and now_s - _ticker_cache_ts.get(inst_id, 0) < _TICKER_TTL:
@@ -4612,6 +4674,7 @@ async def get_ticker(inst_id: str='BTC-USDT'):
     return data
 
 @app.get('/api/market/tickers')
+@policy(AUTH)
 async def get_tickers(inst_id: str=''):
     """Batch ticker fetch — one request replaces N individual /market/ticker
     calls (the dashboard's 10 coin-price strip)."""
@@ -4634,6 +4697,7 @@ async def _safe_ticker(inst_id: str) -> dict:
         return {}
 
 @app.get('/api/market/candles')
+@policy(AUTH)
 async def get_candles(inst_id: str='BTC-USDT-SWAP', bar: str='1H', limit: int=100):
     result = await _okx_call(lambda c: c.get_candles(inst_id, bar=bar, limit=limit))
     if result.get('error'):
@@ -4667,7 +4731,8 @@ def _freqtrade_rate_limited(ip: str) -> bool:
     _bt_attempts[ip].append(now)
     return False
 
-@app.post('/api/trade/order', dependencies=[Depends(require_admin)])
+@app.post('/api/trade/order')
+@policy(ADMIN)
 async def place_order(data: dict):
     """Manual orders disabled by default — only strategy signal path may open risk."""
     allow = os.getenv('ALLOW_MANUAL_ORDERS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
@@ -4682,6 +4747,7 @@ async def place_order(data: dict):
     return {'message': 'Order placed', 'data': result.get('data')}
 
 @app.get('/api/trade/orders')
+@policy(AUTH_NO_GUEST)
 async def get_orders(inst_type: str='SPOT'):
     result = await _okx_call(lambda c: c.get_orders(inst_type))
     if result.get('error'):
@@ -4689,10 +4755,12 @@ async def get_orders(inst_type: str='SPOT'):
     return {'orders': result.get('data', [])}
 
 @app.get('/api/trade/log')
+@policy(AUTH_NO_GUEST)
 async def get_trade_log():
     return {'orders': trade_log[-100:]}
 
-@app.post('/api/db/reset-all', dependencies=[Depends(require_admin)])
+@app.post('/api/db/reset-all')
+@policy(ADMIN)
 async def db_reset_all():
     """Nuclear reset: clear ALL bot data (trades, signals, positions, metrics, bots)."""
     global rotation
@@ -4706,14 +4774,16 @@ async def db_reset_all():
             print(f'[reset-all] Error clearing {table}: {e}', flush=True)
     return {'message': 'All data reset - clean slate'}
 
-@app.get('/api/telegram/status', dependencies=[Depends(require_admin)])
+@app.get('/api/telegram/status')
+@policy(ADMIN)
 async def telegram_status():
     """Return Telegram notification config status (token masked)."""
     masked_token = telegram.token[:10] + '…' + telegram.token[-4:] if telegram.token else ''
     masked_chat = telegram.chat_id[:2] + '…' + telegram.chat_id[-3:] if telegram.chat_id else ''
     return {'configured': telegram.configured, 'status': telegram.status, 'chat_id': masked_chat, 'chat_id_masked': masked_chat, 'token_masked': masked_token}
 
-@app.post('/api/telegram/config', dependencies=[Depends(require_admin)])
+@app.post('/api/telegram/config')
+@policy(ADMIN)
 async def telegram_config(data: dict=None):
     """Set/update Telegram bot token, chat id and signals channel at runtime."""
     d = data or {}
@@ -4737,7 +4807,8 @@ async def telegram_config(data: dict=None):
             print(f'[telegram/config] poller start error: {e}', flush=True)
     return await telegram_status()
 
-@app.post('/api/telegram/test', dependencies=[Depends(require_admin)])
+@app.post('/api/telegram/test')
+@policy(ADMIN)
 async def telegram_test(data: dict=None):
     """Send a test message to verify the Telegram connection."""
     d = data or {}
@@ -4749,7 +4820,8 @@ async def telegram_test(data: dict=None):
     ok = await notifier.send('✅ Уведомления о сделках настроены и работают!')
     return {'ok': ok, 'message': 'Сообщение отправлено' if ok else 'Не удалось отправить. Проверьте token и chat_id (например, через @userinfobot).'}
 
-@app.post('/api/telegram/simulate', dependencies=[Depends(require_admin)])
+@app.post('/api/telegram/simulate')
+@policy(ADMIN)
 async def telegram_simulate(data: dict=None):
     """Send sample trade-signal messages to Telegram to preview the real format.
 
@@ -4775,7 +4847,8 @@ async def telegram_simulate(data: dict=None):
     ok_all = all(results.values())
     return {'ok': ok_all, 'message': 'Все 4 сигнала отправлены' if ok_all else f'Частичная отправка: {results}', 'results': results}
 
-@app.post('/api/telegram/menu', dependencies=[Depends(require_admin)])
+@app.post('/api/telegram/menu')
+@policy(ADMIN)
 async def telegram_menu(request: Request, data: dict=None):
     """Set the bot's chat menu button to open the Mini App (/mini)."""
     if not (telegram.token and telegram.chat_id):
@@ -4789,7 +4862,8 @@ async def telegram_menu(request: Request, data: dict=None):
     print(f'[telegram/menu] url={url} ok={ok}', flush=True)
     return {'ok': ok, 'url': url, 'message': 'Кнопка меню установлена' if ok else 'Ошибка установки кнопки меню'}
 
-@app.get('/api/subs', dependencies=[Depends(require_admin)])
+@app.get('/api/subs')
+@policy(ADMIN)
 async def subs_list():
     """List all subscribers with status + revenue stats (admin)."""
     rows = await db.list_subscriptions()
@@ -4813,7 +4887,8 @@ async def subs_list():
         pass
     return {'subscribers': subscribers, 'users': users, 'stats': {'total': len(subscribers), 'active': active, 'expired': len(subscribers) - active, 'revenue_stars': sum(revenue.values()), 'revenue_signals': revenue['signals'], 'revenue_pro': revenue['pro'], 'price_stars': PRO_PRICE_STARS, 'pro_price_stars': PRO_PRICE_STARS}}
 
-@app.post('/api/subs/activate', dependencies=[Depends(require_admin)])
+@app.post('/api/subs/activate')
+@policy(ADMIN)
 async def subs_activate(data: dict=None):
     """Manually grant/extend a subscription (e.g. cash payment or admin test)."""
     d = data or {}
@@ -4848,7 +4923,8 @@ async def subs_activate(data: dict=None):
             pass
     return {'message': 'Subscription activated', 'active_until': until}
 
-@app.post('/api/subs/deactivate', dependencies=[Depends(require_admin)])
+@app.post('/api/subs/deactivate')
+@policy(ADMIN)
 async def subs_deactivate(data: dict=None):
     """Immediately deactivate a user's subscription."""
     d = data or {}
@@ -4858,12 +4934,14 @@ async def subs_deactivate(data: dict=None):
     await db.delete_subscription(user_id)
     return {'message': 'Subscription deactivated'}
 
-@app.get('/api/subs/config', dependencies=[Depends(require_admin)])
+@app.get('/api/subs/config')
+@policy(ADMIN)
 async def subs_config():
     """Subscription product config + poller readiness (admin)."""
     return {'pro_price_stars': PRO_PRICE_STARS, 'pro_plan_days': PRO_PLAN_DAYS, 'signals_free': True, 'bot_configured': bool(telegram.token), 'poller_running': bool(bot_poller and bot_poller._running)}
 
 @app.get('/api/chart/trades')
+@policy(AUTH_NO_GUEST)
 async def chart_trades(inst_id: str='BTC-USDT-SWAP'):
     """Return real trade markers + TP/SL lines for a specific instrument.
     Closed trades: entry (green) + exit (red/green) markers.
@@ -5514,7 +5592,8 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
             traceback.print_exc()
     return 0
 
-@app.post('/api/pnl/rebuild-exchange', dependencies=[Depends(require_admin)])
+@app.post('/api/pnl/rebuild-exchange')
+@policy(ADMIN)
 async def pnl_rebuild_exchange():
     """Force re-sync of exchange close trades from OKX bills → DB, then return stats."""
     global _exchange_sync_ts
@@ -5533,7 +5612,8 @@ async def pnl_rebuild_exchange():
     ai_pnl = sum((t.get('pnl', 0) for t in trades if t.get('bot_label') == 'AI Discretionary 1H'))
     return {'synced': n, 'total_trades': len(trades), 'total_pnl': round(total_pnl, 2), 'ai_pnl': round(ai_pnl, 2), 'epoch': epoch, 'trades': [{'oid': t['ord_id'][-8:], 'inst': t['inst_id'], 'bot': t['bot_label'], 'pnl': round(t['pnl'], 2), 'fee': round(t['fee'], 2), 'ts': t['close_ts']} for t in trades[:50]]}
 
-@app.get('/api/debug/bills', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/bills')
+@policy(ADMIN)
 async def debug_bills():
     """Temporary: show raw OKX bills to diagnose sync filter."""
     bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_account_mode())
@@ -5553,7 +5633,8 @@ async def debug_bills():
         samples.append({'subType': b.get('subType'), 'pnl': b.get('pnl'), 'balChg': b.get('balChg'), 'fee': b.get('fee'), 'type': b.get('type'), 'instId': b.get('instId'), 'ordId': str(b.get('ordId', ''))[-8:]})
     return {'total_bills': len(bills), 'subTypes': dict(sub_counter), 'pnl_nonzero': pnl_nonzero, 'samples': samples, 'mode': _account_mode()}
 
-@app.post('/api/pnl/rebuild-strategy', dependencies=[Depends(require_admin)])
+@app.post('/api/pnl/rebuild-strategy')
+@policy(ADMIN)
 async def pnl_rebuild_strategy(data: dict=None):
     """Reassign SOL off AI -> Impulse and rebuild each strategy PnL from DB trades only."""
     data = data or {}
@@ -5588,7 +5669,8 @@ async def pnl_rebuild_strategy(data: dict=None):
             out['ai_correct_err'] = str(e)
     return out
 
-@app.get('/api/admin/users', dependencies=[Depends(require_admin)])
+@app.get('/api/admin/users')
+@policy(ADMIN)
 async def admin_list_users():
     """Users + OKX account status for admin panel."""
     out = []
@@ -5610,7 +5692,8 @@ async def admin_list_users():
     platform = {'kind': 'platform_demo', 'label': 'Showcase DEMO (env OKX)', 'connected': bool(_env_key and _env_secret and _env_pass), 'demo': bool(_env_demo), 'mode': 'demo' if _env_demo else 'live', 'note': 'Общий demo-счёт витрины: гости и превью подписки. Не для личных Live-ключей.'}
     return {'users': out, 'platform': platform, 'counts': {'users': len(out), 'with_creds': sum((1 for x in out if x['creds_configured'])), 'live': sum((1 for x in out if x['creds_configured'] and (not x['okx_demo']))), 'demo': sum((1 for x in out if x['creds_configured'] and x['okx_demo'])), 'active_plans': sum((1 for x in out if x['active']))}}
 
-@app.post('/api/admin/users/plan', dependencies=[Depends(require_admin)])
+@app.post('/api/admin/users/plan')
+@policy(ADMIN)
 async def admin_set_user_plan(data: dict=None):
     """Set plan + active_until for a telegram user."""
     d = data or {}
@@ -5637,7 +5720,8 @@ async def admin_set_user_plan(data: dict=None):
         pass
     return {'ok': True, 'telegram_id': tid, 'plan': plan, 'active_until': active_until}
 
-@app.post('/api/admin/users/mode', dependencies=[Depends(require_admin)])
+@app.post('/api/admin/users/mode')
+@policy(ADMIN)
 async def admin_set_user_mode(data: dict=None):
     """Force user OKX mode demo|live (requires existing keys for live)."""
     d = data or {}
@@ -5664,7 +5748,8 @@ async def admin_set_user_mode(data: dict=None):
         pass
     return {'ok': True, 'telegram_id': tid, 'mode': mode}
 
-@app.post('/api/admin/users/clear-credentials', dependencies=[Depends(require_admin)])
+@app.post('/api/admin/users/clear-credentials')
+@policy(ADMIN)
 async def admin_clear_user_credentials(data: dict=None):
     """Remove stored OKX keys for a user."""
     d = data or {}
@@ -5683,7 +5768,8 @@ async def admin_clear_user_credentials(data: dict=None):
         pass
     return {'ok': True, 'telegram_id': tid}
 
-@app.post('/api/admin/reset-trading-stats', dependencies=[Depends(require_admin)])
+@app.post('/api/admin/reset-trading-stats')
+@policy(ADMIN)
 async def admin_reset_trading_stats(data: dict=None):
     """Wipe strategy trading history and start PnL counting from now (UTC).
 
@@ -5764,6 +5850,7 @@ async def admin_reset_trading_stats(data: dict=None):
 
 
 @app.get('/api/stats')
+@policy(AUTH)
 async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo', date_from: str = '', date_to: str = ''):
     """Bot performance stats. DEMO is the public showcase; LIVE only for admin/owner.
 
@@ -5821,6 +5908,7 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
 
 
 @app.get('/api/pnl/summary')
+@policy(AUTH_NO_GUEST)
 async def pnl_summary(request: Request=None, mode: str = None):
     """Lightweight PnL for dashboard metric cards (cached via get_pnl).
 
@@ -5853,6 +5941,7 @@ def _active_bot_labels() -> set:
     return labels
 
 @app.get('/api/pnl')
+@policy(AUTH_NO_GUEST)
 async def get_pnl(request: Request=None, mode: str = None):
     """Cached dashboard PnL. Optional mode=demo|live for dual DEMO/LIVE cards."""
     q = None
@@ -6120,7 +6209,8 @@ async def _get_pnl_cached(mode: str = None) -> dict:
 
 
 
-@app.get('/api/pnl/reconcile', dependencies=[Depends(require_admin)])
+@app.get('/api/pnl/reconcile')
+@policy(ADMIN)
 async def pnl_reconcile():
     """Compare dashboard strict PnL vs OKX bills (trade + funding) + positions upl.
 
@@ -6192,6 +6282,7 @@ async def pnl_reconcile():
     return {'ok': abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0, 'pnl_epoch': epoch, 'dashboard': {'realized_tagged': r_dash, 'unrealized': u_dash, 'funding': f_dash, 'fees_informational': dash.get('fees'), 'economic_approx': dash.get('economic_approx'), 'skipped_untagged': dash.get('skipped_untagged'), 'per_bot': dash.get('per_bot'), 'source': dash.get('source')}, 'okx': {'trade_pnl_all': round(okx_trade_pnl, 4), 'trade_pnl_tagged_clord': round(okx_tagged_pnl, 4), 'trade_pnl_untagged': round(okx_untagged_pnl, 4), 'trade_bills_n': okx_trade_n, 'unrealized_upl': round(upl, 4), 'open_positions': n_pos, 'funding': f_dash}, 'diffs': {'realized_dash_minus_okx_tagged': round(r_dash - okx_tagged_pnl, 4), 'unrealized_dash_minus_okx': round(u_dash - upl, 4), 'okx_all_minus_dash': round(okx_trade_pnl - r_dash, 4)}, 'notes': ['Dashboard realized = strategy-tagged closed trades after pnl_epoch only.', 'OKX trade_pnl_all may include untagged/manual fills.', 'fillPnl usually already net of trading fees; fees on dashboard are informational.', 'Funding is separate (bills type=8), included in economic_approx.', 'Timestamps and epoch filter use UTC.']}
 
 @app.get('/api/reports/summary')
+@policy(AUTH_NO_GUEST)
 async def reports_summary():
     """Single reporting snapshot for UI/export — same trade source as History/Dashboard.
 
@@ -6379,6 +6470,7 @@ async def _bot_history_stats() -> dict:
     return stats
 
 @app.get('/api/trades')
+@policy(AUTH_NO_GUEST)
 async def get_all_trades(limit: int=100):
     """Trades for current account mode only (demo XOR live)."""
     mode = _account_mode()
@@ -6486,6 +6578,7 @@ async def _fetch_live_okx_trades_direct() -> list:
     return paired
 
 @app.get('/api/trades/paired')
+@policy(AUTH_NO_GUEST)
 async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
     """Paired entry+exit trades — all bots, all time, sourced from the DB
     (persisted) plus live in-memory logs. Fallback to OKX fills only when
@@ -7085,7 +7178,8 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
         traceback.print_exc()
         return {'trades': []}
 
-@app.get('/api/debug/trades-db', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/trades-db')
+@policy(ADMIN)
 async def debug_trades_db():
     """Diagnostic: check what's in the DB trades table."""
     try:
@@ -7102,7 +7196,8 @@ async def debug_trades_db():
         import traceback
         return {'error': str(e), 'traceback': traceback.format_exc()}
 
-@app.get('/api/debug/fills', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/fills')
+@policy(ADMIN)
 async def debug_fills():
     """Diagnostic endpoint: shows raw OKX fills (ALL fields) and pairing results."""
     client = client_manager.get_client()
@@ -7124,7 +7219,8 @@ async def debug_fills():
     open_trades = [t for t in paired if t.get('reason') == 'open']
     return {'client_ok': client_ok, 'demo': demo, 'raw_fills_count': len(raw_fills), 'paired_count': len(paired), 'closed_count': len(closed_trades), 'open_count': len(open_trades), 'first_fill_all_fields': first_fill, 'close_candidate_all_fields': close_candidate, 'sample_raw': raw_fills[:3], 'sample_closed': closed_trades[:3], 'sample_open': open_trades[:3], 'field_names': list(first_fill.keys()) if first_fill else []}
 
-@app.get('/api/analysis', dependencies=[Depends(require_admin)])
+@app.get('/api/analysis')
+@policy(ADMIN)
 async def trade_analysis():
     """Detailed trade analysis: PnL breakdown, last ETH trades, stop-loss detection."""
     global _fills_cache_ts
@@ -7160,12 +7256,14 @@ async def trade_analysis():
     loss_trades = total_trades - win_trades
     return {'summary': {'total_pnl': round(total_pnl, 2), 'total_trades': total_trades, 'win': win_trades, 'loss': loss_trades, 'win_rate': round(win_trades / total_trades * 100, 1) if total_trades > 0 else 0}, 'eth': {'total_fills': len(eth_fills), 'closed_trades': len(eth_closed), 'open_trades': len(eth_open), 'total_eth_pnl': round(sum((float(t.get('pnl', 0) or 0) for t in eth_closed)), 4), 'last_10_trades': eth_trade_details[-10:], 'open_positions': [{'entry': t.get('entry', 0), 'size': t.get('size', 0), 'entry_time': t.get('entry_time', ''), 'pos_side': t.get('pos_side', '')} for t in eth_open]}, 'current_positions': positions, 'by_instrument': {inst: {'trades': sum((1 for t in all_paired if t.get('inst_id') == inst and t.get('reason') == 'closed')), 'pnl': round(sum((float(t.get('pnl', 0) or 0) for t in all_paired if t.get('inst_id') == inst and t.get('reason') == 'closed')), 4)} for inst in set((t.get('inst_id', '') for t in all_paired))}}
 
-@app.get('/api/db/positions', dependencies=[Depends(require_admin)])
+@app.get('/api/db/positions')
+@policy(ADMIN)
 async def get_db_positions():
     positions = await db.get_all_positions()
     return {'positions': positions}
 
-@app.get('/api/analysis/log', dependencies=[Depends(require_admin)])
+@app.get('/api/analysis/log')
+@policy(ADMIN)
 async def analysis_log_download(request: Request):
     token = get_token(request)
     if not validate(token):
@@ -7177,6 +7275,7 @@ async def analysis_log_download(request: Request):
 if STATIC_DIR.exists():
 
     @app.head('/api/health')
+    @policy(PUBLIC)
     async def health_head():
         return JSONResponse({'status': 'ok'})
 
@@ -7198,7 +7297,8 @@ if STATIC_DIR.exists():
         return FileResponse(str(STATIC_DIR / 'index.html'), headers={'Cache-Control': 'no-store'})
 _MINI_LOG_RING = []
 
-@app.post('/api/debug/mini-log', dependencies=[Depends(require_admin)])
+@app.post('/api/debug/mini-log')
+@policy(ADMIN)
 async def mini_log_collect(data: dict):
     """Collect client-side logs from the Telegram Mini App (admin-only)."""
     logs = (data or {}).get('logs') or []
@@ -7210,7 +7310,8 @@ async def mini_log_collect(data: dict):
             logger.info('MINI %s', line)
     return {'saved': len(logs)}
 
-@app.post('/api/debug/client-error', dependencies=[Depends(require_admin)])
+@app.post('/api/debug/client-error')
+@policy(ADMIN)
 async def client_error_collect(request: Request, data: dict):
     """Admin-only client error sink (was public — spam/DoS vector)."""
     'Collect frontend JS errors (public — no auth, for WebView diagnostics).'
@@ -7223,15 +7324,31 @@ async def client_error_collect(request: Request, data: dict):
     logger.error('CLIENT-ERR %s %s', msg, stack[:500])
     return {'ok': True}
 
-@app.get('/api/debug/client-errors', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/client-errors')
+@policy(ADMIN)
 async def client_errors_read():
     """Read recent captured client errors (public, for diagnostics)."""
     return {'errors': [l for l in _MINI_LOG_RING if l.startswith('CLIENT-ERR')][-20:]}
 
-@app.get('/api/debug/mini-log', dependencies=[Depends(require_admin)])
+@app.get('/api/debug/mini-log')
+@policy(ADMIN)
 async def mini_log_read():
     """Return the most recent Mini App client logs."""
     return {'count': len(_MINI_LOG_RING), 'logs': _MINI_LOG_RING[-150:]}
+
+
+# ── Access policy: build the lookup table and fail loud if anything is unmarked ──
+# Must run after every route is registered. verify_route_policies() raises at
+# import/boot when an /api route lacks @policy(...) — an undeclared route means
+# nobody decided who may call it, so we refuse to serve instead of guessing.
+_policy_table.build(app)
+_POLICY_ROUTE_COUNT = verify_route_policies(app)
+print(
+    f'[auth] route policies verified: {_POLICY_ROUTE_COUNT} path(s), '
+    f'table entries: {_policy_table.size}',
+    flush=True,
+)
+
 if __name__ == '__main__':
     import uvicorn
     port = int(os.getenv('BACKEND_PORT', '8000'))
