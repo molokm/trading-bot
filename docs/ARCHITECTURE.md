@@ -128,6 +128,7 @@ Keep-alive на free tier: в коде **отсутствует**, нужен в
 cd backend && ./.venv/bin/python -m uvicorn app.main:app --reload --port 8000
 
 # Тесты (pytest.ini: pythonpath=backend, testpaths=tests)
+./backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
 ./backend/.venv/bin/python -m pytest
 
 # Сборка фронтенда

@@ -41,10 +41,14 @@ cd backend && ./.venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ## Тесты
 
 ```bash
+# зависимости для тестов (включают рантайм-зависимости)
+./backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
+
 ./backend/.venv/bin/python -m pytest          # 38 тестов: зеркало (14) + PnL (24)
 ```
 
-Конфигурация — [pytest.ini](pytest.ini) (`pythonpath=backend`, `testpaths=tests`).
+Конфигурация — [pytest.ini](pytest.ini) (`pythonpath=backend`, `testpaths=tests`),
+асинхронные тесты зеркала требуют `pytest-asyncio`.
 Тесты запускаются в CI на каждый push: [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
 ## Деплой
