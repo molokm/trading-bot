@@ -40,6 +40,9 @@ backend/.venv/
 # Database
 backend/data/
 backend/trading_bot.db
+# Runtime journal dir (ai_strategy probes <cwd>/data, then /tmp) — recreated on
+# every local run / pytest, so it is not committed and not tracked as a file.
+/data/
 
 # Backups
 trading-bot-backups/
