@@ -82,18 +82,16 @@ Python, frontend 6 235, 94 роута, 13 таблиц.
       Поведение сохранено 1:1: тест паритета сверяет решение по каждому роуту и каждой роли
       с замороженными прежними правилами (взяты из коммита `c31a0faf`) — расхождений 0.
       Тестов стало 88.
-- [ ] **Решение по роли `user`** (найдено в 3A, требует продуктового выбора). Сейчас
-      15 роутов с данными владельца доступны платному Pro-клиенту (роль `user`), потому что
-      так было и до рефакторинга: `/api/pnl`, `/api/pnl/summary`, `/api/positions`,
-      `/api/portfolio`, `/api/trades`, `/api/trades/paired`, `/api/stats`,
-      `/api/reports/summary`, `/api/chart/trades`, `/api/trade/log`, `/api/trade/orders`,
-      `/api/live/status`, `/api/live/trades`, `/api/risk/status`, `/api/ai/diagnostics`.
-      Mini App использует из них `/api/pnl*`, `/api/positions`, `/api/trades/paired`,
-      `/api/live/status`. Варианты: (а) оставить только эти 5 как `AUTH`, остальные 10
-      перевести в `ADMIN`; (б) перевести в `ADMIN` все 15 и добавить Mini App
-      `/api/me/*`-эквиваленты агрегатов. Список зафиксирован тестом
-      `test_user_reachable_routes_are_a_known_list`, так что новый «случайно доступный»
-      роут не появится незаметно.
+- [x] **Решение по роли `user`** (3B, 2026-10-12): данные владельца закрыты админом.
+      10 роутов переведены из `AUTH`/`AUTH_NO_GUEST` в `ADMIN`: `/api/portfolio`,
+      `/api/trades`, `/api/stats`, `/api/reports/summary`, `/api/chart/trades`,
+      `/api/trade/log`, `/api/trade/orders`, `/api/live/trades`, `/api/risk/status`,
+      `/api/ai/diagnostics`. Как `AUTH_NO_GUEST` оставлены ровно те 5, что вызывает Mini App
+      (`/api/pnl`, `/api/pnl/summary`, `/api/positions`, `/api/trades/paired`, `/api/live/status`) —
+      проверено grep'ом по `MiniAppPage.jsx`. Список зафиксирован тестом
+      `test_user_reachable_routes_are_a_known_list`: новый «случайно доступный» роут
+      уронит suite. Паритет-тест теперь явно кодирует это ужесточение
+      (`TIGHTENED_IN_3B`), чтобы оно не потерялось при будущих рефакторингах.
 - [ ] **`GET /api/startup-log` публичен** — раскрывает версии и пути. Закрыть админом.
 - [ ] **`GET /api/ai/status` публичен** — осознанное решение (нужен Mini App), но отдаёт
       конфигурацию LLM; пересмотреть состав полей.

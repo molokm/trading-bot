@@ -2300,7 +2300,7 @@ async def startup_log():
         return {'log': [], 'error': str(e)}
 
 @app.get('/api/ai/diagnostics')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def ai_diagnostics():
     """Per-coin veto diagnostics — shows exactly why each coin is or isn't trading."""
     global ai_bot
@@ -3184,7 +3184,7 @@ async def live_disconnect():
     }
 
 @app.get('/api/live/trades')
-@policy(AUTH)
+@policy(ADMIN)
 async def live_trades():
     """Public — recent LIVE mirror trades."""
     if not db:
@@ -3572,7 +3572,7 @@ async def health(request: Request):
     return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
 
 @app.get('/api/risk/status')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def risk_status():
     """Public-ish status for UI badges (no secrets)."""
     st = risk_get_status(daily_pnl=None)
@@ -3964,7 +3964,7 @@ async def get_audit(limit: int=100):
     return {'items': rows}
 
 @app.get('/api/portfolio')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def get_portfolio(request: Request):
     global _portfolio_cache, _portfolio_cache_ts
     now_s = _time.time()
@@ -4747,7 +4747,7 @@ async def place_order(data: dict):
     return {'message': 'Order placed', 'data': result.get('data')}
 
 @app.get('/api/trade/orders')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def get_orders(inst_type: str='SPOT'):
     result = await _okx_call(lambda c: c.get_orders(inst_type))
     if result.get('error'):
@@ -4755,7 +4755,7 @@ async def get_orders(inst_type: str='SPOT'):
     return {'orders': result.get('data', [])}
 
 @app.get('/api/trade/log')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def get_trade_log():
     return {'orders': trade_log[-100:]}
 
@@ -4941,7 +4941,7 @@ async def subs_config():
     return {'pro_price_stars': PRO_PRICE_STARS, 'pro_plan_days': PRO_PLAN_DAYS, 'signals_free': True, 'bot_configured': bool(telegram.token), 'poller_running': bool(bot_poller and bot_poller._running)}
 
 @app.get('/api/chart/trades')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def chart_trades(inst_id: str='BTC-USDT-SWAP'):
     """Return real trade markers + TP/SL lines for a specific instrument.
     Closed trades: entry (green) + exit (red/green) markers.
@@ -5850,7 +5850,7 @@ async def admin_reset_trading_stats(data: dict=None):
 
 
 @app.get('/api/stats')
-@policy(AUTH)
+@policy(ADMIN)
 async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo', date_from: str = '', date_to: str = ''):
     """Bot performance stats. DEMO is the public showcase; LIVE only for admin/owner.
 
@@ -6282,7 +6282,7 @@ async def pnl_reconcile():
     return {'ok': abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0, 'pnl_epoch': epoch, 'dashboard': {'realized_tagged': r_dash, 'unrealized': u_dash, 'funding': f_dash, 'fees_informational': dash.get('fees'), 'economic_approx': dash.get('economic_approx'), 'skipped_untagged': dash.get('skipped_untagged'), 'per_bot': dash.get('per_bot'), 'source': dash.get('source')}, 'okx': {'trade_pnl_all': round(okx_trade_pnl, 4), 'trade_pnl_tagged_clord': round(okx_tagged_pnl, 4), 'trade_pnl_untagged': round(okx_untagged_pnl, 4), 'trade_bills_n': okx_trade_n, 'unrealized_upl': round(upl, 4), 'open_positions': n_pos, 'funding': f_dash}, 'diffs': {'realized_dash_minus_okx_tagged': round(r_dash - okx_tagged_pnl, 4), 'unrealized_dash_minus_okx': round(u_dash - upl, 4), 'okx_all_minus_dash': round(okx_trade_pnl - r_dash, 4)}, 'notes': ['Dashboard realized = strategy-tagged closed trades after pnl_epoch only.', 'OKX trade_pnl_all may include untagged/manual fills.', 'fillPnl usually already net of trading fees; fees on dashboard are informational.', 'Funding is separate (bills type=8), included in economic_approx.', 'Timestamps and epoch filter use UTC.']}
 
 @app.get('/api/reports/summary')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def reports_summary():
     """Single reporting snapshot for UI/export — same trade source as History/Dashboard.
 
@@ -6470,7 +6470,7 @@ async def _bot_history_stats() -> dict:
     return stats
 
 @app.get('/api/trades')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def get_all_trades(limit: int=100):
     """Trades for current account mode only (demo XOR live)."""
     mode = _account_mode()

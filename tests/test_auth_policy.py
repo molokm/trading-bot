@@ -70,6 +70,16 @@ LEGACY_ADMIN_DEP_PATHS = {
 }
 
 
+# Deliberate tightening (stage 3B): owner data that a Pro `user` token could read
+# before is now admin-only. The Mini App keeps only the five routes it actually
+# calls (see OWNER_DATA_REACHABLE_BY_USER below).
+TIGHTENED_IN_3B = {
+    '/api/ai/diagnostics', '/api/chart/trades', '/api/live/trades', '/api/portfolio',
+    '/api/reports/summary', '/api/risk/status', '/api/stats', '/api/trade/log',
+    '/api/trade/orders', '/api/trades',
+}
+
+
 def _legacy_allows(path: str, role: str | None) -> bool:
     """Old effective behaviour (middleware + require_admin dependency)."""
     if path in LEGACY_PUBLIC:
@@ -83,6 +93,14 @@ def _legacy_allows(path: str, role: str | None) -> bool:
     if role == 'guest' and any(path == p or path.startswith(p) for p in LEGACY_GUEST_FORBIDDEN):
         return False
     return True
+
+
+def _expected_allows(path: str, role: str | None) -> bool:
+    """Legacy behaviour plus the conscious stage-3B tightening (now ADMIN, so
+    both guest and non-admin user lose access)."""
+    if path in TIGHTENED_IN_3B and role in ('user', 'guest'):
+        return False
+    return _legacy_allows(path, role)
 
 
 ROLES = (None, 'guest', 'user', 'admin')
@@ -168,13 +186,13 @@ def test_sensitive_routes_have_expected_policy(matrix, path, expected):
     assert matrix.get(path) == expected, f"{path} must be {expected}, got {matrix.get(path)}"
 
 
-# Owner-scoped data that a non-admin `user` token (a Pro / Mini App customer) can
-# still read, because that is how the endpoint was reachable before the refactor.
-# Tightening these is a product decision — see docs/AUDIT.md, stage 3 open item.
+# The only owner-scoped data a non-admin `user` token may read: exactly what the
+# Mini App calls. Everything else was tightened to ADMIN in stage 3B.
 OWNER_DATA_REACHABLE_BY_USER = {
-    '/api/ai/diagnostics', '/api/chart/trades', '/api/live/status', '/api/live/trades',
-    '/api/pnl', '/api/pnl/summary', '/api/portfolio', '/api/positions', '/api/reports/summary',
-    '/api/risk/status', '/api/stats', '/api/trade/log', '/api/trade/orders', '/api/trades',
+    '/api/live/status',
+    '/api/pnl',
+    '/api/pnl/summary',
+    '/api/positions',
     '/api/trades/paired',
 }
 
@@ -201,16 +219,22 @@ def test_user_reachable_routes_are_a_known_list(matrix):
 # ── 2. parity with the pre-stage-3 rules ─────────────────────────────────────
 
 def test_parity_with_legacy_rules_for_every_route_and_role(matrix):
-    """The refactor must not change who can call what."""
+    """Only the deliberate stage-3B tightening may differ from the old rules."""
     mismatches = []
     for path, pol in matrix.items():
         for role in ROLES:
             new = role_allows(pol, role)
-            old = _legacy_allows(path, role)
+            old = _expected_allows(path, role)
             if new != old:
-                mismatches.append(f"{path} role={role}: legacy={'allow' if old else 'deny'} "
+                mismatches.append(f"{path} role={role}: expected={'allow' if old else 'deny'} "
                                   f"new={'allow' if new else 'deny'} ({pol})")
-    assert not mismatches, "access changed:\n" + "\n".join(mismatches)
+    assert not mismatches, "access changed unexpectedly:\n" + "\n".join(mismatches)
+
+
+def test_tightened_routes_are_admin(matrix):
+    """The stage-3B tightening must actually be in force."""
+    wrong = {p: matrix.get(p) for p in TIGHTENED_IN_3B if matrix.get(p) != ADMIN}
+    assert not wrong, f"these routes must be ADMIN: {wrong}"
 
 
 # ── 3. behaviour through the real middleware ─────────────────────────────────

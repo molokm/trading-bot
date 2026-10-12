@@ -93,8 +93,8 @@ Keep-alive на free tier: в коде **отсутствует**, нужен в
 |---|---|---|
 | `PUBLIC` | без токена | `/api/health`, `/api/auth/login|guest|telegram|logout`, `/api/ai/status`, `/api/me/dashboard`, `/api/meta/product` |
 | `AUTH` | admin, user, guest | `/api/live/status`, `/api/market/*` |
-| `AUTH_NO_GUEST` | admin, user | `/api/me/*`, `/api/pnl*`, `/api/positions*`, `/api/trades*`, `/api/stats`, `/api/reports/*`, `/api/chart/trades`, `/api/trade/*`, `/api/ai/diagnostics`, `/api/risk/status`, `/api/portfolio` |
-| `ADMIN` | только admin | `/api/admin/*`, `/api/debug/*`, все мутации (start/stop/config/close/order/reset), `/api/audit`, `/api/subs*`, `/api/telegram/*`, `/api/credentials/*`, `/api/mode`, `/api/analysis*` |
+| `AUTH_NO_GUEST` | admin, user (ровно то, что вызывает Mini App) | `/api/me/*`, `/api/pnl`, `/api/pnl/summary`, `/api/positions`, `/api/trades/paired` |
+| `ADMIN` | только admin | `/api/admin/*`, `/api/debug/*`, все мутации (start/stop/config/close/order/reset), `/api/audit`, `/api/subs*`, `/api/telegram/*`, `/api/credentials/*`, `/api/mode`, `/api/analysis*`, а также данные владельца: `/api/portfolio`, `/api/trades`, `/api/stats`, `/api/reports/*`, `/api/chart/trades`, `/api/trade/*`, `/api/live/trades`, `/api/risk/status`, `/api/ai/diagnostics` |
 
 ```python
 @app.get('/api/positions')
