@@ -2,8 +2,9 @@
 backend/venv/
 backend/.env
 backend/__pycache__/
-backend/**/*.pyc
-backend/**/*.pyo
+__pycache__/
+*.pyc
+*.pyo
 
 # Analysis logs (JSONL for later analysis)
 backend/logs/
@@ -42,11 +43,16 @@ backend/trading_bot.db
 
 # Backups
 trading-bot-backups/
+_backups/
+backup_*.tar.gz
 
 # OS
 .DS_Store
 *.log
 .env
+
+# Session-log analysis dumps (may contain secrets — never commit)
+_analysis/
 
 # freqtrade artifacts
 *.sqlite

@@ -1,71 +1,106 @@
-# Deploy verification
+# Деплой и эксплуатация
 
-## 2026-08-16 — Stage 1: sessions + keep-alive
+> Актуально на 2026-10-12. Архитектура — [ARCHITECTURE.md](ARCHITECTURE.md).
 
-### JWT sessions (survive Render restart/sleep)
+## 1. Как устроен деплой
 
-Auth tokens are **signed JWT** (`backend/app/services/auth.py`), not in-memory maps.
-After a free-tier spin-down and wake, existing tokens remain valid until `exp` (24h),
-as long as the signing secret is stable.
+| Шаг | Что происходит |
+|---|---|
+| 1 | `git push origin main` → GitHub (`molokm/trading-bot`) |
+| 2 | **Render** видит push (`autoDeploy: true` в [render.yaml](../render.yaml)) и собирает [Dockerfile](../Dockerfile): стадия `node:20-slim` собирает SPA → стадия `python:3.12-slim` ставит `backend/requirements.txt` и копирует `dist` в `./static` |
+| 3 | Контейнер стартует через [entrypoint.sh](../entrypoint.sh): `PORT` (Render) → `BACKEND_PORT` → 8000, `uvicorn app.main:app --limit-concurrency 50` |
+| 4 | Render проверяет `GET /api/health`; при 200 сервис переключается на новую версию |
 
-**Required env (production):**
+Параллельно [.github/workflows/ci.yml](../.github/workflows/ci.yml) прогоняет на каждый
+push: компиляцию backend, **pytest** (`tests/`), сборку фронтенда и публикацию образа в
+GHCR. Деплой на Render идёт независимо от CI — если тесты красные, прод всё равно
+обновится.
 
-| Variable | Purpose |
-|----------|---------|
-| `TOKEN_ENCRYPTION_KEY` | Fernet key for OKX secrets at rest; also used as JWT secret if `JWT_SECRET` unset |
-| `JWT_SECRET` | Optional dedicated JWT HMAC secret (recommended) |
-| `DASHBOARD_PASSWORD` | Admin password |
+## 2. Проверка после деплоя
 
-Generate Fernet key:
+```bash
+curl -s https://trading-bot-mu99.onrender.com/api/health | python3 -m json.tool
+```
+
+Смотреть в ответе:
+
+| Поле | Ожидание |
+|---|---|
+| `status` | `ok` |
+| `version` | первые 12 символов SHA задеплоенного коммита (`RENDER_GIT_COMMIT`) |
+| `connected` | `true` (ключи OKX приняты) |
+| `demo` | `true` пока торговля идёт на демо-счёте |
+| `bots.ai` | `true` — цикл стратегии запущен |
+| `live_mirror` | `{connected, enabled}` — состояние LIVE-зеркала |
+| `auth` | `jwt` |
+| `risk` | `kill_switch`, лимиты, число открытых позиций |
+| `sm_diag.rss_mb` | потребление памяти (free tier — 512 МБ) |
+
+`uptime_sec` сбрасывается при перезапуске — по нему видно, был ли сервис усыплён/перезапущен.
+
+## 3. Keep-alive (free tier)
+
+Free-инстанс Render засыпает без трафика — торговые циклы останавливаются до следующего
+запроса. Нужен **внешний** монитор:
+
+1. UptimeRobot / Better Stack / cron-job.org.
+2. Пинг **каждые 5 минут**: `GET` (или `HEAD`) `https://trading-bot-mu99.onrender.com/api/health`.
+3. Ожидание — HTTP 200 и `{"status":"ok", ...}`.
+
+Keep-alive намеренно не встроен в код и не связан с торговой логикой.
+
+## 4. Секреты, сессии и ключи
+
+| Переменная | Назначение |
+|---|---|
+| `TOKEN_ENCRYPTION_KEY` | Fernet-ключ для шифрования OKX-ключей пользователей в БД |
+| `JWT_SECRET` | Секрет подписи JWT-сессий (рекомендуется задать отдельно) |
+| `DASHBOARD_PASSWORD` | Пароль администратора |
+| `DATABASE_URL` | PostgreSQL (Neon): `postgresql://…?sslmode=require` |
 
 ```bash
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-If neither `JWT_SECRET` nor `TOKEN_ENCRYPTION_KEY` is set, a random secret is used
-**per process** and all sessions die on every restart (old behaviour).
+Правила:
 
-### Keep-alive on Render free tier
+- Сессии — самодостаточные **JWT** (24 ч), поэтому переживают перезапуск и «сон» Render,
+  пока секрет стабилен между деплоями.
+- Если `TOKEN_ENCRYPTION_KEY` не задан, ключ детерминированно выводится из `JWT_SECRET`
+  или `DASHBOARD_PASSWORD`; при полном отсутствии секретов сервис **не стартует**
+  (fail-closed).
+- ⚠ **Смена `DASHBOARD_PASSWORD` или `JWT_SECRET` при незаданном `TOKEN_ENCRYPTION_KEY`
+  делает ранее сохранённые OKX-ключи нечитаемыми.** Задавайте `TOKEN_ENCRYPTION_KEY`
+  явно и не меняйте его.
+- Все секреты в `render.yaml` помечены `sync: false` и задаются в дашборде Render вручную.
 
-Free web services sleep after idle traffic. Trading loops stop until the next HTTP request.
+## 5. Смоук-чеклист после деплоя
 
-**Do this:**
-
-1. Create a free monitor (UptimeRobot, Better Stack, cron-job.org, etc.).
-2. Ping **every 5 minutes**:
-   - `GET https://<your-service>.onrender.com/api/health`
-   - or `HEAD https://<your-service>.onrender.com/api/health`
-3. Expect HTTP 200 and JSON `{"status":"ok",...}`.
-
-Keep-alive is **external only** — do not couple health pings with strategy logic.
-
-### Guest mode
-
-- `POST /api/auth/guest` issues a JWT with `role=guest`.
-- UI shows amber badge **Guest · view only**.
-- Mutating routes still require admin (`Depends(require_admin)`).
-- On 401 the SPA redirects to `/login?reason=session`.
-
-### Health payload (stage-1b)
-
-`GET /api/health` includes:
-
-- `uptime_sec` — seconds since process start (resets after sleep/wake)
-- `bots.rotation|impulse|validation` — `true` if loop is running after auto-start
-- `auth: "jwt"`
-
-On every boot (including Render wake) strategies auto-start when OKX env keys are set.
-Failures are isolated: one bot error does not block the others.
-
-### Smoke checklist after deploy
-
-1. Open site → Guest login → dashboard loads, badge visible.
-2. Restart/redeploy service → refresh page **without** re-login → still authenticated (JWT).
-3. Uptime monitor green for `/api/health`.
-4. Admin login → Settings visible; guest cannot open Settings.
+1. Открыть сайт → Guest → дашборд грузится, виден бейдж режима.
+2. Перезапустить/передеплоить сервис → обновить страницу **без** повторного логина —
+   сессия жива (JWT).
+3. Монитор зелёный на `/api/health`.
+4. Админ-логин → видны «Настройки»; guest их не видит.
+5. Проверить `bots.ai: true` и состояние `live_mirror` — после редеплоя бот и зеркало
+   должны подняться автоматически, если были включены до него.
 
 ---
 
-## 2026-08-12
+## Архив заметок
 
-Verify closed trades persist across redeploys.
+### 2026-08-16 — Stage 1: sessions + keep-alive
+
+- JWT-сессии вместо in-memory карт (`backend/app/services/auth.py`).
+- Guest-режим: `POST /api/auth/guest` выдаёт `role=guest`; мутирующие роуты требуют админа;
+  на 401 SPA редиректит на `/login?reason=session`.
+- Health-полезная нагрузка пополнена `uptime_sec`, флагами ботов (тогда —
+  `rotation|impulse|validation`), `auth: "jwt"`. Сейчас боты в `bots` — `ai`, `ai_scale`,
+  `rotation`, `impulse`, `validation`, `scalp`, `vwap_rev`, `smart_money`, из них активен
+  только `ai` (остальные retired).
+- Автостарт стратегий на каждом старте процесса (включая пробуждение Render), ошибки
+  изолированы: падение одного бота не блокирует остальные.
+
+### 2026-08-12
+
+Проверить, что закрытые сделки сохраняются между передеплоями (историческая задача;
+решение — PostgreSQL вместо локального SQLite + таблица `exchange_close_trades`).
