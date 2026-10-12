@@ -47,16 +47,26 @@ Python, frontend 6 235, 94 роута, 13 таблиц.
       нужная `main.py`, закреплена тестом
       [tests/test_legacy_stubs_contract.py](../tests/test_legacy_stubs_contract.py)
       (тестов стало 60).
-- [ ] **Мёртвые ключи i18n**: `scalp.*` (16), `nav.smartMoney`, `nav.backtest`,
-      `nav.chart`, `ui.strategy_desc.*` выведенных ботов; всего 371 из 662 ключей не
-      используется ни в одном `t('…')` (динамических ключей нет, кроме `t(p.labelKey)`).
-- [ ] **`backend/static/`** — закоммиченная устаревшая сборка SPA (в ней страницы
-      `BacktestPage`, `ChartPage`, `SmartMoneyPage`, `TrackerPage`, которых уже нет).
-      Обновить из `frontend/dist` или перестать хранить в git.
-- [ ] **Зависимости**: `ccxt`, `aiohttp`, `beautifulsoup4`, `yt-dlp` в
-      [requirements.txt](../backend/requirements.txt) не используются; `websockets` —
-      только мёртвым `subscribe_ticker()`.
-- [ ] **`.deploy_trigger`** — файл-артефакт форс-передеплоя, никем не читается.
+- [x] **Мёртвые ключи i18n** (2D, 2026-10-12): удалены 370 неиспользуемых ключей из
+      `ru.js` и `en.js` (711 → 337/338 строк, осталось 291/292 ключа). Динамической
+      сборки ключей в коде нет, поэтому удаление детерминировано. Попутно найдены и
+      исправлены 3 бага: `reason.trail` (в таблице сделок показывался сырой ключ вместо
+      «Трейл»), `dash.regime` и `bots.top_signals` отсутствовали в словарях; убрана
+      склейка двух ключей в одной строке `ru.js`; обновлён устаревший текст
+      «Live-боты: Momentum Rotation и Impulse 1D». Контракт закреплён тестом
+      [tests/test_i18n_keys.py](../tests/test_i18n_keys.py): все используемые ключи есть
+      в обоих языках, наборы ключей совпадают, мёртвых ключей нет.
+- [x] **Зависимости** (2C): из [requirements.txt](../backend/requirements.txt) удалены
+      `ccxt`, `aiohttp`, `beautifulsoup4`, `yt-dlp` (0 импортов в `backend/app`).
+      Проверено установкой с нуля в чистом Python 3.12: 65 тестов и импорт `app.main` OK.
+      Осталось: `websockets` нужен только мёртвому `subscribe_ticker()` — удалять вместе
+      с кодом WS-клиента.
+- [x] **`backend/static/`** (2E1): пересобрано из `frontend/dist` — ушли страницы
+      `BacktestPage`, `ChartPage`, `SmartMoneyPage`, `TrackerPage`, добавились `StatsPage`,
+      PWA-манифест и иконки; ссылки в `index.html` сверены с содержимым `assets/`.
+- [x] **`.deploy_trigger`** (2E2) — удалён вместе с пустой папкой `data/` в корне.
+      ⚠ Если понадобится форс-передеплой Render — теперь это пустой коммит
+      (`git commit --allow-empty -m "trigger deploy"`), отдельный файл не нужен.
 - [ ] **Персистентность**: в `render.yaml` нет `disk:` → состояние в `/tmp`/`cwd/data`
       (журнал AI, blacklist, клеймы) теряется при передеплое. Решить: Render Disk или
       перенос в Postgres.
