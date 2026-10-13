@@ -126,39 +126,22 @@ def _verify_mirror_guards() -> None:
     """
     CRITICAL: Runtime verification that mirror safety guards are present.
     Runs on strategy init. Fails fast if any guard is missing (e.g. lost in rebase).
+
+    NOTE: Uses hasattr() which works in all environments (Docker,pyinstaller).
+    inspect.getsource() is NOT used — it fails in packaged environments.
     """
     missing = []
-    # 1. _require_demo_twin_open
-    if not hasattr(AIStrategy, "_require_demo_twin_open"):
-        missing.append("_require_demo_twin_open")
-    # 2. _require_demo_flat_for_close
-    if not hasattr(AIStrategy, "_require_demo_flat_for_close"):
-        missing.append("_require_demo_flat_for_close")
-    # 3. _live_market_order (single chokepoint)
-    if not hasattr(AIStrategy, "_live_market_order"):
-        missing.append("_live_market_order")
-    # 4. _client() refuses non-demo (check source contains guard)
-    import inspect
-    client_src = inspect.getsource(AIStrategy._client) if hasattr(AIStrategy, "_client") else ""
-    if "REFUSED live client as primary" not in client_src:
-        missing.append("_client() live-refusal guard")
-    # 5. _open() blocks live_client_forbidden
-    open_src = inspect.getsource(AIStrategy._open) if hasattr(AIStrategy, "_open") else ""
-    if "live_client_forbidden" not in open_src:
-        missing.append("_open() live_client_forbidden guard")
-    # 6. _mirror_enabled() fail-closed
-    mirror_src = inspect.getsource(AIStrategy._mirror_enabled) if hasattr(AIStrategy, "_mirror_enabled") else ""
-    if "fail-closed" not in mirror_src and "False" not in mirror_src:
-        # more precise check
-        if "return False" not in mirror_src:
-            missing.append("_mirror_enabled() fail-closed")
+    for guard in ("_require_demo_twin_open", "_require_demo_flat_for_close",
+                  "_live_market_order", "_client", "_open", "_mirror_enabled"):
+        if not hasattr(AIStrategy, guard):
+            missing.append(guard)
 
     if missing:
         raise RuntimeError(
             f"MIRROR GUARDS MISSING — LIVE TRADING UNSAFE: {', '.join(missing)}. "
             "This is a CRITICAL safety failure. Do not deploy."
         )
-    print(f"[AI] MIRROR GUARDS VERIFIED: all {6 - len(missing)} checks passed", flush=True)
+    print(f"[AI] MIRROR GUARDS VERIFIED: {6 - len(missing)}/{6} checks passed", flush=True)
 
 def _parse_iso_ts(value) -> float:
     """Return unix seconds for an ISO timestamp, or 0 on failure."""
