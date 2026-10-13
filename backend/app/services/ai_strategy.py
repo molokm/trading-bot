@@ -33,7 +33,14 @@ Safety envelope (anti-liquidation oriented):
   - risk_guard.assert_can_open on entries
   - v1.10 defensive: early trail/BE, daily loss limit −2%
 """
+
 from __future__ import annotations
+
+import logging
+
+from app.services.observability import suppressed
+
+log = logging.getLogger("ai_strategy")
 
 import asyncio
 import math
@@ -2101,15 +2108,15 @@ class AIStrategy:
             self._decision_log.append(rec)
             try:
                 self.analysis.log("ai", "signal_open", **{k: rec[k] for k in rec if k != "time"})
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open', _e)
             return
         for ps in (side, "net", None):
             try:
                 await client.set_leverage(inst, lev, mgn_mode="cross",
                                          pos_side=ps if ps else "net")
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open', _e)
         pos_side_try = side
         trade_id = self._new_demo_trade_id()
         cl_demo = self._clord_demo(trade_id)
@@ -2141,15 +2148,15 @@ class AIStrategy:
                     try:
                         await client.set_leverage(inst, lev2, mgn_mode="cross",
                                                   pos_side=pos_side_try or "net")
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._open', _e)
                     try:
                         resp = await self._place(client, inst, order_side, sz2,
                                                  pos_side_try, cl_ord_id=cl_demo)
                         if not resp.get("error"):
                             sz, lev = sz2, lev2
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._open', _e)
             if resp.get("error"):
                 self._record_exec(
                     "open_error", coin=coin, side=side,
@@ -2172,8 +2179,8 @@ class AIStrategy:
                             fill_px, fee, _ = extract_fill_avg(rows, entry)
                             if fill_px and fill_px > 0:
                                 break
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._open', _e)
         if not fill_px or fill_px <= 0:
             fill_px = entry
         if side == "long":
@@ -2307,8 +2314,8 @@ class AIStrategy:
                 asyncio.create_task(
                     self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
                 )
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open', _e)
 
 
     async def _notify_close_tg(
@@ -2437,8 +2444,8 @@ class AIStrategy:
             if self.db:
                 try:
                     await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                except Exception:
-                    pass
+                except Exception as _e:
+                    suppressed(log, 'ai_strategy._close', _e)
             return
         # Safety: verify position still exists on exchange (exchange algo may have closed it)
         try:
@@ -2459,8 +2466,8 @@ class AIStrategy:
                     _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
                     if isinstance(_td, list) and _td:
                         mark = float(_td[0].get("last") or mark) or mark
-                except Exception:
-                    pass
+                except Exception as _e:
+                    suppressed(log, 'ai_strategy._close', _e)
                 entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                 signal_id = int(getattr(pos, "signal_id", 0) or 0)
                 mode, key = self._account_mode_tag()
@@ -2486,14 +2493,14 @@ class AIStrategy:
                         "pnl": float(pnl or 0),
                         "reason": str(reason or "exchange_stop"),
                     }
-                except Exception:
-                    pass
+                except Exception as _e:
+                    suppressed(log, 'ai_strategy._close', _e)
                 del self._positions[coin]
                 if self.db:
                     try:
                         await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._close', _e)
                 print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [already flat]", flush=True)
                 return
         except Exception as e:
@@ -2518,8 +2525,8 @@ class AIStrategy:
                         _td = ticker.get("data") or []
                         if _td:
                             mark = float(_td[0].get("last") or mark) or mark
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._close', _e)
                     _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                     mode, _k = self._account_mode_tag()
                     await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
@@ -2527,8 +2534,8 @@ class AIStrategy:
                     if self.db:
                         try:
                             await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            suppressed(log, 'ai_strategy._close', _e)
                     print(f"[AI] CLOSE {coin} after err — already flat pnl={pnl:+.2f}", flush=True)
             except Exception as e2:
                 print(f"[AI] close error recovery: {e2}", flush=True)
@@ -2546,8 +2553,8 @@ class AIStrategy:
                     rows = od.get("data") or []
                     if rows:
                         fill_px, fee, _ = extract_fill_avg(rows, mark)
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._close', _e)
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
@@ -2657,22 +2664,22 @@ class AIStrategy:
                 "pnl": float(pnl or 0),
                 "reason": str(reason or ""),
             }
-        except Exception:
-            pass
+        except Exception as _e:
+            suppressed(log, 'ai_strategy._close', _e)
         del self._positions[coin]
         if self.db:
             try:
                 await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._close', _e)
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
         try:
             hold_min = None
             try:
                 opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
                 hold_min = round((datetime.now(timezone.utc) - opened).total_seconds() / 60.0, 1)
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._close', _e)
             self._journal_append({
                 "time": datetime.now(timezone.utc).isoformat(),
                 "coin": coin, "side": pos.side, "pnl": pnl, "reason": reason,
@@ -2687,8 +2694,8 @@ class AIStrategy:
                 "ai", "close", coin=coin, side=pos.side, entry=pos.entry_price,
                 exit=fill_px, pnl=round(pnl, 2), reason=reason,
             )
-        except Exception:
-            pass
+        except Exception as _e:
+            suppressed(log, 'ai_strategy._close', _e)
         try:
             if await self._mirror_enabled():
                 await self._try_refresh_live_client()
@@ -2717,8 +2724,8 @@ class AIStrategy:
                     c = self.live_client_manager.get_client()
                     if c and not getattr(c, "demo", True) and getattr(c, "has_credentials", lambda: False)():
                         lc = c
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open_live', _e)
         if not lc:
             print("[AI-LIVE] open_skip: no live client (mirror offline)", flush=True)
             return False
@@ -2735,8 +2742,8 @@ class AIStrategy:
                 if raw:
                     alloc = float(raw)
                     self._live_capital = alloc
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open_live', _e)
         size_eq = alloc if alloc >= 10 else live_eq
         if size_eq <= 0:
             try:
@@ -2772,15 +2779,15 @@ class AIStrategy:
             if demo_pos:
                 try:
                     demo_pos.demo_trade_id = trade_id
-                except Exception:
-                    pass
+                except Exception as _e:
+                    suppressed(log, 'ai_strategy._open_live', _e)
         cl_live = self._clord_live(trade_id)
         for ps in (side, "net", None):
             try:
                 await lc.set_leverage(inst, lev, mgn_mode="cross",
                                       pos_side=ps if ps else "net")
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._open_live', _e)
         # Strict chokepoint: blocks if no DEMO twin position
         resp = await self._live_market_order(
             lc, inst=inst, order_side=order_side, sz=sz, pos_side=side,
@@ -2803,8 +2810,8 @@ class AIStrategy:
                             fill_px, fee, _ = extract_fill_avg(rows, entry)
                             if fill_px and fill_px > 0:
                                 break
-                    except Exception:
-                        pass
+                    except Exception as _e:
+                        suppressed(log, 'ai_strategy._open_live', _e)
         if not fill_px or fill_px <= 0:
             fill_px = entry
         if side == "long":
@@ -2919,8 +2926,8 @@ class AIStrategy:
                     _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
                     if isinstance(_td, list) and _td:
                         mark = float(_td[0].get("last") or mark) or mark
-                except Exception:
-                    pass
+                except Exception as _e:
+                    suppressed(log, 'ai_strategy._close_live', _e)
                 entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
                 await self._notify_close_tg(
                     pos, coin, reason or "exchange_stop", mark, pnl,
@@ -2958,8 +2965,8 @@ class AIStrategy:
                     rows = od.get("data") or []
                     if rows:
                         fill_px, fee, _ = extract_fill_avg(rows, mark)
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._close_live', _e)
         if not fill_px:
             fill_px = mark
         fee_c = fee_cost(fee)
@@ -3020,8 +3027,8 @@ class AIStrategy:
                 print(f"[AI-LIVE] exchange_close tag: {e}", flush=True)
         try:
             await release_open(self.db, live_bid, pos.inst_id, pos.side)
-        except Exception:
-            pass
+        except Exception as _e:
+            suppressed(log, 'ai_strategy._close_live', _e)
         await self._notify_close_tg(
             pos, coin, reason, fill_px, pnl,
             account_mode="live", bot_name_suffix=" (LIVE)",
@@ -3246,8 +3253,8 @@ class AIStrategy:
                             _td = (ticker or {}).get("data") or []
                             if _td:
                                 exit_px = float(_td[0].get("last") or exit_px) or exit_px
-                        except Exception:
-                            pass
+                        except Exception as _e:
+                            suppressed(log, 'ai_strategy._reconcile_live_from_exchange', _e)
                         _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                         try:
                             # v1.17: LIVE no longer carries its own exchange SL/TP, so
@@ -3264,8 +3271,8 @@ class AIStrategy:
                     self._live_positions.pop(coin, None)
             try:
                 await self._persist_live_async()
-            except Exception:
-                pass
+            except Exception as _e:
+                suppressed(log, 'ai_strategy._reconcile_live_from_exchange', _e)
         except Exception as e:
             print(f"[AI-LIVE] reconcile: {e}", flush=True)
 
@@ -3298,8 +3305,8 @@ class AIStrategy:
                     return False, f"price_ran_away_long:{move:.3%}"
                 if side == "short" and move > 0.012:
                     return False, f"price_ran_away_short:{move:.3%}"
-        except Exception:
-            pass
+        except Exception as _e:
+            suppressed(log, 'ai_strategy._revalidate_mirror_entry', _e)
         return True, "ok_mirror_no_relitigation"
 
     async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
