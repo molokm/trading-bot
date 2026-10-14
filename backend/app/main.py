@@ -5476,6 +5476,7 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
     group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
     mode=demo|live; when omitted uses _account_mode(). TTL is per-mode.
     Returns number of trades synced."""
+    global _exchange_sync_ts
     _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
     if _mode not in ('demo', 'live'):
         _mode = _account_mode()
@@ -7106,6 +7107,7 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
     except Exception as e:
         print(f'[trades/paired] entry-owner override error: {e}', flush=True)
     try:
+        import app.services.trade_attribution as trade_attr
         _overrides = await trade_attr.load_overrides(db)
         trade_attr.apply_attribution(dedup, entry_owner=inst_entry_bot if isinstance(inst_entry_bot, dict) else {}, overrides=_overrides)
     except Exception as e:
