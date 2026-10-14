@@ -337,8 +337,11 @@ class TelegramNotifier:
             mid = await self._send_to(self.chat_id, text, parse_mode, reply_to_message_id=reply_to_message_id)
             if not mid:
                 print(f"[TG] send_trade DEMO owner returned 0 chat_id={self.chat_id}", flush=True)
+            else:
+                print(f"[TG] send_trade DEMO owner mid={mid} chat_id={self.chat_id}", flush=True)
         # Public free channel — DEMO only, never LIVE
         if self.channel_id and str(self.channel_id) != str(self.chat_id):
+            print(f"[TG] send_trade DEMO: chat={self.chat_id!r} channel={self.channel_id!r} — trying channel", flush=True)
             try:
                 ch_mid = await self._send_to(self.channel_id, text, parse_mode)
                 print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)

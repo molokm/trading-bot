@@ -2314,9 +2314,14 @@ class AIStrategy:
         bot_name_suffix: str = "",
     ) -> None:
         """Always try to send close notification (reply to open if possible)."""
+        mode_tag = self._account_mode_tag()[0]
         if not self.notifier:
             print(f"[AI] TG close skipped: no notifier ({coin})", flush=True)
             return
+        tok = getattr(self.notifier, "token", "") or ""
+        _cid = getattr(self.notifier, "chat_id", "") or ""
+        _chid = getattr(self.notifier, "channel_id", "") or ""
+        print(f"[AI] TG close: account={mode_tag} notif chat={bool(_cid)} chan={bool(_chid)} tok={bool(tok)} ({coin})", flush=True)
         # Allow channel-only setups (token + channel) not just chat_id
         tok = getattr(self.notifier, "token", "") or ""
         has_target = bool(
