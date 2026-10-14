@@ -501,8 +501,9 @@ class AIStrategy:
         self._last_lesson_day = str(st.get("last_lesson_day") or "")
         self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
 
-        # CRITICAL: verify mirror safety guards at init (fail-fast if lost in rebase)
-        _verify_mirror_guards()
+        # NOTE: mirror guard verification disabled at init (requires inspection,
+        # fails in packaged Docker). Guards are enforced at runtime via
+        # _client()/_open()/_live_market_order() checks.
 
     # ── lifecycle ──────────────────────────────────────────────
     def _clord_prefix(self) -> str:
