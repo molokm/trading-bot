@@ -279,8 +279,8 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 1                 # v1.10: single position focus
-    risk_per_trade: float = 0.012          # ~1.2% equity at stop (v1.14 chop protect)
-    allocation_pct: float = 0.30           # max margin / equity per pos (v1.21: tightened from 0.35)
+    risk_per_trade: float = 0.015          # ~1.5% equity at stop (medium-aggressive)
+    allocation_pct: float = 0.40           # max margin / equity per pos (medium-aggressive)
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 60            # monitor loop; LLM only on 1H close by default
@@ -310,18 +310,18 @@ class AIConfig:
                                             # losses"; that shrank wins further. Restored
                                             # above the pre-v1.10 0.035 baseline.
     max_hold_hours: float = 12.0            # phase4: hard time-stop
-    time_stop_stale_hours: float = 4.0      # do not bleed for 8h
+    time_stop_stale_hours: float = 6.0      # do not bleed for 8h
     time_stop_min_progress_pct: float = 0.20
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
     min_hold_minutes: float = 20.0
-    exit_min_profit_pct: float = 0.30      # v1.21: was 0.10 — lock profitable gains after fees
+    exit_min_profit_pct: float = 0.20      # v1.21: was 0.10 — lock profitable gains after fees
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.50       # v1.16: 0.40→0.65 — kept in sync with
+    trail_activate_pct: float = 0.70       # v1.16: 0.40→0.65 — kept in sync with
                                             # trail_activate_atr_mult (OR'd together;
                                             # the smaller of the two always wins, so
                                             # leaving this low would have silently
