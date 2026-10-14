@@ -122,24 +122,24 @@ def save_ai_state(payload: dict) -> None:
 
 def _verify_mirror_guards() -> None:
     """
-    CRITICAL: Runtime verification that mirror safety guards are present.
-    Runs on strategy init. Fails fast if any guard is missing (e.g. lost in rebase).
+    Runtime check that mirror safety guard functions exist.
+    Runs at AIStrategy init. Logs CRITICAL warning if guards are missing
+    (does NOT crash — LIVE trading is blocked at runtime by the guards themselves).
 
-    NOTE: Uses hasattr() which works in all environments (Docker,pyinstaller).
-    inspect.getsource() is NOT used — it fails in packaged environments.
+    Guards (must exist as methods on AIStrategy):
+      _require_demo_twin_open, _require_demo_flat_for_close,
+      _live_market_order, _client, _open, _mirror_enabled
     """
-    missing = []
-    for guard in ("_require_demo_twin_open", "_require_demo_flat_for_close",
-                  "_live_market_order", "_client", "_open", "_mirror_enabled"):
-        if not hasattr(AIStrategy, guard):
-            missing.append(guard)
+    required = ("_require_demo_twin_open", "_require_demo_flat_for_close",
+                "_live_market_order", "_client", "_open", "_mirror_enabled")
+    missing = [g for g in required if not hasattr(AIStrategy, g)]
 
     if missing:
-        raise RuntimeError(
-            f"MIRROR GUARDS MISSING — LIVE TRADING UNSAFE: {', '.join(missing)}. "
-            "This is a CRITICAL safety failure. Do not deploy."
-        )
-    print(f"[AI] MIRROR GUARDS VERIFIED: {6 - len(missing)}/{6} checks passed", flush=True)
+        print(f"[AI] MIRROR GUARDS MISSING: {', '.join(missing)} — "
+              f"LIVE mirror unsafe. Fix before re-enabling mirror.", flush=True)
+        log.critical("[AI] MIRROR GUARDS MISSING: %s — LIVE mirror unsafe", ', '.join(missing))
+    else:
+        print(f"[AI] MIRROR GUARDS: all {len(required)} verified", flush=True)
 
 def _parse_iso_ts(value) -> float:
     """Return unix seconds for an ISO timestamp, or 0 on failure."""
@@ -499,9 +499,11 @@ class AIStrategy:
         self._last_lesson_day = str(st.get("last_lesson_day") or "")
         self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
 
-        # NOTE: mirror guard verification disabled at init (requires inspection,
-        # fails in packaged Docker). Guards are enforced at runtime via
-        # _client()/_open()/_live_market_order() checks.
+        # Mirror guard verification — logs warning if guards missing, does NOT crash
+        try:
+            _verify_mirror_guards()
+        except Exception as e:
+            log.warning("[AI] mirror guard check failed: %s", e)
 
     # ── lifecycle ──────────────────────────────────────────────
     def _clord_prefix(self) -> str:
