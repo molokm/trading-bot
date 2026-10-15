@@ -571,7 +571,7 @@ class AIStrategy:
         When the current provider is rate-limited, automatically falls through
         to the next one that has an API key and is not on cooldown.
         """
-        from .ai_agent import (
+        from app.services.ai_agent import (
             is_provider_available, next_available_provider,
         )
         # Preferred: config/env → groq → openrouter → openai (BAI removed)
@@ -628,7 +628,7 @@ class AIStrategy:
 
     def _get_provider_status(self) -> dict:
         """Return cooldown/availability status of all LLM providers."""
-        from .ai_agent import get_provider_status, _last_provider_used
+        from app.services.ai_agent import get_provider_status, _last_provider_used
         return {
             "active": _last_provider_used or self._provider(),
             "providers": get_provider_status(),
@@ -910,7 +910,7 @@ class AIStrategy:
             self._llm_rate_limit_until = 0.0
             self._llm_rate_limited = False
             try:
-                from .ai_agent import _rate_limit_until
+                from app.services.ai_agent import _rate_limit_until
                 if _t.time() < _rate_limit_until:
                     self._llm_rate_limited = True
                     self._llm_rate_limit_until = _rate_limit_until
@@ -2833,7 +2833,7 @@ class AIStrategy:
         if not ok_claim:
             print(f"[AI-LIVE] CRITICAL: claim failed — flattening {coin}", flush=True)
             try:
-                from .position_claim import flatten_position
+                from app.services.position_claim import flatten_position
                 await flatten_position(lc, inst, side, sz)
             except Exception as e:
                 print(f"[AI-LIVE] flatten on claim-fail: {e}", flush=True)
@@ -3081,7 +3081,7 @@ class AIStrategy:
                 if pos and pos.size > 0:
                     print(f"[AI-LIVE] orphan_detected {coin} — closing", flush=True)
                     try:
-                        from .position_claim import flatten_position
+                        from app.services.position_claim import flatten_position
                         await flatten_position(lc, pos.inst_id, pos.side, pos.size)
                     except Exception as e:
                         print(f"[AI-LIVE] orphan flatten: {e}", flush=True)
@@ -4785,7 +4785,7 @@ class AIStrategy:
 
         # release claim
         try:
-            from .position_claim import release_open
+            from app.services.position_claim import release_open
             await release_open(self.db, self.BOT_ID, inst_id, "long")
             await release_open(self.db, self.BOT_ID, inst_id, "short")
         except Exception as e:
