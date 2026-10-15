@@ -52,7 +52,7 @@ from app.database import db
 from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, set_blacklist
 from app.services.strategy_manager import StrategyManager, set_hydrate_deps
 from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
-from app.services.ai_strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID
+from app.bots.ai_discretionary.strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID
 from app.services.route_policy import (
     policy, PUBLIC, AUTH, AUTH_NO_GUEST, ADMIN,
     RoutePolicyTable, role_allows, verify_route_policies,
@@ -438,7 +438,7 @@ async def startup():
             from app.services.position_claim import restore_snapshots_to_claims
             from app.services.legacy_stubs import ROT_BOT_ID
             from app.services.legacy_stubs import IMP_BOT_ID
-            from app.services.ai_strategy import AI_BOT_ID
+            from app.bots.ai_discretionary.strategy import AI_BOT_ID
             try:
                 from app.services.legacy_stubs import VAL_BOT_ID
             except Exception:
@@ -2368,7 +2368,7 @@ async def ai_correct_attribution(data: dict=None):
     to_bot = str(data.get('to_bot') or 'impulse_strategy')
     if ai_bot and hasattr(ai_bot, 'correct_misattributed'):
         return await ai_bot.correct_misattributed(symbol, to_bot)
-    from app.services.ai_strategy import AI_BOT_ID
+    from app.bots.ai_discretionary.strategy import AI_BOT_ID
     inst = f'{symbol}-USDT-SWAP'
     stats = await db.reassign_trades_instrument(AI_BOT_ID, to_bot, inst)
     try:
@@ -3450,7 +3450,7 @@ async def positions_reclaim(data: dict=Body(default=None)):
     injected = None
     try:
         if to_bot == 'ai_scale_strategy' and ai_scale_bot:
-            from app.services.ai_strategy import AIPosition
+            from app.bots.ai_discretionary.strategy import AIPosition
             from datetime import datetime, timezone
             stop_pct, take_pct = (0.03, 0.06)
             if side == 'long':
@@ -3462,7 +3462,7 @@ async def positions_reclaim(data: dict=Body(default=None)):
             ai_scale_bot._positions[sym] = AIPosition(coin=sym, inst_id=inst, side=side, size=sz, entry_price=entry, stop_price=stop, take_price=take, leverage=float(getattr(ai_scale_bot.config, 'max_leverage', 3) or 3), opened_at=datetime.now(timezone.utc).isoformat(), peak_price=entry, signal_id=0)
             injected = 'ai_scale'
         elif to_bot == 'ai_strategy' and ai_bot:
-            from app.services.ai_strategy import AIPosition
+            from app.bots.ai_discretionary.strategy import AIPosition
             from datetime import datetime, timezone
             stop_pct, take_pct = (0.03, 0.06)
             if side == 'long':
@@ -4304,7 +4304,7 @@ async def get_positions(request: Request, inst_type: str='SWAP'):
                 pos_map = getattr(ai_scale_bot, '_positions', None)
                 if pos_map is not None and coin not in pos_map:
                     try:
-                        from app.services.ai_strategy import AIPosition
+                        from app.bots.ai_discretionary.strategy import AIPosition
                         pos_map[coin] = AIPosition(coin=coin, inst_id=inst_id, side=side, size=sz, entry_price=entry, stop_price=stop, take_price=entry * (1.06 if side == 'long' else 0.94), leverage=3.0, opened_at=now_iso)
                     except Exception:
                         pass
