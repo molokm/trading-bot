@@ -1,22 +1,21 @@
 import React, { useState, useEffect, createContext, useContext, lazy, Suspense } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
-import {
-  LayoutDashboard, Bot, BarChart3, ScrollText, Settings,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe
+import { BarChart3, 
+  LayoutDashboard, Bot, ScrollText, Settings, Users,
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
+import { api } from './services/api'
 import { Loader } from './components/ui'
 
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const BotsPage = lazy(() => import('./pages/BotsPage'))
-const BacktestPage = lazy(() => import('./pages/BacktestPage'))
-const ChartPage = lazy(() => import('./pages/ChartPage'))
 const HistoryPage = lazy(() => import('./pages/HistoryPage'))
+const StatsPage = lazy(() => import('./pages/StatsPage'))
 const SettingsPage = lazy(() => import('./pages/SettingsPage'))
+const AdminPage = lazy(() => import('./pages/AdminPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
-const TrackerPage = lazy(() => import('./pages/TrackerPage'))
-import { api } from './services/api'
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -24,6 +23,30 @@ import { GlossaryModal, OnboardingTour } from './components/ui'
 
 const AuthContext = createContext()
 export const useAuth = () => useContext(AuthContext)
+
+/** True only in real Telegram Mini App or explicit /mini route.
+ *  Do NOT treat main website as mini just because telegram-web-app.js is loaded.
+ */
+function isTelegramMiniApp() {
+  try {
+    if (typeof window === 'undefined') return false
+    // Explicit mini route
+    const path = String(window.location?.pathname || '')
+    if (path === '/mini' || path.startsWith('/mini/')) return true
+    // Flag set only by MiniAppPage module
+    if (window.__MINI_APP__ === true && path.startsWith('/mini')) return true
+    // Real Telegram session: non-empty initData (opened inside Telegram client)
+    const tg = window.Telegram && window.Telegram.WebApp
+    if (tg) {
+      const init = String(tg.initData || '').trim()
+      if (init.length > 10) return true
+      const unsafe = tg.initDataUnsafe
+      if (unsafe && (unsafe.user || unsafe.query_id || unsafe.auth_date)) return true
+    }
+  } catch { /* ignore */ }
+  return false
+}
+
 
 /* ═══ ErrorBoundary — показать ошибку вместо белого экрана ═══ */
 class MiniErrorBoundary extends React.Component {
@@ -72,6 +95,13 @@ class MiniErrorBoundary extends React.Component {
 
 function AppRouter() {
   const { auth, setAuth } = useAuth()
+  // Inside Telegram client → dedicated mini UI (not the full website shell)
+  try {
+    if (typeof window !== 'undefined' && isTelegramMiniApp() && !String(window.location.pathname || '').startsWith('/mini')) {
+      window.location.replace('/mini')
+      return null
+    }
+  } catch { /* ignore */ }
   if (!auth) return <LoginPage onLogin={(token, role) => setAuth({ token, role })} />
   return <AppLayout />
 }
@@ -81,7 +111,6 @@ function AppLayout() {
   const { theme, toggle } = useTheme()
   const { t, lang, setLang } = useTranslation()
   const [connected, setConnected] = useState(false)
-  const [demoMode, setDemoMode] = useState(true)
   const [health, setHealth] = useState({ status: 'checking' })
   const [latencyMs, setLatencyMs] = useState(null)
   const [glossaryOpen, setGlossaryOpen] = useState(false)
@@ -97,7 +126,6 @@ function AppLayout() {
         setLatencyMs(Math.round(performance.now() - t0))
         setHealth(h)
         setConnected(h.connected)
-        setDemoMode(h.demo)
       } catch {
         setLatencyMs(null)
         setHealth({ status: 'error' })
@@ -105,7 +133,10 @@ function AppLayout() {
       }
     }
     check()
-    const interval = setInterval(check, 15000)
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      check()
+    }, 30000)
     return () => clearInterval(interval)
   }, [])
 
@@ -119,16 +150,18 @@ function AppLayout() {
   const navItems = [
     { to: '/', icon: LayoutDashboard, label: t('nav.dashboard') },
     { to: '/bots', icon: Bot, label: t('nav.bots') },
-    { to: '/backtest', icon: BarChart3, label: t('nav.backtest') },
-    { to: '/chart', icon: BarChart3, label: t('nav.chart') },
     { to: '/history', icon: ScrollText, label: t('nav.history') },
-    ...(isAdmin ? [{ to: '/settings', icon: Settings, label: t('nav.settings') }] : []),
+    { to: '/stats', icon: BarChart3, label: t('nav.stats') },
+    ...(isAdmin ? [
+      { to: '/admin', icon: Users, label: 'Админка' },
+      { to: '/settings', icon: Settings, label: t('nav.settings') },
+    ] : []),
   ]
 
   return (
-    <div className="h-screen flex flex-col bg-[var(--bg)] overflow-hidden">
+    <div className="app-shell h-[100dvh] max-h-[100dvh] flex flex-col bg-[var(--bg)] overflow-hidden">
       {/* ═══ HEADER ═══ */}
-      <header className="flex items-center justify-between px-5 h-[var(--header-h)] border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
+      <header className="app-header flex items-center justify-between px-4 sm:px-5 border-b border-[var(--border)] bg-[var(--surface)] flex-shrink-0">
         {/* Left: Logo + Nav */}
         <div className="flex items-center gap-7">
           <div className="flex items-center gap-2">
@@ -159,11 +192,11 @@ function AppLayout() {
         {/* Right: Status + Controls */}
         <div className="flex items-center gap-2">
           {/* Connection Status */}
-          <div data-tour="status" className="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
-            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
-            <span className={`text-2xs font-semibold ${connected ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
-              {connected ? (demoMode ? 'DEMO' : 'LIVE') : 'OFFLINE'}
-            </span>
+          <div data-tour="status" className="flex items-center gap-2 px-1.5 py-1 rounded-lg bg-[var(--bg)] border border-[var(--border)]">
+            <span className={`w-1.5 h-1.5 rounded-full ml-1 ${connected ? 'bg-[var(--profit)] animate-pulse-dot' : 'bg-[var(--loss)]'}`} />
+            {!connected && (
+              <span className="text-2xs font-semibold text-[var(--loss)] pr-2">OFFLINE</span>
+            )}
             {health?.version ? (
               <span className="text-[10px] font-mono text-[var(--txt-muted)] hidden md:inline" title="Build / git commit">
                 {String(health.version).slice(0, 7)}
@@ -174,6 +207,16 @@ function AppLayout() {
                 {latencyMs}ms
               </span>
             ) : null}
+            {health?.bots && (
+              <span className="hidden sm:flex items-center gap-1 ml-0.5" title={t('nav.bots_status_tip')}>
+                {['rotation', 'impulse', 'validation'].map(k => (
+                  <span
+                    key={k}
+                    className={`w-1.5 h-1.5 rounded-full ${health.bots[k] ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)] opacity-40'}`}
+                  />
+                ))}
+              </span>
+            )}
           </div>
 
           {/* User role */}
@@ -221,15 +264,15 @@ function AppLayout() {
       )}
 
       {/* ═══ MAIN CONTENT ═══ */}
-      <main className="flex-1 overflow-hidden pb-[calc(3.5rem+env(safe-area-inset-bottom))] md:pb-0">
+      <main className="app-main flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
-          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} demoMode={demoMode} />} />
+          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
           <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
-          <Route path="/backtest" element={<BacktestPage connected={connected} />} />
-          <Route path="/chart" element={<ChartPage />} />
           <Route path="/history" element={<HistoryPage />} />
-          <Route path="/settings" element={<SettingsPage onConnected={setConnected} onDemoMode={setDemoMode} />} />
+          <Route path="/stats" element={<StatsPage />} />
+          <Route path="/admin" element={<AdminPage />} />
+          <Route path="/settings" element={<SettingsPage onConnected={setConnected} />} />
           <Route path="/docs" element={<DocsPage />} />
         </Routes>
         </Suspense>
@@ -238,7 +281,8 @@ function AppLayout() {
       {/* ═══ MODALS ═══ */}
       <GlossaryModal open={glossaryOpen} onClose={() => setGlossaryOpen(false)} />
 
-      {/* Mobile bottom nav */}
+      {/* Mobile bottom nav — never in Telegram Mini App */}
+      {!isTelegramMiniApp() && (
       <nav className="mobile-bottom-nav md:hidden" aria-label="Primary">
         {navItems.map(item => (
           <NavLink
@@ -254,6 +298,7 @@ function AppLayout() {
           </NavLink>
         ))}
       </nav>
+      )}
       <OnboardingTour />
     </div>
   )
@@ -266,6 +311,21 @@ export default function App() {
     return token ? { token, role } : null
   })
 
+  // Bootstrap session from httpOnly cookie when localStorage empty (after deploy)
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const s = await api.authStatus()
+        if (cancelled || !s?.authenticated) return
+        const role = s.role === 'admin' ? 'admin' : (s.role || 'guest')
+        localStorage.setItem('auth_role', role)
+        setAuth((prev) => prev || { token: localStorage.getItem('auth_token') || 'cookie', role })
+      } catch { /* not logged in */ }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
   return (
     <ThemeProvider>
       <TranslationProvider>
@@ -274,7 +334,8 @@ export default function App() {
             <Routes>
               <Route path="/login" element={<LoginPage onLogin={(token, role) => setAuth({ token, role })} />} />
               <Route path="/mini" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
-              <Route path="/tracker" element={<TrackerPage />} />
+              <Route path="/mini/*" element={<MiniErrorBoundary><MiniAppPage /></MiniErrorBoundary>} />
+              {/* Full website always via AppRouter. Mini app only at /mini (and real TG session redirects below). */}
               <Route path="/*" element={<AppRouter />} />
             </Routes>
           </AuthContext.Provider>

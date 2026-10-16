@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -21,8 +22,97 @@ PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 TOKEN_TTL = timedelta(hours=24)
 JWT_ALG = "HS256"
 
-# In-process logout blacklist (jti -> exp unix). Best-effort only.
+# In-process logout blacklist (jti -> exp unix). Persisted to disk so a
+# logged-out token stays revoked across process restarts / Render sleep.
 _blacklist: dict[str, float] = {}
+# Optional durable backend (Postgres settings). Wired from main.startup.
+_db_loader = None  # async callable () -> dict
+_db_saver = None   # async callable (dict) -> None
+_db_sync_pending = False
+
+BLACKLIST_PATH = os.path.join(
+    os.environ.get("DATA_DIR", "/tmp"),
+    "auth_blacklist.json",
+)
+
+def _load_blacklist() -> None:
+    global _blacklist
+    try:
+        if os.path.exists(BLACKLIST_PATH):
+            with open(BLACKLIST_PATH) as f:
+                data = json.load(f)
+            now = time.time()
+            _blacklist = {k: float(v) for k, v in data.items() if float(v) > now}
+    except Exception:
+        _blacklist = {}
+
+
+def _save_blacklist() -> None:
+    """Persist to local file immediately; DB flush scheduled if hook is set."""
+    global _blacklist, _db_sync_pending
+    try:
+        now = time.time()
+        pruned = {k: v for k, v in _blacklist.items() if v > now}
+        _blacklist = pruned
+        tmp = BLACKLIST_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(pruned, f)
+        os.replace(tmp, BLACKLIST_PATH)
+    except Exception:
+        pass
+    _db_sync_pending = True
+
+
+def configure_blacklist_db(loader, saver) -> None:
+    """Register async DB load/save callables (from FastAPI startup)."""
+    global _db_loader, _db_saver
+    _db_loader = loader
+    _db_saver = saver
+
+
+async def hydrate_blacklist_from_db() -> int:
+    """Merge JWT denylist from Postgres settings into memory. Returns count."""
+    global _blacklist
+    if not _db_loader:
+        return 0
+    try:
+        data = await _db_loader()
+        if not isinstance(data, dict):
+            return 0
+        now = time.time()
+        n = 0
+        for k, v in data.items():
+            try:
+                exp = float(v)
+            except (TypeError, ValueError):
+                continue
+            if exp > now:
+                prev = _blacklist.get(k, 0)
+                if exp > prev:
+                    _blacklist[k] = exp
+                    n += 1
+        _save_blacklist()
+        return n
+    except Exception as e:
+        print(f"[auth] hydrate_blacklist_from_db: {e}", flush=True)
+        return 0
+
+
+async def flush_blacklist_to_db() -> None:
+    """Write current denylist to Postgres (best-effort)."""
+    global _db_sync_pending
+    if not _db_saver:
+        return
+    try:
+        now = time.time()
+        pruned = {k: v for k, v in _blacklist.items() if v > now}
+        await _db_saver(pruned)
+        _db_sync_pending = False
+    except Exception as e:
+        print(f"[auth] flush_blacklist_to_db: {e}", flush=True)
+
+
+_load_blacklist()
 
 # ── Rate limiting (in-memory; resets on restart — acceptable) ──
 _attempts: dict[str, list[float]] = defaultdict(list)
@@ -62,15 +152,78 @@ def record_guest(ip: str):
 
 
 # ── Encryption for secrets at rest (OKX keys, etc.) ──
+def _derive_fernet_key(seed: str) -> bytes:
+    """Stable Fernet key from a long-lived secret (password / JWT secret)."""
+    import base64
+    import hashlib
+    digest = hashlib.sha256(("tb-fernet-v1:" + seed).encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest)
+
+
+def _require_stable_secrets() -> None:
+    """Ensure we can encrypt secrets at rest.
+
+    Prefer TOKEN_ENCRYPTION_KEY. If unset, derive a stable Fernet key from
+    JWT_SECRET or DASHBOARD_PASSWORD so deploys keep working.
+    Hard-fail only when REQUIRE_ENCRYPTION_KEY=1 and key is missing, or when
+    there is no seed at all to derive from.
+    """
+    strict = (os.getenv("REQUIRE_ENCRYPTION_KEY") or "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+    key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
+    if key_b64:
+        try:
+            Fernet(key_b64.encode() if isinstance(key_b64, str) else key_b64)
+        except Exception as e:
+            raise RuntimeError(f"TOKEN_ENCRYPTION_KEY is invalid: {e}") from e
+        return
+
+    seed = (
+        os.getenv("JWT_SECRET", "").strip()
+        or os.getenv("DASHBOARD_PASSWORD", "").strip()
+    )
+    if strict:
+        raise RuntimeError(
+            "TOKEN_ENCRYPTION_KEY is required (REQUIRE_ENCRYPTION_KEY=1). Generate with: "
+            "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    if seed:
+        print(
+            "[auth] TOKEN_ENCRYPTION_KEY unset — deriving stable Fernet key from "
+            "JWT_SECRET/DASHBOARD_PASSWORD (set TOKEN_ENCRYPTION_KEY for explicit control)",
+            flush=True,
+        )
+        return
+
+    raise RuntimeError(
+        "TOKEN_ENCRYPTION_KEY is required (or set JWT_SECRET / DASHBOARD_PASSWORD to derive). "
+        "Generate: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+
+
+
+
 def _get_fernet() -> Fernet:
     key_b64 = os.getenv("TOKEN_ENCRYPTION_KEY", "").strip()
     if key_b64:
         try:
             return Fernet(key_b64.encode())
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"TOKEN_ENCRYPTION_KEY is invalid: {e}") from e
+    seed = (
+        os.getenv("JWT_SECRET", "").strip()
+        or os.getenv("DASHBOARD_PASSWORD", "").strip()
+    )
+    if seed:
+        return Fernet(_derive_fernet_key(seed))
     if not hasattr(_get_fernet, "_fallback_key"):
         _get_fernet._fallback_key = Fernet.generate_key()
+        print(
+            "[auth] WARNING: ephemeral Fernet key — OKX secrets will not survive restart",
+            flush=True,
+        )
     return Fernet(_get_fernet._fallback_key)
 
 
@@ -200,11 +353,26 @@ def logout(token_enc: str):
     else:
         exp_ts = time.time() + TOKEN_TTL.total_seconds()
     _blacklist[jti] = exp_ts
-    # prune
+    _save_blacklist()
+
+
+def get_blacklist() -> dict:
+    """Return current (jti -> exp unix) blacklist snapshot (for DB persistence)."""
+    try:
+        _save_blacklist()
+    except Exception:
+        pass
+    return dict(_blacklist)
+
+
+def set_blacklist(entries: dict) -> None:
+    """Replace blacklist with entries loaded from persistent storage."""
+    global _blacklist
     now = time.time()
-    dead = [k for k, v in _blacklist.items() if v < now]
-    for k in dead:
-        del _blacklist[k]
+    try:
+        _blacklist = {str(k): float(v) for k, v in (entries or {}).items() if float(v) > now}
+    except Exception:
+        _blacklist = {}
 
 
 def cleanup():
@@ -213,3 +381,7 @@ def cleanup():
     dead = [k for k, v in _blacklist.items() if v < now]
     for k in dead:
         del _blacklist[k]
+
+
+def ensure_auth_secrets() -> None:
+    _require_stable_secrets()
