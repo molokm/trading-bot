@@ -212,14 +212,16 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.24-exit-giveback"
+STRATEGY_VERSION = "v1.25-continuation"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.21 — BTC/ETH/SOL/XRP: exit_min_profit 0.30% (was 0.10%), "
-    "allocation 30% (was 35%), trail_activate 0.85%/0.80×ATR (was 0.65%/0.70×ATR), "
-    "time_stop_stale 7h (was 5h). v1.20 base: wider TP, later trail/BE activation "
-    "(лечим отрицательную tendency при высоком WR — v1.10 случайно обрезал выигрыши "
-    "вместо лоссов), риск ~1.2%, hold-in-trend при align≥0.60 с chop/ADX-гардами."
+    "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
+    "шорт под EMA21 и при MACD≤0, лонг над EMA21 и при MACD≥0. Отбой против "
+    "стороны не берём (это давало шорты в отскок при медвежьем режиме). "
+    "Выход: тейк шире стопа, трейл не режем рано, фиксация если отдали "
+    "больше половины хода от пика +0.65%, и досрочный выход если тезис "
+    "сломан (цена и MACD против). SOL только при ADX≥28 и совпадении ≥0.88. "
+    "После убытка по монете пауза 3 часа. Риск ~1.5%."
 )
 
 CT_VAL = {
@@ -335,10 +337,22 @@ class AIConfig:
     hold_loss_min_adx: float = 22.0        # v1.14: no hold-in-loss in weak trend
     hold_loss_block_chop: bool = True      # v1.14: never hold red in chop regime
     force_exit_adverse_atr: float = 0.60   # v1.14: if loss >0.6×ATR allow ind_exit despite align
-    # Peak giveback: if trade was +X% and gave back most of it → lock remainder
+    # Peak giveback: if trade was +X% and gave back most of it → lock remainder.
+    # Armed a bit earlier than v1.24 (0.80 → 0.65) but we KEEP more of the peak
+    # (35% → 50%). Cuts the round-trip "was green, closed red" without the
+    # v1.10 mistake of trailing winners from the first tick.
     giveback_enable: bool = True
-    giveback_min_peak_pct: float = 0.80    # only after peak unrealized >= 0.80%
-    giveback_retain_frac: float = 0.35     # close when current upl <= 35% of peak
+    giveback_min_peak_pct: float = 0.65
+    giveback_retain_frac: float = 0.50
+    # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
+    momentum_entry_filter: bool = True
+    # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
+    thesis_break_exit: bool = True
+    # SOL was the drag (reflection: about −127 over 9 trades). Higher bar, not a ban.
+    sol_min_adx: float = 28.0
+    sol_min_align: float = 0.88
+    # Same-coin reopen after a loss — 75m was too short (XRP triple on 14 Oct).
+    loss_reopen_cooldown_min: float = 180.0
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
@@ -1131,19 +1145,38 @@ class AIStrategy:
                 if e200 and c < e200:
                     short_pts += 0.25
                 if adx_v >= float(cfg.min_adx or 22):
-                    long_pts += 0.15
-                    short_pts += 0.15
+                    # ADX is strength, not direction — only the EMA-stack side gets it.
+                    # Giving it to both sides inflated short-align to 0.95 on a bounce.
+                    if e21 and e50 and e21 > e50:
+                        long_pts += 0.15
+                    elif e21 and e50 and e21 < e50:
+                        short_pts += 0.15
                 if macd_hv > 0:
                     long_pts += 0.15
-                if macd_hv < 0:
+                elif macd_hv < 0:
                     short_pts += 0.15
-                if 40 <= rsi_v <= 65:
-                    long_pts += 0.1
-                if 35 <= rsi_v <= 60:
-                    short_pts += 0.1
+                # RSI: no overlap that scores both sides on a 55–60 bounce.
+                if 45 <= rsi_v <= 68:
+                    long_pts += 0.10
+                if 32 <= rsi_v <= 55:
+                    short_pts += 0.10
+                if rsi_v >= 64:
+                    short_pts -= 0.10
+                if rsi_v <= 36:
+                    long_pts -= 0.10
+                roc_v = float(roc[-1] or 0) if roc[-1] is not None else 0.0
                 if vol_ratio and vol_ratio >= 1.1:
-                    long_pts += 0.1
-                    short_pts += 0.1
+                    if roc_v > 0:
+                        long_pts += 0.10
+                    elif roc_v < 0:
+                        short_pts += 0.10
+                # Price vs fast EMA: a bear regime with price back above EMA21 is a bounce.
+                if e21 and c > e21:
+                    long_pts += 0.10
+                    short_pts -= 0.15
+                elif e21 and c < e21:
+                    short_pts += 0.10
+                    long_pts -= 0.15
 
                 # 4H context
                 tf4 = {}
@@ -1204,8 +1237,8 @@ class AIStrategy:
                     "bb_lower": _r(bb_l[-1]),
                     "vol_ratio": _r(vol_ratio),
                     "regime": regime,
-                    "align_long": round(min(1.0, long_pts), 3),
-                    "align_short": round(min(1.0, short_pts), 3),
+                    "align_long": round(min(1.0, max(0.0, long_pts)), 3),
+                    "align_short": round(min(1.0, max(0.0, short_pts)), 3),
                     "tf_4h": tf4,
                     "bar": cfg.bar,
                 }
@@ -1270,6 +1303,87 @@ class AIStrategy:
         if align_best >= bypass and adx >= soft:
             return False
         return True
+
+    def _momentum_against(self, side: str, ind: dict) -> str | None:
+        """Reason string if this side fights the live 1H impulse, else None.
+
+        EMA200 regime stays 'bear' through a bounce. Those shorts (price back
+        above EMA21, MACD histogram up, ROC up) were the recent losers.
+        A 12-bar ROC gate alone lags the turn — MACD hist + EMA21 catch it.
+        """
+        if not bool(getattr(self.config, "momentum_entry_filter", True)):
+            return None
+        if not ind:
+            return None
+        side = (side or "").lower()
+        try:
+            close = float(ind.get("close") or 0)
+            ema21 = float(ind.get("ema21") or ind.get("ema_fast") or 0)
+            roc = float(ind.get("roc") if ind.get("roc") is not None else ind.get("roc_3") or 0)
+            hist = float(ind.get("macd_hist") or 0)
+            rsi = float(ind.get("rsi") or 50)
+        except (TypeError, ValueError):
+            return None
+        if close <= 0:
+            return None
+        if side == "short":
+            if ema21 > 0 and close > ema21 * 1.001:
+                return "bounce_above_ema21"
+            if hist > 0 and roc > 0.05:
+                return "macd_roc_up"
+            if rsi >= 63 and roc > 0:
+                return "rsi_bounce"
+        elif side == "long":
+            if ema21 > 0 and close < ema21 * 0.999:
+                return "fade_below_ema21"
+            if hist < 0 and roc < -0.05:
+                return "macd_roc_down"
+            if rsi <= 37 and roc < 0:
+                return "rsi_fade"
+        return None
+
+    def _thesis_break_reason(self, pos, ind: dict, upl: float, held_min: float) -> str | None:
+        """Cut a flat/red trade when 2 of 3 impulse signals have flipped.
+
+        Does not touch a winner (upl ≥ 0.25%) — giveback and the trail do that.
+        One signal alone is noise; two means the entry thesis is gone.
+        """
+        if not bool(getattr(self.config, "thesis_break_exit", True)):
+            return None
+        if held_min < float(getattr(self.config, "min_hold_minutes", 20) or 0):
+            return None
+        if upl >= 0.25:
+            return None
+        try:
+            close = float(ind.get("close") or 0)
+            ema21 = float(ind.get("ema21") or ind.get("ema_fast") or 0)
+            roc = float(ind.get("roc") if ind.get("roc") is not None else ind.get("roc_3") or 0)
+            hist = float(ind.get("macd_hist") or 0)
+        except (TypeError, ValueError):
+            return None
+        if close <= 0 or ema21 <= 0:
+            return None
+        flags = []
+        side = str(getattr(pos, "side", "") or "").lower()
+        if side == "short":
+            if close > ema21 * 1.0015:
+                flags.append("above_ema21")
+            if hist > 0:
+                flags.append("macd_up")
+            if roc > 0.15:
+                flags.append("roc_up")
+        elif side == "long":
+            if close < ema21 * 0.9985:
+                flags.append("below_ema21")
+            if hist < 0:
+                flags.append("macd_down")
+            if roc < -0.15:
+                flags.append("roc_down")
+        else:
+            return None
+        if len(flags) >= 2 and upl < 0.15:
+            return "thesis_break:" + "+".join(flags)
+        return None
 
     def _build_quant(self) -> dict:
         """Aggregate quant layer for LLM + hard gates."""
@@ -1422,6 +1536,19 @@ class AIStrategy:
                 return f"quant_veto:btc_impulse_up_no_alt_short"
             if impulse == "down" and side == "long":
                 return f"quant_veto:btc_impulse_down_no_alt_long"
+        mom = self._momentum_against(side, ind)
+        if mom:
+            return f"quant_veto:momentum:{mom}"
+        if coin == "SOL":
+            try:
+                adx_sol = float(ind.get("adx") or 0)
+            except (TypeError, ValueError):
+                adx_sol = 0.0
+            align_sol = float(cq.get("align_short") if side == "short" else cq.get("align_long") or 0)
+            need_adx = float(getattr(self.config, "sol_min_adx", 28) or 28)
+            need_al = float(getattr(self.config, "sol_min_align", 0.88) or 0.88)
+            if adx_sol < need_adx or align_sol < need_al:
+                return f"quant_veto:sol_quality:adx={adx_sol:.0f}/align={align_sol:.2f}"
         return None
 
     def _closed_trades(self, demo_only: bool = False) -> list:
@@ -1724,6 +1851,9 @@ class AIStrategy:
             "adapt_window", "adapt_min_trades", "conf_floor", "conf_ceil",
             "align_floor", "align_ceil", "size_cap_floor", "size_cap_ceil",
             "provider",
+            "giveback_enable", "giveback_min_peak_pct", "giveback_retain_frac",
+            "momentum_entry_filter", "thesis_break_exit",
+            "sol_min_adx", "sol_min_align", "loss_reopen_cooldown_min",
         ]
         for k in keys:
             if hasattr(cfg, k):
@@ -1960,32 +2090,17 @@ class AIStrategy:
         if align < min_al:
             self._record_exec("scale_skip", coin=coin, side=side, reason=f"weak_align:{align:.2f}")
             return False
-        # Don't average down aggressively when already deep red
+        mom = self._momentum_against(side, ind)
+        if mom:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"momentum:{mom}")
+            return False
+        # Add only to a trade that is already working. Averaging a loser
+        # was how Scale-In amplified drawdowns.
         px = float(ind.get("close") or 0) or float(pos.entry_price or 0)
         upl = self._unrealized_pct(pos, px)
-        if upl < -1.2:
-            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_red:{upl:+.2f}%")
+        if upl < 0.05:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"not_in_profit:{upl:+.2f}%")
             return False
-        # No averaging down past 0.5×ATR against entry (even if UPL% not yet -1.2)
-        try:
-            atr = float(ind.get("atr") or 0)
-            entry = float(pos.entry_price or 0)
-            max_adv = float(getattr(cfg, "scale_in_max_adverse_atr", 0.5) or 0.5)
-            if upl < 0 and atr > 0 and entry > 0 and max_adv > 0:
-                adverse = (entry - px) if side == "long" else (px - entry)
-                if adverse > max_adv * atr:
-                    self._record_exec(
-                        "scale_skip", coin=coin, side=side,
-                        reason=f"adverse_atr:{adverse:.4f}>{max_adv}*atr={atr:.4f}",
-                    )
-                    print(
-                        f"[AI] scale_skip {coin}: adverse {adverse:.4f} > {max_adv}×ATR {atr:.4f} "
-                        f"(upl={upl:+.2f}%)",
-                        flush=True,
-                    )
-                    return False
-        except Exception as e:
-            print(f"[AI] scale atr gate: {e}", flush=True)
         frac = float(getattr(cfg, "scale_in_frac", 0.45) or 0.45)
         add_sz = round(float(pos.size) * frac, 8)
         lot = LOT_SZ.get(coin, 0.01)
@@ -3731,8 +3846,12 @@ class AIStrategy:
                 flush=True,
             )
             return "ind_exit:adverse_atr+" + "+".join(reasons[:2] or ["deep"])
-        # Strong multi-signal against even if flat/small red — cut before full SL
-        # BUT skip if we are red AND trend still confirmed (non-chop, ADX ok, not too deep)
+        # Slightly red: do NOT flatten on indicator noise. That path closed
+        # XRP shorts in ~20 minutes for a fee. Thesis-break (2 confirms) and
+        # the hard stop handle real failures; a winner still exits above.
+        if upl < 0:
+            return None
+        # Strong multi-signal against even if flat — cut before full SL
         if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
             if upl < 0 and trend_still_ok:
                 print(
@@ -3822,6 +3941,19 @@ class AIStrategy:
                         continue
             except Exception as e:
                 print(f"[AI] giveback check: {e}", flush=True)
+            # Thesis broken (price + MACD/ROC flipped) while flat or red → leave
+            # before the full stop. Winners are left to giveback/trail.
+            try:
+                tb = self._thesis_break_reason(pos, ind, upl, held_min)
+                if tb:
+                    print(
+                        f"[AI] {tb} {coin} {pos.side} upl={upl:+.2f}% held={held_min:.0f}m",
+                        flush=True,
+                    )
+                    await self._close(client, coin, tb)
+                    continue
+            except Exception as e:
+                print(f"[AI] thesis_break check: {e}", flush=True)
             atr_p = self._atr_pct(coin, float(pos.entry_price or px or 0))
             # Favorable move in ATR units
             fav_atr = 0.0
@@ -4536,6 +4668,18 @@ class AIStrategy:
                         continue
                     if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr):
                         continue
+                    ind_q = (self._latest_indicators or {}).get(coin_q) or {}
+                    if self._momentum_against(side, ind_q):
+                        continue
+                    if coin_q == "SOL":
+                        try:
+                            adx_q = float(ind_q.get("adx") or 0)
+                        except (TypeError, ValueError):
+                            adx_q = 0.0
+                        if adx_q < float(getattr(self.config, "sol_min_adx", 28) or 28):
+                            continue
+                        if al < float(getattr(self.config, "sol_min_align", 0.88) or 0.88):
+                            continue
                     if al < max(min_al, 0.85):
                         continue
                     if al < min_cf and al < 0.88:
@@ -4635,11 +4779,21 @@ class AIStrategy:
                 if lc and str(lc.get("side") or "").lower() == side_dec:
                     age_min = (time.time() - float(lc.get("ts") or 0)) / 60.0
                     cd = float(getattr(self.config, "reopen_cooldown_min", 75) or 75)
+                    try:
+                        last_pnl = float(lc.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        last_pnl = 0.0
+                    if last_pnl < 0:
+                        cd = max(cd, float(getattr(self.config, "loss_reopen_cooldown_min", 180) or 180))
                     ind0 = self._latest_indicators.get(coin) or {}
                     al0 = float(ind0.get("align_long") or 0)
                     ash0 = float(ind0.get("align_short") or 0)
                     align0 = ash0 if side_dec == "short" else al0
                     ov = float(getattr(self.config, "reopen_align_override", 0.82) or 0.82)
+                    # A losing close does not get the align override — that reopened
+                    # the same XRP short three times on 14 Oct.
+                    if last_pnl < 0:
+                        ov = 1.01
                     if age_min < cd and align0 < ov:
                         self._record_exec(
                             "open_skip", coin=coin, side=side_dec,
@@ -4702,6 +4856,10 @@ class AIStrategy:
                     return
                 if side == "short" and roc > 0:
                     self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
+                    return
+                mom = self._momentum_against(side, ind)
+                if mom:
+                    self._record_exec("open_skip", coin=coin, side=side, reason=f"momentum:{mom}")
                     return
             try:
                 _entry_hint = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
@@ -5553,6 +5711,14 @@ class AIStrategy:
             conf_part = ""
             if conf_f is not None:
                 conf_part = f" Оценка ИИ {conf_f:.0%}."
+            mom = None
+            try:
+                mom = self._momentum_against(
+                    b.get("best_side"),
+                    (self._latest_indicators or {}).get(coin) or {},
+                )
+            except Exception:
+                mom = None
             # wait until next bar if useful
             wait = ""
             try:
@@ -5571,6 +5737,12 @@ class AIStrategy:
                     wait = f" Следующая проверка ~через {mins} мин."
             except Exception:
                 pass
+            if mom:
+                return (
+                    f"Рынок: {reg_ru}. {coin} {side_ru} выглядит сильно "
+                    f"({sc:.0%}), но импульс против входа — сделку не берём."
+                    f"{conf_part}{wait}"
+                )[:280]
             return (
                 f"Рынок: {reg_ru}. Ожидаем {side_ru} по {coin} с {prob} вероятностью "
                 f"(совпадение {sc:.0%}).{conf_part}{wait}"
