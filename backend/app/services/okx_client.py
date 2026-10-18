@@ -229,8 +229,8 @@ class OKXClient:
             if self._client is not None and not self._client.is_closed:
                 try:
                     await self._client.aclose()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[OKX] aclose old client (ignored): {type(e).__name__}: {e}", flush=True)
             self._client = httpx.AsyncClient(timeout=30.0)
             self._client_loop = loop
         return self._client
@@ -290,6 +290,8 @@ class OKXClient:
                     last_err = str(e)
                     await asyncio.sleep(1.0 + attempt)
                 except Exception as e:
+                    # Not httpx — log so TypeError/KeyError is not mistaken for OKX outage
+                    print(f"[OKX] unexpected in _request: {type(e).__name__}: {e}", flush=True)
                     return {"error": True, "message": str(e)}
             return {"error": True, "message": f"request failed after retries: {last_err}"}
 
@@ -502,8 +504,8 @@ class OKXClient:
         if self._client is not None and not self._client.is_closed:
             try:
                 await self._client.aclose()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[OKX] aclose on close() (ignored): {type(e).__name__}: {e}", flush=True)
 
     @property
     def is_connected(self) -> bool:
@@ -573,7 +575,11 @@ class OKXClientManager:
             await client.close()
             return result
         except Exception as e:
-            await client.close()
+            print(f"[OKX] test_connection: {type(e).__name__}: {e}", flush=True)
+            try:
+                await client.close()
+            except Exception as e2:
+                print(f"[OKX] test_connection close: {type(e2).__name__}: {e2}", flush=True)
             return {"error": True, "message": str(e)}
 
     def is_ready(self) -> bool:

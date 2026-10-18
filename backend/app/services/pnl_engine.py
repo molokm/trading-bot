@@ -167,7 +167,8 @@ def normalize_close_row(r: dict) -> Optional[dict]:
                     datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() * 1000
                 )
                 break
-            except Exception:
+            except Exception as e:
+                print(f"[pnl_engine] close_ts parse skip: {type(e).__name__}: {e}", flush=True)
                 continue
     mode = str(r.get("account_mode") or r.get("mode") or "demo").strip().lower()
     if mode not in ("demo", "live"):
@@ -484,7 +485,8 @@ async def _rows_from_db_trades(db, ai_only: bool = True, account_mode: str = "de
         if not ts_ms and isinstance(ts_raw, str) and ts_raw:
             try:
                 ts_ms = int(datetime.fromisoformat(ts_raw.replace("Z", "+00:00")).timestamp() * 1000)
-            except Exception:
+            except Exception as e:
+                print(f"[pnl_engine] ts_raw parse: {type(e).__name__}: {e}", flush=True)
                 ts_ms = 0
         if ts_ms and ts_ms < ep:
             continue
@@ -621,11 +623,13 @@ def _period_bounds(period: str, now: Optional[datetime] = None, date_from: str =
     if date_from or date_to:
         try:
             d0 = datetime.strptime(date_from, "%Y-%m-%d").date() if date_from else datetime.fromisoformat(PNL_EPOCH_ISO).astimezone(PNL_TZ).date()
-        except Exception:
+        except Exception as e:
+            print(f"[pnl_engine] date_from fallback: {type(e).__name__}: {e}", flush=True)
             d0 = datetime.fromisoformat(PNL_EPOCH_ISO).astimezone(PNL_TZ).date()
         try:
             d1 = datetime.strptime(date_to, "%Y-%m-%d").date() if date_to else today
-        except Exception:
+        except Exception as e:
+            print(f"[pnl_engine] date_to fallback: {type(e).__name__}: {e}", flush=True)
             d1 = today
         return d0, d1
 

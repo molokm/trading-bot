@@ -95,8 +95,8 @@ class Database:
                 try:
                     if not pool._closed:
                         await pool.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[db] pool.close (ignored): {type(e).__name__}: {e}", flush=True)
             self._pg_pools.clear()
         if not self._pg_mode and self._conn:
             await self._conn.close()
@@ -327,8 +327,9 @@ class Database:
         # Add name column if missing (idempotent)
         try:
             await conn.execute("ALTER TABLE bots ADD COLUMN name TEXT")
-        except Exception:
-            pass
+        except Exception as e:
+            # expected if column already exists
+            print(f"[db] migrate bots.name (ok if exists): {type(e).__name__}: {e}", flush=True)
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS signals (
@@ -525,8 +526,8 @@ class Database:
         ):
             try:
                 await conn.execute(_sql)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[db] isolation column migrate (ok if exists): {type(e).__name__}: {e}", flush=True)
 
     # ── Query helpers ──
 
@@ -951,27 +952,27 @@ class Database:
         for sql in alters:
             try:
                 await self._conn.execute(sql)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
         try:
             await self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_account_mode_ts "
                 "ON trades (account_mode, account_key, timestamp)"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
         try:
             await self._conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
         try:
             await self._conn.execute(
                 "UPDATE trades SET account_mode='demo', account_key='showcase' "
                 "WHERE account_mode IS NULL OR account_mode='' "
             )
             await self._conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
 
     async def _ensure_account_isolation_columns_pg(self, conn) -> None:
         """Stage 1: account_mode / account_key on trades (+ exchange closes)."""
@@ -984,23 +985,23 @@ class Database:
         for sql in alters:
             try:
                 await conn.execute(sql)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
         try:
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_trades_account_mode_ts "
                 "ON trades (account_mode, account_key, timestamp)"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
         try:
             await conn.execute(
                 "UPDATE trades SET account_mode='demo', account_key='showcase' "
                 "WHERE account_mode IS NULL OR account_key IS NULL "
                 "OR account_mode='' OR account_key=''"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[db] ignored: {type(e).__name__}: {e}", flush=True)
 
     # ── Trades ──
 
@@ -1910,7 +1911,8 @@ class Database:
                 row = await self._fetchone(sql, (inst_id,))
                 if row and row.get("bot_id"):
                     return row.get("bot_id")
-            except Exception:
+            except Exception as e:
+                print(f"[db] find_bot_id_for_inst skip: {type(e).__name__}: {e}", flush=True)
                 continue
         return None
 
@@ -2154,7 +2156,8 @@ class Database:
                     (prefix + "%",),
                 ) or []
             return [r.get("key") if isinstance(r, dict) else r[0] for r in rows]
-        except Exception:
+        except Exception as e:
+            print(f"[db] list_settings_prefix: {type(e).__name__}: {e}", flush=True)
             return []
 
     async def set_setting(self, key: str, value: str):
