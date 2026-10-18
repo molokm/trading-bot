@@ -212,7 +212,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.25.1-watchdog"
+STRATEGY_VERSION = "v1.25.2-exit-mark"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
@@ -3965,6 +3965,27 @@ class AIStrategy:
                 held_h = 0.0
             ind = self._latest_indicators.get(coin) or {}
             px = float(ind.get("close") or 0)
+            # Always prefer live mark for exit math — 1H candle close can lag
+            # (we saw demo candles stuck while OKX ticker already moved ~1.5%).
+            try:
+                tk = await client.get_ticker(pos.inst_id)
+                rows = (tk or {}).get("data") or []
+                if rows:
+                    last = float(rows[0].get("last") or 0)
+                    if last > 0:
+                        if px > 0 and abs(last - px) / px > 0.003:
+                            print(
+                                f"[AI] manage mark refresh {coin}: candle={px:.4f} → ticker={last:.4f}",
+                                flush=True,
+                            )
+                        px = last
+                        try:
+                            if coin in (self._latest_indicators or {}):
+                                self._latest_indicators[coin]["mark"] = last
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"[AI] manage ticker {coin}: {e}", flush=True)
             if px <= 0:
                 continue
             # Phase4 time-stop: no progress after N hours → exit (don't bleed to SL)
