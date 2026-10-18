@@ -135,7 +135,79 @@ function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
   )
 }
 
+function formatSignalSide(side) {
+  if (side === 'long') return 'лонг'
+  if (side === 'short') return 'шорт'
+  return side || '—'
+}
+
+function formatRegime(regime) {
+  const r = String(regime || '').toLowerCase()
+  if (r === 'bear') return 'медвежий'
+  if (r === 'bull') return 'бычий'
+  if (r === 'chop') return 'боковик'
+  return regime || '—'
+}
+
+function signalBlockRu(s) {
+  return s?.blocked_reason_ru
+    || (s?.blocked_reason ? String(s.blocked_reason).replace(/_/g, ' ') : null)
+}
+
+function SignalRow({ s, index }) {
+  const isLong = s.side === 'long'
+  const scorePct = Math.round((s.score || 0) * 100)
+  const alignPct = Math.round((s.align_score || 0) * 100)
+  const filtersPassed = s.filters_passed
+  const filtersTotal = s.filters_total
+  const weakAdx = typeof s.adx === 'number' && s.adx < 20
+  const blockRu = signalBlockRu(s)
+  const ready = !blockRu && scorePct >= 60
+  return (
+    <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] px-2 py-1.5 space-y-1">
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span className="text-[0.55rem] font-bold text-[var(--txt-muted)]">#{index + 1}</span>
+        <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+        <span className={`px-1 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+          {formatSignalSide(s.side)}
+        </span>
+        <span className="text-[0.55rem] text-[var(--txt-muted)]">{formatRegime(s.regime)}</span>
+        <div className="flex-1 min-w-[4px]" />
+        <span className={`text-[0.55rem] font-semibold ${ready ? 'text-[var(--profit)]' : 'text-[var(--txt-muted)]'}`}>
+          {ready ? 'можно входить' : 'ждём'}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.55rem] text-[var(--txt-muted)]">
+        <span title="Насколько цена и индикаторы совпадают с направлением">
+          Совпадение <span className="mono text-[var(--txt)] font-semibold">{alignPct}%</span>
+        </span>
+        <span title="Вероятность пройти все фильтры входа прямо сейчас">
+          Готовность <span className="mono text-[var(--txt)] font-semibold">{scorePct}%</span>
+        </span>
+        <span className={weakAdx ? 'text-[var(--warn)]' : ''} title="Сила тренда (ADX)">
+          ADX {s.adx != null ? Number(s.adx).toFixed(0) : '—'}{weakAdx ? ' слаб.' : ''}
+        </span>
+        {filtersTotal != null && (
+          <span className={filtersPassed < filtersTotal ? 'text-[var(--warn)]' : 'text-[var(--profit)]'} title="Сколько фильтров пройдено">
+            Фильтры {filtersPassed}/{filtersTotal}
+          </span>
+        )}
+      </div>
+      {blockRu ? (
+        <div className="text-[0.58rem] leading-snug text-[var(--warn)]">
+          Почему не входим: {blockRu}
+        </div>
+      ) : (
+        <div className="text-[0.58rem] leading-snug text-[var(--profit)]">
+          Фильтры допускают вход — ждём подтверждение ИИ
+        </div>
+      )}
+    </div>
+  )
+}
+
 function DashBotPanel({
+
   title, version, running, loading, accent = 'text-[var(--accent)]',
   pnl, trades, winRate, openCount, model, capital, pulse, tagline,
   isGuest, onStart, onStop, startLabel, t,
@@ -190,58 +262,23 @@ function DashBotPanel({
           </div>
         )}
         {running && topSignals && topSignals.length > 0 && (
-          <div className="space-y-1 pt-1">
+          <div className="space-y-1.5 pt-1">
             <div className="flex items-center gap-1.5 text-[0.6rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
               <Target size={9} />
-              <span>{t('dash.top_signals') || 'Сигналы на вход'}</span>
+              <span>Кандидаты на вход</span>
             </div>
-            {topSignals.map((s, i) => {
-              const isLong = s.side === 'long'
-              const scorePct = Math.round((s.score || 0) * 100)
-              const alignPct = Math.round((s.align_score || 0) * 100)
-              const filtersPassed = s.filters_passed
-              const filtersTotal = s.filters_total
-              const weakAdx = typeof s.adx === 'number' && s.adx < 20
-              return (
-                <details key={s.coin + i} className="group">
-                  <summary className="flex items-center gap-1.5 py-0.5 cursor-pointer list-none [&::-webkit-details-marker]:hidden">
-                    <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3">#{i + 1}</span>
-                    <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                      {isLong ? 'L' : 'S'}
-                    </span>
-                    <span className="text-[0.65rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
-                    <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
-                    <div className="flex-1" />
-                    <span className="text-[0.55rem] text-[var(--txt-muted)]">Готовность</span>
-                    <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
-                      <div className="h-full rounded-full" style={{
-                        width: `${scorePct}%`,
-                        backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
-                      }} />
-                    </div>
-                    <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
-                  </summary>
-                  <div className="pl-[1.6rem] pb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[0.55rem] text-[var(--txt-muted)]">
-                    <span>Align {alignPct}%</span>
-                    <span className={weakAdx ? 'text-[var(--loss)]' : ''}>
-                      ADX {s.adx != null ? Number(s.adx).toFixed(0) : '—'}{weakAdx ? ' (слабый тренд)' : ''}
-                    </span>
-                    {filtersTotal != null && (
-                      <span className={filtersPassed < filtersTotal ? 'text-[var(--loss)]' : ''}>
-                        Фильтры {filtersPassed}/{filtersTotal}
-                      </span>
-                    )}
-                    {s.blocked_reason && (
-                      <span className="text-[var(--loss)]">блок: {s.blocked_reason}</span>
-                    )}
-                  </div>
-                </details>
-              )
-            })}
+            <p className="text-[0.55rem] text-[var(--txt-muted)] leading-snug m-0">
+              <b className="text-[var(--txt)]">Совпадение</b> — насколько тренд и индикаторы смотрят в одну сторону.
+              {' '}<b className="text-[var(--txt)]">Готовность</b> — шанс пройти все фильтры прямо сейчас (ниже = вход ещё нельзя).
+            </p>
+            {topSignals.map((s, i) => (
+              <SignalRow key={(s.coin || '') + i} s={s} index={i} />
+            ))}
           </div>
         )}
         {(pulse) && (
-          <div className="p-2 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-28 overflow-y-auto text-[11px] leading-relaxed text-[var(--txt)] whitespace-pre-wrap break-words">
+          <div className="p-2 rounded-md bg-[var(--bg)] border border-[var(--border)] max-h-32 overflow-y-auto text-[11px] leading-relaxed text-[var(--txt)] whitespace-pre-wrap break-words">
+            <div className="text-[0.55rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider mb-1">Статус бота</div>
             {pulse}
           </div>
         )}

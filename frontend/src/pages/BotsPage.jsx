@@ -167,44 +167,50 @@ function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
 
 function CompactSignals({ signals, t }) {
   if (!signals || signals.length === 0) return null
+  const sideRu = (side) => side === 'long' ? 'лонг' : side === 'short' ? 'шорт' : (side || '—')
+  const regimeRu = (r) => {
+    const x = String(r || '').toLowerCase()
+    if (x === 'bear') return 'медвежий'
+    if (x === 'bull') return 'бычий'
+    if (x === 'chop') return 'боковик'
+    return r || '—'
+  }
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5 text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
         <Target size={10} />
-        <span>{t('bots.top_signals') || 'Сигналы на вход'}</span>
+        <span>{t('bots.top_signals') || 'Кандидаты на вход'}</span>
       </div>
-      <div className="grid grid-cols-1 gap-1">
+      <p className="text-[0.55rem] text-[var(--txt-muted)] leading-snug m-0">
+        Совпадение — тренд и индикаторы. Готовность — шанс пройти фильтры сейчас.
+      </p>
+      <div className="grid grid-cols-1 gap-1.5">
         {signals.map((s, i) => {
           const isLong = s.side === 'long'
           const scorePct = Math.round((s.score || 0) * 100)
           const alignPct = Math.round((s.align_score || 0) * 100)
           const fp = s.filters_passed ?? 10
           const ft = s.filters_total ?? 10
-          const blocked = s.blocked_reason
+          const blockRu = s.blocked_reason_ru || (s.blocked_reason ? String(s.blocked_reason).replace(/_/g, ' ') : null)
           return (
-            <div key={s.coin + i} className="flex items-center gap-1.5 p-1.5 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
-              <span className="text-[0.55rem] font-bold text-[var(--txt-muted)] w-3 text-center">#{i + 1}</span>
-              <span className={`px-0.5 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
-                {isLong ? 'L' : 'S'}
-              </span>
-              <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
-              <span className="text-[0.55rem] text-[var(--txt-muted)]">{s.regime}</span>
-              <div className="flex-1" />
-              {blocked ? (
-                <span className="text-[0.48rem] px-1 py-px rounded bg-[var(--warn)]/15 text-[var(--warn)] font-medium truncate max-w-[80px]" title={blocked}>
-                  {blocked.replace(/_/g, ' ')}
+            <div key={s.coin + i} className="p-1.5 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60 space-y-1">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <span className="text-[0.55rem] font-bold text-[var(--txt-muted)]">#{i + 1}</span>
+                <span className="text-[0.7rem] font-semibold text-[var(--txt)] mono">{s.coin}</span>
+                <span className={`px-1 py-px rounded text-[0.55rem] font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>
+                  {sideRu(s.side)}
                 </span>
-              ) : (
-                <span className="text-[0.5rem] text-[var(--profit)] font-medium">{fp}/{ft}</span>
-              )}
-              <span className="text-[0.5rem] text-[var(--txt-muted)]" title={`Align: ${alignPct}%`}>A:{alignPct}%</span>
-              <div className="w-10 h-1 rounded-full bg-[var(--border)] overflow-hidden">
-                <div className="h-full rounded-full" style={{
-                  width: `${scorePct}%`,
-                  backgroundColor: scorePct >= 60 ? 'var(--profit)' : scorePct >= 35 ? 'var(--info)' : 'var(--txt-muted)',
-                }} />
+                <span className="text-[0.55rem] text-[var(--txt-muted)]">{regimeRu(s.regime)}</span>
+                <div className="flex-1" />
+                <span className="text-[0.55rem] text-[var(--txt-muted)]">Совп. <b className="text-[var(--txt)] mono">{alignPct}%</b></span>
+                <span className="text-[0.55rem] text-[var(--txt-muted)]">Готов. <b className="text-[var(--txt)] mono">{scorePct}%</b></span>
+                <span className="text-[0.5rem] text-[var(--txt-muted)]">{fp}/{ft}</span>
               </div>
-              <span className="mono text-[0.6rem] font-bold text-[var(--txt)] w-7 text-right">{scorePct}%</span>
+              {blockRu ? (
+                <div className="text-[0.55rem] text-[var(--warn)] leading-snug">Почему не входим: {blockRu}</div>
+              ) : (
+                <div className="text-[0.55rem] text-[var(--profit)] leading-snug">Фильтры ок — ждём подтверждение ИИ</div>
+              )}
             </div>
           )
         })}

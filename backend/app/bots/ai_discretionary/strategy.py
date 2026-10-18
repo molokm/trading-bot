@@ -5438,7 +5438,38 @@ class AIStrategy:
             })
         return board
 
+    BLOCK_REASON_RU = {
+        "block_open": "Слабое совпадение / боковик — вход закрыт",
+        "short_in_bull": "Шорт против бычьего режима",
+        "long_in_bear": "Лонг против медвежьего режима",
+        "short_vs_btc_bull": "BTC в бычьем режиме — шорт альта отложен",
+        "long_vs_btc_bear": "BTC в медвежьем режиме — лонг альта отложен",
+        "short_vs_btc_roc_up": "BTC растёт (ROC↑) — шорт альта отменён",
+        "long_vs_btc_roc_down": "BTC падает (ROC↓) — лонг альта отменён",
+        "funding_toxic_long": "Funding слишком высокий для лонга",
+        "funding_toxic_short": "Funding слишком низкий для шорта",
+        "btc_impulse_up": "Импульс BTC вверх — шорт альта нельзя",
+        "btc_impulse_down": "Импульс BTC вниз — лонг альта нельзя",
+        "weak_adx": "Слабый тренд (ADX низкий)",
+        "flat_roc": "Слабый импульс цены (ROC почти 0)",
+        "ema_not_bullish": "Цена/EMA не подтверждают лонг",
+        "ema_not_bearish": "Цена/EMA не подтверждают шорт",
+        "below_ema200": "Цена ниже EMA200 — лонг рискован",
+        "above_ema200": "Цена выше EMA200 — шорт рискован",
+        "bounce_above_ema21": "Отбой выше EMA21 — шорт против импульса",
+        "fade_below_ema21": "Откат ниже EMA21 — лонг против импульса",
+        "macd_hist_against": "MACD против направления входа",
+        "sol_quality": "SOL: нужен более сильный сетап (ADX/align)",
+    }
+
+    @classmethod
+    def _block_reason_ru(cls, code: str | None) -> str | None:
+        if not code:
+            return None
+        return cls.BLOCK_REASON_RU.get(str(code), str(code).replace("_", " "))
+
     def _top_signals(self, n: int = 3) -> list:
+
         """Top-N coins ranked by *entry readiness* — realistic probability of
         actually passing all trade-entry filters.
 
@@ -5575,6 +5606,14 @@ class AIStrategy:
                 if side == "short" and close > ema200 + tol:
                     blockers.append("above_ema200")
 
+            # 11. v1.25 impulse / continuation (same as live entry gate)
+            try:
+                mom = self._momentum_against(side, ind)
+                if mom:
+                    blockers.append(str(mom))
+            except Exception:
+                pass
+
             # ── composite score ──
             hard_block = bool(c.get("block_open")) or len(blockers) >= 4
             n_filters = 10  # total veto checks
@@ -5586,6 +5625,7 @@ class AIStrategy:
             if score < 0.03:
                 continue
 
+            _br = blockers[0] if blockers else None
             scored.append({
                 "coin": coin,
                 "side": side,
@@ -5598,7 +5638,10 @@ class AIStrategy:
                 "change_pct": round(float(roc) * 100, 2),
                 "filters_passed": n_filters - len(blockers),
                 "filters_total": n_filters,
-                "blocked_reason": blockers[0] if blockers else None,
+                "blocked_reason": _br,
+                "blocked_reason_ru": self._block_reason_ru(_br),
+                "blockers": list(blockers)[:5],
+                "blockers_ru": [self._block_reason_ru(b) for b in blockers[:5]],
             })
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:n]
