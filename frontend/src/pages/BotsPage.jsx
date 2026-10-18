@@ -179,13 +179,13 @@ function CompactSignals({ signals, t }) {
     <div className="space-y-1.5">
       <div className="flex items-center gap-1.5 text-[0.62rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
         <Target size={10} />
-        <span>{t('bots.top_signals') || 'Кандидаты на вход'}</span>
+        <span>{t('bots.top_signals') || 'Лидер на вход'}</span>
       </div>
       <p className="text-[0.55rem] text-[var(--txt-muted)] leading-snug m-0">
-        Совпадение — тренд и индикаторы. Готовность — шанс пройти фильтры сейчас.
+        Ближе всех к сделке: совпадение (тренд) и готовность (фильтры).
       </p>
       <div className="grid grid-cols-1 gap-1.5">
-        {signals.map((s, i) => {
+        {(signals || []).slice(0, 1).map((s, i) => {
           const isLong = s.side === 'long'
           const scorePct = Math.round((s.score || 0) * 100)
           const alignPct = Math.round((s.align_score || 0) * 100)
@@ -750,7 +750,7 @@ const aiRunning = !!aiStatus?.running
           apiAlive={apiAlive}
           nextTickAt={aiStatus?.health?.next_tick_at}
           pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
-          topSignals={aiStatus?.top_signals}
+          topSignals={(aiStatus?.top_signals || []).slice(0, 1)}
           onToggle={aiToggle}
           isGuest={isGuest}
           loading={aiLoading}

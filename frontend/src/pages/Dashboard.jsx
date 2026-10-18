@@ -262,18 +262,15 @@ function DashBotPanel({
           </div>
         )}
         {running && topSignals && topSignals.length > 0 && (
-          <div className="space-y-1.5 pt-1">
+          <div className="space-y-1 pt-1">
             <div className="flex items-center gap-1.5 text-[0.6rem] font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
               <Target size={9} />
-              <span>Кандидаты на вход</span>
+              <span>Лидер на вход</span>
             </div>
-            <p className="text-[0.55rem] text-[var(--txt-muted)] leading-snug m-0">
-              <b className="text-[var(--txt)]">Совпадение</b> — насколько тренд и индикаторы смотрят в одну сторону.
-              {' '}<b className="text-[var(--txt)]">Готовность</b> — шанс пройти все фильтры прямо сейчас (ниже = вход ещё нельзя).
+            <p className="text-[0.5rem] text-[var(--txt-muted)] leading-snug m-0">
+              Ближе всех к сделке: <b className="text-[var(--txt)]">совпадение</b> (тренд) и <b className="text-[var(--txt)]">готовность</b> (фильтры).
             </p>
-            {topSignals.map((s, i) => (
-              <SignalRow key={(s.coin || '') + i} s={s} index={i} />
-            ))}
+            <SignalRow s={topSignals[0]} index={0} />
           </div>
         )}
         {(pulse) && (
@@ -1649,7 +1646,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             t={t}
             nextTickAt={aiStatus?.health?.next_tick_at}
             pollIntervalSec={aiStatus?.health?.poll_interval_sec || aiStatus?.config?.poll_interval_sec || 300}
-            topSignals={aiStatus?.top_signals}
+            topSignals={(aiStatus?.top_signals || []).slice(0, 1)}
             startLabel={`${t('dash.start')} AI`}
             onStart={async () => {
               try {
