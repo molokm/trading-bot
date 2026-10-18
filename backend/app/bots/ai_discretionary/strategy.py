@@ -212,7 +212,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.25.2-exit-mark"
+STRATEGY_VERSION = "v1.26.0-integrity"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
@@ -493,6 +493,7 @@ class AIStrategy:
         self._llm_rate_limit_until = 0.0
         self._last_provider_used = None
         self._latest_indicators: dict = {}
+        self._indicators_stale_flag = False
         self._last_decision: dict = {}
         # v1.1 adaptive layer
         self._adapt = {
@@ -1313,6 +1314,28 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI] candles {coin}: {e}", flush=True)
         self._latest_indicators = out
+        # Attach live marks + staleness (exits must not rely on lagging candles alone)
+        try:
+            self._indicators_stale_flag = self._indicators_stale(2.5)
+            if getattr(self, "_indicators_stale_flag", False):
+                print(
+                    "[AI] indicators STALE (closed_bar older than ~2.5 bars) — exits use ticker mark",
+                    flush=True,
+                )
+            for coin in list(out.keys()):
+                last = await self._ticker_last(client, f"{coin}-USDT-SWAP")
+                if last > 0:
+                    out[coin]["mark"] = last
+                    try:
+                        c = float(out[coin].get("close") or 0)
+                        if c > 0 and abs(last - c) / c > 0.005:
+                            out[coin]["close_candle"] = c
+                            out[coin]["price_lag_pct"] = round((last - c) / c * 100, 3)
+                    except Exception:
+                        pass
+            self._latest_indicators = out
+        except Exception as e:
+            print(f"[AI] mark attach: {e}", flush=True)
         return out
 
 
@@ -3827,12 +3850,100 @@ class AIStrategy:
             return (px - pos.entry_price) / pos.entry_price * 100.0
         return (pos.entry_price - px) / pos.entry_price * 100.0
 
+    def _bar_period_sec(self) -> int:
+        b = str(getattr(self.config, "bar", "1H") or "1H").strip().upper()
+        mult = 1
+        if b.endswith("M"):
+            try:
+                return max(60, int(b[:-1] or 1) * 60)
+            except ValueError:
+                return 3600
+        if b.endswith("H"):
+            try:
+                return max(3600, int(b[:-1] or 1) * 3600)
+            except ValueError:
+                return 3600
+        if b.endswith("D"):
+            return 86400
+        return 3600
+
+    def _cfg_f(self, name: str, default: float) -> float:
+        """Read float from config; fallback matches AIConfig defaults (not stale code defaults)."""
+        try:
+            v = getattr(self.config, name, default)
+            return float(v if v is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _cfg_b(self, name: str, default: bool) -> bool:
+        try:
+            return bool(getattr(self.config, name, default))
+        except Exception:
+            return bool(default)
+
+    async def _ticker_last(self, client, inst_id: str) -> float:
+        """Best-effort last trade price from OKX ticker (demo or live client)."""
+        if not client or not inst_id:
+            return 0.0
+        try:
+            tk = await client.get_ticker(inst_id)
+            rows = (tk or {}).get("data") or []
+            if rows:
+                return float(rows[0].get("last") or 0) or 0.0
+        except Exception as e:
+            print(f"[AI] ticker {inst_id}: {type(e).__name__}: {e}", flush=True)
+        return 0.0
+
+    async def _price_for_exit(self, client, coin: str, pos=None) -> float:
+        """Single source of truth for SL/TP/giveback/time-stop price.
+
+        Prefer ticker mark over 1H candle close so exits track the real market
+        even when candle feed lags (seen on demo).
+        """
+        inst = getattr(pos, "inst_id", None) if pos is not None else None
+        if not inst:
+            inst = f"{coin}-USDT-SWAP"
+        last = await self._ticker_last(client, inst)
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        candle = float(ind.get("close") or ind.get("mark") or 0)
+        if last > 0:
+            if candle > 0 and abs(last - candle) / candle > 0.003:
+                print(
+                    f"[AI] exit-price {coin}: candle={candle:.4f} ticker={last:.4f}",
+                    flush=True,
+                )
+            try:
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["mark"] = last
+                    self._latest_indicators[coin]["mark_ts"] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
+            return last
+        return candle
+
+    def _indicators_stale(self, max_bars: float = 2.5) -> bool:
+        """True if any watched coin has closed_bar older than max_bars periods."""
+        inds = self._latest_indicators or {}
+        if not inds:
+            return True
+        bar_ms = self._bar_period_sec() * 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        limit = int(bar_ms * max_bars)
+        for coin, ind in inds.items():
+            try:
+                ts = int(ind.get("closed_bar_ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if ts <= 0 or (now_ms - ts) > limit:
+                return True
+        return False
+
     def _indicator_exit_reason(self, pos, ind: dict, held_min: float) -> str | None:
         """Exit on regime flip — lock small profit instead of giving it back to SL."""
         cfg = self.config
         if not getattr(cfg, "indicator_exit", True):
             return None
-        if held_min < float(getattr(cfg, "min_hold_minutes", 45) or 0):
+        if held_min < float(getattr(cfg, "min_hold_minutes", 20) or 0):
             return None
         px = float(ind.get("close") or 0)
         ema_f = float(ind.get("ema_fast") or 0)
@@ -3964,34 +4075,13 @@ class AIStrategy:
             except Exception:
                 held_h = 0.0
             ind = self._latest_indicators.get(coin) or {}
-            px = float(ind.get("close") or 0)
-            # Always prefer live mark for exit math — 1H candle close can lag
-            # (we saw demo candles stuck while OKX ticker already moved ~1.5%).
-            try:
-                tk = await client.get_ticker(pos.inst_id)
-                rows = (tk or {}).get("data") or []
-                if rows:
-                    last = float(rows[0].get("last") or 0)
-                    if last > 0:
-                        if px > 0 and abs(last - px) / px > 0.003:
-                            print(
-                                f"[AI] manage mark refresh {coin}: candle={px:.4f} → ticker={last:.4f}",
-                                flush=True,
-                            )
-                        px = last
-                        try:
-                            if coin in (self._latest_indicators or {}):
-                                self._latest_indicators[coin]["mark"] = last
-                        except Exception:
-                            pass
-            except Exception as e:
-                print(f"[AI] manage ticker {coin}: {e}", flush=True)
+            px = await self._price_for_exit(client, coin, pos)
             if px <= 0:
                 continue
             # Phase4 time-stop: no progress after N hours → exit (don't bleed to SL)
             try:
-                stale_h = float(getattr(self.config, "time_stop_stale_hours", 8) or 0)
-                min_prog = float(getattr(self.config, "time_stop_min_progress_pct", 0.15) or 0)
+                stale_h = self._cfg_f("time_stop_stale_hours", 6.0)
+                min_prog = self._cfg_f("time_stop_min_progress_pct", 0.20)
                 if stale_h > 0 and held_h >= stale_h:
                     upl0 = self._unrealized_pct(pos, px)
                     if upl0 < min_prog:
@@ -3999,7 +4089,7 @@ class AIStrategy:
                         al = float(ind.get("align_long") or 0)
                         ash = float(ind.get("align_short") or 0)
                         align_side = ash if pos.side == "short" else al
-                        hold_al = float(getattr(self.config, "time_stop_hold_align", 0.70) or 0)
+                        hold_al = self._cfg_f("time_stop_hold_align", 0.85)
                         if hold_al > 0 and align_side >= hold_al:
                             print(
                                 f"[AI] time_stop HOLD {coin} {pos.side}: held={held_h:.1f}h "
@@ -4035,8 +4125,8 @@ class AIStrategy:
             try:
                 if bool(getattr(self.config, "giveback_enable", True)):
                     peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
-                    min_peak = float(getattr(self.config, "giveback_min_peak_pct", 0.80) or 0.80)
-                    retain = float(getattr(self.config, "giveback_retain_frac", 0.35) or 0.35)
+                    min_peak = self._cfg_f("giveback_min_peak_pct", 0.65)
+                    retain = self._cfg_f("giveback_retain_frac", 0.50)
                     if peak_u >= min_peak and upl <= peak_u * retain:
                         print(
                             f"[AI] giveback exit {coin} {pos.side}: peak={peak_u:+.2f}% "
@@ -6020,6 +6110,7 @@ class AIStrategy:
                 "running_flag": bool(self._running),
                 "thread_alive": self._thread_alive(),
                 "stale": bool(self._running) and not self.is_loop_healthy(),
+                "indicators_stale": bool(getattr(self, "_indicators_stale_flag", False)),
                 "last_activity": self._last_activity,
                 "next_tick_at": self._next_tick_at,
                 "poll_interval_sec": self.config.poll_interval_sec,
