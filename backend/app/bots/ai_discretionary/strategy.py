@@ -2460,8 +2460,12 @@ class AIStrategy:
                 if self._live_client():
                     ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
                     _m = "mirror_ok" if ok else "mirror_fail"
-                    self._exec_log.append(_exec_evt(_m, coin, side, reason=reason))
-                    print(f"[AI-LIVE] mirror open result={ok} {side} {coin}", flush=True)
+                    _fail = str(getattr(self, "_last_mirror_fail", "") or "")
+                    self._exec_log.append(_exec_evt(
+                        _m, coin, side,
+                        reason=(_fail or reason)[:200],
+                    ))
+                    print(f"[AI-LIVE] mirror open result={ok} {side} {coin} fail={_fail or '-'}", flush=True)
                 else:
                     _m = "live_not_ready"
                     self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
@@ -2886,9 +2890,13 @@ class AIStrategy:
                          take_pct: float, reason: str) -> bool:
         """Mirror a primary (demo) open onto the connected LIVE account.
         Called at the end of `_open` when the primary fill succeeded."""
-        if not await self._mirror_enabled():
-            print("[AI-LIVE] open_skip: mirror disabled by user", flush=True)
+        self._last_mirror_fail = ""
+        def _fail(msg: str) -> bool:
+            self._last_mirror_fail = str(msg)[:200]
+            print(f"[AI-LIVE] open_skip: {msg}", flush=True)
             return False
+        if not await self._mirror_enabled():
+            return _fail("mirror disabled by user")
         lc = self._live_client()
         if not lc:
             try:
@@ -2899,13 +2907,11 @@ class AIStrategy:
             except Exception:
                 pass
         if not lc:
-            print("[AI-LIVE] open_skip: no live client (mirror offline)", flush=True)
-            return False
+            return _fail("no live client (mirror offline)")
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
-            print("[AI-LIVE] open_skip: no market price", flush=True)
-            return False
+            return _fail("no market price")
         live_eq = await self._ensure_live_equity()
         alloc = float(getattr(self, "_live_capital", 0) or 0)
         if alloc <= 0 and self.db:
@@ -2928,8 +2934,7 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI-LIVE] balance retry: {e}", flush=True)
         if size_eq <= 0:
-            print("[AI-LIVE] open_skip: no live equity/capital", flush=True)
-            return False
+            return _fail("no live equity/capital")
         if live_eq > 0 and size_eq > live_eq:
             size_eq = live_eq
         # NOTE: mirror uses equity-based sizing, NOT avail_usdt.
@@ -2939,8 +2944,7 @@ class AIStrategy:
         print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
-            print(f"[AI-LIVE] open_skip {coin}: size=0 (equity=${live_eq:.2f})", flush=True)
-            return False
+            return _fail(f"{coin}: size=0 (equity=${live_eq:.2f})")
         inst = f"{coin}-USDT-SWAP"
         order_side = "buy" if side == "long" else "sell"
         live_bid = self._live_bot_id()
@@ -2966,8 +2970,7 @@ class AIStrategy:
             cl_ord_id=cl_live, coin=coin, is_close=False, reason=reason,
         )
         if resp.get("error"):
-            print(f"[AI-LIVE] open blocked: {resp.get('message')}", flush=True)
-            return False
+            return _fail(f"order blocked: {resp.get('message')}")
         fills = resp.get("data") or []
         fill_px, fee, _ = extract_fill_avg(fills, entry)
         if (not fill_px or fill_px <= 0) and fills:
@@ -3014,13 +3017,15 @@ class AIStrategy:
         )
         ok_claim = await claim_open(self.db, live_bid, inst, side, sz, fill_px)
         if not ok_claim:
-            print(f"[AI-LIVE] CRITICAL: claim failed — flattening {coin}", flush=True)
+            # Exchange already filled — do NOT flatten. Snapshot best-effort and keep
+            # the live position so DEMO/LIVE stay paired (claim is bookkeeping only).
+            print(f"[AI-LIVE] claim failed after LIVE fill {coin} — keep position, snapshot only", flush=True)
             try:
-                from app.services.position_claim import flatten_position
-                await flatten_position(lc, inst, side, sz)
+                from app.services.position_claim import upsert_snapshot_position
+                await upsert_snapshot_position(self.db, live_bid, inst, side, sz, fill_px)
             except Exception as e:
-                print(f"[AI-LIVE] flatten on claim-fail: {e}", flush=True)
-            return False
+                print(f"[AI-LIVE] snapshot on claim-fail: {e}", flush=True)
+            self._last_mirror_fail = f"claim_failed_but_kept:{coin}"
         self._live_positions[coin] = pos
         self._live_equity -= fee_cost(fee)
         self._live_equity_ts = 0.0
@@ -3561,8 +3566,20 @@ class AIStrategy:
             except Exception:
                 pass
         if watermark == 0:
-            print("[AI-LIVE] clone_missing: no watermark (mirror never explicitly connected) — SKIP all", flush=True)
-            return
+            # After redeploy settings may lose connected_at. Fall back to bot start
+            # so currently open DEMO positions can still gap-fill (not ancient ones).
+            try:
+                st = getattr(self, "_started_at", None)
+                if st:
+                    watermark = int(datetime.fromisoformat(str(st).replace("Z", "+00:00")).timestamp())
+                    print(f"[AI-LIVE] clone_missing: watermark fallback to started_at={watermark}", flush=True)
+                else:
+                    import time as _t
+                    watermark = int(_t.time()) - 3600
+                    print(f"[AI-LIVE] clone_missing: watermark fallback now-1h={watermark}", flush=True)
+            except Exception as _wfe:
+                print(f"[AI-LIVE] clone_missing: watermark fallback failed {_wfe} — SKIP all", flush=True)
+                return
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
