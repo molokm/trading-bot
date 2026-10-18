@@ -838,11 +838,97 @@ async def startup():
             except Exception as e:
                 print(f'[LIVE] heal loop: {e}', flush=True)
 
+    async def _ai_watchdog_loop():
+        """Detect frozen AI tick loop (HTTP up, worker dead/stale) and recover.
+
+        Root cause of multi-hour "no trades + identical indicators":
+        worker thread dies or hangs inside _tick while FastAPI keeps serving
+        a stale get_status snapshot with running=true.
+        """
+        await asyncio.sleep(90)  # let first ticks settle
+        _restarts = 0
+        while True:
+            try:
+                await asyncio.sleep(60)
+                global ai_bot
+                # Respect explicit user stop
+                try:
+                    if db is not None:
+                        _us = await db.get_setting("ai_user_stopped")
+                        if str(_us or "").strip().lower() in ("1", "true", "yes", "on"):
+                            _force = os.getenv(
+                                "AI_FORCE_AUTOSTART", "1" if AI_ONLY_MODE else "0"
+                            ).strip().lower() not in ("0", "false", "no", "off")
+                            if not _force:
+                                continue
+                except Exception:
+                    pass
+                if not ai_bot:
+                    # Expected to be started by autostart; leave to retry task
+                    continue
+                healthy = True
+                try:
+                    healthy = bool(ai_bot.is_loop_healthy())
+                except Exception:
+                    healthy = bool(getattr(ai_bot, "_running", False)) and (
+                        getattr(ai_bot, "_thread", None) is not None
+                        and getattr(ai_bot._thread, "is_alive", lambda: False)()
+                    )
+                if healthy:
+                    continue
+                _restarts += 1
+                la = getattr(ai_bot, "_last_activity", None)
+                tc = getattr(ai_bot, "_tick_count", None)
+                print(
+                    f"[AI-WATCHDOG] unhealthy loop detected "
+                    f"(restart=#{_restarts} last_activity={la} ticks={tc}) — force_restart",
+                    flush=True,
+                )
+                try:
+                    ai_bot.force_restart(reason=f"watchdog#{_restarts}")
+                except Exception as e:
+                    print(f"[AI-WATCHDOG] force_restart failed: {e}", flush=True)
+                    # Fallback: rebuild instance with same config
+                    try:
+                        cfg = getattr(ai_bot, "config", None)
+                        if cfg is not None:
+                            ai_bot.stop()
+                            ai_bot = AIStrategy(
+                                config=cfg,
+                                client_manager=client_manager,
+                                db=db,
+                                notifier=telegram,
+                                live_client_manager=live_manager,
+                            )
+                            _wire_ai_live_cb(ai_bot)
+                            ai_bot.start()
+                            print("[AI-WATCHDOG] rebuilt AIStrategy instance", flush=True)
+                    except Exception as e2:
+                        print(f"[AI-WATCHDOG] rebuild failed: {e2}", flush=True)
+                try:
+                    if db is not None:
+                        await db.set_setting("ai_bot_running", "1")
+                        await db.set_setting(
+                            "ai_watchdog_last",
+                            f"restart#{_restarts} at {__import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat()}",
+                        )
+                except Exception:
+                    pass
+                # brief backoff after restart
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[AI-WATCHDOG] loop error: {e}", flush=True)
+                await asyncio.sleep(30)
+
     try:
         asyncio.create_task(_ai_autostart_retry())
         asyncio.create_task(_live_mirror_heal())
+        asyncio.create_task(_ai_watchdog_loop())
+        print("[startup] AI watchdog scheduled", flush=True)
     except Exception as e:
-        print(f"[startup] AI retry / live heal schedule: {e}", flush=True)
+        print(f"[startup] AI retry / live heal / watchdog schedule: {e}", flush=True)
 
     try:
         print('[startup] AI Scale-In (SCL) — RETIRED, skip auto-start', flush=True)

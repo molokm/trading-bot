@@ -212,7 +212,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.25-continuation"
+STRATEGY_VERSION = "v1.25.1-watchdog"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
@@ -875,6 +875,57 @@ class AIStrategy:
             print(f"[AI-LIVE] equity exception: {e}", flush=True)
         return self._live_equity
 
+    def _thread_alive(self) -> bool:
+        t = self._thread
+        try:
+            return bool(t is not None and t.is_alive())
+        except Exception:
+            return False
+
+    def is_loop_healthy(self, max_stale_sec: float | None = None) -> bool:
+        """True when the worker thread is alive and recently heartbeating."""
+        if not self._running:
+            return False
+        if not self._thread_alive():
+            return False
+        if max_stale_sec is None:
+            poll = float(getattr(self.config, "poll_interval_sec", 120) or 120)
+            # tick hard-timeout (120) + poll + LLM budget + margin
+            max_stale_sec = max(600.0, poll * 4.0 + 180.0)
+        la = self._last_activity
+        if not la:
+            # just started — allow grace period
+            try:
+                import time as _t
+                started = getattr(self, "_started_at", None)
+                if started:
+                    from datetime import datetime as _dt
+                    st = _dt.fromisoformat(str(started).replace("Z", "+00:00"))
+                    age = (datetime.now(timezone.utc) - st).total_seconds()
+                    return age < max_stale_sec
+            except Exception:
+                pass
+            return True
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.fromisoformat(str(la).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            return age <= float(max_stale_sec)
+        except Exception:
+            return True
+
+    def force_restart(self, reason: str = "watchdog") -> None:
+        """Stop the worker thread (if any) and start a fresh one. Keeps state."""
+        print(f"[AI {STRATEGY_VERSION}] force_restart ({reason})", flush=True)
+        try:
+            self.stop()
+        except Exception as e:
+            print(f"[AI] force_restart stop: {e}", flush=True)
+        try:
+            self.start()
+        except Exception as e:
+            print(f"[AI] force_restart start: {e}", flush=True)
+
     async def _run(self):
         try:
             await self._hydrate_from_db()
@@ -887,11 +938,19 @@ class AIStrategy:
                                          name=STRATEGY_NAME)
         except Exception as e:
             print(f"[AI] ensure_bot: {e}", flush=True)
+        # Hard ceiling so a hung OKX/LLM/await cannot freeze the loop forever.
+        _TICK_HARD_TIMEOUT = float(os.getenv("AI_TICK_TIMEOUT_SEC", "120") or 120)
         while self._running:
             try:
-                await self._tick()
+                await asyncio.wait_for(self._tick(), timeout=_TICK_HARD_TIMEOUT)
                 self._last_tick_error = None
                 self._consecutive_fails = 0
+            except asyncio.TimeoutError:
+                self._consecutive_fails += 1
+                self._tick_fail_count = int(getattr(self, "_tick_fail_count", 0) or 0) + 1
+                msg = f"tick_timeout>{_TICK_HARD_TIMEOUT:.0f}s"
+                self._last_tick_error = msg
+                print(f"[AI] {msg} — skipping to next cycle", flush=True)
             except Exception as e:
                 self._consecutive_fails += 1
                 print(f"[AI] tick error: {e}", flush=True)
@@ -929,9 +988,18 @@ class AIStrategy:
                     self._llm_rate_limited = True
                     self._llm_rate_limit_until = _rate_limit_until
                     _sleep = max(_sleep, min(900, int(_rate_limit_until - _t.time()) + 5))
+                    _next_ts = _t.time() + _sleep
+                    self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
             except Exception:
                 pass
-            await asyncio.sleep(_sleep)
+            # Chunked sleep keeps last_activity fresh so the watchdog does not
+            # false-positive during long LLM rate-limit cooldowns.
+            _remaining = float(_sleep)
+            while _remaining > 0 and self._running:
+                _chunk = min(30.0, _remaining)
+                await asyncio.sleep(_chunk)
+                _remaining -= _chunk
+                self._last_activity = datetime.now(timezone.utc).isoformat()
 
     # ── indicators ─────────────────────────────────────────────
     @staticmethod
@@ -5867,7 +5935,10 @@ class AIStrategy:
             "last_activity": self._last_activity,
             "started_at": self._started_at,
             "health": {
-                "alive": self._running and self._last_activity is not None,
+                "alive": self.is_loop_healthy(),
+                "running_flag": bool(self._running),
+                "thread_alive": self._thread_alive(),
+                "stale": bool(self._running) and not self.is_loop_healthy(),
                 "last_activity": self._last_activity,
                 "next_tick_at": self._next_tick_at,
                 "poll_interval_sec": self.config.poll_interval_sec,
