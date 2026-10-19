@@ -121,10 +121,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ instId, posSide, sz, mgnMode, account }),
     }),
+
+  closePositionMe: (instId, posSide, sz, mgnMode = 'cross') =>
+    request('/me/positions/close', {
+      method: 'POST',
+      body: JSON.stringify({ instId, posSide, sz, mgnMode }),
+    }),
+
   closeAllPositions: (account = 'demo') =>
     request('/positions/close-all', {
       method: 'POST',
       body: JSON.stringify({ account }),
+    }),
+
+  closeAllPositionsMe: () =>
+    request('/me/positions/close-all', {
+      method: 'POST',
+      body: JSON.stringify({}),
     }),
 
   // ── Market ──

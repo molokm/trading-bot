@@ -1137,13 +1137,23 @@ export default function Dashboard({ health, connected, isGuest }) {
       // p.side is the strategy's internal view ('long'/'short') and must NOT
       // be used — on net-mode accounts OKX rejects it with error 51011.
       const okxPosSide = ['net', 'long', 'short'].includes(String(p.posSide || '')) ? p.posSide : undefined
-      await api.closePosition(
-        p.instId,
-        okxPosSide,
-        p.pos || p.size,
-        p.mgnMode || 'cross',
-        mode,
-      )
+      // Use user endpoint for regular users, admin endpoint for owner (guest)
+      if (isGuest) {
+        await api.closePosition(
+          p.instId,
+          okxPosSide,
+          p.pos || p.size,
+          p.mgnMode || 'cross',
+          mode,
+        )
+      } else {
+        await api.closePositionMe(
+          p.instId,
+          okxPosSide,
+          p.pos || p.size,
+          p.mgnMode || 'cross',
+        )
+      }
       loadData()
     } catch (e) { alert((t('dash.error') || 'Ошибка: ') + (e.message || e)) }
     finally { setClosing(null) }
@@ -1157,7 +1167,10 @@ export default function Dashboard({ health, connected, isGuest }) {
     }
     setClosingAll(mode)
     try {
-      const r = await api.closeAllPositions(mode)
+      // Use user endpoint for regular users, admin endpoint for owner (guest)
+      const r = isGuest
+        ? await api.closeAllPositions(mode)
+        : await api.closeAllPositionsMe()
       const closed = (r.results || []).filter(x => x.ok).length
       const total = (r.results || []).length
       if (closed < total) {
