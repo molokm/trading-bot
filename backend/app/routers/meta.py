@@ -1,7 +1,7 @@
 """Meta routes for the AI-only product."""
 from fastapi import APIRouter
 
-from app.services.route_policy import policy, PUBLIC
+from app.services.route_policy import PUBLIC, policy
 
 router = APIRouter(tags=["meta"])
 

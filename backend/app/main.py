@@ -1,14 +1,17 @@
 # Stage-5: retired multi-bot route handlers removed (see legacy middleware).
 # Regenerated structure via AST unparse — logic preserved for active routes.
 import asyncio
+import faulthandler
 import json
 import logging
 import os
+import sys
+import threading
 import time as _time
-import faulthandler
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
 _CRASH_LOG = os.path.join(os.environ.get('DATA_DIR', '/tmp'), 'crash_traceback.log')
 try:
     with open(_CRASH_LOG, 'w') as _cf:
@@ -32,40 +35,100 @@ def _excepthook(etype, value, tb):
 
 def _thread_excepthook(args):
     _write_crash('Thread %r: %s' % (args.thread and args.thread.name, ''.join(_tb.format_exception(args.exc_type, args.exc_value, args.exc_traceback) if (_tb := __import__('traceback')) else '?')))
-import sys
+
 sys.excepthook = _excepthook
 try:
     threading.excepthook = _thread_excepthook
 except Exception:
     pass
-import threading
 logger = logging.getLogger('app')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 from dotenv import load_dotenv
-from fastapi import Body, Request, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, Response
-from app.services.okx_client import OKXClientManager, OKXClient
+from fastapi.staticfiles import StaticFiles
+
+from app.bots.ai_discretionary.strategy import AI_BOT_ID, AIConfig, AIStrategy
 from app.database import db
-from app.services.auth import login, guest, validate, logout, is_admin, PASSWORD, grant_admin, grant_user, ensure_auth_secrets, get_user_id, encrypt_str, decrypt_str, check_rate_limit, record_attempt, guest_rate_limited, record_guest, set_blacklist
-from app.services.strategy_manager import StrategyManager, set_hydrate_deps
-from app.services.legacy_stubs import RotationStrategy, RotationConfig, ROT_BOT_ID, RotPosition, COINS, ImpulseStrategy, ImpulseConfig, IMP_BOT_ID, ValidationStrategy, make_validation_config, VAL_BOT_ID, AIScaleStrategy, AIScaleConfig, AI_SCALE_BOT_ID, get_mirror
-from app.bots.ai_discretionary.strategy import AIStrategy, AIConfig, AIPosition, AI_BOT_ID
+from app.services import pnl_engine
+from app.services.analysis_logger import DEFAULT_PATH
+from app.services.auth import (
+    PASSWORD,
+    check_rate_limit,
+    decrypt_str,
+    encrypt_str,
+    ensure_auth_secrets,
+    get_user_id,
+    grant_admin,
+    grant_user,
+    guest,
+    guest_rate_limited,
+    is_admin,
+    login,
+    logout,
+    record_attempt,
+    record_guest,
+    set_blacklist,
+    validate,
+)
+from app.services.equity_tracker import EquityTracker
+from app.services.legacy_stubs import (
+    AI_SCALE_BOT_ID,
+    IMP_BOT_ID,
+    ROT_BOT_ID,
+    VAL_BOT_ID,
+    ImpulseConfig,
+    ImpulseStrategy,
+    OKXCopyAPI,
+    RotationConfig,
+    RotationStrategy,
+    ValidationStrategy,
+    make_validation_config,
+)
+
+# Retired strategy constants (stubs for backwards compatibility with old code paths)
+IMPULSE_NAME = "impulse_1d"
+IMPULSE_VERSION = "v0"
+SCALP_BOT_ID = "scalp"
+VWAP_BOT_ID = "vwap"
+
+# Retired strategy status functions (stubs)
+async def momentum_status():
+    return {"running": False, "strategy": "momentum_rotation", "equity": 0, "open_positions": {}, "total_trades": 0, "total_pnl": 0}
+
+async def impulse_status():
+    return {"running": False, "strategy": IMPULSE_NAME, "version": IMPULSE_VERSION, "equity": 0, "open_positions": [], "closed_trades": 0}
+from app.services.okx_client import OKXClient, OKXClientManager
+from app.services.pnl_engine import PNL_EPOCH_ISO
+from app.services.position_claim import (
+    claim_open,
+    orphan_close_enabled,
+    release_open,
+    sweep_exchange_orphans,
+)
+from app.services.risk_guard import get_status as risk_get_status
+from app.services.risk_guard import set_kill_switch
 from app.services.route_policy import (
-    policy, PUBLIC, AUTH, AUTH_NO_GUEST, ADMIN,
-    RoutePolicyTable, role_allows, verify_route_policies,
+    ADMIN,
+    AUTH,
+    AUTH_NO_GUEST,
+    PUBLIC,
+    RoutePolicyTable,
+    policy,
+    role_allows,
+    verify_route_policies,
+)
+from app.services.strategy_manager import StrategyManager, set_hydrate_deps
+from app.services.telegram_bot import (
+    PRO_PLAN_DAYS,
+    PRO_PRICE_STARS,
+    TelegramBotPoller,
+    _is_active,
 )
 from app.services.telegram_notifier import TelegramNotifier
-from app.services import pnl_engine
-from app.services.pnl_engine import PNL_EPOCH_ISO
-from app.services.telegram_bot import TelegramBotPoller, _is_active, PRO_PRICE_STARS, PRO_PLAN_DAYS
-from app.services.equity_tracker import EquityTracker
-from app.services.risk_guard import get_status as risk_get_status, set_kill_switch
-from app.services.analysis_logger import DEFAULT_PATH
 
-from app.services.position_claim import sweep_exchange_orphans, orphan_close_enabled, claim_open, release_open
 MOM_BOT_ID = 'momentum_strategy'
 load_dotenv()
 _docs_enabled = os.getenv('ENABLE_DOCS', 'false').lower() in ('1', 'true')
@@ -106,6 +169,45 @@ if STATIC_DIR.exists():
 client_manager = OKXClientManager.get_instance()
 showcase_manager = OKXClientManager.new_instance()
 live_manager = OKXClientManager.new_instance()
+
+async def _verify_key_perms(client, label: str = "") -> dict:
+    """Check API key rights via OKX and cache posMode on the client instance.
+
+    Logs CRITICAL if the key has withdrawal rights (the app itself cannot
+    revoke a key — that must be done in the OKX web console).
+    """
+    if not client or not client.has_credentials():
+        return {"ok": False, "error": "no creds"}
+    try:
+        perms = await client.check_key_permissions()
+    except Exception as e:
+        print(f'[key-perms] {label}: check failed: {e}', flush=True)
+        return {"ok": False, "error": str(e)}
+    if not perms.get("ok"):
+        print(f'[key-perms] {label}: API returned error: {perms.get("error")}', flush=True)
+        # still try to cache posMode below — account config is a separate endpoint
+    else:
+        if perms.get("has_withdraw"):
+            print(f'[key-perms] {label}: CRITICAL — key has WITHDRAWAL rights! Fix in OKX console.', flush=True)
+        if not perms.get("has_trade"):
+            print(f'[key-perms] {label}: WARNING — key lacks TRADE right', flush=True)
+        if not perms.get("has_read"):
+            print(f'[key-perms] {label}: WARNING — key lacks READ right', flush=True)
+        print(f'[key-perms] {label}: OK label={perms.get("label")} trade={perms.get("has_trade")} read={perms.get("has_read")}', flush=True)
+    # Fetch account config and cache posMode on the client itself
+    try:
+        cfg = await client.get_account_config()
+        if not cfg.get("error"):
+            print(f'[key-perms] {label}: account posMode={getattr(client, "pos_mode", "net")}', flush=True)
+    except Exception as e:
+        print(f'[key-perms] {label}: get_account_config failed: {e}', flush=True)
+    return perms
+
+def _client_pos_mode(client) -> str:
+    """Return cached posMode for client ('net' or 'hedge'). Defaults to 'net'."""
+    if client is None:
+        return "net"
+    return getattr(client, "pos_mode", "net") or "net"
 _env_key = os.getenv('OKX_API_KEY', '')
 _env_secret = os.getenv('OKX_SECRET_KEY', '')
 _env_pass = os.getenv('OKX_PASSPHRASE', '')
@@ -252,7 +354,6 @@ async def startup():
         try:
             marker = await db.get_setting('pnl_clean_slate_20260912')
             if not marker:
-                from datetime import datetime as _dt, timezone as _tz
                 epoch = PNL_EPOCH_ISO
                 bot_ids = [AI_BOT_ID, AI_SCALE_BOT_ID, 'ai_scale_strategy', 'ai_strategy']
                 try:
@@ -345,14 +446,17 @@ async def startup():
         if (_demo_key or _env_key) and (_demo_secret or _env_secret) and (_demo_pass or _env_pass):
             await showcase_manager.init_client(_demo_key or _env_key, _demo_secret or _env_secret, _demo_pass or _env_pass, True)
             print('[startup] showcase DEMO ready', flush=True)
+            await _verify_key_perms(showcase_manager.get_client(), "SHOWCASE")
         # Init main client_manager — respect restored live mode from DB
         if not _env_demo and _live_key and _live_secret and _live_pass:
             # DB restored LIVE mode — init with live keys
             await client_manager.init_client(_live_key, _live_secret, _live_pass, False)
             print('[startup] client_manager LIVE (restored from DB)', flush=True)
+            await _verify_key_perms(client_manager.get_client(), "LIVE")
         elif _env_key and _env_secret and _env_pass:
             await client_manager.init_client(_env_key, _env_secret, _env_pass, True)
             _env_demo = True
+            await _verify_key_perms(client_manager.get_client(), "DEMO")
         _lm_key = _live_key
         _lm_secret = _live_secret
         _lm_pass = _live_pass
@@ -389,7 +493,8 @@ async def startup():
         else:
             print('[startup] live mirror: no creds found — mirror disabled', flush=True)
         try:
-            get_mirror = lambda *a, **k: None
+            def get_mirror(*a, **k):
+                return None
             m = get_mirror(client_manager=client_manager, notifier=None, db=db)
             await m.hydrate_from_db()
             print(f'[startup] SM mirror targets={len(getattr(m, '_targets', {}) or {})}', flush=True)
@@ -416,7 +521,11 @@ async def startup():
             print(f'[startup] SM tracker hydrate: {e}', flush=True)
         try:
             import json as _json_bl
-            from app.services.auth import configure_blacklist_db, hydrate_blacklist_from_db, flush_blacklist_to_db
+
+            from app.services.auth import (
+                configure_blacklist_db,
+                hydrate_blacklist_from_db,
+            )
 
             async def _bl_load():
                 raw = await db.get_setting('auth_jwt_blacklist')
@@ -435,10 +544,9 @@ async def startup():
         except Exception as e:
             print(f'[startup] auth blacklist hydrate: {e}', flush=True)
         try:
-            from app.services.position_claim import restore_snapshots_to_claims
-            from app.services.legacy_stubs import ROT_BOT_ID
-            from app.services.legacy_stubs import IMP_BOT_ID
             from app.bots.ai_discretionary.strategy import AI_BOT_ID
+            from app.services.legacy_stubs import IMP_BOT_ID, ROT_BOT_ID
+            from app.services.position_claim import restore_snapshots_to_claims
             try:
                 from app.services.legacy_stubs import VAL_BOT_ID
             except Exception:
@@ -945,7 +1053,7 @@ async def startup():
                 else:
                     env_ex = os.getenv('AI_EXECUTE', '1').strip().lower()
                     _exec_s = env_ex not in ('0', 'false', 'no', 'off')
-                from app.services.legacy_stubs import AIScaleStrategy, AIScaleConfig
+                from app.services.legacy_stubs import AIScaleConfig, AIScaleStrategy
                 scfg = AIScaleConfig(capital=float(os.getenv('AI_SCALE_CAPITAL', '5000')), max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=1, risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec_s, scale_enabled=True, max_adds=2)
                 ai_scale_bot = AIScaleStrategy(config=scfg, client_manager=client_manager, db=db, notifier=telegram)
                 ai_scale_bot.start()
@@ -1580,12 +1688,63 @@ async def me_positions_close(request: Request, data: dict=None):
     inst_id = d.get('instId')
     if not inst_id:
         raise HTTPException(status_code=400, detail='instId required')
-    pos_side = d.get('posSide') or 'net'
     mgn_mode = d.get('mgnMode', 'cross')
+    # Resolve posSide: respect account mode (net vs hedge).
+    pos_side = d.get('posSide')
+    if not pos_side:
+        acct_mode = _client_pos_mode(client)
+        if acct_mode == 'hedge':
+            try:
+                positions_resp = await client.get_positions('SWAP')
+                if not positions_resp.get('error') and positions_resp.get('data'):
+                    for p in positions_resp['data']:
+                        if p.get('instId') == inst_id:
+                            pos_side = p.get('posSide', 'long')
+                            break
+            except Exception as e:
+                print(f'[me/positions/close] posSide auto-detect error: {e}', flush=True)
+            if not pos_side:
+                pos_side = 'long'
+        else:
+            pos_side = 'net'
     result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
     if result.get('error'):
         raise HTTPException(status_code=400, detail=result.get('message', ''))
     return {'message': 'Position closed', 'data': result.get('data')}
+
+
+@app.post('/api/me/positions/close-all')
+@policy(AUTH_NO_GUEST)
+async def me_positions_close_all(request: Request, data: dict=None):
+    """Close ALL open positions on the authenticated user's OKX account."""
+    role, user_id, _ = await _me_ctx(request)
+    if user_id is None:
+        return await close_all_positions(data or {})
+    client = await _user_okx_client(user_id)
+    if not client:
+        raise HTTPException(status_code=400, detail='Подключите ключи OKX в настройках')
+    acct_mode = _client_pos_mode(client)
+    try:
+        positions_resp = await client.get_positions('SWAP')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'positions fetch failed: {e}')
+    if positions_resp.get('error') or not positions_resp.get('data'):
+        return {'message': 'No positions or fetch error', 'closed': 0}
+    results = []
+    for p in positions_resp['data']:
+        inst_id = p.get('instId')
+        if not inst_id:
+            continue
+        sz = float(p.get('pos', 0) or p.get('sz', 0) or 0)
+        if sz == 0:
+            continue
+        pos_side = p.get('posSide') or ('net' if acct_mode == 'net' else 'long')
+        try:
+            r = await client.close_position(inst_id=inst_id, mgn_mode='cross', pos_side=pos_side)
+            results.append({'instId': inst_id, 'posSide': pos_side, 'ok': not r.get('error'), 'msg': r.get('message', '') if r.get('error') else ''})
+        except Exception as e:
+            results.append({'instId': inst_id, 'posSide': pos_side, 'ok': False, 'msg': str(e)})
+    return {'message': f'Closed {sum(1 for r in results if r["ok"])}/{len(results)}', 'results': results}
 
 def _user_strategy_statuses(ub):
     rot_status = ub.rotation.get_status() if ub.rotation else {'running': False, 'strategy': 'momentum_rotation', 'equity': 0, 'open_positions': {}, 'total_trades': 0, 'total_pnl': 0}
@@ -1938,7 +2097,9 @@ async def me_dashboard(request: Request):
                     live_realized = 0.0
                     live_today = 0.0
                     live_week = 0.0
-                    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                    from datetime import datetime as _dt
+                    from datetime import timedelta as _td
+                    from datetime import timezone as _tz
                     _msk = _tz(_td(hours=3))
                     _now = _dt.now(_msk)
                     _today_start = _now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -1996,7 +2157,7 @@ async def me_dashboard(request: Request):
                     if s.isdigit():
                         ts = int(s)
                     else:
-                        from datetime import datetime, timezone as _tz
+                        from datetime import datetime
                         ts = int(datetime.fromisoformat(s.replace('Z', '+00:00')).timestamp() * 1000)
                 if 0 < ts < 10_000_000_000:
                     ts *= 1000
@@ -2571,6 +2732,7 @@ async def ai_start(data: dict=None):
                 _lk, _ls, _lp = _live_key, _live_secret, _live_pass
                 if _lk and _ls and _lp:
                     await live_manager.init_client(_lk, _ls, _lp, False)
+                    await _verify_key_perms(live_manager.get_client(), "LIVE")
                     _lc = live_manager.get_client()
                     if _lc and (not getattr(_lc, 'demo', True)):
                         print('[AI/start] live mirror client restored from DB', flush=True)
@@ -2818,7 +2980,7 @@ async def live_status():
     _pnl_src = None
     # MSK day / week bounds for session + week realized
     try:
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
         _msk = timezone(timedelta(hours=3))
         _now_msk = datetime.now(_msk)
         _today_start = _now_msk.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -3138,6 +3300,7 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         live_manager = OKXClientManager.new_instance()
     try:
         await live_manager.init_client(key, secret, passphrase, False)
+        await _verify_key_perms(live_manager.get_client(), "LIVE")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'OKX init failed: {e}')
     lc = live_manager.get_client() if live_manager else None
@@ -3453,7 +3616,7 @@ async def ai_decide_once():
 def _ensure_sm_tracker(*, execute: bool | None=None, start: bool=False):
     """Create global Smart Money tracker on first use (browse/copy without manual Start)."""
     global sm_tracker
-    from app.services.legacy_stubs import SmartMoneyTracker, TrackerConfig, OKXCopyAPI
+    from app.services.legacy_stubs import OKXCopyAPI, SmartMoneyTracker, TrackerConfig
     if sm_tracker is None:
         okx = OKXCopyAPI(api_key=_env_key or os.getenv('OKX_API_KEY', ''), secret_key=_env_secret or os.getenv('OKX_SECRET_KEY', '') or os.getenv('OKX_SECRET', ''), passphrase=_env_pass or os.getenv('OKX_PASSPHRASE', ''), demo=_env_demo)
         cfg = TrackerConfig(sort_type='pnl_ratio', execute=bool(execute) if execute is not None else False)
@@ -3500,8 +3663,8 @@ async def positions_reclaim(data: dict=Body(default=None)):
     if not sym:
         raise HTTPException(status_code=400, detail='symbol required')
     inst = f'{sym}-USDT-SWAP'
-    from app.services.position_claim import claim_open, release_open, norm_side
-    side_n = norm_side(side) if 'norm_side' in dir() else side
+    from app.services.position_claim import claim_open, norm_side, release_open
+    norm_side(side) if 'norm_side' in dir() else side
     known = ['ai_strategy', 'ai_scale_strategy', 'impulse_strategy', 'validation_strategy', 'rotation_strategy', 'momentum_strategy', 'smart_money', 'vwap_rev_strategy']
     released = []
     for bid in known:
@@ -3536,8 +3699,9 @@ async def positions_reclaim(data: dict=Body(default=None)):
     injected = None
     try:
         if to_bot == 'ai_scale_strategy' and ai_scale_bot:
-            from app.bots.ai_discretionary.strategy import AIPosition
             from datetime import datetime, timezone
+
+            from app.bots.ai_discretionary.strategy import AIPosition
             stop_pct, take_pct = (0.03, 0.06)
             if side == 'long':
                 stop, take = (entry * (1 - stop_pct), entry * (1 + take_pct))
@@ -3548,8 +3712,9 @@ async def positions_reclaim(data: dict=Body(default=None)):
             ai_scale_bot._positions[sym] = AIPosition(coin=sym, inst_id=inst, side=side, size=sz, entry_price=entry, stop_price=stop, take_price=take, leverage=float(getattr(ai_scale_bot.config, 'max_leverage', 3) or 3), opened_at=datetime.now(timezone.utc).isoformat(), peak_price=entry, signal_id=0)
             injected = 'ai_scale'
         elif to_bot == 'ai_strategy' and ai_bot:
-            from app.bots.ai_discretionary.strategy import AIPosition
             from datetime import datetime, timezone
+
+            from app.bots.ai_discretionary.strategy import AIPosition
             stop_pct, take_pct = (0.03, 0.06)
             if side == 'long':
                 stop, take = (entry * (1 - stop_pct), entry * (1 + take_pct))
@@ -3768,6 +3933,7 @@ async def _ensure_live_mirror_client() -> bool:
         print('[LIVE] ensure: created new live_manager', flush=True)
     try:
         await live_manager.init_client(key, secret, passphrase, False)
+        await _verify_key_perms(live_manager.get_client(), "LIVE")
     except Exception as e:
         print(f'[LIVE] ensure init_client: {e}', flush=True)
         return False
@@ -3993,7 +4159,6 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
                     print(f'[mode] warm positions cache: {e}', flush=True)
                 try:
                     # Warm fills cache
-                    from app.services.okx_client import OKXClient
                     client = client_manager.get_client() if client_manager else None
                     if client:
                         try:
@@ -4004,7 +4169,6 @@ async def set_trading_mode(request: Request, data: dict=Body(default=None)):
                     print(f'[mode] warm fills cache: {e}', flush=True)
                 try:
                     # Warm portfolio cache (positions + balance)
-                    from app.services.okx_client import OKXClient
                     client = client_manager.get_client() if client_manager else None
                     if client:
                         try:
@@ -4450,7 +4614,10 @@ async def get_positions(request: Request, inst_type: str='SWAP'):
             try:
                 last_bot = await db.last_bot_for_instrument(inst)
                 last_name = _db_bot_name(last_bot) if last_bot else ''
-                from app.services.trade_attribution import is_scale_bot, is_discretionary_bot
+                from app.services.trade_attribution import (
+                    is_discretionary_bot,
+                    is_scale_bot,
+                )
                 allowed = last_bot in (AI_BOT_ID, AI_SCALE_BOT_ID, 'ai_strategy', 'ai_scale_strategy') or is_scale_bot(last_name or last_bot or '') or is_discretionary_bot(last_name or last_bot or '')
                 if last_bot and allowed and (sz > 0) and (entry > 0):
                     await claim_open(db, last_bot, inst, side_n, sz, entry)
@@ -4685,20 +4852,31 @@ async def close_position(data: dict):
     if not client:
         raise HTTPException(status_code=400, detail='API not configured')
     inst_id = data.get('instId')
-    pos_side = data.get('posSide') or 'net'
     mgn_mode = data.get('mgnMode', 'cross')
     if not inst_id:
         raise HTTPException(status_code=400, detail='instId required')
-    if pos_side == 'net' and 'posSide' not in data:
-        try:
-            positions_resp = await client.get_positions('SWAP')
-            if not positions_resp.get('error') and positions_resp.get('data'):
-                for p in positions_resp['data']:
-                    if p.get('instId') == inst_id:
-                        pos_side = p.get('posSide', 'net')
-                        break
-        except Exception as e:
-            print(f'[positions/close] posSide auto-detect error: {e}', flush=True)
+    # Resolve posSide: respect account mode (net vs hedge).
+    # In net mode OKX requires posSide='net'; in hedge mode 'long' or 'short'.
+    # If user passed a side, trust it (they know their account mode).
+    # If not passed, auto-detect from account config cache or exchange positions.
+    pos_side = data.get('posSide')
+    if not pos_side:
+        acct_mode = _client_pos_mode(client)
+        if acct_mode == 'hedge':
+            # Must fetch the actual position to know long/short
+            try:
+                positions_resp = await client.get_positions('SWAP')
+                if not positions_resp.get('error') and positions_resp.get('data'):
+                    for p in positions_resp['data']:
+                        if p.get('instId') == inst_id:
+                            pos_side = p.get('posSide', 'long')
+                            break
+            except Exception as e:
+                print(f'[positions/close] posSide auto-detect error: {e}', flush=True)
+            if not pos_side:
+                pos_side = 'long'  # fallback, OKX will reject with clear error
+        else:
+            pos_side = 'net'
     result = await client.close_position(inst_id=inst_id, mgn_mode=mgn_mode, pos_side=pos_side)
     if result.get('error'):
         raise HTTPException(status_code=400, detail=result.get('message', ''))
@@ -4727,6 +4905,78 @@ async def close_position(data: dict):
     except Exception as e:
         print(f'[positions/close] memory sync: {e}', flush=True)
     return {'message': 'Position closed', 'data': result.get('data'), 'account': account or 'demo'}
+
+
+@app.post('/api/positions/close-all')
+@policy(AUTH_NO_GUEST)
+async def close_all_positions(data: dict = None):
+    """Close ALL open positions on the given account (demo or live)."""
+    data = data or {}
+    account = str(data.get('account') or 'demo').lower()
+    client = None
+    if account == 'live':
+        if live_manager:
+            try:
+                _lc = live_manager.get_client()
+                if _lc and not getattr(_lc, 'demo', True) and getattr(_lc, 'has_credentials', lambda: False)():
+                    client = _lc
+            except Exception:
+                client = None
+        if not client:
+            raise HTTPException(status_code=400, detail='LIVE-подключение не активно')
+    else:
+        client = client_manager.get_client()
+    if not client:
+        raise HTTPException(status_code=400, detail='API not configured')
+    acct_mode = _client_pos_mode(client)
+    try:
+        positions_resp = await client.get_positions('SWAP')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f'positions fetch failed: {e}')
+    if positions_resp.get('error') or not positions_resp.get('data'):
+        return {'message': 'No positions or fetch error', 'account': account, 'closed': 0}
+    results = []
+    for p in positions_resp['data']:
+        inst_id = p.get('instId')
+        if not inst_id:
+            continue
+        sz = float(p.get('pos', 0) or p.get('sz', 0) or 0)
+        if sz == 0:
+            continue
+        pos_side = p.get('posSide') or ('net' if acct_mode == 'net' else 'long')
+        try:
+            r = await client.close_position(inst_id=inst_id, mgn_mode='cross', pos_side=pos_side)
+            results.append({'instId': inst_id, 'posSide': pos_side, 'ok': not r.get('error'), 'msg': r.get('message', '') if r.get('error') else ''})
+        except Exception as e:
+            results.append({'instId': inst_id, 'posSide': pos_side, 'ok': False, 'msg': str(e)})
+    # Sync bot memory
+    try:
+        coin_set = set()
+        for r in results:
+            if r.get('ok'):
+                coin = str(r.get('instId') or '').replace('-USDT-SWAP', '').replace('-USD-SWAP', '')
+                if coin:
+                    coin_set.add(coin)
+        bot = globals().get('ai_bot')
+        if bot is not None:
+            if account == 'live':
+                lp = getattr(bot, '_live_positions', None)
+                if isinstance(lp, dict):
+                    for coin in coin_set:
+                        lp.pop(coin, None)
+                    try:
+                        if hasattr(bot, '_persist_live'):
+                            bot._persist_live()
+                    except Exception:
+                        pass
+            else:
+                pos = getattr(bot, '_positions', None)
+                if isinstance(pos, dict):
+                    for coin in coin_set:
+                        pos.pop(coin, None)
+    except Exception as e:
+        print(f'[positions/close-all] memory sync: {e}', flush=True)
+    return {'message': f'Closed {sum(1 for r in results if r["ok"])}/{len(results)}', 'account': account, 'results': results}
 _ticker_cache: dict = {}
 _ticker_cache_ts: dict = {}
 _TICKER_TTL = 5
@@ -4982,8 +5232,9 @@ async def subs_activate(data: dict=None):
     days = int(d.get('days', PRO_PLAN_DAYS))
     if not user_id:
         raise HTTPException(status_code=400, detail='user_id required')
+    from datetime import datetime as _dt
     from datetime import timedelta as _td
-    from datetime import datetime as _dt, timezone as _tz
+    from datetime import timezone as _tz
     now = _dt.now(_tz.utc)
     try:
         cur = await db.get_subscription(user_id)
@@ -5543,7 +5794,8 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
     try:
         ts_list = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
         if ts_list:
-            from datetime import datetime as _dt, timezone as _tz
+            from datetime import datetime as _dt
+            from datetime import timezone as _tz
             a = _dt.fromtimestamp(ts_list[0] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
             z = _dt.fromtimestamp(ts_list[-1] / 1000.0, tz=_tz.utc).strftime('%Y-%m-%d')
             print(f'[bills] {mode} range {a} → {z} n={len(bills)}', flush=True)
@@ -5690,7 +5942,8 @@ async def pnl_rebuild_exchange():
     epoch_ms = 0
     if epoch:
         try:
-            from datetime import datetime as _dt, timezone as _tz
+            from datetime import datetime as _dt
+            from datetime import timezone as _tz
             epoch_ms = int(_dt.fromisoformat(epoch).replace(tzinfo=_tz.utc).timestamp() * 1000)
         except Exception:
             pass
@@ -5792,7 +6045,9 @@ async def admin_set_user_plan(data: dict=None):
         raise HTTPException(status_code=400, detail='plan must be free|signals|pro')
     days = int(d.get('days') or 0)
     active_until = d.get('active_until')
-    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
     if days > 0:
         active_until = (_dt.now(_tz.utc) + _td(days=days)).isoformat()
     elif plan == 'free':
@@ -5863,7 +6118,8 @@ async def admin_reset_trading_stats(data: dict=None):
     Does not close exchange positions and does not delete position claims. Does not change strategy code/params.
     Sets pnl_epoch so OKX history before this moment is ignored in cards.
     """
-    from datetime import datetime as dt, timezone as tz
+    from datetime import datetime as dt
+    from datetime import timezone as tz
     data = data or {}
     if data.get('epoch'):
         epoch = str(data['epoch'])
@@ -6054,10 +6310,14 @@ async def _compute_pnl(mode: str = None):
     """
     global _pnl_last_unified
     from app.services.pnl_engine import (
-        aggregate_rows,
-        epoch_ms as _ep_ms,
-        filter_pnl_rows,
         PNL_EPOCH_ISO as _EP_ISO,
+    )
+    from app.services.pnl_engine import (
+        aggregate_rows,
+        filter_pnl_rows,
+    )
+    from app.services.pnl_engine import (
+        epoch_ms as _ep_ms,
     )
     _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
     if _mode not in ('demo', 'live'):
@@ -6303,7 +6563,8 @@ async def pnl_reconcile():
 
     Helps detect attribution gaps (untagged), funding drift, and upl mismatch.
     """
-    from datetime import datetime as dt, timezone as tz
+    from datetime import datetime as dt
+    from datetime import timezone as tz
     dash = await get_pnl()
     epoch = dash.get('pnl_epoch') or await get_pnl_epoch()
     okx_trade_pnl = 0.0
@@ -6381,7 +6642,7 @@ async def reports_summary():
     """
     pnl = await get_pnl()
     paired = await get_paired_trades(limit=5000)
-    trades = [x for x in paired.get('trades') or [] if (x.get('reason') or '').lower() in ('closed', 'tp', 'sl', 'trail', 'breakeven', 'manual', '')]
+    [x for x in paired.get('trades') or [] if (x.get('reason') or '').lower() in ('closed', 'tp', 'sl', 'trail', 'breakeven', 'manual', '')]
     closed = []
     for x in paired.get('trades') or []:
         reason = (x.get('reason') or '').lower()
@@ -6426,7 +6687,7 @@ async def reports_summary():
             funding_source = 'okx_bills_type8'
     except Exception as e:
         print(f'[reports] funding fetch: {e}', flush=True)
-    net = float(pnl.get('total') or 0) + float(pnl.get('unrealized') or 0) + funding - 0.0
+    float(pnl.get('total') or 0) + float(pnl.get('unrealized') or 0) + funding - 0.0
     return {'as_of': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'realized_total': pnl.get('total'), 'realized_1d': pnl.get('1d'), 'realized_7d': pnl.get('7d'), 'realized_30d': pnl.get('30d'), 'realized_week': pnl.get('week'), 'unrealized': pnl.get('unrealized'), 'fees_reported': round(fees, 4) if fees else pnl.get('fees'), 'funding': round(funding, 4), 'funding_source': funding_source, 'net_approx': round(float(pnl.get('total') or 0) + float(pnl.get('unrealized') or 0) + funding, 2), 'per_bot': pnl.get('per_bot') or {}, 'trades_closed': len(closed), 'wins': wins, 'losses': losses, 'win_rate_pct': win_rate, 'pnl_source': pnl.get('source'), 'note': 'PnL matches History paired trades; funding is OKX bills type=8 (best-effort, last page).'}
 _bot_stats_cache = {'ts': 0, 'data': {}, 'mode': ''}
 _BOT_STATS_TTL = 15
@@ -6490,7 +6751,8 @@ async def _bot_history_stats() -> dict:
     KNOWN = ('Momentum', 'Impulse 1D', 'MACD+Donchian Validation', 'AI Discretionary 1H', 'Order Book Scalp', 'Умные деньги')
     stats = {name: {'total_pnl': 0.0, 'total_trades': 0, 'wins': 0, 'losses': 0, 'win_rate': 0.0, 'total_pnl_source': 'exchange_close_trades'} for name in KNOWN}
     try:
-        from datetime import datetime as dt, timezone as tz
+        from datetime import datetime as dt
+        from datetime import timezone as tz
         epoch = await get_pnl_epoch()
         epoch_ms = 0
         if epoch:
@@ -6861,7 +7123,6 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
         except Exception as e:
             print(f'[trades/paired] DB read error: {e}', flush=True)
     live_bots = [('rotation', rotation), ('impulse', impulse), ('validation', validation), ('ai', ai_bot)]
-    live_names = {ROT_BOT_ID: 'Momentum', IMP_BOT_ID: 'Impulse 1D', VAL_BOT_ID: 'MACD+Donchian Validation', AI_BOT_ID: 'AI Discretionary 1H'}
     for key, bot in live_bots:
         if bot and bot._trade_log:
             for t in bot._trade_log:

@@ -681,7 +681,7 @@ class Database:
         sql += " GROUP BY inst_id, bot_label ORDER BY bot_label, inst_id"
         return await self._fetchall(sql, params)
 
-    
+
     async def reclassify_exchange_bot_labels(self) -> int:
         """Fix bot_label from cl_ord_id.
 
@@ -1617,7 +1617,7 @@ class Database:
         """
         out = {"ok": False, "updated_exchange": 0, "updated_trades": 0, "pnls": []}
         try:
-            from datetime import datetime, timezone, timedelta
+            from datetime import datetime, timedelta, timezone
             d0 = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
             # MSK is UTC+3 — expand window to cover full local day
             start_ms = int((d0 - timedelta(hours=3)).timestamp() * 1000)
@@ -1636,7 +1636,7 @@ class Database:
                    WHERE close_ts >= ? AND close_ts < ?""",
                 (start_ms, end_ms),
             ) or []
-        except Exception as e:
+        except Exception:
             # SQLite/PG placeholder mismatch — try both styles via _fetchall convention
             try:
                 if self._pg_mode:

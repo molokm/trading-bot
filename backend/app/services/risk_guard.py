@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, Optional
 
 if TYPE_CHECKING:
     from app.services.ai_strategy import AIStrategy
@@ -148,9 +148,9 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     env_kill = _b("RISK_KILL_SWITCH", False)
     kill = env_kill if _runtime_kill is None else _runtime_kill
     max_daily = _f("RISK_MAX_DAILY_LOSS_USD", 0.0)  # 0 = disabled
-    max_pos = _f("RISK_MAX_POSITION_USD", 0.0)
-    max_lev = _f("RISK_MAX_LEVERAGE", 0.0)
-    demo = _b("OKX_DEMO", True)
+    _f("RISK_MAX_POSITION_USD", 0.0)
+    _f("RISK_MAX_LEVERAGE", 0.0)
+    _b("OKX_DEMO", True)
 
     # Position-level limits from env
     max_open_pos = int(_f("RISK_MAX_OPEN_POSITIONS", 0))  # 0 = unlimited

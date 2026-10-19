@@ -14,13 +14,13 @@ Flow:
 7. Tracks R-multiples
 8. Sends Telegram alerts
 """
-import json
-import time
 import asyncio
+import json
+from datetime import datetime
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from datetime import datetime
 
 RULES_PATH = Path(__file__).parent / "rules.json"
 
@@ -216,7 +216,7 @@ def generate_planned_trade(df, idx, rules, symbol):
     row = df.iloc[idx]
     prev = df.iloc[idx - 1] if idx > 0 else row
 
-    entry_rules = rules.get("entry_rules", {})
+    rules.get("entry_rules", {})
     exit_rules = rules.get("exit_rules", {})
 
     # Evaluate all rules

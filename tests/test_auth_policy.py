@@ -193,6 +193,7 @@ OWNER_DATA_REACHABLE_BY_USER = {
     '/api/pnl',
     '/api/pnl/summary',
     '/api/positions',
+    '/api/positions/close-all',
     '/api/trades/paired',
 }
 

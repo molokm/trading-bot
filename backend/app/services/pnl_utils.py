@@ -5,6 +5,7 @@ Older code did `gross - fee`, which *adds* fee when fee is negative. We normaliz
 to a positive cost and always subtract it from gross PnL.
 """
 from __future__ import annotations
+
 from typing import Any, Iterable, Optional, Tuple
 
 

@@ -23,14 +23,12 @@ from typing import Optional
 
 import httpx
 
-from .telegram_notifier import TelegramNotifier
 from .strategy_cards import (
     telegram_metrics_block,
     telegram_profile_description,
     telegram_short_description,
-    strategy_versions_line,
-    cagr_range_str,
 )
+from .telegram_notifier import TelegramNotifier
 
 log = logging.getLogger("telegram_bot")
 
@@ -468,7 +466,7 @@ class TelegramBotPoller:
             return
         until = sub.get("active_until", "")
         active = _is_active(sub)
-        plan = sub.get("plan", "pro")
+        sub.get("plan", "pro")
         plan_label = "💎 Pro"
         state = "✅ активна" if active else "⛔ истекла"
         await self._send_msg(
@@ -496,7 +494,7 @@ class TelegramBotPoller:
         first_name = user.get("first_name", "")
 
         # Only the Pro plan exists now; plan is always "pro".
-        payload = payment.get("invoice_payload", "") or ""
+        payment.get("invoice_payload", "") or ""
         plan = "pro"
         days = PRO_PLAN_DAYS
 

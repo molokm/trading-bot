@@ -4,7 +4,8 @@ main.py assigns these during startup; routers read them without circular imports
 of main.
 """
 from __future__ import annotations
-from typing import Any, Optional
+
+from typing import Any
 
 # Assigned in main.startup / module init
 db: Any = None

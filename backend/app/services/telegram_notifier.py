@@ -8,7 +8,6 @@ updated at runtime through the dashboard settings endpoint.
 import asyncio
 import hashlib
 import hmac
-import html
 import json
 import os
 import threading

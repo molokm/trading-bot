@@ -9,8 +9,6 @@ Scans OKX SWAP pairs for:
 """
 import json
 import time
-import numpy as np
-import pandas as pd
 from pathlib import Path
 
 RULES_PATH = Path(__file__).parent / "rules.json"

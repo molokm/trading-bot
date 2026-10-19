@@ -41,23 +41,33 @@ import logging
 log = logging.getLogger("ai_strategy")
 
 import asyncio
+import json
 import math
 import os
+import re
 import threading
 import time
 import uuid
-import re
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.services.telegram_notifier import TelegramNotifier
-from app.services.pnl_utils import extract_fill_avg, close_pnl, fee_cost, pnl_from_okx_fills
-from app.services.position_claim import claim_open, release_open, claim_or_flatten, sweep_exchange_orphans, orphan_close_enabled
-from app.services.ai_agent import call_llm, ALLOWED_SYMBOLS, llm_status, mock_decide
-import json
-from app.services.risk_guard import assert_can_open
+from app.services.ai_agent import ALLOWED_SYMBOLS, call_llm, llm_status, mock_decide
 from app.services.analysis_logger import get_logger
+from app.services.pnl_utils import (
+    close_pnl,
+    extract_fill_avg,
+    fee_cost,
+    pnl_from_okx_fills,
+)
+from app.services.position_claim import (
+    claim_open,
+    claim_or_flatten,
+    release_open,
+    sweep_exchange_orphans,
+)
+from app.services.risk_guard import assert_can_open
+from app.services.telegram_notifier import TelegramNotifier
 
 AI_BOT_ID = "ai_strategy"
 
@@ -599,7 +609,8 @@ class AIStrategy:
         to the next one that has an API key and is not on cooldown.
         """
         from app.services.ai_agent import (
-            is_provider_available, next_available_provider,
+            is_provider_available,
+            next_available_provider,
         )
         # Preferred: config/env → groq → openrouter → openai (BAI removed)
         if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
@@ -655,7 +666,7 @@ class AIStrategy:
 
     def _get_provider_status(self) -> dict:
         """Return cooldown/availability status of all LLM providers."""
-        from app.services.ai_agent import get_provider_status, _last_provider_used
+        from app.services.ai_agent import _last_provider_used, get_provider_status
         return {
             "active": _last_provider_used or self._provider(),
             "providers": get_provider_status(),
@@ -909,7 +920,6 @@ class AIStrategy:
         if not la:
             # just started — allow grace period
             try:
-                import time as _t
                 started = getattr(self, "_started_at", None)
                 if started:
                     from datetime import datetime as _dt
@@ -3247,7 +3257,7 @@ class AIStrategy:
             self._live_lifetime_wins += 1
         self._live_lifetime_fees += fee_c
         self._live_equity_ts = 0.0
-        now_iso = datetime.now(timezone.utc).isoformat()
+        datetime.now(timezone.utc).isoformat()
         signal_id = int(getattr(pos, "signal_id", 0) or 0)
         self._live_trade_log_append(
             pos, "close", fill_px, pos.size, pnl,
@@ -3926,7 +3936,6 @@ class AIStrategy:
         """Move the exchange SL order to a new price (trailing / breakeven)."""
         if not client or not pos or not pos.sl_algo_id:
             return
-        sl_side = "sell" if pos.side == "long" else "buy"
         sl_px = str(round(new_sl_px, 4))
         try:
             resp = await client.amend_algo_order(
@@ -4031,7 +4040,6 @@ class AIStrategy:
 
     def _bar_period_sec(self) -> int:
         b = str(getattr(self.config, "bar", "1H") or "1H").strip().upper()
-        mult = 1
         if b.endswith("M"):
             try:
                 return max(60, int(b[:-1] or 1) * 60)
@@ -5107,7 +5115,7 @@ class AIStrategy:
         # While flat: only on new closed bar. While in a position: also allow
         # manage cadence so exits are not stuck waiting for the next 1H close.
         in_pos = bool(self._positions)
-        need_llm = (bool(fresh) or in_pos) and gap_ok
+        (bool(fresh) or in_pos) and gap_ok
         if decide_bar and not fresh and not in_pos:
             if self._tick_count % 10 == 0:
                 print(f"[AI] skip LLM — waiting for next closed {getattr(self.config, 'bar', '1H')} bar", flush=True)
@@ -5984,7 +5992,7 @@ class AIStrategy:
             btc_roc = float(q.get("btc_roc") or 0)
         except (TypeError, ValueError):
             btc_roc = 0.0
-        min_al = float(q.get("min_align") or self._effective_min_align())
+        float(q.get("min_align") or self._effective_min_align())
         min_adx_cfg = float(self.config.min_adx or 18)
         adx_soft = float(self.config.adx_soft_floor or 14)
         adx_bypass = float(self.config.adx_align_bypass or 0.72)
@@ -6327,7 +6335,7 @@ class AIStrategy:
             # wait until next bar if useful
             wait = ""
             try:
-                from datetime import datetime, timezone, timedelta
+                from datetime import datetime, timedelta, timezone
                 now = datetime.now(timezone.utc)
                 bar = getattr(self.config, "bar", "1H") or "1H"
                 if str(bar).upper() in ("4H", "4h"):
@@ -6399,7 +6407,7 @@ class AIStrategy:
 
     def get_status(self) -> dict:
         closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
-        session_wins = sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
+        sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
         return {
             "running": self._running,
             "strategy": STRATEGY_NAME,

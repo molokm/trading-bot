@@ -323,6 +323,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     setPositions([])
   }, [demoMode])
   const [closing, setClosing] = useState(null)
+  const [closingAll, setClosingAll] = useState(null)
   const [loading, setLoading] = useState(true)
   const [dataFreshAt, setDataFreshAt] = useState(null)
   const [reconcileOpen, setReconcileOpen] = useState(false)
@@ -1132,9 +1133,13 @@ export default function Dashboard({ health, connected, isGuest }) {
     }
     setClosing(posId)
     try {
+      // Pass posSide ONLY when it's a valid OKX value from the position data.
+      // p.side is the strategy's internal view ('long'/'short') and must NOT
+      // be used — on net-mode accounts OKX rejects it with error 51011.
+      const okxPosSide = ['net', 'long', 'short'].includes(String(p.posSide || '')) ? p.posSide : undefined
       await api.closePosition(
         p.instId,
-        p.posSide || p.side || 'net',
+        okxPosSide,
         p.pos || p.size,
         p.mgnMode || 'cross',
         mode,
@@ -1142,6 +1147,28 @@ export default function Dashboard({ health, connected, isGuest }) {
       loadData()
     } catch (e) { alert((t('dash.error') || 'Ошибка: ') + (e.message || e)) }
     finally { setClosing(null) }
+  }
+
+  const handleCloseAll = async (mode) => {
+    const label = mode === 'live' ? 'LIVE' : 'DEMO'
+    if (mode === 'live') {
+      const ok = window.confirm(`Закрыть ВСЕ позиции на LIVE-счёте? Это необратимо.`)
+      if (!ok) return
+    }
+    setClosingAll(mode)
+    try {
+      const r = await api.closeAllPositions(mode)
+      const closed = (r.results || []).filter(x => x.ok).length
+      const total = (r.results || []).length
+      if (closed < total) {
+        const fails = (r.results || []).filter(x => !x.ok).map(x => `${x.instId}: ${x.msg}`).join('; ')
+        alert(`Закрыто ${closed}/${total}. Ошибки: ${fails}`)
+      } else {
+        alert(`Все позиции закрыты (${closed})`)
+      }
+      loadData()
+    } catch (e) { alert((t('dash.error') || 'Ошибка: ') + (e.message || e)) }
+    finally { setClosingAll(null) }
   }
 
   const handleReconcile = async () => {
@@ -1474,6 +1501,26 @@ export default function Dashboard({ health, connected, isGuest }) {
                 <span className="text-[var(--txt-secondary)]">DEMO {demoPositions.length}</span>
                 <span className="text-[var(--profit)]">LIVE {mirrorPositions.length}</span>
               </span>
+            </div>
+            <div className="flex items-center gap-1 px-2 pt-1 pb-0">
+              {demoPositions.length > 0 && (
+                <button
+                  onClick={() => handleCloseAll('demo')}
+                  disabled={closingAll === 'demo'}
+                  className="text-[0.6rem] px-2 py-0.5 rounded bg-[var(--warn-dim)] text-[var(--warn)] hover:bg-[var(--warn)]/20 transition disabled:opacity-50"
+                >
+                  {closingAll === 'demo' ? '...' : 'Закрыть все DEMO'}
+                </button>
+              )}
+              {mirrorPositions.length > 0 && (
+                <button
+                  onClick={() => handleCloseAll('live')}
+                  disabled={closingAll === 'live'}
+                  className="text-[0.6rem] px-2 py-0.5 rounded bg-[var(--loss-dim)] text-[var(--loss)] hover:bg-[var(--loss)]/20 transition disabled:opacity-50"
+                >
+                  {closingAll === 'live' ? '...' : 'Закрыть все LIVE'}
+                </button>
+              )}
             </div>
             <div className="flex-1 overflow-auto p-2 space-y-2">
               {loading ? (

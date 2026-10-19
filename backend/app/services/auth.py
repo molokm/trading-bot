@@ -6,10 +6,10 @@ the current process lifetime.
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
-import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional

@@ -1,15 +1,16 @@
-import hmac
+import asyncio
 import base64
+import hmac
 import json
 import time
-import asyncio
 import urllib.parse
-from typing import Optional, Dict
 from datetime import datetime
 from enum import Enum
+from typing import Dict, Optional
 
 import httpx
 import websockets
+
 from app.services.risk_guard import assert_can_open
 
 
@@ -90,13 +91,13 @@ class CircuitBreaker:
 
         try:
             result = await func(*args, **kwargs)
-        except Exception as e:
+        except Exception:
             await self._on_failure()
             raise
 
         # Проверяем результат на ошибку бизнес-уровня
         if isinstance(result, dict) and result.get("error"):
-            error_msg = str(result.get("message", ""))
+            str(result.get("message", ""))
             # Не считаем ошибки бизнес-уровня (insufficient margin, etc) как failure
             if not self._is_business_error(result):
                 await self._on_failure()
@@ -107,7 +108,7 @@ class CircuitBreaker:
 
     def _is_business_error(self, result: dict) -> bool:
         """Ошибки бизнес-уровня (недостаток маржи, неверные параметры) — не считаем failure."""
-        msg = str(result.get("message", "")).lower()
+        str(result.get("message", "")).lower()
         business_codes = {"58001", "58002", "58003", "58004", "58005",  # margin/position
                           "30001", "30002", "30003",  # param errors
                           "58101", "58102",  # leverage
@@ -183,6 +184,9 @@ class OKXClient:
         # that safety while still reusing connections in the common case.
         self._client: Optional[httpx.AsyncClient] = None
         self._client_loop = None
+        # Position mode from /api/v5/account/config ('net' | 'hedge' | raw value).
+        # Cached on the instance (not a global dict) so a replaced client starts fresh.
+        self.pos_mode: str = "net"
 
         # Circuit Breaker для защиты от каскадных ошибок
         self._circuit_breaker = CircuitBreaker(
@@ -413,14 +417,64 @@ class OKXClient:
             body["posSide"] = pos_side
         return await self._request("POST", "/api/v5/account/set-leverage", body=body)
 
+    async def get_account_config(self) -> dict:
+        """GET /api/v5/account/config — returns posMode (net/long_short_mode),
+        accountLevel, etc. Also caches posMode on the client instance for
+        correct close-position posSide resolution."""
+        result = await self._request("GET", "/api/v5/account/config")
+        if not result.get("error") and result.get("data"):
+            info = result["data"][0] if isinstance(result["data"], list) else result["data"]
+            raw = str(info.get("posMode", "net_mode") or "net_mode")
+            self.pos_mode = "net" if raw == "net_mode" else ("hedge" if raw == "long_short_mode" else raw)
+        return result
+
+    async def check_key_permissions(self) -> dict:
+        """GET /api/v5/account/api-key — verify the API key's rights.
+
+        Returns {"ok": True, "label": ..., "perm": ...} or {"ok": False, "error": ...}.
+        Note: if the endpoint is unavailable the error is returned gracefully —
+        callers must treat a failed check as 'unknown', not 'allowed'.
+        """
+        result = await self._request("GET", "/api/v5/account/api-key",
+                                     params={"apiKey": self.api_key})
+        if result.get("error"):
+            return {"ok": False, "error": result.get("message", "unknown"),
+                    "label": None, "perm": None}
+        data = result.get("data", [])
+        if not data:
+            return {"ok": False, "error": "empty response", "label": None, "perm": None}
+        info = data[0] if isinstance(data, list) else data
+        perm = str(info.get("perm", "") or "")
+        label = str(info.get("label", "") or "")
+        return {
+            "ok": True,
+            "label": label,
+            "perm": perm,
+            "has_trade": "trade" in perm.lower(),
+            "has_read": "read" in perm.lower(),
+            "has_withdraw": "withdrawal" in perm.lower(),
+        }
+
     async def close_position(self, inst_id: str, mgn_mode: str = "cross",
-                              pos_side: str = None, auto_cxl: bool = True) -> dict:
+                               pos_side: str = None, auto_cxl: bool = True) -> dict:
         body = {"instId": inst_id, "mgnMode": mgn_mode}
         if pos_side:
             body["posSide"] = pos_side
         if auto_cxl:
             body["autoCxl"] = "true"
-        return await self._request("POST", "/api/v5/trade/close-position", body=body)
+        result = await self._request("POST", "/api/v5/trade/close-position", body=body)
+        # Retry with posSide='net' if OKX rejects the side for net-mode accounts
+        if result.get("error") and "51011" in str(result):
+            net_body = {"instId": inst_id, "mgnMode": mgn_mode, "posSide": "net", "autoCxl": "true" if auto_cxl else "false"}
+            retry = await self._request("POST", "/api/v5/trade/close-position", body=net_body)
+            if not retry.get("error"):
+                return retry
+            # last resort: omit posSide entirely (OKX infers from account mode)
+            fallback_body = {"instId": inst_id, "mgnMode": mgn_mode}
+            if auto_cxl:
+                fallback_body["autoCxl"] = "true"
+            return await self._request("POST", "/api/v5/trade/close-position", body=fallback_body)
+        return result
 
     async def get_bills(self, inst_type: str = "SWAP", limit: int = 100, **kwargs) -> dict:
         params = {"instType": inst_type, "limit": limit, **kwargs}

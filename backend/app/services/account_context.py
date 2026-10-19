@@ -6,7 +6,7 @@ positions, PnL and trades never cross environments.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Awaitable, Literal, Optional
+from typing import Any, Callable, Literal
 
 AccountMode = Literal["demo", "live"]
 

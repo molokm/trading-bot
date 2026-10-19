@@ -5,9 +5,7 @@ without shipping full strategy implementations.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Optional
-
+from dataclasses import dataclass
 
 # ── IDs / names ──────────────────────────────────────────────
 ROT_BOT_ID = "rotation_strategy"

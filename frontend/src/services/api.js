@@ -121,6 +121,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ instId, posSide, sz, mgnMode, account }),
     }),
+  closeAllPositions: (account = 'demo') =>
+    request('/positions/close-all', {
+      method: 'POST',
+      body: JSON.stringify({ account }),
+    }),
 
   // ── Market ──
   getTicker: (instId = 'BTC-USDT') =>

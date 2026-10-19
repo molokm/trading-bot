@@ -1,6 +1,5 @@
 
 import asyncio
-from typing import Optional
 
 
 class _ClientHolder:

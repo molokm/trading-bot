@@ -4,8 +4,8 @@ Every trade is measured in R (risk units): R = (entry - stop).
 """
 import json
 import time
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 DATA_PATH = Path(__file__).parent / "data"
 TRADES_FILE = DATA_PATH / "r_trades.json"
