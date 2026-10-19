@@ -212,7 +212,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.26.0-integrity"
+STRATEGY_VERSION = "v1.27.0-profit-lock"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
@@ -342,8 +342,15 @@ class AIConfig:
     # (35% → 50%). Cuts the round-trip "was green, closed red" without the
     # v1.10 mistake of trailing winners from the first tick.
     giveback_enable: bool = True
-    giveback_min_peak_pct: float = 0.65
-    giveback_retain_frac: float = 0.50
+    giveback_min_peak_pct: float = 0.50   # v1.27: was 0.65 — arm lock earlier
+    giveback_retain_frac: float = 0.40   # v1.27: was 0.50 — exit after giving back 60% of peak
+    # Hard profit lock: if we ever reached hard_profit_lock_peak % and then
+    # fell below hard_profit_lock_floor %, close immediately (anti "green→red").
+    hard_profit_lock_enable: bool = True
+    hard_profit_lock_peak: float = 0.80
+    hard_profit_lock_floor: float = 0.25
+    # Soft full take when unrealized hits this % (don't wait for distant ATR take).
+    soft_profit_take_pct: float = 1.20
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
@@ -366,9 +373,9 @@ class AIConfig:
                                             # (was cut to 1.90 under v1.10's "closer TP"
                                             # fix, which worked against its own diagnosis)
     scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
-    breakeven_atr_mult: float = 0.35       # v1.16: 0.28→0.45 — give winners room before
+    breakeven_atr_mult: float = 0.28       # v1.27: lock BE sooner after green move
                                             # locking BE (was triggering too early)
-    breakeven_min_pct: float = 0.40        # v1.16: named replacement for the old hardcoded
+    breakeven_min_pct: float = 0.35        # v1.27: earlier BE floor
                                             # upl>=0.35 OR-fallback (was firing before the
                                             # ATR condition, defeating the widening above)
     trail_atr_mult: float = 0.50           # v1.16: 0.55→0.65 — slightly wider trail
@@ -4121,12 +4128,35 @@ class AIStrategy:
                     pos.peak_upl_pct = upl
             except Exception:
                 pass
-            # Peak giveback exit — lock remaining profit when a winner fades
+            # --- Profit protection (v1.27): soft take → hard lock → giveback ---
             try:
-                if bool(getattr(self.config, "giveback_enable", True)):
-                    peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
-                    min_peak = self._cfg_f("giveback_min_peak_pct", 0.65)
-                    retain = self._cfg_f("giveback_retain_frac", 0.50)
+                peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                # 1) Soft profit take: bank a clean green without waiting for far TP
+                soft_take = self._cfg_f("soft_profit_take_pct", 1.20)
+                if soft_take > 0 and upl >= soft_take:
+                    print(
+                        f"[AI] soft_profit_take {coin} {pos.side}: upl={upl:+.2f}% "
+                        f">= {soft_take:.2f}% (peak={peak_u:+.2f}%)",
+                        flush=True,
+                    )
+                    await self._close(client, coin, f"soft_take_{upl:.1f}")
+                    continue
+                # 2) Hard lock: was clearly green, now almost flat/red → leave
+                if self._cfg_b("hard_profit_lock_enable", True):
+                    lock_peak = self._cfg_f("hard_profit_lock_peak", 0.80)
+                    lock_floor = self._cfg_f("hard_profit_lock_floor", 0.25)
+                    if peak_u >= lock_peak and upl < lock_floor:
+                        print(
+                            f"[AI] hard_profit_lock {coin} {pos.side}: peak={peak_u:+.2f}% "
+                            f"now={upl:+.2f}% < floor {lock_floor:.2f}%",
+                            flush=True,
+                        )
+                        await self._close(client, coin, f"profit_lock_peak_{peak_u:.1f}")
+                        continue
+                # 3) Classic giveback: gave back most of the peak
+                if self._cfg_b("giveback_enable", True):
+                    min_peak = self._cfg_f("giveback_min_peak_pct", 0.50)
+                    retain = self._cfg_f("giveback_retain_frac", 0.40)
                     if peak_u >= min_peak and upl <= peak_u * retain:
                         print(
                             f"[AI] giveback exit {coin} {pos.side}: peak={peak_u:+.2f}% "
@@ -4136,7 +4166,7 @@ class AIStrategy:
                         await self._close(client, coin, f"giveback_peak_{peak_u:.1f}")
                         continue
             except Exception as e:
-                print(f"[AI] giveback check: {e}", flush=True)
+                print(f"[AI] profit-protect check: {e}", flush=True)
             # Thesis broken (price + MACD/ROC flipped) while flat or red → leave
             # before the full stop. Winners are left to giveback/trail.
             try:
@@ -4161,8 +4191,8 @@ class AIStrategy:
             # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
             # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
             # override the other (see v1.16 notes on the config fields above).
-            be_need = float(getattr(self.config, "breakeven_atr_mult", 0.45) or 0.45)
-            be_min_pct = float(getattr(self.config, "breakeven_min_pct", 0.55) or 0.55)
+            be_need = self._cfg_f("breakeven_atr_mult", 0.28)
+            be_min_pct = self._cfg_f("breakeven_min_pct", 0.35)
             if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
                 if pos.side == "long":
                     be = float(pos.entry_price) * 1.0005
