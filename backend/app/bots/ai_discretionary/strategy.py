@@ -212,16 +212,16 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.27.0-profit-lock"
+STRATEGY_VERSION = "v1.28.0-holistic"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.25 — BTC/ETH/SOL/XRP. Вход только по импульсу: "
-    "шорт под EMA21 и при MACD≤0, лонг над EMA21 и при MACD≥0. Отбой против "
-    "стороны не берём (это давало шорты в отскок при медвежьем режиме). "
-    "Выход: тейк шире стопа, трейл не режем рано, фиксация если отдали "
-    "больше половины хода от пика +0.65%, и досрочный выход если тезис "
-    "сломан (цена и MACD против). SOL только при ADX≥28 и совпадении ≥0.88. "
-    "После убытка по монете пауза 3 часа. Риск ~1.5%."
+    "AI Discretionary 1H v1.28 — BTC/ETH/SOL/XRP. "
+    "Вход: импульс (EMA21+MACD+ROC), ADX≥20, align≥0.62, conf≥0.68, без chop; "
+    "фильтры BTC/funding; SOL жёстче (ADX≥28, align≥0.88). "
+    "Удержание: BE с ~0.35%, трейл по ATR, peak UPL в памяти и в БД. "
+    "Выход: soft take +1.2%, частичная фиксация ~50% с +0.8%, "
+    "hard lock (пик≥0.8%→сейчас<0.25%), giveback 50%/40%, thesis-break, "
+    "stop/take, time-stop 6ч. Цена выхода — только ticker mark, не свеча."
 )
 
 CT_VAL = {
@@ -351,6 +351,10 @@ class AIConfig:
     hard_profit_lock_floor: float = 0.25
     # Soft full take when unrealized hits this % (don't wait for distant ATR take).
     soft_profit_take_pct: float = 1.20
+    # Partial scale-out once at this UPL (fraction of size), then trail the rest
+    partial_take_enable: bool = True
+    partial_take_pct: float = 0.80
+    partial_take_frac: float = 0.50
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
@@ -426,6 +430,7 @@ class AIPosition:
     tg_message_id: int = 0
     peak_price: float = 0.0
     peak_upl_pct: float = 0.0            # best unrealized % seen while open
+    partial_taken: bool = False          # v1.28 one-shot scale-out done
     unrealized_pnl: float = 0.0
     sl_algo_id: str = ""
     scale_adds: int = 0
@@ -937,6 +942,10 @@ class AIStrategy:
     async def _run(self):
         try:
             await self._hydrate_from_db()
+            try:
+                await self._restore_peaks()
+            except Exception as _rp:
+                print(f"[AI] restore_peaks on start: {_rp}", flush=True)
             self._hydrated = True
         except Exception as e:
             print(f"[AI] hydrate: {e}", flush=True)
@@ -3945,6 +3954,153 @@ class AIStrategy:
                 return True
         return False
 
+    async def _persist_peaks(self) -> None:
+        """Survive redeploy: peak_upl_pct must not reset or hard-lock is blind."""
+        if not self.db:
+            return
+        try:
+            blob = {}
+            for coin, pos in (self._positions or {}).items():
+                blob[coin] = {
+                    "peak_upl_pct": float(getattr(pos, "peak_upl_pct", 0) or 0),
+                    "peak_price": float(getattr(pos, "peak_price", 0) or 0),
+                    "stop_price": float(getattr(pos, "stop_price", 0) or 0),
+                    "take_price": float(getattr(pos, "take_price", 0) or 0),
+                    "partial_taken": bool(getattr(pos, "partial_taken", False)),
+                    "side": getattr(pos, "side", ""),
+                    "entry_price": float(getattr(pos, "entry_price", 0) or 0),
+                }
+            await self.db.set_setting(
+                f"ai_peaks:{self.BOT_ID}",
+                json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "pos": blob}),
+            )
+        except Exception as e:
+            print(f"[AI] persist_peaks: {e}", flush=True)
+
+    async def _restore_peaks(self) -> None:
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting(f"ai_peaks:{self.BOT_ID}")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            blob = (data.get("pos") if isinstance(data, dict) else None) or {}
+            for coin, meta in blob.items():
+                pos = (self._positions or {}).get(coin)
+                if not pos or not isinstance(meta, dict):
+                    continue
+                if str(getattr(pos, "side", "")) != str(meta.get("side") or ""):
+                    continue
+                try:
+                    peak = float(meta.get("peak_upl_pct") or 0)
+                    if peak > float(getattr(pos, "peak_upl_pct", 0) or 0):
+                        pos.peak_upl_pct = peak
+                    pp = float(meta.get("peak_price") or 0)
+                    if pp > 0:
+                        pos.peak_price = pp
+                    if meta.get("partial_taken"):
+                        pos.partial_taken = True
+                    # prefer tighter stored stop for shorts/longs
+                    sp = float(meta.get("stop_price") or 0)
+                    if sp > 0:
+                        if pos.side == "short":
+                            if not pos.stop_price or sp < float(pos.stop_price):
+                                pos.stop_price = sp
+                        else:
+                            if not pos.stop_price or sp > float(pos.stop_price):
+                                pos.stop_price = sp
+                except Exception:
+                    pass
+            if blob:
+                print(f"[AI] restore_peaks: {list(blob.keys())}", flush=True)
+        except Exception as e:
+            print(f"[AI] restore_peaks: {e}", flush=True)
+
+    async def _sync_live_stop(self, coin: str, new_sl: float) -> None:
+        """Mirror demo trail/BE stop onto live algo when possible."""
+        try:
+            lpos = (self._live_positions or {}).get(coin)
+            lc = self._live_client()
+            if not lpos or not lc or new_sl <= 0:
+                return
+            old = float(getattr(lpos, "stop_price", 0) or 0)
+            side = str(getattr(lpos, "side", "") or "")
+            tighter = False
+            if side == "short":
+                tighter = (old <= 0) or (new_sl < old)
+            else:
+                tighter = (old <= 0) or (new_sl > old)
+            if not tighter:
+                return
+            lpos.stop_price = new_sl
+            await self._amend_exchange_sl(lc, lpos, new_sl)
+        except Exception as e:
+            print(f"[AI-LIVE] sync stop {coin}: {e}", flush=True)
+
+    async def _scale_out_partial(self, client, coin: str, frac: float, reason: str) -> bool:
+        """Close a fraction of the DEMO position (and mirror) to bank profit."""
+        pos = self._positions.get(coin)
+        if not pos or frac <= 0 or frac >= 0.99:
+            return False
+        if bool(getattr(pos, "partial_taken", False)):
+            return False
+        full = float(pos.size or 0)
+        lot = float(LOT_SZ.get(coin, 0.01) or 0.01)
+        close_sz = max(lot, round(full * frac / lot) * lot)
+        if close_sz >= full * 0.95:
+            await self._close(client, coin, reason)
+            return True
+        remain = round((full - close_sz) / lot) * lot
+        if remain < lot:
+            await self._close(client, coin, reason)
+            return True
+        if not self._execute_enabled():
+            pos.size = remain
+            pos.partial_taken = True
+            print(f"[AI] SIGNAL partial {coin} close={close_sz} remain={remain} ({reason})", flush=True)
+            return True
+        close_side = "buy" if pos.side == "short" else "sell"
+        try:
+            resp = await self._place(
+                client, pos.inst_id, close_side, close_sz, pos.side, is_close=True,
+            )
+            if resp.get("error"):
+                print(f"[AI] partial fail {coin}: {resp.get('message')}", flush=True)
+                return False
+            pos.size = remain
+            pos.partial_taken = True
+            print(f"[AI] partial close {coin} sz={close_sz} remain={remain} ({reason})", flush=True)
+            # Mirror reduce on live
+            try:
+                if await self._mirror_enabled() and self._live_ready():
+                    lpos = (self._live_positions or {}).get(coin)
+                    lc = self._live_client()
+                    if lpos and lc:
+                        lfull = float(lpos.size or 0)
+                        lclose = max(float(LOT_SZ.get(coin, 0.01)), round(lfull * frac / lot) * lot)
+                        if 0 < lclose < lfull * 0.95:
+                            self._mirror_call_active = True
+                            try:
+                                await self._place(
+                                    lc, lpos.inst_id, close_side, lclose, lpos.side, is_close=True,
+                                )
+                            finally:
+                                self._mirror_call_active = False
+                            lpos.size = max(lot, lfull - lclose)
+                            lpos.partial_taken = True
+            except Exception as e:
+                print(f"[AI-LIVE] partial mirror: {e}", flush=True)
+            try:
+                await self._persist_peaks()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            print(f"[AI] partial exception {coin}: {e}", flush=True)
+            return False
+
+
     def _indicator_exit_reason(self, pos, ind: dict, held_min: float) -> str | None:
         """Exit on regime flip — lock small profit instead of giving it back to SL."""
         cfg = self.config
@@ -4126,11 +4282,27 @@ class AIStrategy:
                 prev_peak = float(getattr(pos, "peak_upl_pct", 0) or 0)
                 if upl > prev_peak:
                     pos.peak_upl_pct = upl
+                    # persist peak so redeploy cannot erase profit-lock memory
+                    if int(getattr(self, "_tick_count", 0) or 0) % 3 == 0:
+                        try:
+                            await self._persist_peaks()
+                        except Exception:
+                            pass
             except Exception:
                 pass
             # --- Profit protection (v1.27): soft take → hard lock → giveback ---
             try:
                 peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                # 0) Partial scale-out once — bank half, trail the rest
+                if self._cfg_b("partial_take_enable", True) and not bool(getattr(pos, "partial_taken", False)):
+                    part_lvl = self._cfg_f("partial_take_pct", 0.80)
+                    part_frac = self._cfg_f("partial_take_frac", 0.50)
+                    if part_lvl > 0 and upl >= part_lvl:
+                        ok = await self._scale_out_partial(
+                            client, coin, part_frac, f"partial_{upl:.1f}"
+                        )
+                        if ok:
+                            continue
                 # 1) Soft profit take: bank a clean green without waiting for far TP
                 soft_take = self._cfg_f("soft_profit_take_pct", 1.20)
                 if soft_take > 0 and upl >= soft_take:
@@ -4242,6 +4414,7 @@ class AIStrategy:
                 if pos.stop_price != old_stop:
                     try:
                         await self._amend_exchange_sl(client, pos, pos.stop_price)
+                        await self._sync_live_stop(coin, float(pos.stop_price))
                     except Exception as e:
                         print(f"[AI] trail amend SL: {e}", flush=True)
 
