@@ -212,7 +212,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.28.0-holistic"
+STRATEGY_VERSION = "v1.28.1-mirror-sync"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.28 — BTC/ETH/SOL/XRP. "
@@ -2912,16 +2912,27 @@ class AIStrategy:
         except Exception:
             pass
         try:
+            self._demo_closing_coin = coin
             if await self._mirror_enabled():
                 await self._try_refresh_live_client()
                 if self._live_client():
                     ok = await self._close_live(coin, reason)
                     if not ok:
-                        print(f"[AI-LIVE] WARN: LIVE close FAILED for {coin} — position still open on exchange, next tick will retry", flush=True)
+                        print(f"[AI-LIVE] WARN: LIVE close FAILED for {coin} — next tick SYNC will force flat", flush=True)
                 else:
-                    print(f"[AI-LIVE] close skip {coin}: live not ready", flush=True)
+                    print(f"[AI-LIVE] close skip {coin}: live not ready — SYNC next tick", flush=True)
+            else:
+                pending = getattr(self, "_pending_live_closes", None) or set()
+                pending.add(coin)
+                self._pending_live_closes = pending
+                print(f"[AI-LIVE] close deferred {coin}: mirror disabled — queued", flush=True)
         except Exception as e:
             print(f"[AI-LIVE] close_mirror: {e}", flush=True)
+        finally:
+            try:
+                self._demo_closing_coin = None
+            except Exception:
+                pass
 
     # ── LIVE mirror execution ──────────────────────────────────────────────────
 
@@ -3110,9 +3121,41 @@ class AIStrategy:
         """Mirror a primary (demo) close onto the connected LIVE account."""
         if not await self._mirror_enabled():
             print("[AI-LIVE] close_skip: mirror disabled by user", flush=True)
+            # Queue for when user re-enables
+            try:
+                pending = getattr(self, "_pending_live_closes", None) or set()
+                pending.add(coin)
+                self._pending_live_closes = pending
+            except Exception:
+                pass
             return False
         lc = self._live_client()
+        if not lc:
+            await self._try_refresh_live_client()
+            lc = self._live_client()
         pos = self._live_positions.get(coin)
+        # Memory miss: still try exchange flatten for this coin
+        if not pos and lc:
+            try:
+                inst = f"{coin}-USDT-SWAP"
+                resp = await lc.get_positions(inst_id=inst)
+                for row in (resp.get("data") or []):
+                    try:
+                        sz = abs(float(row.get("pos") or 0))
+                    except (TypeError, ValueError):
+                        sz = 0.0
+                    if sz <= 0:
+                        continue
+                    ps = str(row.get("posSide") or "").lower()
+                    raw = float(row.get("pos") or 0)
+                    side = ps if ps in ("long", "short") else ("long" if raw > 0 else "short")
+                    print(f"[AI-LIVE] close {coin}: no memory — flatten exchange {side} sz={sz}", flush=True)
+                    from app.services.position_claim import flatten_position
+                    await flatten_position(lc, inst, side, sz)
+                    self._exec_log.append(_exec_evt("mirror_close_exch", coin, side, reason=reason or "demo_close"))
+                    return True
+            except Exception as e:
+                print(f"[AI-LIVE] close exchange fallback {coin}: {e}", flush=True)
         if not lc or not pos:
             self._live_positions.pop(coin, None)
             return False
@@ -3278,42 +3321,162 @@ class AIStrategy:
         self._trade_log.append(entry)
 
     async def _manage_live_orphans(self, client):
-        """Safety net: close live positions whose coin is not in the primary book.
+        """Force LIVE book ≡ DEMO book (exchange-truth, not only memory).
 
-        v1.19: default ORPHAN_CLOSE=on, but gated on hydration + 120s boot grace
-        so we never wipe real mirrors right after deploy before demo state loads.
+        Cases fixed:
+        - DEMO closed + reversed, LIVE still holds old side/coin
+        - mirror was disabled at open/close → LIVE drifted
+        - _live_positions memory empty but exchange still has size
         """
+        if not await self._mirror_enabled():
+            return
         lc = self._live_client()
         if not lc:
-            return
-        if not orphan_close_enabled():
+            await self._try_refresh_live_client()
+            lc = self._live_client()
+        if not lc:
             return
         if not getattr(self, "_hydrated", False):
             return
+        # Short boot grace only (30s) — 120s was too long for reverse-flip sync
         try:
             started = getattr(self, "_started_at", None)
             if started:
                 started_dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
                 if getattr(started_dt, "tzinfo", None) is None:
                     started_dt = started_dt.replace(tzinfo=timezone.utc)
-                elapsed = (datetime.now(timezone.utc) - started_dt).total_seconds()
-                if elapsed < 120:
+                if (datetime.now(timezone.utc) - started_dt).total_seconds() < 30:
                     return
         except Exception:
+            pass
+
+        # 1) Exchange snapshot
+        exch: dict = {}
+        try:
+            resp = await lc.get_positions(inst_type="SWAP")
+            for row in (resp.get("data") or []):
+                try:
+                    sz = abs(float(row.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
+                    continue
+                inst = str(row.get("instId") or "")
+                if not inst.endswith("-USDT-SWAP"):
+                    continue
+                coin = inst.split("-")[0]
+                if coin not in set(getattr(self.config, "symbols", None) or ALLOWED_SYMBOLS):
+                    continue
+                ps = str(row.get("posSide") or "").lower()
+                raw = float(row.get("pos") or 0)
+                if ps in ("long", "short"):
+                    side = ps
+                else:
+                    side = "long" if raw > 0 else "short"
+                try:
+                    entry = float(row.get("avgPx") or row.get("openAvgPx") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                exch[coin] = {"side": side, "size": sz, "entry": entry, "inst_id": inst}
+        except Exception as e:
+            print(f"[AI-LIVE] sync exchange positions: {e}", flush=True)
             return
-        coins = list(self._live_positions.keys())
-        for coin in coins:
-            if coin not in self._positions:
-                pos = self._live_positions.get(coin)
-                if pos and pos.size > 0:
-                    print(f"[AI-LIVE] orphan_detected {coin} — closing", flush=True)
+
+        # 2) Close LIVE that DEMO does not hold (same coin+side)
+        for coin, info in list(exch.items()):
+            demo = (self._positions or {}).get(coin)
+            need_flat = (
+                demo is None
+                or float(getattr(demo, "size", 0) or 0) <= 0
+                or str(getattr(demo, "side", "")).lower() != info["side"]
+            )
+            if not need_flat:
+                # keep memory in sync
+                mem = (self._live_positions or {}).get(coin)
+                if mem is None:
                     try:
-                        from app.services.position_claim import flatten_position
-                        await flatten_position(lc, pos.inst_id, pos.side, pos.size)
-                    except Exception as e:
-                        print(f"[AI-LIVE] orphan flatten: {e}", flush=True)
-                    self._live_positions.pop(coin, None)
-        self._persist_live()
+                        self._live_positions[coin] = AIPosition(
+                            coin=coin, inst_id=info["inst_id"], side=info["side"],
+                            size=info["size"], entry_price=info["entry"] or 0,
+                            stop_price=0, take_price=0, leverage=1.0,
+                            opened_at=datetime.now(timezone.utc).isoformat(),
+                            peak_price=info["entry"] or 0,
+                        )
+                        self._ensure_default_stops(self._live_positions[coin])
+                    except Exception:
+                        pass
+                continue
+            print(
+                f"[AI-LIVE] SYNC close {coin} {info['side']} sz={info['size']} "
+                f"(demo={'none' if not demo else demo.side}) — book mismatch",
+                flush=True,
+            )
+            try:
+                from app.services.position_claim import flatten_position
+                await flatten_position(lc, info["inst_id"], info["side"], info["size"])
+                self._exec_log.append(_exec_evt(
+                    "mirror_sync_close", coin, info["side"],
+                    reason="demo_flat_or_side_mismatch",
+                ))
+            except Exception as e:
+                print(f"[AI-LIVE] SYNC flatten {coin}: {e}", flush=True)
+                # Fallback market close via _place
+                try:
+                    self._mirror_call_active = True
+                    close_side = "sell" if info["side"] == "long" else "buy"
+                    await self._place(
+                        lc, info["inst_id"], close_side, info["size"], info["side"],
+                        is_close=True,
+                    )
+                except Exception as e2:
+                    print(f"[AI-LIVE] SYNC place-close {coin}: {e2}", flush=True)
+                finally:
+                    self._mirror_call_active = False
+            self._live_positions.pop(coin, None)
+            try:
+                await release_open(self.db, self._live_bot_id(), info["inst_id"], info["side"])
+            except Exception:
+                pass
+
+        # 3) Open LIVE for DEMO positions missing/wrong on exchange
+        for coin, demo in list((self._positions or {}).items()):
+            side = str(getattr(demo, "side", "") or "").lower()
+            if not side:
+                continue
+            cur = exch.get(coin)
+            if cur and cur["side"] == side and float(cur.get("size") or 0) > 0:
+                continue
+            entry = float(getattr(demo, "entry_price", 0) or 0)
+            stop_p = float(getattr(demo, "stop_price", 0) or 0)
+            take_p = float(getattr(demo, "take_price", 0) or 0)
+            stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.025
+            take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.05
+            print(
+                f"[AI-LIVE] SYNC open {coin} {side} (exchange={'none' if not cur else cur['side']})",
+                flush=True,
+            )
+            try:
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    # Still open if DEMO already holds — mirror must copy, not second-guess
+                    # unless move is violently against (>2.5%)
+                    print(f"[AI-LIVE] SYNC open soft-gate {coin}: {gate_reason} — still mirroring", flush=True)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
+                    reason="mirror_sync_from_demo",
+                )
+                self._exec_log.append(_exec_evt(
+                    "mirror_sync_open", coin, side,
+                    reason=("ok" if ok else "fail"),
+                ))
+                print(f"[AI-LIVE] SYNC open result {coin}={ok}", flush=True)
+            except Exception as e:
+                print(f"[AI-LIVE] SYNC open {coin}: {e}", flush=True)
+
+        try:
+            self._persist_live()
+        except Exception:
+            pass
 
 
     async def _reconcile_live_from_exchange(self) -> None:
