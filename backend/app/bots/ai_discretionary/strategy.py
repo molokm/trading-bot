@@ -67,6 +67,7 @@ from app.services.position_claim import (
     sweep_exchange_orphans,
 )
 from app.services.risk_guard import assert_can_open
+from app.services.risk_regime import regime_multiplier
 from app.services.telegram_notifier import TelegramNotifier
 
 AI_BOT_ID = "ai_strategy"
@@ -2100,17 +2101,33 @@ class AIStrategy:
     # ── sizing (anti-liq) ──────────────────────────────────────
     def _size_order(self, coin: str, entry: float, stop_pct: float,
                     equity: float = None) -> tuple[float, float]:
-        """Return (contracts_size, leverage) with risk and margin caps."""
+        """Apply regime‑adjusted sizing.
+
+        Returns (contracts_size, leverage) with risk and margin caps.
+        The risk per trade ($eq * risk_per_trade) is multiplied by a regime
+        factor obtained from recent price behavior (bull/bear/sideways).
+        The multiplier defaults to 1.0 (no change) and can be tuned via env
+        vars RISK_REGIME_MULT_BULL, RISK_REGIME_MULT_BEAR, RISK_REGIME_MULT_SIDEWAYS.
+        """
         cfg = self.config
         ct = CT_VAL.get(coin, 0.01)
         lot = LOT_SZ.get(coin, 0.01)
         stop_pct = max(0.015, min(0.05, abs(stop_pct)))
         eq = float(equity) if equity else self._equity
+        # Apply regime multiplier if recent indicators are available
+        mult = 1.0
+        try:
+            reg = (self._latest_indicators or {}).get(coin, {}).get("regime")
+            if reg:
+                # Use already imported regime_multiplier
+                mult = regime_multiplier(reg)
+        except Exception:
+            mult = 1.0
         # v1.14: hard cap risk at 1.2% even if env/DB still has 2%
         _r = float(getattr(cfg, "risk_per_trade", 0.012) or 0.012)
         if _r > 0.012:
             _r = 0.012
-        risk_usd = eq * _r
+        risk_usd = eq * _r * mult
         # notional such that stop_pct * notional ≈ risk_usd
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
         max_margin = eq * cfg.allocation_pct
