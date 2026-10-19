@@ -29,8 +29,8 @@ def _f(name: str, default: float) -> float:
 # Multipliers configurable via environment – default values match current
 # risk policy (no scaling).
 BULL_MULT: float = _f("RISK_REGIME_MULT_BULL", 1.0)
-BEAR_MULT: float = _f("RISK_REGIME_MULT_BEAR", 0.5)
-SIDEWAYS_MULT: float = _f("RISK_REGIME_MULT_SIDEWAYS", 0.3)
+BEAR_MULT: float = _f("RISK_REGIME_MULT_BEAR", 1.0)
+SIDEWAYS_MULT: float = _f("RISK_REGIME_MULT_SIDEWAYS", 1.0)
 
 
 def get_regime(prices: pd.Series) -> Regime:
@@ -58,9 +58,12 @@ def get_regime(prices: pd.Series) -> Regime:
 
 
 def regime_multiplier(regime: Regime) -> float:
-    """Map regime to size multiplier using env‑configured values."""
+    """Map regime to size multiplier using env‑configured values.
+
+    Values are clamped to the range [0.8, 1.2] to avoid runaway sizing.
+    """
     if regime == "bull":
-        return BULL_MULT
+        return max(0.8, min(1.2, BULL_MULT))
     if regime == "bear":
-        return BEAR_MULT
-    return SIDEWAYS_MULT
+        return max(0.8, min(1.2, BEAR_MULT))
+    return max(0.8, min(1.2, SIDEWAYS_MULT))
