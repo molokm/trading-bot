@@ -223,25 +223,27 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.29.0-let-run"
+STRATEGY_VERSION = "v1.30.0-hold-trend"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.29 — 10 монет (BTC/ETH/SOL/XRP/DOGE/BCH/OKB/LINK/AVAX/ADA). "
+    "AI Discretionary 1H v1.30 — 14 монет (+LTC/DOT/UNI/NEAR). "
     "Вход: импульс EMA21+MACD+ROC, ADX≥20, align≥0.62, conf≥0.68; до 2 позиций. "
-    "Удержание дольше: BE с ~0.7%, трейл позже; min hold 45м. "
-    "Выход без шума: soft take +2.5%, partial 30% с +1.5%, hard lock только "
-    "после пика ≥1.5%; LLM-close запрещён в мелком плюсе. Цена — ticker mark."
+    "Удержание тренда: min hold 90м, BE/трейл позже; индикаторный выход "
+    "не режет при сильном align. Soft take +2.8%, partial 25%@+1.8%. "
+    "Цель — не отдавать основное движение шуму 1H."
 )
 
 CT_VAL = {
     "BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0,
     "OKB": 1.0, "DOGE": 1000.0, "BCH": 0.1, "DAI": 10.0,
     "LINK": 1.0, "AVAX": 1.0, "ADA": 100.0,
+    "LTC": 1.0, "DOT": 1.0, "UNI": 1.0, "NEAR": 1.0,
 }
 LOT_SZ = {
     "BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01,
     "OKB": 0.1, "DOGE": 1.0, "BCH": 0.01, "DAI": 1.0,
     "LINK": 0.1, "AVAX": 0.1, "ADA": 1.0,
+    "LTC": 0.1, "DOT": 0.1, "UNI": 0.1, "NEAR": 0.1,
 }
 
 
@@ -322,13 +324,13 @@ class AIConfig:
                                             # while *also* diagnosing "wins too small vs
                                             # losses"; that shrank wins further. Restored
                                             # above the pre-v1.10 0.035 baseline.
-    max_hold_hours: float = 12.0            # phase4: hard time-stop
-    time_stop_stale_hours: float = 6.0      # do not bleed for 8h
+    max_hold_hours: float = 18.0            # v1.30: allow multi-session trends
+    time_stop_stale_hours: float = 10.0     # v1.30: give trend more room
     time_stop_min_progress_pct: float = 0.20
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
-    min_hold_minutes: float = 45.0         # v1.29: less noise churn
+    min_hold_minutes: float = 90.0         # v1.30: hold through 1H noise
     exit_min_profit_pct: float = 0.20      # v1.21: was 0.10 — lock profitable gains after fees
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
@@ -339,7 +341,7 @@ class AIConfig:
                                             # the smaller of the two always wins, so
                                             # leaving this low would have silently
                                             # undone the ATR widening above)
-    trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
+    trail_lock_pct: float = 0.22           # v1.30: wider trail — less noise stops
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
     reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
@@ -353,15 +355,15 @@ class AIConfig:
     # (35% → 50%). Cuts the round-trip "was green, closed red" without the
     # v1.10 mistake of trailing winners from the first tick.
     giveback_enable: bool = True
-    giveback_min_peak_pct: float = 1.20   # v1.29: only after a real swing, not noise
-    giveback_retain_frac: float = 0.35   # keep ~35% of peak before exit
+    giveback_min_peak_pct: float = 1.20   # v1.30: need real peak before giveback
+    giveback_retain_frac: float = 0.35   # keep 35% of peak min
     hard_profit_lock_enable: bool = True
-    hard_profit_lock_peak: float = 1.50  # v1.29: was 0.80 — ignore micro peaks
+    hard_profit_lock_peak: float = 1.80  # v1.29: was 0.80 — ignore micro peaks
     hard_profit_lock_floor: float = 0.40
-    soft_profit_take_pct: float = 2.50   # v1.29: was 1.20 — let trend develop
+    soft_profit_take_pct: float = 2.80     # v1.30: bank only after real leg
     partial_take_enable: bool = True
-    partial_take_pct: float = 1.50       # v1.29: was 0.80
-    partial_take_frac: float = 0.30      # bank 30%, ride 70%
+    partial_take_pct: float = 1.80       # v1.30: was 1.50
+    partial_take_frac: float = 0.25      # bank 25%, ride 75%
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
@@ -1465,9 +1467,9 @@ class AIStrategy:
         """
         if not bool(getattr(self.config, "thesis_break_exit", True)):
             return None
-        if held_min < float(getattr(self.config, "min_hold_minutes", 20) or 0):
+        if held_min < float(getattr(self.config, "min_hold_minutes", 90) or 0):
             return None
-        if upl >= 0.25:
+        if upl >= 0.50:  # v1.30: winners left to giveback/trail, not thesis-break
             return None
         try:
             close = float(ind.get("close") or 0)
@@ -4291,7 +4293,7 @@ class AIStrategy:
         cfg = self.config
         if not getattr(cfg, "indicator_exit", True):
             return None
-        if held_min < float(getattr(cfg, "min_hold_minutes", 45) or 0):
+        if held_min < float(getattr(cfg, "min_hold_minutes", 90) or 0):
             return None
         px = float(ind.get("close") or 0)
         ema_f = float(ind.get("ema_fast") or 0)
@@ -4379,8 +4381,16 @@ class AIStrategy:
             and not too_deep
         )
 
-        # In profit + any soft signal → take the small win
+        # In profit + soft signal: only if align already faded OR move is real (≥1.2%).
+        # v1.30: soft EMA/ROC flips alone were cutting trend legs in 20–40m.
         if soft and upl >= min_p:
+            if align_side >= hold_al and upl < 1.20 and not too_deep:
+                print(
+                    f"[AI] hold soft-ind noise {pos.coin} {pos.side}: "
+                    f"upl={upl:+.2f}% align={align_side:.2f} reasons={reasons[:3]}",
+                    flush=True,
+                )
+                return None
             return "ind_exit:" + "+".join(reasons[:3])
         # Deep adverse in ATR terms → cut even on single hard signal / soft cluster
         if too_deep and (hard or (soft and len(reasons) >= 1)) and upl < 0:
@@ -4481,7 +4491,7 @@ class AIStrategy:
                 # 0) Partial scale-out once — bank half, trail the rest
                 if self._cfg_b("partial_take_enable", True) and not bool(getattr(pos, "partial_taken", False)):
                     part_lvl = self._cfg_f("partial_take_pct", 1.50)
-                    part_frac = self._cfg_f("partial_take_frac", 0.30)
+                    part_frac = self._cfg_f("partial_take_frac", 0.25)
                     if part_lvl > 0 and upl >= part_lvl:
                         ok = await self._scale_out_partial(
                             client, coin, part_frac, f"partial_{upl:.1f}"
