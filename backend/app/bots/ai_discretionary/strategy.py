@@ -317,11 +317,11 @@ class AIConfig:
     adx_align_bypass: float = 0.78         # only very strong align softens ADX
     min_roc_abs: float = 0.15
     min_stop_pct: float = 0.016
-    max_stop_pct: float = 0.035            # cut max pain per trade
-    min_take_pct: float = 0.038            # v1.16: widened back — v1.10 cut this to 0.028
-                                            # while *also* diagnosing "wins too small vs
-                                            # losses"; that shrank wins further. Restored
-                                            # above the pre-v1.10 0.035 baseline.
+    max_stop_pct: float = 0.040            # cut max pain per trade
+    min_take_pct: float = 0.050            # v1.29: widened — v1.10 cut this to 0.028
+                                             # while *also* diagnosing "wins too small vs
+                                             # losses"; that shrank wins further. Restored
+                                             # above the pre-v1.10 0.035 baseline.
     max_hold_hours: float = 12.0            # phase4: hard time-stop
     time_stop_stale_hours: float = 6.0      # do not bleed for 8h
     time_stop_min_progress_pct: float = 0.20
@@ -329,17 +329,17 @@ class AIConfig:
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
     min_hold_minutes: float = 20.0
-    exit_min_profit_pct: float = 0.20      # v1.21: was 0.10 — lock profitable gains after fees
+    exit_min_profit_pct: float = 0.30      # v1.29: was 0.20 — lock profitable gains after fees
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 0.70       # v1.16: 0.40→0.65 — kept in sync with
-                                            # trail_activate_atr_mult (OR'd together;
-                                            # the smaller of the two always wins, so
-                                            # leaving this low would have silently
-                                            # undone the ATR widening above)
-    trail_lock_pct: float = 0.12           # tighter trail → more BE+ locks
+    trail_activate_pct: float = 1.00       # v1.29: 0.70→1.00 — kept in sync with
+                                             # trail_activate_atr_mult (OR'd together;
+                                             # the smaller of the two always wins, so
+                                             # leaving this low would have silently
+                                             # undone the ATR widening above)
+    trail_lock_pct: float = 0.15           # tighter trail → more BE+ locks
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
     reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
@@ -353,15 +353,15 @@ class AIConfig:
     # (35% → 50%). Cuts the round-trip "was green, closed red" without the
     # v1.10 mistake of trailing winners from the first tick.
     giveback_enable: bool = True
-    giveback_min_peak_pct: float = 0.50   # v1.27: was 0.65 — arm lock earlier
-    giveback_retain_frac: float = 0.40   # v1.27: was 0.50 — exit after giving back 60% of peak
+    giveback_min_peak_pct: float = 0.70   # v1.29: was 0.50 — arm lock later
+    giveback_retain_frac: float = 0.30   # v1.29: was 0.40 — exit after giving back 70% of peak
     # Hard profit lock: if we ever reached hard_profit_lock_peak % and then
     # fell below hard_profit_lock_floor %, close immediately (anti "green→red").
     hard_profit_lock_enable: bool = True
-    hard_profit_lock_peak: float = 0.80
-    hard_profit_lock_floor: float = 0.25
+    hard_profit_lock_peak: float = 1.00
+    hard_profit_lock_floor: float = 0.40
     # Soft full take when unrealized hits this % (don't wait for distant ATR take).
-    soft_profit_take_pct: float = 1.20
+    soft_profit_take_pct: float = 1.80
     # Partial scale-out once at this UPL (fraction of size), then trail the rest
     partial_take_enable: bool = True
     partial_take_pct: float = 0.80
