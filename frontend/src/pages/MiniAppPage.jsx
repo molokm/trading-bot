@@ -175,9 +175,11 @@ function MiniAppPageInner() {
         },
         live: {
           connected: !!(liveSt?.connected || liveFromDash.connected),
-          total_pnl: pnlLive?.total ?? liveSt?.total_pnl ?? liveFromDash.total_pnl,
-          session_pnl: pnlLive?.['1d'] ?? liveSt?.session_pnl ?? liveFromDash.session_pnl,
-          week: pnlLive?.week ?? liveSt?.week ?? liveFromDash.week,
+          // Same preference order as the web Dashboard LIVE card:
+          // mirror status (engine+bills) first, then /api/pnl?mode=live.
+          total_pnl: liveSt?.total_pnl ?? liveSt?.strategy_realized ?? pnlLive?.total ?? liveFromDash.total_pnl,
+          session_pnl: liveSt?.session_pnl ?? liveSt?.pnl_1d ?? pnlLive?.['1d'] ?? liveFromDash.session_pnl,
+          week: liveSt?.week ?? liveSt?.pnl_week ?? pnlLive?.week ?? liveFromDash.week,
           unrealized_pnl: liveSt?.unrealized_pnl ?? liveSt?.unrealized ?? liveFromDash.unrealized,
           equity: liveSt?.equity ?? liveFromDash.equity,
           positions: liveSt?.open_positions || liveSt?.positions || liveFromDash.positions || [],

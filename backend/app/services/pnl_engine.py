@@ -850,6 +850,99 @@ def _merge_close_rows(
     return merged, extra
 
 
+def rows_from_bills(
+    bills: list[dict],
+    *,
+    epoch: Optional[int] = None,
+    allow_untagged_ai: bool = False,
+) -> list[dict]:
+    """Normalize OKX trade bills (subType 5/6 closes) into canonical close rows.
+
+    Same membership rules as the dashboard: AI-tagged clOrdId only, unless the
+    platform is AI-only (then untagged closes are attributed to AI).
+    """
+    ep = epoch_ms() if epoch is None else int(epoch)
+    out: list[dict] = []
+    seen: set[str] = set()
+    for b in bills or []:
+        if not isinstance(b, dict):
+            continue
+        if str(b.get("subType") or "") not in ("5", "6"):
+            continue
+        oid = str(b.get("ordId") or "").strip()
+        if not oid or oid in seen:
+            continue
+        try:
+            bp = float(b.get("pnl") or 0)
+        except (TypeError, ValueError):
+            bp = 0.0
+        if abs(bp) < 1e-12:
+            continue
+        try:
+            bts = int(b.get("ts") or 0)
+        except (TypeError, ValueError):
+            bts = 0
+        if bts and bts < ep:
+            continue
+        cl = str(b.get("clOrdId") or "").strip()
+        cl_l = cl.lower()
+        if cl_l.startswith("ais"):
+            continue
+        if not cl_l.startswith("ai") and not allow_untagged_ai:
+            continue
+        seen.add(oid)
+        out.append({
+            "ord_id": oid,
+            "inst_id": b.get("instId") or "",
+            "cl_ord_id": cl,
+            "pnl": bp,
+            "fee": abs(float(b.get("fee") or 0) or 0),
+            "close_ts": bts,
+            "account_mode": "live",
+            "account_key": "live",
+            "bot_label": "AI Discretionary 1H",
+        })
+    return out
+
+
+async def load_eligible_rows(
+    db,
+    *,
+    mode: str = "demo",
+    ai_only: bool = True,
+    bills: Optional[list[dict]] = None,
+    allow_untagged_ai: bool = False,
+    sync_fn: Optional[Callable] = None,
+) -> tuple[list[dict], dict]:
+    """Set T loader — the ONE place that decides which closes count.
+
+    /api/pnl, /api/pnl/summary, /api/ai/status, /api/stats, the Telegram
+    /stats command and the mini app all read PnL through this function.
+    """
+    mode = "live" if str(mode or "").strip().lower() == "live" else "demo"
+    if sync_fn:
+        try:
+            await sync_fn()
+        except Exception as e:
+            print(f"[pnl_engine] load sync: {e}", flush=True)
+    ep = epoch_ms()
+    raw: list = []
+    try:
+        raw.extend(await db.get_exchange_close_trades_detail(
+            epoch_ms=ep, limit=5000, account_mode=mode) or [])
+    except Exception as e:
+        print(f"[pnl_engine] load exchange rows: {e}", flush=True)
+    try:
+        raw.extend(await db.get_trades_multi_bot(
+            ["ai_strategy", "ai_strategy_live"], limit=5000, account_mode=mode) or [])
+    except Exception as e:
+        print(f"[pnl_engine] load db trades: {e}", flush=True)
+    if bills:
+        raw.extend(rows_from_bills(
+            bills, epoch=ep, allow_untagged_ai=allow_untagged_ai))
+    return filter_pnl_rows(raw, mode=mode, ai_only=ai_only)
+
+
 async def compute_stats(
     db,
     *,
@@ -859,57 +952,36 @@ async def compute_stats(
     date_from: str = "",
     date_to: str = "",
     sync_fn: Optional[Callable] = None,
+    bills: Optional[list[dict]] = None,
+    allow_untagged_ai: bool = False,
 ) -> dict:
-    """Public stats for DEMO showcase (and LIVE for owner — caller enforces)."""
+    """Public stats for DEMO showcase (and LIVE for owner — caller enforces).
+
+    Uses load_eligible_rows (set T) so Total here == /api/pnl Total.
+    """
     await ensure_epoch(db)
-    if sync_fn:
-        try:
-            await sync_fn()
-        except Exception as e:
-            print(f"[pnl_engine] stats sync: {e}", flush=True)
 
     mode = (account_mode or "demo").lower()
     if mode != "live":
         mode = "demo"
 
-    rows = []
-    try:
-        rows = await db.get_exchange_pnl_timebucket(
-            bot_label=None,
-            account_mode=("live" if mode == "live" else None),
-            epoch_ms=0,
-        ) or []
-    except Exception as e:
-        print(f"[pnl_engine] stats load: {e}", flush=True)
-
-    if mode == "live":
-        # SQL already filtered by account_mode; legacy rows without the column
-        # are treated as live (they were only written while in live mode).
-        rows = [r for r in rows if str(r.get("account_mode") or "live").lower() == "live"]
-    else:
-        rows = [r for r in rows if str(r.get("account_mode") or "demo").lower() in ("", "demo")]
-
-    # Always merge DB closes so bot-tagged closes appear immediately
-    # (before OKX bills sync), without double-counting by ord_id.
-    db_rows = await _rows_from_db_trades(db, ai_only=ai_only, account_mode=mode)
-    merged, extra = _merge_close_rows(rows, db_rows)
+    rows, _diag = await load_eligible_rows(
+        db,
+        mode=mode,
+        ai_only=ai_only,
+        bills=bills if mode == "live" else None,
+        allow_untagged_ai=allow_untagged_ai,
+        sync_fn=sync_fn,
+    )
 
     out = aggregate_stats(
-        merged, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
+        rows, ai_only=ai_only, period=period, date_from=date_from, date_to=date_to,
     )
-    if out["trades"] == 0:
-        out["source"] = "empty"
-    elif extra and rows:
-        out["source"] = "exchange_close_trades+db"
-    elif rows:
-        out["source"] = "exchange_close_trades"
-    else:
-        out["source"] = "db_trades_fallback"
-
+    out["source"] = "pnl_engine_set_T" if rows else "empty"
     out["account_mode"] = mode
     out["active_bots"] = list(AI_ONLY_LABELS) if ai_only else []
     out["rows_exchange"] = len(rows or [])
-    out["rows_db_extra"] = extra
+    out["rows_db_extra"] = 0
     return out
 
 

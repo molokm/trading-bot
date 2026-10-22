@@ -6221,6 +6221,14 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
     period = (period or 'all').strip().lower()
     if period not in ('today', '1d', 'day', 'week', 'w', '7d', '30d', 'month', '90d', 'quarter', 'all'):
         period = 'all'
+    _bills = None
+    if mode == 'live':
+        try:
+            _lc = live_manager.get_client() if live_manager else None
+            if _lc is not None and not getattr(_lc, 'demo', False):
+                _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
+        except Exception as _be:
+            print(f'[stats] live bills: {_be}', flush=True)
     try:
         data = await pnl_engine.compute_stats(
             db,
@@ -6231,6 +6239,8 @@ async def get_bot_stats(request: Request, period: str = 'all', mode: str = 'demo
             date_to=(date_to or '').strip(),
             # Pull new OKX close bills (TTL 60s) so each closed trade appears in stats
             sync_fn=sync_exchange_close_trades,
+            bills=_bills,
+            allow_untagged_ai=bool(AI_ONLY_MODE),
         )
     except Exception as e:
         print(f'[stats] error: {e}', flush=True)
@@ -6324,94 +6334,31 @@ async def _compute_pnl(mode: str = None):
     from app.services.pnl_engine import (
         PNL_EPOCH_ISO as _EP_ISO,
     )
-    from app.services.pnl_engine import (
-        aggregate_rows,
-        filter_pnl_rows,
-    )
-    from app.services.pnl_engine import (
-        epoch_ms as _ep_ms,
-    )
+    from app.services.pnl_engine import aggregate_rows
     _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
     if _mode not in ('demo', 'live'):
         _mode = _account_mode()
-    _ep = int(_ep_ms())
     try:
         try:
             await sync_exchange_close_trades(mode=_mode)
         except Exception as _se:
             print(f'[pnl] sync_exchange side-effect: {_se}', flush=True)
 
-        raw: list = []
-        try:
-            if db and hasattr(db, 'get_exchange_close_trades_detail'):
-                raw.extend(await db.get_exchange_close_trades_detail(
-                    epoch_ms=_ep, limit=2000, account_mode=_mode) or [])
-        except Exception as e:
-            print(f'[pnl] db exchange_close_trades: {e}', flush=True)
-        try:
-            if db and hasattr(db, 'get_trades_multi_bot'):
-                # live mirror writes closes under <BOT_ID>_live (ai_strategy._live_bot_id)
-                raw.extend(await db.get_trades_multi_bot(
-                    ['ai_strategy', 'ai_strategy_live'], limit=2000, account_mode=_mode) or [])
-            elif db and hasattr(db, 'get_trades'):
-                raw.extend(await db.get_trades(bot_id='ai_strategy', limit=2000, account_mode=_mode) or [])
-        except Exception as e:
-            print(f'[pnl] db trades: {e}', flush=True)
-
         # LIVE: merge OKX bills so Sum PnL matches Mirror card (DB alone is incomplete)
+        bills = None
         if _mode == 'live':
             try:
-                lc = None
-                try:
-                    lc = live_manager.get_client() if live_manager else None
-                except Exception:
-                    lc = None
+                lc = live_manager.get_client() if live_manager else None
                 if lc is not None and not getattr(lc, 'demo', False):
-                    _bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
-                    _seen = {str(r.get('ord_id') or r.get('ordId') or '') for r in raw if r}
-                    for _b in _bills or []:
-                        if str(_b.get('subType') or '') not in ('5', '6'):
-                            continue
-                        _oid = str(_b.get('ordId') or '').strip()
-                        if not _oid or _oid in _seen:
-                            continue
-                        try:
-                            _bp = float(_b.get('pnl') or 0)
-                        except (TypeError, ValueError):
-                            _bp = 0.0
-                        if abs(_bp) < 1e-12:
-                            continue
-                        try:
-                            _bts = int(_b.get('ts') or 0)
-                        except (TypeError, ValueError):
-                            _bts = 0
-                        if _bts and _bts < _ep:
-                            continue
-                        _cl = str(_b.get('clOrdId') or '').strip()
-                        _cl_l = _cl.lower()
-                        if _cl_l.startswith('ais'):
-                            continue
-                        # AI-tagged or AI-only untagged live closes
-                        if not (_cl_l.startswith('ai') or AI_ONLY_MODE):
-                            continue
-                        _seen.add(_oid)
-                        raw.append({
-                            'ord_id': _oid,
-                            'inst_id': _b.get('instId') or '',
-                            'cl_ord_id': _cl,
-                            'pnl': _bp,
-                            'fee': abs(float(_b.get('fee') or 0) or 0),
-                            'close_ts': _bts,
-                            'account_mode': 'live',
-                            'account_key': 'live',
-                            'bot_label': 'AI Discretionary 1H',
-                        })
+                    bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
             except Exception as _be:
-                print(f'[pnl] live bills merge: {_be}', flush=True)
+                print(f'[pnl] live bills fetch: {_be}', flush=True)
 
-        rows, diag = filter_pnl_rows(raw, mode=_mode, ai_only=True)
-        # LIVE bills with bot_label but no ai* clOrd still need to pass: filter uses resolve_bot
-        # which accepts stored AI label — already set above.
+        # Set T loader — shared with /api/stats, TG /stats and the mini app.
+        rows, diag = await pnl_engine.load_eligible_rows(
+            db, mode=_mode, ai_only=True, bills=bills,
+            allow_untagged_ai=bool(AI_ONLY_MODE),
+        )
         agg = aggregate_rows(rows, ai_only=True)
         total = round(float(agg.get('total') or 0), 2)
         day = round(float(agg.get('1d') or 0), 2)
@@ -6497,7 +6444,16 @@ async def _compute_pnl(mode: str = None):
         }
     try:
         unreal = 0.0
-        client = client_manager.get_client() if client_manager else None
+        client = None
+        if _mode == 'live' and live_manager is not None:
+            try:
+                _lc = live_manager.get_client()
+                if _lc is not None and not getattr(_lc, 'demo', True):
+                    client = _lc
+            except Exception:
+                client = None
+        if client is None:
+            client = client_manager.get_client() if client_manager else None
         if client:
             pos = await client.get_positions(inst_type='SWAP')
             if not pos.get('error'):
