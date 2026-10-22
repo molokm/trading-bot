@@ -87,6 +87,10 @@ class Database:
             print("[db] Connected, running migrations ...", flush=True)
             try:
                 await self._migrate_pg(conn)
+            except Exception as e:
+                self._migrate_error = f"{type(e).__name__}: {e}"
+                print(f"[db] PG migration error: {self._migrate_error}", flush=True)
+                raise
             finally:
                 await conn.close()
             print("[db] PG init done", flush=True)
@@ -383,8 +387,25 @@ class Database:
                 timestamp     TEXT NOT NULL
             )
         """)
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id)")
+        # Isolation columns must exist BEFORE the index that references them
+        # (a fresh DB used to abort the whole migration here, leaving no
+        # exchange_close_trades table at all).
+        for _sql in (
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+        ):
+            try:
+                await conn.execute(_sql)
+            except Exception as e:
+                print(f"[db] trades isolation column: {type(e).__name__}: {e}", flush=True)
+        for _sql in (
+            "CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id)",
+        ):
+            try:
+                await conn.execute(_sql)
+            except Exception as e:
+                print(f"[db] trades index skipped: {type(e).__name__}: {e}", flush=True)
 
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS positions (
@@ -525,8 +546,22 @@ class Database:
                 synced_at     TEXT NOT NULL
             )
         """)
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ect_mode_ts ON exchange_close_trades(account_mode, close_ts DESC)")
-        await conn.execute("CREATE INDEX IF NOT EXISTS idx_ect_bot_label ON exchange_close_trades(bot_label)")
+        for _sql in (
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo'",
+            "ALTER TABLE exchange_close_trades ADD COLUMN IF NOT EXISTS account_key TEXT NOT NULL DEFAULT 'showcase'",
+        ):
+            try:
+                await conn.execute(_sql)
+            except Exception as e:
+                print(f"[db] ect isolation column: {type(e).__name__}: {e}", flush=True)
+        for _sql in (
+            "CREATE INDEX IF NOT EXISTS idx_ect_mode_ts ON exchange_close_trades(account_mode, close_ts DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_ect_bot_label ON exchange_close_trades(bot_label)",
+        ):
+            try:
+                await conn.execute(_sql)
+            except Exception as e:
+                print(f"[db] ect index skipped: {type(e).__name__}: {e}", flush=True)
 
         try:
             await self._ensure_account_isolation_columns_pg(conn)
