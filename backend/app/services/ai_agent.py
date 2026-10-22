@@ -166,7 +166,8 @@ How to analyze (write this into thesis/reason, in order):
 A) Market structure per coin: close vs EMA21/50/200, BB location, tf_4h trend alignment
 B) Momentum: ROC, MACD histogram sign, RSI (avoid extremes against the trade)
 C) Strength: ADX, regime, vol_ratio (participation)
-D) Risk context: ATR-based stop room, funding_rate bias, max_positions, adaptive preset
+D) Risk context: ATR-based stop room, funding_rate bias, max_positions, adaptive
+   preset, costs.round_trip_pct (fees+slippage you pay on every open->close)
 E) Self-reflection: memory + journal_tail + daily_lessons + reflection — trust
    verdict=edge, avoid setups that settled as bad_thesis/noise_loss, and do not
    size up on beta_win (PnL that was just BTC beta, alpha≈0)
@@ -182,6 +183,9 @@ Hard rules:
 8) Respect adaptive.size_cap and daily_lessons RULE*.
 9) Prefer BTC/ETH leadership consistent with the chosen side when trading alts.
 10) Size down (near size_pct floor) when ADX is only moderate or regime mixed.
+11) Cost check: an open is only worth it when the expected move clears
+    costs.round_trip_pct by >= costs.min_edge_mult (see costs.min_worthwhile_move_pct).
+    A target inside that cost band is negative EV even if direction is right.
 
 Worked examples (follow this reasoning pattern, not these exact numbers):
 
@@ -461,6 +465,7 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None,
         "daily_lessons": snapshot.get("daily_lessons") or [],
         "journal_tail": snapshot.get("journal_tail") or [],
         "memory": snapshot.get("memory"),
+        "costs": snapshot.get("costs"),
         "adaptive": snapshot.get("adaptive"),
     }
     raw_json = json.dumps(user_payload, ensure_ascii=False)

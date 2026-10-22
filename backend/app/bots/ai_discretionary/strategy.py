@@ -232,16 +232,17 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.31.0-debate-settlement"
+STRATEGY_VERSION = "v1.32.0-cost-aware"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.31 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "AI Discretionary 1H v1.32 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
     "ADX≥20, align≥0.62, conf≥0.68; до 2 позиций. Дебаты bull/bear на втором "
     "проходе LLM вместо слепого повтора (AI_DEBATE=0 отключает). "
     "Удержание тренда: min hold 90м, BE/трейл позже; soft take +2.8%, "
-    "partial 25%@+1.8%. Каждый закрытый трейд оценивается по alpha vs BTC "
-    "и R-multiple — уроки идут обратно в промпт. Закрытия по биржевому SL/TP "
-    "теперь учитываются в PnL и памяти, а не просто стираются."
+    "partial 25%@+1.8%. НОВОЕ: издержки явные — LLM видит round-trip "
+    "fee+slippage и минимально осмысленный ход, а статус показывает, какую "
+    "долю брутто-PnL съедают комиссии. Каждый закрытый трейд оценивается "
+    "по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
 )
 
 CT_VAL = {
@@ -307,6 +308,11 @@ class AIConfig:
     max_positions: int = 2                 # v1.29: allow 2 concurrent trends
     risk_per_trade: float = 0.015          # ~1.5% equity at stop (medium-aggressive)
     allocation_pct: float = 0.40           # max margin / equity per pos (medium-aggressive)
+    # v1.32 cost model: what one open->close round trip actually costs us.
+    # Market orders on both legs -> taker on both sides, plus slippage.
+    fee_taker_pct: float = 0.0005          # OKX USDT-M taker, per side
+    slippage_pct: float = 0.0002           # market-order slippage estimate, per side
+    cost_min_edge_mult: float = 3.0        # expected move should clear cost by >=3x
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 60            # monitor loop; LLM only on 1H close by default
@@ -2173,6 +2179,37 @@ class AIStrategy:
     def _effective_min_align(self) -> float:
         return float((self._adapt or {}).get("quant_min_align") or self.config.quant_min_align)
 
+    def _round_trip_cost_pct(self) -> float:
+        """Fees + slippage for a full open->close round trip, in % of notional.
+
+        v1.32: the LLM had no idea commissions exist, so a 0.10% gross "win"
+        looked free while it actually nets ~-0.04% after 0.05% taker on both
+        legs. Cost is now explicit in the snapshot (see Bysik & Slepaczuk 2026:
+        hourly ML forecasts die at 10 bps of costs unless execution is
+        cost-aware).
+        """
+        cfg = self.config
+        per_side = float(getattr(cfg, "fee_taker_pct", 0.0005) or 0.0) + \
+            float(getattr(cfg, "slippage_pct", 0.0002) or 0.0)
+        return round(2.0 * per_side * 100.0, 4)
+
+    def _turnover_stats(self, pnl: float, fees: float, equity: float) -> dict:
+        """Fees vs gross PnL/equity — the cost drag that "more trades" hides."""
+        net = float(pnl or 0.0)
+        fee = float(fees or 0.0)
+        gross = net + fee
+        return {
+            "round_trip_pct": self._round_trip_cost_pct(),
+            "fees_usd": round(fee, 2),
+            "gross_pnl_usd": round(gross, 2),
+            "fees_pct_of_gross": (
+                round(100.0 * fee / abs(gross), 1) if abs(gross) > 1e-9 else None
+            ),
+            "fees_pct_of_equity": (
+                round(100.0 * fee / float(equity), 2) if float(equity or 0) else None
+            ),
+        }
+
     def _snapshot(self) -> dict:
         open_list = []
         try:
@@ -2247,10 +2284,21 @@ class AIStrategy:
             "noise_loss": verdicts.count("noise_loss"),
             "avg_alpha_pct": round(sum(alphas) / len(alphas), 2) if alphas else None,
         }
+        rt = self._round_trip_cost_pct()
+        mult = float(getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+        turnover = self._turnover_stats(self._lifetime_pnl, self._lifetime_fees, self._equity)
+        costs = {
+            "round_trip_pct": rt,
+            "min_edge_mult": mult,
+            "min_worthwhile_move_pct": round(rt * mult, 3),
+            "fees_paid_usd": turnover["fees_usd"],
+            "fees_pct_of_gross": turnover["fees_pct_of_gross"],
+        }
         return {
             "equity": round(self._equity, 2),
             "capital": self._capital,
             "memory": memory,
+            "costs": costs,
             "max_leverage": self.config.max_leverage,
             "max_positions": self.config.max_positions,
             "open_positions": open_list,
@@ -6617,6 +6665,8 @@ class AIStrategy:
             "lifetime_pnl": round(self._lifetime_pnl, 2),
             "lifetime_trades": self._lifetime_trades,
             "lifetime_fees": round(self._lifetime_fees, 2),
+            "turnover": self._turnover_stats(
+                self._lifetime_pnl, self._lifetime_fees, self._equity),
             "total_trades": self._lifetime_trades,
             "session_trades": len(closed),
             "open_fills": len([t for t in self._trade_log if t.get("reason") == "open"]),
@@ -6697,6 +6747,9 @@ class AIStrategy:
                 "session_pnl": round(self._live_session_pnl, 2),
                 "lifetime_trades": self._live_lifetime_trades,
                 "lifetime_fees": round(self._live_lifetime_fees, 2),
+                "turnover": self._turnover_stats(
+                    self._live_lifetime_pnl, self._live_lifetime_fees,
+                    self._live_equity),
                 "win_rate": (
                     round(100.0 * self._live_lifetime_wins / self._live_lifetime_trades, 1)
                     if self._live_lifetime_trades else None
