@@ -808,6 +808,14 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             m = _resolve_groq_model(m)
             if m not in candidates:
                 candidates.append(m)
+    else:
+        _fb_raw = os.getenv("AI_MODEL_FALLBACKS", "").strip()
+        if not _fb_raw and "generativelanguage" in base_url:
+            # Gemini retires model ids often — keep a live free-tier chain.
+            _fb_raw = "gemini-3.5-flash-lite,gemini-3.1-flash-lite,gemini-2.5-flash"
+        for m in (x.strip() for x in _fb_raw.split(",")):
+            if m and m not in candidates:
+                candidates.append(m)
     last_err = None
     tpd_hit = False
     async with httpx.AsyncClient(timeout=45.0) as client:
@@ -905,7 +913,7 @@ def llm_status() -> dict:
         "model": (
             _resolve_groq_model(os.getenv("AI_LLM_MODEL"))
             if provider == "groq"
-            else (os.getenv("AI_LLM_MODEL") or (
+            else (os.getenv("OPENAI_MODEL") or os.getenv("AI_LLM_MODEL") or (
                 "gpt-4o-mini" if provider == "openai" else "mock-heuristic"
             ))
         ),
