@@ -3308,6 +3308,23 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
             status_code=400,
             detail='Укажите капитал зеркала (мин. $10)',
         )
+    # Persistence is required: without DB settings a restart silently loses LIVE.
+    if not db:
+        raise HTTPException(
+            status_code=500,
+            detail='БД недоступна — ключи LIVE негде сохранить (после рестарта отключится).',
+        )
+    try:
+        _probe_ts = str(int(__import__('time').time()))
+        await db.set_setting('live_connect_probe', _probe_ts)
+        if str(await db.get_setting('live_connect_probe') or '') != _probe_ts:
+            raise RuntimeError('readback mismatch')
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f'БД не принимает записи настроек: {e}',
+        )
+
     if live_manager is None:
         live_manager = OKXClientManager.new_instance()
     try:
@@ -3393,11 +3410,24 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
     except Exception as e:
         print(f'[LIVE] post-connect ensure err: {e}', flush=True)
 
-    print(f'[LIVE] mirror CONNECTED capital={capital} equity={total_eq}', flush=True)
+    _persisted = False
+    try:
+        _pv = await db.get_settings_batch(
+            ['live_mirror_enabled', 'live_mirror_key', 'live_mirror_secret', 'live_mirror_pass'])
+        _persisted = (
+            str(_pv[0] or '').strip() == '1'
+            and bool(_pv[1]) and bool(_pv[2]) and bool(_pv[3])
+        )
+    except Exception as _pe:
+        print(f'[LIVE] persist readback: {_pe}', flush=True)
+    print(f'[LIVE] mirror CONNECTED capital={capital} equity={total_eq} '
+          f'persisted={_persisted}', flush=True)
     return {
-        'message': 'LIVE mirror подключён',
+        'message': ('LIVE mirror подключён' if _persisted else
+                    'LIVE mirror подключён, но ключи НЕ сохранены в БД — после рестарта отключится'),
         'connected': True,
         'enabled': True,
+        'persisted': _persisted,
         'capital': round(float(capital), 2),
         'equity': round(float(total_eq), 2),
     }
@@ -3823,6 +3853,17 @@ async def health(request: Request):
             diag['pnl_source'] = _pr.get('source')
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
+        try:
+            if db:
+                _lv = await db.get_settings_batch(
+                    ['live_mirror_enabled', 'live_mirror_key',
+                     'live_mirror_secret', 'live_mirror_pass'])
+                diag['live_creds_db'] = {
+                    'enabled': _lv[0],
+                    'key': bool(_lv[1]), 'secret': bool(_lv[2]), 'pass': bool(_lv[3]),
+                }
+        except Exception as e:
+            diag['live_creds_db_err'] = str(e)[:120]
         _live_on = False
     _live_en = None
     try:
