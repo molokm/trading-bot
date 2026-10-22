@@ -41,6 +41,28 @@ PLANS = {
 }
 
 
+
+def _parse_stats_args(raw: str = "all") -> tuple:
+    """Split '/stats' args into (mode, period).
+
+    Accepts 'live', 'demo', optional period, in any of the two positions:
+    'live week', 'week live', 'demo today', 'all'.
+    """
+    aliases = {"today": "today", "1d": "today", "day": "today",
+               "сегодня": "today", "week": "week", "w": "week",
+               "неделя": "week", "30d": "30d", "month": "30d",
+               "месяц": "30d", "90d": "90d", "quarter": "90d",
+               "all": "all", "всё": "all", "все": "all", "total": "all"}
+    mode = "demo"
+    period = ""
+    for tok in str(raw or "").strip().lower().split():
+        if tok in ("live", "demo"):
+            mode = tok
+        elif tok in aliases:
+            period = aliases[tok]
+    return mode, (period or "all")
+
+
 class TelegramBotPoller:
     """Long-polling update loop + subscription (Stars) handling."""
 
@@ -109,7 +131,7 @@ class TelegramBotPoller:
             elif cmd in ("/stats", "/stat", "/statistics"):
                 # optional period: /stats week
                 parts = text.split()
-                period = parts[1].lower() if len(parts) > 1 else "all"
+                period = " ".join(parts[1:]).lower() if len(parts) > 1 else "all"
                 await self._cmd_stats(chat_id, period=period)
             elif cmd in ("/tracker",):
                 await self._send_info(chat_id, "results")
@@ -343,8 +365,11 @@ class TelegramBotPoller:
         return f"{sign}{n:.2f}"
 
     async def _cmd_stats(self, chat_id, period: str = "all"):
-        """Live DEMO stats — same engine as web /api/stats."""
-        period = (period or "all").strip().lower()
+        """Stats for DEMO (default) or LIVE — same engine as web /api/stats.
+
+        Usage: /stats [live|demo] [today|week|30d|90d|all]
+        """
+        mode, period = _parse_stats_args(period)
         aliases = {
             "today": "today", "1d": "today", "day": "today", "сегодня": "today",
             "week": "week", "w": "week", "неделя": "week",
@@ -367,11 +392,24 @@ class TelegramBotPoller:
 
         try:
             from app.services import pnl_engine
+            bills = None
+            allow_untagged = False
+            if mode == "live":
+                try:
+                    from app.main import _fetch_all_trade_bills
+                    from app.main import AI_ONLY_MODE as _ai_only
+                    bills = await _fetch_all_trade_bills(
+                        limit_per_page=100, mode="live")
+                    allow_untagged = bool(_ai_only)
+                except Exception as _be:
+                    log.warning("stats cmd live bills: %s", _be)
             data = await pnl_engine.compute_stats(
                 self.db,
-                account_mode="demo",
+                account_mode=mode,
                 ai_only=True,
                 period=period,
+                bills=bills,
+                allow_untagged_ai=allow_untagged,
                 sync_fn=None,  # avoid blocking TG on OKX; uses latest stored closes
             )
         except Exception as e:
@@ -403,7 +441,7 @@ class TelegramBotPoller:
         wr_s = f"{wr}%" if wr is not None else "—"
 
         text = (
-            f"📊 <b>Статистика DEMO · AI</b>\n"
+            f"📊 <b>Статистика {mode.upper()} · AI</b>\n"
             f"━━━━━━━━━━━━━━━\n"
             f"Период: <b>{period_labels.get(period, period)}</b>\n"
             f"{d_from} → {d_to}\n\n"
@@ -412,7 +450,7 @@ class TelegramBotPoller:
             f"Win rate: <b>{wr_s}</b> · PF <b>{pf_s}</b>\n"
             f"Ср. плюс: <b>{avg_w}</b> · Ср. минус: <b>{avg_l}</b>\n\n"
             f"<b>По монетам</b>\n{coins_block}\n\n"
-            f"<i>Только закрытые сделки · МСК · /stats</i>"
+            f"<i>Только закрытые сделки · МСК · {'/stats live' if mode == 'live' else '/stats'}</i>"
         )
         await self._send_msg(
             chat_id, text,

@@ -158,3 +158,14 @@ async def test_compute_pnl_endpoint_payload_matches_stats(monkeypatch):
 
     stats = await pe.compute_stats(db, account_mode="demo", period="all")
     assert payload["total"] == stats["realized_pnl"]
+
+
+def test_stats_command_parses_mode_and_period():
+    from app.services.telegram_bot import _parse_stats_args
+
+    assert _parse_stats_args("all") == ("demo", "all")
+    assert _parse_stats_args("live") == ("live", "all")
+    assert _parse_stats_args("live week") == ("live", "week")
+    assert _parse_stats_args("week live") == ("live", "week")
+    assert _parse_stats_args("demo сегодня") == ("demo", "today")
+    assert _parse_stats_args("") == ("demo", "all")
