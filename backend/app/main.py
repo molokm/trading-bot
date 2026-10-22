@@ -796,7 +796,7 @@ async def startup():
                     _slog(f'pre-AI live ensure: {_pre_ok}')
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
-                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '2')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), execute=_exec)
+                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '2')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), llm_manage_interval_sec=int(os.getenv('AI_LLM_MANAGE_SEC', '90')), llm_min_interval_sec=int(os.getenv('AI_LLM_MIN_SEC', '180')), execute=_exec)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
@@ -888,6 +888,8 @@ async def startup():
                 max_positions=int(os.getenv("AI_MAX_POSITIONS", "2")),
                 risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.012")),
                 poll_interval_sec=int(os.getenv("AI_POLL_SEC", "60")),
+                llm_manage_interval_sec=int(os.getenv("AI_LLM_MANAGE_SEC", "90")),
+                llm_min_interval_sec=int(os.getenv("AI_LLM_MIN_SEC", "180")),
                 execute=True,
             )
             ai_bot = AIStrategy(
