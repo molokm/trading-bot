@@ -2534,7 +2534,19 @@ async def ai_status():
     internal = status.get('lifetime_pnl', status.get('total_pnl'))
     status['total_pnl_internal'] = internal
     status['lifetime_pnl_internal'] = internal
-    return await _apply_history_kpi(status, 'AI Discretionary 1H')
+    status = await _apply_history_kpi(status, 'AI Discretionary 1H')
+    # History overlay replaces lifetime_pnl, so rebuild turnover from the same
+    # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
+    try:
+        if 'turnover' in status and hasattr(ai_bot, '_turnover_stats'):
+            status['turnover'] = ai_bot._turnover_stats(
+                float(status.get('lifetime_pnl') or 0),
+                float(status.get('lifetime_fees') or 0),
+                float(status.get('equity') or 0),
+            )
+    except Exception as _te:
+        print(f'[ai/status] turnover: {_te}', flush=True)
+    return status
 
 @app.get('/api/startup-log')
 @policy(PUBLIC)
