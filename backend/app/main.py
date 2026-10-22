@@ -3316,6 +3316,12 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
             status_code=500,
             detail='БД недоступна — ключи LIVE негде сохранить (после рестарта отключится).',
         )
+    if not getattr(db, '_pg_mode', False):
+        raise HTTPException(
+            status_code=503,
+            detail=('PostgreSQL недоступен (аварийный SQLite-режим): ключи LIVE '
+                    'не переживут рестарт. Восстановите БД и подключите заново.'),
+        )
     try:
         _probe_ts = str(int(__import__('time').time()))
         await db.set_setting('live_connect_probe', _probe_ts)
