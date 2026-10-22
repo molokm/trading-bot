@@ -121,6 +121,27 @@ def _resolve_groq_model(model: str | None) -> str:
 
 
 
+SYSTEM_PROMPT_SECOND_ENTRY = """You MAY open ONE additional OKX USDT-SWAP position while another
+position is already managed. This is the SECOND slot — a privilege, not a habit.
+
+Reply with ONE JSON object only (no markdown):
+{"thesis":"<=200 chars","reason":"<=200 chars: >=2 concrete metrics","regime":"bull|bear|chop|unknown",
+"confidence":0-1,"action":"open|hold","symbol":"<coin from candidates_allowed NOT in open_positions>|null",
+"side":"long|short|null","stop_pct":0.015-0.04,"take_pct":0.04-0.10}
+
+The bar is MUCH higher than for the first trade. Open only if ALL hold:
+1) A different coin from open_positions with an exceptional setup: align >= 0.85, ADX >= 25,
+   4H structure aligned, momentum fresh (RSI not exhausted).
+2) It is NOT correlated with the held coin (no BTC+ETH, no two of SOL/AVAX/DOT/ADA/NEAR/LINK/UNI).
+   Correlated stacking is just 2x beta, not diversification.
+3) The signal is an independent market story — not "everything is pumping".
+4) take_pct clears costs.min_worthwhile_move_pct by a wide margin; RR >= 1.8.
+5) Size is set by the engine at half risk (second_slot.risk_pct) — do not inflate it.
+
+DEFAULT action is hold. When in doubt, hold: one working trade beats two average ones.
+Never propose a coin already in open_positions — that is the manage pass.
+"""
+
 SYSTEM_PROMPT_MANAGE = """You MANAGE an open OKX USDT-SWAP position (do not open a new coin).
 Think like a desk: structure → momentum → risk → action.
 Reply with ONE JSON object only (no markdown). Write thesis/reason FIRST — reason
@@ -417,7 +438,9 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None,
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
     global _ACTIVE_SYSTEM_PROMPT
     mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
-    if debate and not (mode == "manage" and open_syms):
+    if mode == "second_entry" and not debate:
+        _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_SECOND_ENTRY
+    elif debate and not (mode == "manage" and open_syms):
         _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_DEBATE
     else:
         _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
@@ -466,6 +489,7 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None,
         "journal_tail": snapshot.get("journal_tail") or [],
         "memory": snapshot.get("memory"),
         "costs": snapshot.get("costs"),
+        "second_slot": snapshot.get("second_slot"),
         "adaptive": snapshot.get("adaptive"),
     }
     raw_json = json.dumps(user_payload, ensure_ascii=False)

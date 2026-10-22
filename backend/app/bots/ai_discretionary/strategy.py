@@ -23,6 +23,8 @@ INVARIANTS (enforced at runtime, tested in tests/test_mirror_strict.py):
 7. No exchange-level SL/TP on LIVE (they would close LIVE without DEMO).
    Orphan algos are purged (_purge_live_algos); a LIVE position not opened by
    this mirror (entry clOrdId != ai*) is never flattened by the bot.
+8. The 2nd concurrent slot (_try_second_entry) opens through _open() only, so
+   it is DEMO-first and reaches LIVE solely via the same mirror chokepoint.
 
 ANY CHANGE TO THESE GUARDS MUST:
 - Update tests/test_mirror_strict.py
@@ -72,7 +74,7 @@ from app.services.position_claim import (
     release_open,
     sweep_exchange_orphans,
 )
-from app.services.risk_guard import assert_can_open
+from app.services.risk_guard import assert_can_open, _symbol_to_group
 from app.services.risk_regime import regime_multiplier
 from app.services.telegram_notifier import TelegramNotifier
 from app.services.trade_memory import build_lessons, settle_trade
@@ -232,17 +234,18 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.32.0-cost-aware"
+STRATEGY_VERSION = "v1.33.0-second-slot"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.32 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
-    "ADX≥20, align≥0.62, conf≥0.68; до 2 позиций. Дебаты bull/bear на втором "
-    "проходе LLM вместо слепого повтора (AI_DEBATE=0 отключает). "
-    "Удержание тренда: min hold 90м, BE/трейл позже; soft take +2.8%, "
-    "partial 25%@+1.8%. НОВОЕ: издержки явные — LLM видит round-trip "
-    "fee+slippage и минимально осмысленный ход, а статус показывает, какую "
-    "долю брутто-PnL съедают комиссии. Каждый закрытый трейд оценивается "
-    "по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
+    "AI Discretionary 1H v1.33 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "ADX≥20, align≥0.62, conf≥0.68. Дебаты bull/bear на втором проходе LLM "
+    "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
+    "soft take +2.8%, partial 25%@+1.8%. Второй слот: при открытой и уже "
+    "зелёной позиции бот может взять ещё одну — но только сильный (align≥0.85, "
+    "ADX≥25, conf≥0.80) и НЕкоррелированный актив, с половинным риском и "
+    "маржой ≤30%. Издержки явные: LLM видит round-trip fee+slippage, статус "
+    "показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый трейд "
+    "оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
 )
 
 CT_VAL = {
@@ -313,6 +316,13 @@ class AIConfig:
     fee_taker_pct: float = 0.0005          # OKX USDT-M taker, per side
     slippage_pct: float = 0.0002           # market-order slippage estimate, per side
     cost_min_edge_mult: float = 3.0        # expected move should clear cost by >=3x
+    # v1.33: opportunistic second slot. Only when the first trade already works.
+    second_entry_enabled: bool = True
+    second_entry_margin_pct: float = 0.30  # max margin for the 2nd pos (1st stays 40%)
+    second_entry_risk_pct: float = 0.006   # half the normal risk budget
+    second_entry_min_align: float = 0.85
+    second_entry_min_adx: float = 25.0
+    second_entry_min_conf: float = 0.80
     bar: str = "1H"
     candle_limit: int = 120
     poll_interval_sec: int = 60            # monitor loop; LLM only on 1H close by default
@@ -504,6 +514,7 @@ class AIStrategy:
         # and account_mode="live" for full DB isolation.
         self._live_positions: dict[str, AIPosition] = {}
         self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
+        self._second_entry_bar: str | None = None  # v1.33: bar already asked for a 2nd slot
         self._live_equity = 0.0
         self._live_capital = 0.0
         self._live_session_pnl = 0.0
@@ -2210,6 +2221,109 @@ class AIStrategy:
             ),
         }
 
+    def _second_entry_veto(self, coin: str, side: str, conf: float,
+                           align: float = None, adx: float = None) -> str | None:
+        """v1.33: reason why a 2nd concurrent position is NOT allowed (None = allowed).
+
+        The feature exists to catch a genuinely independent strong setup while
+        trade #1 is working — not to double exposure to the same market move.
+        """
+        cfg = self.config
+        if not bool(getattr(cfg, "second_entry_enabled", True)):
+            return "disabled"
+        if len(self._positions) >= int(getattr(cfg, "max_positions", 2) or 2):
+            return "max_positions"
+        if len(self._positions) != 1:
+            return f"open_n:{len(self._positions)}"
+        if coin in self._positions:
+            return "same_coin"
+        # Trade #1 must already pay for itself (green beyond its own round trip).
+        try:
+            first_coin, first_pos = next(iter(self._positions.items()))
+            ind0 = (self._latest_indicators or {}).get(first_coin) or {}
+            px0 = float(ind0.get("close") or 0)
+            upl0 = self._unrealized_pct(first_pos, px0) if px0 else 0.0
+        except Exception:
+            upl0 = 0.0
+        if upl0 < self._round_trip_cost_pct():
+            return f"first_trade_not_green:{upl0:+.2f}"
+        if float(conf or 0) < float(getattr(cfg, "second_entry_min_conf", 0.80) or 0.80):
+            return f"low_conf:{float(conf or 0):.2f}"
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        _align = float(align if align is not None else (
+            ind.get("align_short") if side == "short" else ind.get("align_long")) or 0)
+        if _align < float(getattr(cfg, "second_entry_min_align", 0.85) or 0.85):
+            return f"weak_align:{_align:.2f}"
+        _adx = float(adx if adx is not None else (ind.get("adx") or 0))
+        if _adx < float(getattr(cfg, "second_entry_min_adx", 25.0) or 25.0):
+            return f"low_adx:{_adx:.1f}"
+        # Correlation: never stack the same group (BTC+ETH, SOL+AVAX/DOT/ADA/...).
+        new_group = _symbol_to_group(f"{coin}-USDT-SWAP")
+        for held in self._positions:
+            if _symbol_to_group(f"{held}-USDT-SWAP") == new_group:
+                return f"correlated:{new_group}"
+        return None
+
+    async def _try_second_entry(self, client, fresh: list = None) -> None:
+        """v1.33: ask the LLM for an optional 2nd slot, gated hard."""
+        cfg = self.config
+        if not bool(getattr(cfg, "second_entry_enabled", True)):
+            return
+        if len(self._positions) != 1:
+            return
+        if len(self._positions) >= int(getattr(cfg, "max_positions", 2) or 2):
+            return
+        if not fresh:
+            return   # one extra LLM call per closed bar, never per 90s manage poll
+        bar_key = ",".join(sorted(str(x) for x in (fresh or []))) or f"tick{self._tick_count}"
+        if getattr(self, "_second_entry_bar", None) == bar_key:
+            return
+        snap = self._snapshot()
+        snap["decision_mode"] = "second_entry"
+        snap["decision_trigger"] = "second_slot"
+        snap["second_slot"] = {
+            "open_n": len(self._positions),
+            "held": list(self._positions),
+            "margin_pct": float(getattr(cfg, "second_entry_margin_pct", 0.30) or 0.30),
+            "risk_pct": float(getattr(cfg, "second_entry_risk_pct", 0.006) or 0.006),
+            "min_align": float(getattr(cfg, "second_entry_min_align", 0.85) or 0.85),
+            "min_adx": float(getattr(cfg, "second_entry_min_adx", 25.0) or 25.0),
+        }
+        self._second_entry_bar = bar_key
+        try:
+            dec = await call_llm(snap, provider=self._provider())
+        except Exception as e:
+            self._record_exec("second_skip", reason=f"llm_error:{str(e)[:80]}")
+            return
+        action = str(dec.get("action") or "hold").lower()
+        coin = str(dec.get("symbol") or "").upper()
+        side = str(dec.get("side") or "").lower()
+        if action != "open" or not coin or side not in ("long", "short"):
+            self._record_exec("second_skip", reason=str(dec.get("reason") or "hold")[:80])
+            return
+        _rl = str(dec.get("reason") or "").lower()
+        if "mock:" in _rl or "via_mock" in _rl or "llm_error" in _rl or _rl.startswith("fallback"):
+            self._record_exec("second_skip", reason="mock_or_llm_error")
+            return
+        conf = float(dec.get("confidence") or 0)
+        veto = self._second_entry_veto(coin, side, conf)
+        if veto is None:
+            # Full open veto chain: regime, funding, BTC leadership, 4H, RR.
+            veto = self._quant_veto_open(dec)
+        if veto:
+            self._record_exec("second_skip", coin=coin, side=side, reason=str(veto)[:80])
+            print(f"[AI] second slot skipped {coin} {side}: {veto}", flush=True)
+            return
+        self._record_exec("second_entry", coin=coin, side=side,
+                          conf=conf, reason=str(dec.get("reason") or "")[:100])
+        print(f"[AI] SECOND SLOT {side} {coin} conf={conf:.2f} "
+              f"held={list(self._positions)} (risk=half, margin<=30%)", flush=True)
+        await self._open(client, coin, side,
+                         float(dec.get("stop_pct") or 0.03),
+                         float(dec.get("take_pct") or 0.06),
+                         str(dec.get("reason") or "second_entry")[:200],
+                         confidence=conf, second=True)
+
     def _snapshot(self) -> dict:
         open_list = []
         try:
@@ -2348,7 +2462,8 @@ class AIStrategy:
 
     # ── sizing (anti-liq) ──────────────────────────────────────
     def _size_order(self, coin: str, entry: float, stop_pct: float,
-                    equity: float = None) -> tuple[float, float]:
+                    equity: float = None, risk_pct: float = None,
+                    margin_pct: float = None) -> tuple[float, float]:
         """Apply regime‑adjusted sizing.
 
         Returns (contracts_size, leverage) with risk and margin caps.
@@ -2373,12 +2488,17 @@ class AIStrategy:
             mult = 1.0
         # v1.14: hard cap risk at 1.2% even if env/DB still has 2%
         _r = float(getattr(cfg, "risk_per_trade", 0.012) or 0.012)
+        if risk_pct is not None:
+            _r = float(risk_pct)
         if _r > 0.012:
             _r = 0.012
         risk_usd = eq * _r * mult
         # notional such that stop_pct * notional ≈ risk_usd
         notional = risk_usd / stop_pct if stop_pct > 0 else 0
-        max_margin = eq * cfg.allocation_pct
+        _alloc = float(getattr(cfg, "allocation_pct", 0.40) or 0.40)
+        if margin_pct is not None:
+            _alloc = min(_alloc, float(margin_pct))
+        max_margin = eq * _alloc
         # leverage chosen ≤ max, so margin = notional/lev ≤ max_margin
         lev = min(cfg.max_leverage, max(1.0, notional / max_margin if max_margin > 0 else 1.0))
         # if still over margin, cut notional
@@ -2556,7 +2676,8 @@ class AIStrategy:
         return True
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
-                    reason: str, confidence: float = 0.0, thesis: str = ""):
+                    reason: str, confidence: float = 0.0, thesis: str = "",
+                    second: bool = False):
         if client is not None and not getattr(client, "demo", True):
             print(f"[AI] BLOCK open on non-demo client {coin}", flush=True)
             self._record_exec("open_skip", coin=coin, side=side, reason="live_client_forbidden")
@@ -2567,7 +2688,13 @@ class AIStrategy:
             return
         avail = await self._avail_usdt(client)
         eq_cap = min(self._equity, avail) if avail > 0 else self._equity
-        sz, lev = self._size_order(coin, entry, stop_pct, equity=eq_cap)
+        _risk_pct = None
+        _margin_pct = None
+        if second:
+            _risk_pct = float(getattr(self.config, "second_entry_risk_pct", 0.006) or 0.006)
+            _margin_pct = float(getattr(self.config, "second_entry_margin_pct", 0.30) or 0.30)
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=eq_cap,
+                                   risk_pct=_risk_pct, margin_pct=_margin_pct)
         if sz <= 0:
             self._record_exec("open_skip", coin=coin, side=side, reason="size=0",
                               entry=entry, stop_pct=stop_pct)
@@ -2624,7 +2751,8 @@ class AIStrategy:
             # 51008: margin/borrow quota — resize from real available balance, retry once
             if resp.get("error") and "51008" in msg and avail > 0:
                 sz2, lev2 = self._size_order(coin, entry, stop_pct,
-                                             equity=avail * 0.9)
+                                             equity=avail * 0.9,
+                                             risk_pct=_risk_pct, margin_pct=_margin_pct)
                 if sz2 > 0 and sz2 < sz:
                     try:
                         await client.set_leverage(inst, lev2, mgn_mode="cross",
@@ -5467,6 +5595,15 @@ class AIStrategy:
                     print(f"[AI] quant_auto override → {decision}", flush=True)
             except Exception as e:
                 print(f"[AI] quant_auto: {e}", flush=True)
+
+        # v1.33: opportunistic 2nd slot. Run after the manage decision is known
+        # (never when it is closing/reducing #1) — one extra LLM call per bar.
+        try:
+            _act = str(decision.get("action") or "hold").lower()
+            if len(self._positions) == 1 and _act in ("hold", "add", "reduce"):
+                await self._try_second_entry(client, fresh)
+        except Exception as e:
+            print(f"[AI] second_entry: {e}", flush=True)
 
         action = decision.get("action")
         coin = decision.get("symbol")
