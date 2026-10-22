@@ -3862,7 +3862,8 @@ async def health(request: Request):
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
         try:
-            diag['exchange_sync'] = dict(_sync_diag)
+            diag['exchange_sync'] = {k: dict(v) for k, v in _sync_diag.items()}
+            diag['bills'] = {k: dict(v) for k, v in _bills_diag.items()}
         except Exception:
             pass
         try:
@@ -5759,6 +5760,7 @@ async def _get_okx_realized_pnl() -> dict:
                 pnl[key] += trade_pnl
     return pnl
 _bills_cache: dict = {}
+_bills_diag: dict = {}
 _BILLS_TTL = 60
 
 async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> list:
@@ -5809,11 +5811,18 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
                     continue
                 break
             if not resp or resp.get('error'):
-                print(f'[bills] {mode}/{endpoint} error: {(resp or {}).get("message", "")}', flush=True)
+                _msg = str((resp or {}).get('message', ''))[:200]
+                print(f'[bills] {mode}/{endpoint} error: {_msg}', flush=True)
+                _bd = _bills_diag.setdefault(mode, {'endpoints': {}})
+                _bd['endpoints'].setdefault(endpoint, {})['error'] = _msg
                 break
             data = resp.get('data', []) or []
             if not data:
                 break
+            _bd = _bills_diag.setdefault(mode, {'endpoints': {}})
+            _ep = _bd['endpoints'].setdefault(endpoint, {'pages': 0, 'rows': 0, 'error': ''})
+            _ep['pages'] = pages
+            _ep['rows'] = int(_ep.get('rows') or 0) + len(data)
             added = 0
             for b in data:
                 bid = str(b.get('billId', '') or '')
@@ -5994,23 +6003,24 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
             len(recovered_labels),
             ', '.join(f'{k}x{v}' for k, v in _rc.items()),
         ), flush=True)
-    _sync_diag.update({'ts': int(_time.time()), 'mode': _mode,
-                       'bills': len(bills), 'close_orders': len(close_by_ord),
-                       'rows': len(rows)})
+    _sd = _sync_diag.setdefault(_mode, {})
+    _sd.update({'ts': int(_time.time()),
+                'bills': len(bills), 'close_orders': len(close_by_ord),
+                'rows': len(rows)})
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)
             _exchange_sync_ts = _time.time()
-            _sync_diag.update({'ok': True, 'stored': n, 'err': ''})
+            _sd.update({'ok': True, 'stored': n, 'err': ''})
             print(f'[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders', flush=True)
             return n
         except Exception as e:
-            _sync_diag.update({'ok': False, 'stored': 0, 'err': str(e)[:200]})
+            _sd.update({'ok': False, 'stored': 0, 'err': str(e)[:200]})
             print(f'[exchange-sync] DB upsert error: {e}', flush=True)
             import traceback
             traceback.print_exc()
     else:
-        _sync_diag.update({'ok': True, 'stored': 0, 'err': ''})
+        _sd.update({'ok': True, 'stored': 0, 'err': ''})
     return 0
 
 @app.post('/api/pnl/rebuild-exchange')
