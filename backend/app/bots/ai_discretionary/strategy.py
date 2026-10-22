@@ -17,6 +17,12 @@ INVARIANTS (enforced at runtime, tested in tests/test_mirror_strict.py):
    _open() blocks with "live_client_forbidden" if called with live client.
 5. Mirror enable flag is EXPLICIT opt-in (DB live_mirror_enabled='1'),
    fail-closed on any error (_mirror_enabled()).
+6. Mirror NEVER opens on its own: opens are event-driven copies of a DEMO open
+   (or _clone_missing_to_live, gated by the "Connect LIVE" watermark). There is
+   no reconcile-based auto-open; a manual LIVE close is not "corrected".
+7. No exchange-level SL/TP on LIVE (they would close LIVE without DEMO).
+   Orphan algos are purged (_purge_live_algos); a LIVE position not opened by
+   this mirror (entry clOrdId != ai*) is never flattened by the bot.
 
 ANY CHANGE TO THESE GUARDS MUST:
 - Update tests/test_mirror_strict.py
@@ -69,6 +75,7 @@ from app.services.position_claim import (
 from app.services.risk_guard import assert_can_open
 from app.services.risk_regime import regime_multiplier
 from app.services.telegram_notifier import TelegramNotifier
+from app.services.trade_memory import build_lessons, settle_trade
 
 AI_BOT_ID = "ai_strategy"
 
@@ -139,10 +146,12 @@ def _verify_mirror_guards() -> None:
 
     Guards (must exist as methods on AIStrategy):
       _require_demo_twin_open, _require_demo_flat_for_close,
-      _live_market_order, _client, _open, _mirror_enabled
+      _live_market_order, _client, _open, _mirror_enabled,
+      _live_clone_watermark, _purge_live_algos
     """
     required = ("_require_demo_twin_open", "_require_demo_flat_for_close",
-                "_live_market_order", "_client", "_open", "_mirror_enabled")
+                "_live_market_order", "_client", "_open", "_mirror_enabled",
+                "_live_clone_watermark", "_purge_live_algos")
     missing = [g for g in required if not hasattr(AIStrategy, g)]
 
     if missing:
@@ -223,14 +232,16 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.30.0-hold-trend"
+STRATEGY_VERSION = "v1.31.0-debate-settlement"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.30 — 14 монет (+LTC/DOT/UNI/NEAR). "
-    "Вход: импульс EMA21+MACD+ROC, ADX≥20, align≥0.62, conf≥0.68; до 2 позиций. "
-    "Удержание тренда: min hold 90м, BE/трейл позже; индикаторный выход "
-    "не режет при сильном align. Soft take +2.8%, partial 25%@+1.8%. "
-    "Цель — не отдавать основное движение шуму 1H."
+    "AI Discretionary 1H v1.31 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "ADX≥20, align≥0.62, conf≥0.68; до 2 позиций. Дебаты bull/bear на втором "
+    "проходе LLM вместо слепого повтора (AI_DEBATE=0 отключает). "
+    "Удержание тренда: min hold 90м, BE/трейл позже; soft take +2.8%, "
+    "partial 25%@+1.8%. Каждый закрытый трейд оценивается по alpha vs BTC "
+    "и R-multiple — уроки идут обратно в промпт. Закрытия по биржевому SL/TP "
+    "теперь учитываются в PnL и памяти, а не просто стираются."
 )
 
 CT_VAL = {
@@ -420,7 +431,10 @@ class AIConfig:
     def __post_init__(self):
         if self.symbols is None:
             # Majors first — fewer noisy alts (DOGE/BCH/DAI) after drawdown period
-            order = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "OKB", "LINK", "AVAX", "ADA")
+            order = (
+                "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "OKB",
+                "LINK", "AVAX", "ADA", "LTC", "DOT", "UNI", "NEAR",
+            )
             majors = [s for s in order if s in set(ALLOWED_SYMBOLS)]
             self.symbols = majors or list(ALLOWED_SYMBOLS)
 
@@ -448,6 +462,11 @@ class AIPosition:
     owner_checked: bool = False   # cache _entry_fill_owner — historical fact
     owner_prefix: str = ""
     demo_trade_id: str = ""       # shared id: DEMO clOrdId=aid{id}, LIVE=ail{id}
+    # ── settlement memory (P2): context captured at entry ──
+    risk_usd: float = 0.0         # planned risk in USDT (size * stop distance)
+    btc_ref: float = 0.0          # BTC price at entry — benchmark anchor
+    entry_confidence: float = 0.0
+    entry_thesis: str = ""
 
 
 class AIStrategy:
@@ -478,6 +497,7 @@ class AIStrategy:
         # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
         # and account_mode="live" for full DB isolation.
         self._live_positions: dict[str, AIPosition] = {}
+        self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
         self._live_equity = 0.0
         self._live_capital = 0.0
         self._live_session_pnl = 0.0
@@ -835,6 +855,61 @@ class AIStrategy:
         except Exception:
             # Fail-closed: любая ошибка чтения = mirror OFF
             return False
+
+    async def _live_clone_watermark(self) -> int:
+        """Explicit "Connect LIVE" timestamp (unix secs); 0 = unknown.
+
+        Fail-closed: without a watermark we cannot tell whether a DEMO position
+        was opened while mirroring was on, so cloning is refused. This is what
+        keeps LIVE from opening trades that the bot did not copy live.
+        """
+        if not self.db:
+            return 0
+        try:
+            raw = await self.db.get_setting("live_mirror_connected_at")
+            return int(float(raw)) if raw else 0
+        except Exception:
+            return 0
+
+    async def _purge_live_algos(self, lc) -> int:
+        """Cancel exchange-level TP/SL on LIVE (orphans from older builds).
+
+        This build deliberately places NO SL/TP on the mirror account: an algo
+        order there can close LIVE without DEMO, which is exactly how the mirror
+        ended up trading by itself. Anything left behind must be removed.
+        """
+        if not lc:
+            return 0
+        # Only touch orders on mirrored instruments or ones this bot placed.
+        mirrored = {f"{c}-USDT-SWAP" for c in (self._live_positions or {})}
+        cancelled = 0
+        for kind in ("conditional", "move_order_stop", "oco"):
+            try:
+                resp = await lc.get_algo_orders(
+                    ord_type=kind, inst_type="SWAP", state="live", limit=100)
+            except Exception as e:
+                print(f"[AI-LIVE] purge algos {kind}: {e}", flush=True)
+                continue
+            for row in ((resp or {}).get("data") or []):
+                try:
+                    inst = str(row.get("instId") or "")
+                    algo = str(row.get("algoId") or "")
+                    cid = str(row.get("clOrdId") or "").lower()
+                    if not algo or not inst.endswith("-USDT-SWAP"):
+                        continue
+                    if inst not in mirrored and not cid.startswith("ai"):
+                        continue  # user's own algo on an unrelated instrument
+                    r = await lc.cancel_algo_order(inst, algo)
+                    if not (r or {}).get("error"):
+                        cancelled += 1
+                except Exception:
+                    continue
+        if cancelled:
+            print(f"[AI-LIVE] purged {cancelled} exchange algo order(s) — "
+                  f"mirror exits are bot-side only", flush=True)
+            self._exec_log.append(_exec_evt(
+                "mirror_purge_algos", "ALL", "-", reason=f"cancelled={cancelled}"))
+        return cancelled
 
     async def _try_refresh_live_client(self) -> bool:
         """Call main's ensure callback if wired; return whether live client is ready."""
@@ -1721,6 +1796,9 @@ class AIStrategy:
                 "entry": entry.get("entry_price") or entry.get("entry"),
                 "exit": entry.get("exit_price") or entry.get("exit"),
             }
+            for k in ("move_pct", "btc_pct", "alpha_pct", "r_mult", "verdict"):
+                if entry.get(k) is not None:
+                    row[k] = entry[k]
             self._journal = (getattr(self, "_journal", None) or []) + [row]
             self._journal = self._journal[-100:]
         except Exception as e:
@@ -1731,52 +1809,7 @@ class AIStrategy:
         journal = list(getattr(self, "_journal", None) or self._closed_trades())[-30:]
         if len(journal) < 3:
             return list(getattr(self, "_daily_lessons", None) or [])[:3]
-        by_coin: dict = {}
-        by_reason: dict = {}
-        losses = []
-        wins = []
-        for t in journal:
-            coin = (t.get("coin") or t.get("symbol") or "?").replace("-USDT-SWAP", "")
-            pnl = float(t.get("pnl") or 0)
-            reason = str(t.get("reason") or "unknown")
-            by_coin.setdefault(coin, {"pnl": 0.0, "n": 0, "wins": 0})
-            by_coin[coin]["pnl"] += pnl
-            by_coin[coin]["n"] += 1
-            if pnl > 0:
-                by_coin[coin]["wins"] += 1
-                wins.append(t)
-            else:
-                losses.append(t)
-            by_reason[reason] = by_reason.get(reason, 0) + (1 if pnl <= 0 else 0)
-        lessons = []
-        # Worst coin
-        if by_coin:
-            worst = min(by_coin.items(), key=lambda x: x[1]["pnl"])
-            if worst[1]["pnl"] < 0 and worst[1]["n"] >= 2:
-                lessons.append(
-                    f"Avoid weak setups on {worst[0]} (recent sum PnL {worst[1]['pnl']:+.1f} over {worst[1]['n']} trades)."
-                )
-        # Dominant loss reason
-        if by_reason:
-            top_r = max(by_reason.items(), key=lambda x: x[1])
-            if top_r[1] >= 2:
-                lessons.append(
-                    f"Frequent loss exit={top_r[0]} x{top_r[1]} — tighten entry or exit earlier on that path."
-                )
-        # Streak / size
-        loss_n = len(losses)
-        if loss_n >= 3 and len(journal) >= 5:
-            lessons.append(
-                "Recent losses cluster — prefer hold unless align>=0.7 and RR>=2; cut size."
-            )
-        if not lessons and wins:
-            lessons.append("No strong anti-pattern — keep requiring RR>=1.8 and bar-close only.")
-        # Dedup
-        out = []
-        for L in lessons:
-            if L not in out:
-                out.append(L)
-        return out[:3]
+        return build_lessons(journal)
 
     def _maybe_refresh_daily_lessons(self) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1806,12 +1839,165 @@ class AIStrategy:
         lessons = getattr(self, "_daily_lessons", None) or []
         for i, L in enumerate(lessons, 1):
             parts.append(f"RULE{i}:{L}")
+        for t in (getattr(self, "_journal", None) or [])[-3:]:
+            if t.get("alpha_pct") is None:
+                continue
+            r = t.get("r_mult")
+            r_s = f"{float(r):+.2f}" if r is not None else "n/a"
+            parts.append(
+                f"SETTLED {t.get('coin')} {t.get('side')} R={r_s} "
+                f"alpha={float(t.get('alpha_pct')):+.2f}% -> {t.get('verdict')}"
+            )
         preset = (self._adapt or {}).get("preset")
         if preset:
             parts.append(
                 f"Active preset={preset}; conf>={(self._adapt or {}).get('min_confidence')}"
             )
         return " | ".join(parts)[:900]
+
+    def _settle_close_memory(self, pos, coin: str, exit_px: float, pnl: float,
+                             reason: str) -> dict:
+        """Score a close (alpha vs BTC, R-multiple) and refresh lessons/reflection."""
+        hold_min = None
+        try:
+            opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+            hold_min = round((datetime.now(timezone.utc) - opened).total_seconds() / 60.0, 1)
+        except Exception:
+            pass
+        entry = float(getattr(pos, "entry_price", 0) or 0)
+        risk = float(getattr(pos, "risk_usd", 0) or 0)
+        if risk <= 0 and entry > 0:
+            # Adopted positions have no planned risk — derive it from the stop.
+            try:
+                stop = float(getattr(pos, "stop_price", 0) or 0)
+                notional = abs(float(getattr(pos, "size", 0) or 0)) * \
+                    CT_VAL.get(coin, 0.01) * entry
+                risk = abs(entry - stop) / entry * notional
+            except Exception:
+                risk = 0.0
+        btc_exit = float((self._latest_indicators.get("BTC") or {}).get("close") or 0)
+        st = settle_trade(
+            side=str(getattr(pos, "side", "") or ""),
+            entry=entry,
+            exit=float(exit_px or 0),
+            pnl=float(pnl or 0),
+            risk_usd=risk,
+            btc_entry=float(getattr(pos, "btc_ref", 0) or 0),
+            btc_exit=btc_exit,
+        )
+        try:
+            self._journal_append({
+                "time": datetime.now(timezone.utc).isoformat(),
+                "coin": coin, "side": getattr(pos, "side", ""),
+                "pnl": pnl, "reason": reason,
+                "hold_min": hold_min, "entry": entry, "exit": exit_px,
+                **st,
+            })
+        except Exception as e:
+            print(f"[AI] journal on close: {e}", flush=True)
+        try:
+            self._maybe_refresh_daily_lessons()
+        except Exception as e:
+            print(f"[AI] lessons on close: {e}", flush=True)
+        try:
+            self._reflection = self._build_reflection(self._rolling_stats())
+        except Exception as e:
+            print(f"[AI] reflection on close: {e}", flush=True)
+        return st
+
+    async def _record_flat_close(self, client, pos, coin: str, exit_px: float,
+                                 reason: str) -> None:
+        """Book a close that already happened on the exchange (SL/TP, manual, race).
+
+        The old code just dropped such positions from memory: PnL, lifetime stats
+        and the journal were never updated. This keeps books and memory in sync.
+        """
+        if not pos:
+            return
+        inst = getattr(pos, "inst_id", "") or f"{coin}-USDT-SWAP"
+        side = str(getattr(pos, "side", "") or "")
+        entry_px = float(getattr(pos, "entry_price", 0) or 0)
+        try:
+            exit_px = float(exit_px or 0)
+        except (TypeError, ValueError):
+            exit_px = 0.0
+        # Resolve the real exit BEFORE computing PnL: exit=0 would book a -100% loss.
+        if exit_px <= 0 and client is not None:
+            try:
+                ticker = await client.get_ticker(inst)
+                _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                if isinstance(_td, list) and _td:
+                    exit_px = float(_td[0].get("last") or 0)
+            except Exception:
+                pass
+        if exit_px <= 0:
+            exit_px = entry_px  # unknown fill — book flat, never a phantom total loss
+        try:
+            _e, exit_px, pnl, _fee = compute_close_metrics(
+                pos, coin, exit_px, fee=0)
+        except Exception:
+            pnl = 0.0
+
+        self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        if pnl > 0:
+            self._lifetime_wins += 1
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+        self._persist()
+
+        side_order = "sell" if side == "long" else "buy"
+        self._trade_log.append({
+            "account_mode": self._account_mode_tag()[0],
+            "time": datetime.now(timezone.utc).isoformat(),
+            "side": side_order, "symbol": inst,
+            "size": getattr(pos, "size", 0), "pnl": round(pnl, 2),
+            "entry_price": getattr(pos, "entry_price", 0),
+            "exit_price": exit_px, "fee": 0.0,
+            "reason": reason, "pos_side": side, "coin": coin,
+            "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+        })
+        mode, key = self._account_mode_tag()
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=side_order, sz=getattr(pos, "size", 0),
+                    px=exit_px, ord_id="", inst_id=inst, ord_type="market",
+                    fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="closed", signal_id=int(getattr(pos, "signal_id", 0) or 0) or None,
+                    account_mode=mode, account_key=key,
+                )
+            except Exception as e:
+                print(f"[AI] db close (flat): {e}", flush=True)
+            try:
+                await self.db.delete_position_inst(self.BOT_ID, inst, side)
+            except Exception:
+                pass
+        try:
+            await release_open(self.db, self.BOT_ID, inst, side)
+        except Exception:
+            pass
+        try:
+            self._last_closes[coin] = {
+                "side": side, "ts": time.time(),
+                "pnl": float(pnl or 0), "reason": str(reason or "exchange_stop"),
+            }
+        except Exception:
+            pass
+        try:
+            await self._notify_close_tg(
+                pos, coin, reason or "exchange_stop", exit_px, pnl, account_mode=mode)
+        except Exception as e:
+            print(f"[AI] TG close (flat): {e}", flush=True)
+
+        self._settle_close_memory(pos, coin, exit_px, pnl, reason or "exchange_stop")
+        self._positions.pop(coin, None)
+        print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [flat]", flush=True)
 
     def _refresh_adaptive(self, force_log: bool = False) -> dict:
         """Bounded self-tune from rolling trade outcomes. Never exceeds floor/ceil."""
@@ -2047,9 +2233,24 @@ class AIStrategy:
                 hints.append(f"open:{p.get('coin')} {p.get('side')} entry={p.get('entry_price')}")
         except Exception:
             pass
+        # Settled-outcome summary: separates real edge from market beta.
+        settled = [j for j in (getattr(self, "_journal", None) or [])
+                   if j.get("verdict")][-20:]
+        verdicts = [str(j.get("verdict")) for j in settled]
+        alphas = [float(j.get("alpha_pct")) for j in settled
+                  if j.get("alpha_pct") is not None]
+        memory = {
+            "settled_n": len(settled),
+            "edge": verdicts.count("edge"),
+            "beta_win": verdicts.count("beta_win"),
+            "bad_thesis": verdicts.count("bad_thesis"),
+            "noise_loss": verdicts.count("noise_loss"),
+            "avg_alpha_pct": round(sum(alphas) / len(alphas), 2) if alphas else None,
+        }
         return {
             "equity": round(self._equity, 2),
             "capital": self._capital,
+            "memory": memory,
             "max_leverage": self.config.max_leverage,
             "max_positions": self.config.max_positions,
             "open_positions": open_list,
@@ -2307,7 +2508,7 @@ class AIStrategy:
         return True
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
-                    reason: str):
+                    reason: str, confidence: float = 0.0, thesis: str = ""):
         if client is not None and not getattr(client, "demo", True):
             print(f"[AI] BLOCK open on non-demo client {coin}", flush=True)
             self._record_exec("open_skip", coin=coin, side=side, reason="live_client_forbidden")
@@ -2445,6 +2646,11 @@ class AIStrategy:
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
             peak_price=fill_px, signal_id=int(signal_id or 0),
             demo_trade_id=str(trade_id or ""),
+            risk_usd=round(
+                abs(sz) * CT_VAL.get(coin, 0.01) * fill_px * float(stop_pct or 0), 4),
+            btc_ref=float((self._latest_indicators.get("BTC") or {}).get("close") or 0),
+            entry_confidence=round(float(confidence or 0), 3),
+            entry_thesis=str(thesis or "")[:280],
         )
         self._positions[coin] = pos
         self._equity -= fee_cost(fee)
@@ -2699,50 +2905,11 @@ class AIStrategy:
                     has_pos = True
                     break
             if not has_pos:
-                # Exchange SL/TP (or manual) already closed — still notify TG
-                print(f"[AI] close {coin}: exchange pos already gone (algo/manual) — notify TG", flush=True)
-                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
-                try:
-                    ticker = await client.get_ticker(pos.inst_id)
-                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
-                    if isinstance(_td, list) and _td:
-                        mark = float(_td[0].get("last") or mark) or mark
-                except Exception:
-                    pass
-                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
-                signal_id = int(getattr(pos, "signal_id", 0) or 0)
-                mode, key = self._account_mode_tag()
-                # Persist close for PnL integrity
-                if self.db:
-                    try:
-                        await self.db.save_trade(
-                            bot_id=self.BOT_ID,
-                            side=("sell" if pos.side == "long" else "buy"),
-                            sz=pos.size, px=mark,
-                            ord_id="", inst_id=pos.inst_id, ord_type="market",
-                            fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
-                            state="closed", signal_id=signal_id or None,
-                            account_mode=mode, account_key=key,
-                        )
-                    except Exception as e:
-                        print(f"[AI] db close (algo): {e}", flush=True)
-                await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
-                try:
-                    self._last_closes[coin] = {
-                        "side": getattr(pos, "side", ""),
-                        "ts": time.time(),
-                        "pnl": float(pnl or 0),
-                        "reason": str(reason or "exchange_stop"),
-                    }
-                except Exception:
-                    pass
-                del self._positions[coin]
-                if self.db:
-                    try:
-                        await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                    except Exception:
-                        pass
-                print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [already flat]", flush=True)
+                # Exchange SL/TP (or manual) already closed — book it, don't just drop.
+                print(f"[AI] close {coin}: exchange pos already gone (algo/manual)", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+                await self._record_flat_close(
+                    client, pos, coin, mark, reason or "exchange_stop")
                 return
         except Exception as e:
             print(f"[AI] close exchange-check: {e}", flush=True)
@@ -2760,24 +2927,10 @@ class AIStrategy:
                         still = True
                         break
                 if not still:
-                    mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
-                    try:
-                        ticker = await client.get_ticker(pos.inst_id)
-                        _td = ticker.get("data") or []
-                        if _td:
-                            mark = float(_td[0].get("last") or mark) or mark
-                    except Exception:
-                        pass
-                    _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
-                    mode, _k = self._account_mode_tag()
-                    await self._notify_close_tg(pos, coin, reason or "exchange_stop", mark, pnl, account_mode=mode)
-                    del self._positions[coin]
-                    if self.db:
-                        try:
-                            await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                        except Exception:
-                            pass
-                    print(f"[AI] CLOSE {coin} after err — already flat pnl={pnl:+.2f}", flush=True)
+                    mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+                    await self._record_flat_close(
+                        client, pos, coin, mark, reason or "exchange_stop")
+                    print(f"[AI] CLOSE {coin} after err — already flat", flush=True)
             except Exception as e2:
                 print(f"[AI] close error recovery: {e2}", flush=True)
             return
@@ -2914,22 +3067,7 @@ class AIStrategy:
             except Exception:
                 pass
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
-        try:
-            hold_min = None
-            try:
-                opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
-                hold_min = round((datetime.now(timezone.utc) - opened).total_seconds() / 60.0, 1)
-            except Exception:
-                pass
-            self._journal_append({
-                "time": datetime.now(timezone.utc).isoformat(),
-                "coin": coin, "side": pos.side, "pnl": pnl, "reason": reason,
-                "hold_min": hold_min, "entry": pos.entry_price, "exit": fill_px,
-            })
-            self._maybe_refresh_daily_lessons()
-            self._reflection = self._build_reflection(self._rolling_stats())
-        except Exception as e:
-            print(f"[AI] journal on close: {e}", flush=True)
+        self._settle_close_memory(pos, coin, fill_px, pnl, reason)
         try:
             self.analysis.log(
                 "ai", "close", coin=coin, side=pos.side, entry=pos.entry_price,
@@ -3347,12 +3485,16 @@ class AIStrategy:
         self._trade_log.append(entry)
 
     async def _manage_live_orphans(self, client):
-        """Force LIVE book ≡ DEMO book (exchange-truth, not only memory).
+        """Keep LIVE a SUBSET of DEMO — closes only, never opens.
 
         Cases fixed:
-        - DEMO closed + reversed, LIVE still holds old side/coin
-        - mirror was disabled at open/close → LIVE drifted
-        - _live_positions memory empty but exchange still has size
+        - DEMO closed + reversed, LIVE still holds old side/coin → close LIVE
+        - _live_positions memory empty but exchange still has size → adopt/close
+        - orphan exchange SL/TP on the mirror account → cancelled
+
+        Opens are NOT healed here. LIVE opens only when a DEMO open event is
+        copied, or via the watermark-gated _clone_missing_to_live. Auto-opening
+        made LIVE trade on its own after a manual close or exchange stop.
         """
         if not await self._mirror_enabled():
             return
@@ -3364,6 +3506,16 @@ class AIStrategy:
             return
         if not getattr(self, "_hydrated", False):
             return
+        # 0) Orphan exchange TP/SL on the mirror account → cancel (throttled).
+        #    Older builds (and manual orders) left algos that could close LIVE
+        #    without DEMO — the mirror then "traded on its own".
+        try:
+            _now = time.time()
+            if _now - float(getattr(self, "_live_algo_purge_ts", 0) or 0) > 60:
+                self._live_algo_purge_ts = _now
+                await self._purge_live_algos(lc)
+        except Exception as e:
+            print(f"[AI-LIVE] purge algos: {e}", flush=True)
         # Short boot grace only (30s) — 120s was too long for reverse-flip sync
         try:
             started = getattr(self, "_started_at", None)
@@ -3432,6 +3584,21 @@ class AIStrategy:
                     except Exception:
                         pass
                 continue
+            # Ownership: never flatten a position this mirror did not open.
+            # A manual LIVE trade must not be closed by the bot on its own.
+            try:
+                owner = await self._entry_fill_owner(lc, info["inst_id"])
+            except Exception:
+                owner = ""
+            # Fail-closed: only a position this mirror clearly opened (ai*)
+            # may be flattened. Empty owner = manual/unknown → leave untouched.
+            if owner != "ai":
+                print(
+                    f"[AI-LIVE] SYNC skip {coin}: LIVE position is not ours "
+                    f"(owner={owner or 'manual/unknown'!r}) — leaving untouched",
+                    flush=True,
+                )
+                continue
             print(
                 f"[AI-LIVE] SYNC close {coin} {info['side']} sz={info['size']} "
                 f"(demo={'none' if not demo else demo.side}) — book mismatch",
@@ -3464,40 +3631,29 @@ class AIStrategy:
             except Exception:
                 pass
 
-        # 3) Open LIVE for DEMO positions missing/wrong on exchange
+        # 3) NEVER open LIVE here. Opens must be event-driven copies of a DEMO
+        # open (or the explicit, watermark-gated gap-fill in
+        # _clone_missing_to_live). Re-opening here made LIVE trade on its own:
+        # a manual LIVE close or an exchange SL/TP was instantly "corrected".
         for coin, demo in list((self._positions or {}).items()):
             side = str(getattr(demo, "side", "") or "").lower()
             if not side:
                 continue
             cur = exch.get(coin)
             if cur and cur["side"] == side and float(cur.get("size") or 0) > 0:
+                self._live_drift_warned.discard(coin)
                 continue
-            entry = float(getattr(demo, "entry_price", 0) or 0)
-            stop_p = float(getattr(demo, "stop_price", 0) or 0)
-            take_p = float(getattr(demo, "take_price", 0) or 0)
-            stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.025
-            take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.05
+            if coin in self._live_drift_warned:
+                continue
+            self._live_drift_warned.add(coin)
             print(
-                f"[AI-LIVE] SYNC open {coin} {side} (exchange={'none' if not cur else cur['side']})",
+                f"[AI-LIVE] DRIFT {coin}: DEMO {side} is not on LIVE — "
+                f"not auto-opening (copy only)",
                 flush=True,
             )
-            try:
-                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
-                if not ok_gate:
-                    # Still open if DEMO already holds — mirror must copy, not second-guess
-                    # unless move is violently against (>2.5%)
-                    print(f"[AI-LIVE] SYNC open soft-gate {coin}: {gate_reason} — still mirroring", flush=True)
-                ok = await self._open_live(
-                    coin, side, stop_pct, take_pct,
-                    reason="mirror_sync_from_demo",
-                )
-                self._exec_log.append(_exec_evt(
-                    "mirror_sync_open", coin, side,
-                    reason=("ok" if ok else "fail"),
-                ))
-                print(f"[AI-LIVE] SYNC open result {coin}={ok}", flush=True)
-            except Exception as e:
-                print(f"[AI-LIVE] SYNC open {coin}: {e}", flush=True)
+            self._exec_log.append(_exec_evt(
+                "mirror_drift", coin, side, reason="demo_open_not_mirrored",
+            ))
 
         try:
             self._persist_live()
@@ -3784,30 +3940,15 @@ class AIStrategy:
         if not self._live_ready():
             print("[AI-LIVE] clone_missing: live not ready", flush=True)
             return
-        # Watermark: only clone positions opened AFTER explicit mirror connect
-        watermark = 0
-        if self.db:
-            try:
-                raw = await self.db.get_setting("live_mirror_connected_at")
-                if raw:
-                    watermark = int(float(raw))
-            except Exception:
-                pass
+        # Watermark: only clone positions opened AFTER explicit mirror connect.
+        # No watermark → fail-closed (do not guess): LIVE must never open a
+        # position that was not copied while the user had mirroring on.
+        watermark = await self._live_clone_watermark()
         if watermark == 0:
-            # After redeploy settings may lose connected_at. Fall back to bot start
-            # so currently open DEMO positions can still gap-fill (not ancient ones).
-            try:
-                st = getattr(self, "_started_at", None)
-                if st:
-                    watermark = int(datetime.fromisoformat(str(st).replace("Z", "+00:00")).timestamp())
-                    print(f"[AI-LIVE] clone_missing: watermark fallback to started_at={watermark}", flush=True)
-                else:
-                    import time as _t
-                    watermark = int(_t.time()) - 3600
-                    print(f"[AI-LIVE] clone_missing: watermark fallback now-1h={watermark}", flush=True)
-            except Exception as _wfe:
-                print(f"[AI-LIVE] clone_missing: watermark fallback failed {_wfe} — SKIP all", flush=True)
-                return
+            print("[AI-LIVE] clone_missing SKIP: no live_mirror_connected_at "
+                  "watermark — reconnect LIVE to re-arm copying", flush=True)
+            return
+
         try:
             await self._reconcile_live_from_exchange()
         except Exception as e:
@@ -4740,33 +4881,12 @@ class AIStrategy:
             side = getattr(pos, "side", "long")
 
             if not info:
-                exit_px = 0.0
-                try:
-                    ticker = await client.get_ticker(inst)
-                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
-                    if isinstance(_td, list) and _td:
-                        exit_px = float(_td[0].get("last") or 0)
-                except Exception:
-                    pass
-                _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
                 print(
-                    f"[{self.BOT_NAME}] reconcile: drop {coin} — flat on exchange "
-                    f"(was {side} sz={getattr(pos, 'size', 0)} pnl={pnl:+.2f})",
+                    f"[{self.BOT_NAME}] reconcile: {coin} flat on exchange "
+                    f"(was {side} sz={getattr(pos, 'size', 0)}) — booking close",
                     flush=True,
                 )
-                try:
-                    mode = self._account_mode_tag()[0] if hasattr(self, "_account_mode_tag") else "demo"
-                    await self._notify_close_tg(
-                        pos, coin, "manual_close", exit_px, pnl, account_mode=mode,
-                    )
-                except Exception as _nte:
-                    print(f"[{self.BOT_NAME}] reconcile TG notify: {_nte}", flush=True)
-                self._positions.pop(coin, None)
-                try:
-                    if self.db:
-                        await release_open(self.db, self.BOT_ID, inst, side)
-                except Exception as e:
-                    print(f"[{self.BOT_NAME}] reconcile release: {e}", flush=True)
+                await self._record_flat_close(client, pos, coin, 0.0, "exchange_close")
                 continue
 
             # Ownership: clOrdId prefix must match this bot (ais ≠ ai)
@@ -5516,6 +5636,8 @@ class AIStrategy:
                 client, coin, side,
                 stop_pct=stop_pct, take_pct=take_pct,
                 reason=reason or "ai_open",
+                confidence=float(decision.get("confidence") or 0),
+                thesis=str(decision.get("thesis") or ""),
             )
 
 
@@ -5921,6 +6043,9 @@ class AIStrategy:
                 "reason": (self._adapt or {}).get("reason"),
             },
             "reflection": self._reflection,
+            "journal": list(getattr(self, "_journal", None) or [])[-100:],
+            "daily_lessons": list(getattr(self, "_daily_lessons", None) or [])[:5],
+            "last_lesson_day": getattr(self, "_last_lesson_day", ""),
             "adapt_log": self._adapt_log[-20:],
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }

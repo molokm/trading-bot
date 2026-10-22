@@ -128,7 +128,7 @@ through structure/momentum/risk before committing to action, not after:
 {"thesis":"<=180 chars optional: structure+momentum+risk read, in that order",
 "reason":"<=200 chars",
 "confidence":0-1,
-"action":"close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP","side":"long|short|null",
+"action":"close|hold|reduce|add","symbol":"<one of open_positions>","side":"long|short|null",
 "size_pct":0.25-0.75}
 
 Analysis checklist (use fields in snapshot):
@@ -136,7 +136,8 @@ Analysis checklist (use fields in snapshot):
 - Momentum: ROC, MACD hist sign/change, RSI zone
 - Trend strength: ADX, regime (bull/bear/chop)
 - Risk: distance to stop/take in %, unrealized if present, funding_rate
-- Context: reflection + daily_lessons + journal_tail (recent outcomes)
+- Context: memory + reflection + daily_lessons + journal_tail (settled outcomes,
+  alpha vs BTC and R-multiple)
 
 Rules:
 1) Prefer close if trend flipped (EMA/ROC against side), ADX collapsed, or structure broke.
@@ -158,7 +159,7 @@ to match it.
 "reason":"<=200 chars: the >=2 concrete metrics that decided it",
 "regime":"bull|bear|chop|unknown",
 "confidence":0-1,
-"action":"open|close|hold|reduce|add","symbol":"BTC|ETH|SOL|XRP|null","side":"long|short|null",
+"action":"open|close|hold|reduce|add","symbol":"<coin from candidates_allowed>|null","side":"long|short|null",
 "size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10}
 
 How to analyze (write this into thesis/reason, in order):
@@ -166,7 +167,9 @@ A) Market structure per coin: close vs EMA21/50/200, BB location, tf_4h trend al
 B) Momentum: ROC, MACD histogram sign, RSI (avoid extremes against the trade)
 C) Strength: ADX, regime, vol_ratio (participation)
 D) Risk context: ATR-based stop room, funding_rate bias, max_positions, adaptive preset
-E) Self-reflection: journal_tail + daily_lessons + reflection — skip patterns that recently lost
+E) Self-reflection: memory + journal_tail + daily_lessons + reflection — trust
+   verdict=edge, avoid setups that settled as bad_thesis/noise_loss, and do not
+   size up on beta_win (PnL that was just BTC beta, alpha≈0)
 
 Hard rules:
 1) DEFAULT action is hold. Open only with clear multi-factor edge.
@@ -200,6 +203,26 @@ short). Align_short only 0.48. Funding -0.09% also against the short."
 reason: "fighting BTC leadership + weak align_short — high false-signal risk"
 confidence: 0.38 -> action: hold
 """
+
+SYSTEM_PROMPT_DEBATE = """You are the same OKX USDT-SWAP desk, on the debate pass.
+Argue the strongest case FOR and AGAINST the single best setup, then decide.
+Reply with ONE JSON object only (no markdown):
+{"bull":"<=160 chars: strongest long case with concrete metrics",
+ "bear":"<=160 chars: strongest short/avoid case with concrete metrics",
+ "verdict":"bull|bear|none",
+ "reason":"<=180 chars: why the winning side wins",
+ "confidence":0-1,
+ "action":"open|hold","symbol":"<coin from candidates_allowed>|null","side":"long|short|null",
+ "size_pct_equity":0.03-0.12,"stop_pct":0.015-0.04,"take_pct":0.04-0.10}
+
+Rules:
+1) Cite concrete metrics on BOTH sides (EMA/ADX/ROC/RSI/funding/BTC leadership).
+2) Open only if one side dominates on >=2 independent factors; a tie → hold.
+3) A strong bull case cannot justify a short and vice versa.
+4) If the bear case exposes a correlated stack with open_positions → hold.
+5) Never return action=open with verdict=none.
+"""
+
 
 def _clip(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
@@ -375,7 +398,8 @@ def mock_decide(snapshot: dict) -> dict:
     }, open_syms)
 
 
-async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict:
+async def _call_llm_once(snapshot: dict, provider: Optional[str] = None,
+                         debate: bool = False) -> dict:
     """Internal single LLM call — call_llm() adds self-consistency + risk veto."""
     provider = (provider or os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
     if not provider:
@@ -389,7 +413,10 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
     open_syms = [p.get("coin") for p in (snapshot.get("open_positions") or [])]
     global _ACTIVE_SYSTEM_PROMPT
     mode = (snapshot.get("decision_mode") or ("manage" if open_syms else "entry")).lower()
-    _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
+    if debate and not (mode == "manage" and open_syms):
+        _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_DEBATE
+    else:
+        _ACTIVE_SYSTEM_PROMPT = SYSTEM_PROMPT_MANAGE if (mode == "manage" and open_syms) else SYSTEM_PROMPT
 
     def _compact_ind(ind):
         if not isinstance(ind, dict):
@@ -433,6 +460,7 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
         "reflection": snapshot.get("reflection") or "",
         "daily_lessons": snapshot.get("daily_lessons") or [],
         "journal_tail": snapshot.get("journal_tail") or [],
+        "memory": snapshot.get("memory"),
         "adaptive": snapshot.get("adaptive"),
     }
     raw_json = json.dumps(user_payload, ensure_ascii=False)
@@ -493,6 +521,12 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None) -> dict
         d["reason"] = f"parse_fail via {used}; fallback: {d.get('reason')}"
         return d
     dec = validate_decision(parsed, open_syms)
+    if debate and isinstance(parsed, dict):
+        dec["debate"] = {
+            "bull": str(parsed.get("bull") or "")[:200],
+            "bear": str(parsed.get("bear") or "")[:200],
+            "verdict": str(parsed.get("verdict") or "")[:10],
+        }
     if used:
         global _last_provider_used
         _last_provider_used = used
@@ -576,7 +610,17 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
     if mode != "entry" or dec1.get("action") != "open":
         return dec1
 
-    dec2 = await _call_llm_once(snapshot, provider)
+    debate_on = os.getenv("AI_DEBATE", "1").strip().lower() in ("1", "true", "yes", "on")
+    dec2 = await _call_llm_once(snapshot, provider, debate=debate_on)
+    if debate_on and isinstance(dec2.get("debate"), dict):
+        dec1["debate"] = dec2["debate"]
+        if str(dec2["debate"].get("verdict") or "").lower() == "none":
+            dec1["action"] = "hold"
+            dec1["size_pct_equity"] = 0.0
+            dec1["reason"] = (
+                "debate_tie: bull/bear had no decisive edge"
+            )[:240]
+            return dec1
     agree = (
         dec2.get("action") == "open"
         and dec2.get("symbol") == dec1.get("symbol")
@@ -603,7 +647,9 @@ async def call_llm(snapshot: dict, provider: Optional[str] = None) -> dict:
             min(float(dec1.get("confidence") or 0), float(dec2.get("confidence") or 0)), 3)
     except (TypeError, ValueError):
         pass
-    dec1["reason"] = f"consensus(2/2): {dec1.get('reason', '')}"[:240]
+    _verdict = (dec1.get("debate") or {}).get("verdict")
+    _tag = f"2/2 debate={_verdict}" if _verdict else "2/2"
+    dec1["reason"] = f"consensus({_tag}): {dec1.get('reason', '')}"[:240]
 
     # Risk-manager veto (fail-open)
     veto, why = await _risk_manager_veto(snapshot, dec1, provider)
