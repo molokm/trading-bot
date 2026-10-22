@@ -3862,6 +3862,10 @@ async def health(request: Request):
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
         try:
+            diag['exchange_sync'] = dict(_sync_diag)
+        except Exception:
+            pass
+        try:
             _fb = str(getattr(db, '_fallback_reason', '') or '')
             diag['db_pg_mode'] = bool(getattr(db, '_pg_mode', False))
             diag['db_fallback'] = bool(_fb)
@@ -5877,6 +5881,9 @@ _CLORD_BOT_MAP = {'ais': 'AI Scale-In 1H', 'ai': 'AI Discretionary 1H', 'rot': '
 _exchange_sync_ts: dict[str, float] = {}
 _EXCHANGE_SYNC_TTL = 60
 
+_sync_diag: dict = {}
+
+
 async def sync_exchange_close_trades(mode: str = None) -> int:
     """Fetch all OKX trade bills (type=2), filter close trades (non-zero pnl),
     group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
@@ -5987,16 +5994,23 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
             len(recovered_labels),
             ', '.join(f'{k}x{v}' for k, v in _rc.items()),
         ), flush=True)
+    _sync_diag.update({'ts': int(_time.time()), 'mode': _mode,
+                       'bills': len(bills), 'close_orders': len(close_by_ord),
+                       'rows': len(rows)})
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)
             _exchange_sync_ts = _time.time()
+            _sync_diag.update({'ok': True, 'stored': n, 'err': ''})
             print(f'[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders', flush=True)
             return n
         except Exception as e:
+            _sync_diag.update({'ok': False, 'stored': 0, 'err': str(e)[:200]})
             print(f'[exchange-sync] DB upsert error: {e}', flush=True)
             import traceback
             traceback.print_exc()
+    else:
+        _sync_diag.update({'ok': True, 'stored': 0, 'err': ''})
     return 0
 
 @app.post('/api/pnl/rebuild-exchange')
