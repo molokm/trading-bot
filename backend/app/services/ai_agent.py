@@ -812,10 +812,16 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
     tpd_hit = False
     async with httpx.AsyncClient(timeout=45.0) as client:
         for i, mid in enumerate(candidates):
+            _mt = int(os.getenv("AI_LLM_MAX_TOKENS") or 0)
+            if not _mt:
+                # gpt-oss is a reasoning model: reasoning tokens eat max_tokens,
+                # so 900 truncates the JSON and Groq answers 400 "Failed to
+                # validate JSON".
+                _mt = 2048 if "gpt-oss" in mid else 900
             body = {
                 "model": mid,
                 "temperature": 0.2,
-                "max_tokens": 900,
+                "max_tokens": _mt,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user},
@@ -823,6 +829,8 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             }
             if json_mode:
                 body["response_format"] = {"type": "json_object"}
+            if "gpt-oss" in mid:
+                body["reasoning_effort"] = os.getenv("AI_LLM_REASONING_EFFORT", "low")
             r = await client.post(url, headers=headers, json=body)
             if r.status_code == 200:
                 data = r.json()
@@ -871,6 +879,9 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
             if r.status_code == 404 or "model_not_found" in txt or "does not exist" in txt \
                     or "unavailable for free" in txt:
                 log.warning("LLM model unavailable %s — next", mid)
+                continue
+            if r.status_code == 400 and "validate json" in txt:
+                log.warning("LLM invalid JSON on %s — next model", mid)
                 continue
             # other errors: stop this provider
             break
