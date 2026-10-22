@@ -127,3 +127,32 @@ def test_all_stats_surfaces_use_the_shared_loader():
 
     pnl_src = inspect.getsource(m._compute_pnl)
     assert "load_eligible_rows" in pnl_src
+
+
+@pytest.mark.asyncio
+async def test_compute_pnl_endpoint_payload_matches_stats(monkeypatch):
+    """Guards the /api/pnl payload itself: no swallowed error, same total as stats."""
+    import app.main as m
+    from types import SimpleNamespace
+
+    rows = [
+        close("1", 10.0, NOW_MS),
+        close("2", -4.0, NOW_MS - 86_400_000),
+    ]
+    db = FakeDB(rows)
+
+    async def _sync(mode=None):
+        return None
+
+    monkeypatch.setattr(m, "db", db, raising=False)
+    monkeypatch.setattr(m, "sync_exchange_close_trades", _sync, raising=False)
+    monkeypatch.setattr(m, "client_manager", SimpleNamespace(get_client=lambda: None), raising=False)
+    monkeypatch.setattr(m, "live_manager", None, raising=False)
+
+    payload = await m._compute_pnl("demo")
+    assert "error" not in payload, payload.get("error")
+    assert payload["total"] == 6.0
+    assert payload["trades_counted"] == 2
+
+    stats = await pe.compute_stats(db, account_mode="demo", period="all")
+    assert payload["total"] == stats["realized_pnl"]

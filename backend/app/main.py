@@ -6398,7 +6398,7 @@ async def _compute_pnl(mode: str = None):
             'pnl_epoch': _EP_ISO,
             'engine': 'unified_filter_v1',
             'account_mode': _mode,
-            'closes_raw': len(raw),
+            'closes_raw': int(diag.get('eligible_n') or len(rows)) + int(diag.get('excluded_n') or 0),
             'eligible_n': diag.get('eligible_n'),
             'excluded_n': diag.get('excluded_n'),
             'excluded_pnl': diag.get('excluded_pnl'),
