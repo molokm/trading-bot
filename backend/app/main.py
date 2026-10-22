@@ -6849,6 +6849,7 @@ async def get_all_trades(limit: int=100):
     for tr in logs:
         if _trade_matches_mode(tr, mode):
             out.append(tr)
+    out = _filter_since_epoch(out, keep_unknown=True)
     return {'trades': out[-limit:], 'account_mode': mode}
 _paired_cache: dict = {}
 _paired_lock = asyncio.Lock()
@@ -6940,6 +6941,86 @@ async def _fetch_live_okx_trades_direct() -> list:
     _live_okx_cache['ts'] = now
     _live_okx_cache['trades'] = paired
     return paired
+
+_EPOCH_MS_CACHE: list = []
+
+
+def _epoch_ms_cached() -> int:
+    """Product epoch (2026-09-01) in ms — every stats/trades surface cuts here."""
+    if not _EPOCH_MS_CACHE:
+        try:
+            from app.services.pnl_engine import epoch_ms as _ep
+            _EPOCH_MS_CACHE.append(int(_ep()))
+        except Exception:
+            _EPOCH_MS_CACHE.append(0)
+    return _EPOCH_MS_CACHE[0]
+
+
+def _ts_ms_any(value) -> int:
+    """Best-effort timestamp → unix ms (0 when unknown).
+
+    Accepts ms ints, seconds ints, numeric strings and ISO datetimes
+    (with/without tz, 'Z' or 'YYYY-MM-DD HH:MM:SS').
+    """
+    if value is None or value == "":
+        return 0
+    try:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, (int, float)):
+            num = float(value)
+        else:
+            txt = str(value).strip()
+            if not txt:
+                return 0
+            try:
+                num = float(txt)
+            except ValueError:
+                num = 0.0
+                from datetime import datetime as _dtm
+                from datetime import timezone as _tzm
+                iso = txt.replace("Z", "+00:00").replace(" ", "T", 1)
+                try:
+                    d = _dtm.fromisoformat(iso)
+                except ValueError:
+                    return 0
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=_tzm.utc)
+                return int(d.timestamp() * 1000)
+        if num > 1e11:
+            return int(num)
+        if num > 1e8:
+            return int(num * 1000)
+    except (TypeError, ValueError):
+        return 0
+    return 0
+
+
+def _row_ts_ms(row: dict) -> int:
+    if not isinstance(row, dict):
+        return 0
+    for key in ("exit_time", "entry_time", "time", "timestamp", "ts", "close_ts"):
+        ms = _ts_ms_any(row.get(key))
+        if ms:
+            return ms
+    return 0
+
+
+def _filter_since_epoch(rows, *, keep_unknown: bool = False) -> list:
+    """Drop rows older than the product epoch (2026-09-01)."""
+    epoch = _epoch_ms_cached()
+    if not epoch:
+        return list(rows or [])
+    out = []
+    for r in rows or []:
+        ms = _row_ts_ms(r)
+        if ms:
+            if ms >= epoch:
+                out.append(r)
+        elif keep_unknown:
+            out.append(r)
+    return out
+
 
 @app.get('/api/trades/paired')
 @policy(AUTH_NO_GUEST)
@@ -7076,6 +7157,7 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                 if _m not in ('demo', 'live'):
                     _tr = {**_tr, 'account_mode': 'demo'}
             _tagged.append(_tr)
+        _tagged = _filter_since_epoch(_tagged, keep_unknown=True)
         _tagged.sort(key=lambda t: (t.get('exit_time') or t.get('entry_time') or t.get('time') or ''), reverse=True)
         trades = _tagged
         resp = {**resp, 'trades': trades, 'account_mode': _mode}

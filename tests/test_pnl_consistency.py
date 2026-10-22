@@ -169,3 +169,33 @@ def test_stats_command_parses_mode_and_period():
     assert _parse_stats_args("week live") == ("live", "week")
     assert _parse_stats_args("demo сегодня") == ("demo", "today")
     assert _parse_stats_args("") == ("demo", "all")
+
+
+def test_ts_ms_any_parses_supported_formats():
+    from app.main import _ts_ms_any
+
+    assert _ts_ms_any(1788220801000) == 1788220801000
+    assert _ts_ms_any(1788220801) == 1788220801000
+    assert _ts_ms_any("1788220801000") == 1788220801000
+    assert _ts_ms_any("2026-09-01T00:00:01+00:00") == 1788220801000
+    assert _ts_ms_any("2026-09-01T00:00:01Z") == 1788220801000
+    assert _ts_ms_any("2026-09-01 00:00:01") == 1788220801000
+    assert _ts_ms_any(None) == 0
+    assert _ts_ms_any("garbage") == 0
+
+
+def test_filter_since_epoch_drops_pre_product_rows():
+    from app.main import _filter_since_epoch, _epoch_ms_cached
+
+    epoch = _epoch_ms_cached()
+    rows = [
+        {"time": epoch - 1, "pnl": 1.0},
+        {"time": epoch, "pnl": 2.0},
+        {"time": "2026-08-31T23:59:59+00:00", "pnl": 3.0},
+        {"time": "2026-09-01T00:00:01+00:00", "pnl": 4.0},
+        {"pnl": 5.0},  # unknown ts → dropped by default
+    ]
+    kept = _filter_since_epoch(rows)
+    assert [r["pnl"] for r in kept] == [2.0, 4.0]
+    kept_unknown = _filter_since_epoch(rows, keep_unknown=True)
+    assert [r["pnl"] for r in kept_unknown] == [2.0, 4.0, 5.0]
