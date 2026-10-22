@@ -350,6 +350,8 @@ async def startup():
         print('[startup] 1/7 DB init ...', flush=True)
         await db.init()
         await pnl_engine.ensure_epoch(db)
+        _slog(f'db backend: pg={db._pg_mode} fallback_kind='
+              f'{_db_fallback_kind(getattr(db, "_fallback_reason", ""))}')
         print(f'[startup] pnl_epoch forced {PNL_EPOCH_ISO}', flush=True)
         try:
             marker = await db.get_setting('pnl_clean_slate_20260912')
@@ -3854,8 +3856,10 @@ async def health(request: Request):
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
         try:
+            _fb = str(getattr(db, '_fallback_reason', '') or '')
             diag['db_pg_mode'] = bool(getattr(db, '_pg_mode', False))
-            diag['db_fallback'] = bool(getattr(db, '_fallback_reason', ''))
+            diag['db_fallback'] = bool(_fb)
+            diag['db_fallback_kind'] = _db_fallback_kind(_fb)
         except Exception as e:
             diag['db_mode_err'] = str(e)[:120]
         try:
@@ -6948,6 +6952,20 @@ async def _fetch_live_okx_trades_direct() -> list:
     return paired
 
 _EPOCH_MS_CACHE: list = []
+
+
+def _db_fallback_kind(reason: str) -> str:
+    """Classify why PostgreSQL fell back to SQLite (no hosts/secrets exposed)."""
+    low = str(reason or '').lower()
+    if any(x in low for x in ('quota', 'compute', 'exceeded', 'too many connections',
+                              'insufficientresources', 'limit')):
+        return 'quota'
+    if any(x in low for x in ('password', 'authentication', 'role', 'permission')):
+        return 'auth'
+    if any(x in low for x in ('timeout', 'timed out', 'resolve', 'network',
+                              'connection refused', 'unreachable', 'socket')):
+        return 'network'
+    return 'other' if low else 'none'
 
 
 def _epoch_ms_cached() -> int:
