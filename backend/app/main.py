@@ -6369,6 +6369,9 @@ async def _compute_pnl(mode: str = None):
         fees = round(float(agg.get('fees') or 0), 2)
         n = int(agg.get('trades_counted') or len(rows))
         per_bot = agg.get('per_bot') or {'AI Discretionary 1H': total}
+        _wins = sum(1 for r in rows if float(r.get('pnl') or 0) > 1e-9)
+        _losses = sum(1 for r in rows if float(r.get('pnl') or 0) < -1e-9)
+        _wr = round(100.0 * _wins / (_wins + _losses), 1) if (_wins + _losses) else 0.0
 
         data = {
             'total': total,
@@ -6395,6 +6398,9 @@ async def _compute_pnl(mode: str = None):
             'per_bot_all': per_bot if per_bot else {'AI Discretionary 1H': total},
             'active_bots': list(per_bot.keys()) if per_bot else ['AI Discretionary 1H'],
             'trades_counted': n,
+            'wins': _wins,
+            'losses': _losses,
+            'win_rate': _wr,
             'pnl_epoch': _EP_ISO,
             'engine': 'unified_filter_v1',
             'account_mode': _mode,

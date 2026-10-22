@@ -153,6 +153,8 @@ async def test_compute_pnl_endpoint_payload_matches_stats(monkeypatch):
     assert "error" not in payload, payload.get("error")
     assert payload["total"] == 6.0
     assert payload["trades_counted"] == 2
+    assert payload["wins"] == 1 and payload["losses"] == 1
+    assert payload["win_rate"] == 50.0
 
     stats = await pe.compute_stats(db, account_mode="demo", period="all")
     assert payload["total"] == stats["realized_pnl"]
