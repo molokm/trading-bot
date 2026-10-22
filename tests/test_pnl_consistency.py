@@ -199,3 +199,19 @@ def test_filter_since_epoch_drops_pre_product_rows():
     assert [r["pnl"] for r in kept] == [2.0, 4.0]
     kept_unknown = _filter_since_epoch(rows, keep_unknown=True)
     assert [r["pnl"] for r in kept_unknown] == [2.0, 4.0, 5.0]
+
+
+def test_clean_dsn_is_asyncpg_safe():
+    from app.database import _clean_dsn
+
+    src = ("postgresql://u:p@aws-0-eu-central-1.pooler.supabase.com:6543/postgres"
+           "?channel_binding=require&pgbouncer=true")
+    out = _clean_dsn(src)
+    assert "channel_binding" not in out
+    assert "pgbouncer" not in out
+    assert "sslmode=require" in out
+
+    plain = "postgresql://u:p@db.host:5432/postgres"
+    assert _clean_dsn(plain).endswith("?sslmode=require")
+    assert _clean_dsn("file:./data/trading.db") == "file:./data/trading.db"
+    assert _clean_dsn("") == ""

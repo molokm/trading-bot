@@ -6,7 +6,26 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+def _clean_dsn(url: str) -> str:
+    """Make a hosted Postgres URI safe for asyncpg.
+
+    - drops query params asyncpg rejects (channel_binding, pgbouncer)
+    - defaults sslmode=require (Supabase/Neon refuse plaintext)
+    """
+    if not url or not url.startswith(("postgres://", "postgresql://")):
+        return url
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    drop = {"channel_binding", "pgbouncer"}
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k.lower() not in drop]
+    if not any(k.lower() == "sslmode" for k, _ in query):
+        query.append(("sslmode", "require"))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
+
+
+DATABASE_URL = _clean_dsn(os.getenv("DATABASE_URL", ""))
 
 
 def _is_pg_url(url: str) -> bool:
@@ -557,8 +576,13 @@ class Database:
             self._pg_pools = {}
         pool = self._pg_pools.get(loop)
         if pool is None or pool._closed:
+            kwargs = {}
+            # Supabase transaction pooler (6543) breaks prepared statements.
+            if ":6543" in DATABASE_URL or "pgbouncer" in DATABASE_URL.lower():
+                kwargs["statement_cache_size"] = 0
             pool = await asyncpg.create_pool(
-                DATABASE_URL, min_size=1, max_size=5, command_timeout=30)
+                DATABASE_URL, min_size=1, max_size=5, command_timeout=30,
+                **kwargs)
             self._pg_pools[loop] = pool
         return pool
 
