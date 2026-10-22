@@ -84,7 +84,7 @@ _ACTIVE_SYSTEM_PROMPT = None  # set per call_llm
 
 ALLOWED_ACTIONS = ("open", "close", "hold", "reduce", "add")
 ALLOWED_SIDES = ("long", "short")
-ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "ADA", "DOT", "LINK", "UNI")  # v1.29 expanded majors
+ALLOWED_SYMBOLS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "OKB", "LINK", "AVAX", "ADA", "LTC", "DOT", "UNI", "NEAR")  # v1.30
 
 _DEPRECATED_GROQ_MODELS = {
     "llama-3.1-8b-instant",
