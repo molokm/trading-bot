@@ -3854,6 +3854,11 @@ async def health(request: Request):
         except Exception as e:
             diag['pnl_err'] = str(e)[:200]
         try:
+            diag['db_pg_mode'] = bool(getattr(db, '_pg_mode', False))
+            diag['db_fallback'] = bool(getattr(db, '_fallback_reason', ''))
+        except Exception as e:
+            diag['db_mode_err'] = str(e)[:120]
+        try:
             if db:
                 _lv = await db.get_settings_batch(
                     ['live_mirror_enabled', 'live_mirror_key',
