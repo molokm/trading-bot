@@ -4,6 +4,24 @@ import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
+const AI_FIELDS = [
+  { key: 'risk_per_trade', label: 'Риск на сделку, %', scale: 100, step: 0.1 },
+  { key: 'max_positions', label: 'Макс. позиций', step: 1 },
+  { key: 'max_leverage', label: 'Макс. плечо', step: 0.1 },
+  { key: 'min_confidence', label: 'Мин. уверенность', step: 0.01 },
+  { key: 'min_adx', label: 'Мин. ADX', step: 1 },
+  { key: 'daily_loss_limit_pct', label: 'Дневной лимит убытка, %', scale: 100, step: 0.1 },
+  { key: 'max_hold_hours', label: 'Макс. удержание, ч', step: 0.5 },
+  { key: 'exit_min_profit_pct', label: 'Мин. профит выхода, %', step: 0.05 },
+  { key: 'giveback_min_peak_pct', label: 'Giveback: пик, %', step: 0.1 },
+  { key: 'giveback_retain_frac', label: 'Giveback: оставить (0–1)', step: 0.05 },
+  { key: 'hard_profit_lock_peak', label: 'Hard lock: пик, %', step: 0.1 },
+  { key: 'hard_profit_lock_floor', label: 'Hard lock: пол, %', step: 0.05 },
+  { key: 'partial_take_pct', label: 'Частичный TP, %', step: 0.1 },
+  { key: 'partial_take_frac', label: 'Доля частичного TP', step: 0.05 },
+  { key: 'soft_profit_take_pct', label: 'Soft TP, %', step: 0.1 },
+]
+
 export default function SettingsPage({ onConnected }) {
   const { t } = useTranslation()
   const [form, setForm] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
@@ -18,6 +36,8 @@ export default function SettingsPage({ onConnected }) {
   const [audit, setAudit] = useState([])
   const [aiCfgMsg, setAiCfgMsg] = useState('')
   const [aiCfgBusy, setAiCfgBusy] = useState(false)
+  const [aiCfg, setAiCfg] = useState(null)
+  const [aiCfgEditable, setAiCfgEditable] = useState(false)
   const [liveConfigured, setLiveConfigured] = useState(false)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
@@ -51,6 +71,17 @@ export default function SettingsPage({ onConnected }) {
   }, [])
 
   useEffect(() => {
+    api.aiGetConfig?.().then(c => {
+      if (!c) return
+      const src = c.runtime || c.demo || {}
+      const view = { ...src }
+      for (const f of AI_FIELDS) {
+        const v = Number(view[f.key])
+        if (Number.isFinite(v) && f.scale) view[f.key] = +(v * f.scale).toFixed(4)
+      }
+      setAiCfg(view)
+      setAiCfgEditable(!!c.editable)
+    }).catch(() => {})
     api.riskStatus().then(setRisk).catch(() => setRisk(null))
     api.getAudit(30).then(r => setAudit(r.items || [])).catch(() => setAudit([]))
     api.getMode?.().then(m => {
@@ -335,53 +366,83 @@ export default function SettingsPage({ onConnected }) {
           <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 mb-4">
             <div className="text-sm font-semibold mb-1">AI — настройки (только админ)</div>
             <p className="text-xs text-[var(--muted)] mb-3">
-              Редактирование и отработка — только в <b>DEMO</b>. После проверки нажмите
-              «В LIVE», чтобы перенести снимок настроек на реальный счёт.
-              В LIVE настройки не редактируются.
+              Редактирование применяется к работающему DEMO-движку сразу и сохраняется
+              как снимок. В LIVE-режиме редактирование отключено.
             </p>
-            <div className="flex flex-wrap gap-2 items-center">
-              <button
-                type="button"
-                disabled={aiCfgBusy}
-                className="px-3 py-1.5 rounded-lg text-sm bg-[var(--accent)] text-white disabled:opacity-50"
-                onClick={async () => {
-                  setAiCfgBusy(true)
-                  setAiCfgMsg('')
-                  try {
-                    // Seed/save current runtime into DEMO workspace (only works in demo)
-                    const cur = await api.aiGetConfig()
-                    const payload = cur.demo || cur.runtime || {}
-                    await api.aiSaveConfig(payload)
-                    setAiCfgMsg('DEMO-настройки сохранены')
-                  } catch (e) {
-                    setAiCfgMsg(e.message || 'Ошибка сохранения DEMO')
-                  }
-                  setAiCfgBusy(false)
-                }}
-              >
-                Сохранить в DEMO
-              </button>
-              <button
-                type="button"
-                disabled={aiCfgBusy}
-                className="px-3 py-1.5 rounded-lg text-sm border border-[var(--border)]"
-                onClick={async () => {
-                  if (!window.confirm('Перенести текущие DEMO-настройки AI в LIVE?')) return
-                  setAiCfgBusy(true)
-                  setAiCfgMsg('')
-                  try {
-                    const r = await api.aiPromoteConfig()
-                    setAiCfgMsg(r.message || 'Настройки перенесены в LIVE')
-                  } catch (e) {
-                    setAiCfgMsg(e.message || 'Ошибка трансляции')
-                  }
-                  setAiCfgBusy(false)
-                }}
-              >
-                В LIVE
-              </button>
-              {aiCfgMsg && <span className="text-xs text-[var(--muted)]">{aiCfgMsg}</span>}
-            </div>
+            {!aiCfg && <div className="text-xs text-[var(--muted)]">Загрузка настроек…</div>}
+            {aiCfg && (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
+                  {AI_FIELDS.map(f => (
+                    <label key={f.key} className="flex flex-col gap-1 text-2xs text-[var(--txt-muted)]">
+                      {f.label}
+                      <input
+                        type="number"
+                        step={f.step || 1}
+                        disabled={!aiCfgEditable || aiCfgBusy}
+                        value={aiCfg[f.key] ?? ''}
+                        onChange={e => setAiCfg(prev => ({ ...prev, [f.key]: e.target.value }))}
+                        className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg)] text-[var(--txt)] mono text-xs disabled:opacity-50"
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2 items-center">
+                  <button
+                    type="button"
+                    disabled={aiCfgBusy || !aiCfgEditable}
+                    className="px-3 py-1.5 rounded-lg text-sm bg-[var(--accent)] text-white disabled:opacity-50"
+                    onClick={async () => {
+                      setAiCfgBusy(true)
+                      setAiCfgMsg('')
+                      try {
+                        const payload = { ...aiCfg }
+                        for (const f of AI_FIELDS) {
+                          const v = Number(aiCfg[f.key])
+                          if (!Number.isFinite(v)) continue
+                          payload[f.key] = f.scale ? v / f.scale : v
+                        }
+                        await api.aiSaveConfig(payload)
+                        const c = await api.aiGetConfig()
+                        const src = (c && (c.runtime || c.demo)) || {}
+                        const view = { ...src }
+                        for (const f of AI_FIELDS) {
+                          const v = Number(view[f.key])
+                          if (Number.isFinite(v) && f.scale) view[f.key] = +(v * f.scale).toFixed(4)
+                        }
+                        setAiCfg(view)
+                        setAiCfgMsg('Сохранено в DEMO и применено')
+                      } catch (e) {
+                        setAiCfgMsg(e.message || 'Ошибка сохранения DEMO')
+                      }
+                      setAiCfgBusy(false)
+                    }}
+                  >
+                    Сохранить в DEMO
+                  </button>
+                  <button
+                    type="button"
+                    disabled={aiCfgBusy}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-[var(--border)]"
+                    onClick={async () => {
+                      if (!window.confirm('Сохранить копию текущих DEMO-настроек в LIVE-снимок?')) return
+                      setAiCfgBusy(true)
+                      setAiCfgMsg('')
+                      try {
+                        const r = await api.aiPromoteConfig()
+                        setAiCfgMsg(r.message || 'Снимок скопирован')
+                      } catch (e) {
+                        setAiCfgMsg(e.message || 'Ошибка копирования')
+                      }
+                      setAiCfgBusy(false)
+                    }}
+                  >
+                    Копия в LIVE
+                  </button>
+                  {aiCfgMsg && <span className="text-xs text-[var(--muted)]">{aiCfgMsg}</span>}
+                </div>
+              </>
+            )}
           </div>
               <Key size={13} className="text-[var(--profit)]" /> {t('settings.api_keys')}
               {backendConfig?.has_credentials && (

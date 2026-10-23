@@ -1710,7 +1710,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             startLabel={`${t('dash.start')} AI`}
             onStart={async () => {
               try {
-                await api.aiStart({ capital: 10000, provider: 'groq', execute: true })
+                await api.aiStart({ execute: true })
                 loadData()
               } catch (e) { alert(e.message) }
             }}

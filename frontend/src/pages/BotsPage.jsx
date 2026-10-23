@@ -614,13 +614,10 @@ export default function BotsPage({ connected, isGuest }) {
       } else {
         const cap = Math.max(100, Number(aiCapital) || 10000)
         try { localStorage.setItem('ai_live_capital', String(cap)) } catch {}
-        await api.aiStart({
-          capital: cap,
-          provider: 'groq',
-          execute: true,
-          max_positions: 1,
-          symbols: AI_SYMBOLS,
-        })
+        // Do NOT override strategy knobs here: provider/symbols/max_positions
+        // come from env + saved DEMO config, otherwise the same bot behaves
+        // differently depending on which button started it.
+        await api.aiStart({ capital: cap, execute: true })
       }
       await refreshStatus()
     } catch (e) { alert(e.message) }

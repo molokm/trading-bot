@@ -148,9 +148,6 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     env_kill = _b("RISK_KILL_SWITCH", False)
     kill = env_kill if _runtime_kill is None else _runtime_kill
     max_daily = _f("RISK_MAX_DAILY_LOSS_USD", 0.0)  # 0 = disabled
-    _f("RISK_MAX_POSITION_USD", 0.0)
-    _f("RISK_MAX_LEVERAGE", 0.0)
-    _b("OKX_DEMO", True)
 
     # Position-level limits from env
     max_open_pos = int(_f("RISK_MAX_OPEN_POSITIONS", 0))  # 0 = unlimited
@@ -244,6 +241,15 @@ def assert_can_open(
     """
     if is_reduce_only:
         return
+
+    # Single source for today's realised PnL: the engine's own counter.
+    # Without this the RISK_MAX_DAILY_LOSS_USD knob could never fire because
+    # update_daily_pnl() has no producers.
+    if daily_pnl is None and ai_bot is not None:
+        try:
+            daily_pnl = float(getattr(ai_bot, "_daily_realized", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            daily_pnl = None
 
     st = get_status(daily_pnl=daily_pnl, ai_bot=ai_bot)
     if st.block_new_entries:

@@ -900,14 +900,34 @@ async def _openai_compatible(api_key: str, base_url: str, model: str,
     raise RuntimeError(last_err or "LLM request failed")
 
 
+def _detect_provider() -> str:
+    """Same precedence the engine uses (config/env → groq → openrouter → openai)."""
+    env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+    if env:
+        return env
+    if os.getenv("GROQ_API_KEY", "").strip():
+        return "groq"
+    if os.getenv("OPENROUTER_API_KEY", "").strip():
+        return "openrouter"
+    if os.getenv("OPENAI_API_KEY", "").strip():
+        return "openai"
+    return "mock"
+
+
 def llm_status() -> dict:
     """Public-safe LLM config for /api/ai/status (no secrets)."""
     import time as _time
     key = os.getenv("GROQ_API_KEY", "").strip()
-    provider = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
-    if not provider:
-        provider = "groq" if key else "mock"
+    provider = _detect_provider()
     cool = max(0, int(_rate_limit_until - _time.time()))
+    _ex_env = (os.getenv("AI_EXECUTE") or "").strip().lower()
+    if _ex_env in ("1", "true", "yes", "on"):
+        _execute = True
+    elif _ex_env in ("0", "false", "no", "off"):
+        _execute = False
+    else:
+        # Unset: mirror the engine rule — auto-execute only on demo.
+        _execute = (os.getenv("OKX_DEMO", "true") or "").strip().lower() in ("1", "true", "yes", "on")
     return {
         "provider": provider,
         "model": (
@@ -918,7 +938,7 @@ def llm_status() -> dict:
             ))
         ),
         "groq_key_configured": bool(key),
-        "execute": os.getenv("AI_EXECUTE", "0").strip().lower() in ("1", "true", "yes", "on"),
+        "execute": _execute,
         "rate_limit_cooldown_sec": cool,
         "rate_limited": cool > 0,
         "fallbacks": _provider_chain(provider),

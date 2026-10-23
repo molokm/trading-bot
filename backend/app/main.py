@@ -172,6 +172,54 @@ client_manager = OKXClientManager.get_instance()
 showcase_manager = OKXClientManager.new_instance()
 live_manager = OKXClientManager.new_instance()
 
+
+def _ai_default_config(**overrides):
+    """Single source of truth for AI defaults (boot, UI start, retry paths).
+
+    Previously each call-site repeated os.getenv(..., different_default) which
+    let the same bot start with different sizing/limits depending on the entry
+    point. Keep every default here.
+    """
+    try:
+        from app.services.ai_agent import ALLOWED_SYMBOLS as _AI_SYMS
+        _syms = list(_AI_SYMS)
+    except Exception:
+        _syms = ["BTC", "ETH", "SOL", "XRP"]
+
+    def _num(name, default, cast):
+        try:
+            return cast(os.getenv(name, str(default)) or default)
+        except (TypeError, ValueError):
+            return cast(default)
+
+    cfg = AIConfig(
+        symbols=_syms,
+        capital=_num("AI_CAPITAL", 10000, float),
+        max_leverage=_num("AI_MAX_LEVERAGE", 3, float),
+        max_positions=_num("AI_MAX_POSITIONS", 2, int),
+        risk_per_trade=_num("AI_RISK_PER_TRADE", 0.012, float),
+        poll_interval_sec=_num("AI_POLL_SEC", 60, int),
+        llm_manage_interval_sec=_num("AI_LLM_MANAGE_SEC", 90, int),
+        llm_min_interval_sec=_num("AI_LLM_MIN_SEC", 180, int),
+        execute=True,
+    )
+    for k, v in overrides.items():
+        if v is None or not hasattr(cfg, k):
+            continue
+        try:
+            cur = getattr(cfg, k)
+            if isinstance(cur, bool):
+                setattr(cfg, k, bool(v))
+            elif isinstance(cur, int) and not isinstance(cur, bool):
+                setattr(cfg, k, int(v))
+            elif isinstance(cur, float):
+                setattr(cfg, k, float(v))
+            else:
+                setattr(cfg, k, v)
+        except (TypeError, ValueError):
+            continue
+    return cfg
+
 async def _verify_key_perms(client, label: str = "") -> dict:
     """Check API key rights via OKX and cache posMode on the client instance.
 
@@ -798,16 +846,16 @@ async def startup():
                     _slog(f'pre-AI live ensure: {_pre_ok}')
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
-                ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '2')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), llm_manage_interval_sec=int(os.getenv('AI_LLM_MANAGE_SEC', '90')), llm_min_interval_sec=int(os.getenv('AI_LLM_MIN_SEC', '180')), execute=_exec)
+                ai_cfg = _ai_default_config(execute=_exec, symbols=_syms, capital=_cap)
                 ai_bot = AIStrategy(config=ai_cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
                     import json as _json
-                    _cfgkey = 'ai_config:demo' if _demo else 'ai_config:live'
+                    _cfgkey = 'ai_config:demo'  # AI engine is DEMO-only → one snapshot
                     _raw_cfg = await db.get_setting(_cfgkey)
                     if _raw_cfg:
                         _saved_cfg = _json.loads(_raw_cfg)
-                        for _k in ('capital', 'symbols', 'execute'):
+                        for _k in ('capital', 'symbols', 'execute', 'provider'):
                             _saved_cfg.pop(_k, None)
                         ai_bot.apply_config_dict(_saved_cfg, keep_execute=True)
                         _slog(f'applied saved config ({_cfgkey}, {len(_saved_cfg)} keys)')
@@ -884,16 +932,7 @@ async def startup():
             except Exception:
                 _syms = ["BTC", "ETH", "SOL", "XRP"]
             _cap = float(os.getenv("AI_CAPITAL", "10000"))
-            ai_cfg = AIConfig(
-                symbols=_syms, capital=_cap,
-                max_leverage=float(os.getenv("AI_MAX_LEVERAGE", "3")),
-                max_positions=int(os.getenv("AI_MAX_POSITIONS", "2")),
-                risk_per_trade=float(os.getenv("AI_RISK_PER_TRADE", "0.012")),
-                poll_interval_sec=int(os.getenv("AI_POLL_SEC", "60")),
-                llm_manage_interval_sec=int(os.getenv("AI_LLM_MANAGE_SEC", "90")),
-                llm_min_interval_sec=int(os.getenv("AI_LLM_MIN_SEC", "180")),
-                execute=True,
-            )
+            ai_cfg = _ai_default_config(execute=True, symbols=_syms, capital=_cap)
             ai_bot = AIStrategy(
                 config=ai_cfg, client_manager=showcase_manager, db=db,
                 notifier=telegram, live_client_manager=live_manager,
@@ -1045,8 +1084,11 @@ async def startup():
         losses grow silently. This loop checks the beat registry and acts.
         """
         await asyncio.sleep(120)
-        _alerted: dict = {}
         _flattened: dict = {}
+        _pending: dict = {}
+        _log_seen: set = set()
+        _had_issues = False
+        _last_digest = 0.0
 
         def _flag(name: str, default: str) -> float:
             try:
@@ -1058,7 +1100,7 @@ async def startup():
         _manage_max = _flag("AI_GUARD_MANAGE_SEC", "300")
         _tick_max = _flag("AI_GUARD_TICK_SEC", "180")
         _flatten_after = _flag("AI_GUARD_FLATTEN_SEC", "1200")
-        _notify_gap = _flag("AI_GUARD_NOTIFY_SEC", "1800")
+        _notify_gap = _flag("AI_GUARD_NOTIFY_SEC", "3600")
 
         def _alert(text: str) -> None:
             try:
@@ -1117,13 +1159,11 @@ async def startup():
                     except Exception as e:
                         print(f"[AI-GUARD] restore: {e}", flush=True)
                     if not positions:
-                        key = "positions_lost"
-                        if key not in _alerted or _time.time() - _alerted[key] > _notify_gap:
-                            _alerted[key] = _time.time()
-                            _alert(
-                                f"⚠️ <b>AI guard</b>: движок потерял позиции\n"
-                                f"В базе {len(snap)} шт., в памяти 0. Управление (стопы/TP) не работает."
-                            )
+                        _pending["positions_lost"] = hg.Issue(
+                            "positions_lost", "crit",
+                            f"в базе {len(snap)} позиций, в памяти 0 — стопы/TP не работают",
+                            action="restore/flatten",
+                        )
 
                 issues = hg.evaluate(
                     positions=positions,
@@ -1135,21 +1175,30 @@ async def startup():
                 )
 
                 for it in issues:
-                    key = f"{it.code}:{it.coin}"
-                    if key in _alerted and _time.time() - _alerted[key] < _notify_gap:
-                        continue
-                    _alerted[key] = _time.time()
-                    _who = f" {it.coin}" if it.coin else ""
-                    _alert(
-                        f"⚠️ <b>AI guard</b> [{it.severity}]{_who}\n"
-                        f"{it.code}: {it.detail}\naction={it.action or '-'}"
-                    )
-                    print(f"[AI-GUARD] ISSUE {it.severity} {it.code}{_who}: {it.detail}", flush=True)
+                    _pending[f"{it.code}:{it.coin}"] = it
 
-                # Recovery notice (only after we alerted something).
-                if not issues and _alerted:
-                    _alerted.clear()
+                # Quiet by design: details go to logs, Telegram gets at most one
+                # digest per AI_GUARD_NOTIFY_SEC (default 1h) plus rare actions.
+                _now = _time.time()
+                for _k, _it in _pending.items():
+                    if _k not in _log_seen:
+                        _log_seen.add(_k)
+                        print(f"[AI-GUARD] ISSUE {_it.severity} {_it.code} {_it.coin}: {_it.detail}", flush=True)
+                if _pending and (_now - _last_digest) >= _notify_gap:
+                    _items = list(_pending.values())
+                    _lines = [f"⚠️ <b>AI guard</b>: {len(_items)} проблем(ы)"]
+                    for _it in _items[:8]:
+                        _who = f" {_it.coin}" if _it.coin else ""
+                        _lines.append(f"• {_it.code}{_who}: {_it.detail}")
+                    if len(_items) > 8:
+                        _lines.append(f"… и ещё {len(_items) - 8}")
+                    _alert("\n".join(_lines))
+                    _last_digest = _now
+                elif not _pending and _had_issues:
+                    _log_seen.clear()
                     _alert("✅ <b>AI guard</b>: все проверки снова проходят.")
+                    _last_digest = 0.0
+                _had_issues = bool(_pending)
 
                 # Act: the engine is unmanaged for too long AND the trade is
                 # bleeding → close it, do not wait for a recovery that may not come.
@@ -2878,6 +2927,13 @@ async def ai_start(data: dict=None):
             env_ex = os.getenv('AI_EXECUTE', '1').strip().lower()
             _exec = env_ex not in ('0', 'false', 'no', 'off')
         capital = float(data.get('capital') or os.getenv('AI_CAPITAL', '10000'))
+        if not data.get('capital'):
+            try:
+                _cap_db = await db.get_setting('ai_live_capital') if db else None
+                if _cap_db and float(_cap_db) >= 100:
+                    capital = float(_cap_db)
+            except Exception:
+                pass
         if not _demo:
             try:
                 portfolio = await client.get_balance()
@@ -2889,17 +2945,14 @@ async def ai_start(data: dict=None):
             except Exception:
                 pass
 
-        provider = data.get("provider") or (
-            "groq" if os.getenv("GROQ_API_KEY", "").strip()
-            else ("openrouter" if os.getenv("OPENROUTER_API_KEY", "").strip() else None)
-        )
-
-        cfg = AIConfig(
+        # Provider comes from request, then env; never hardcode a dead vendor.
+        provider = (data.get("provider") or os.getenv("AI_LLM_PROVIDER") or "").strip() or None
+        cfg = _ai_default_config(
             capital=capital,
-            max_leverage=float(data.get("max_leverage") or 3),
-            max_positions=int(data.get("max_positions") or 1),
-            risk_per_trade=float(data.get("risk_per_trade") or 0.02),
-            poll_interval_sec=int(data.get("poll_interval_sec") or 60),
+            max_leverage=float(data.get("max_leverage") or os.getenv("AI_MAX_LEVERAGE", "3") or 3),
+            max_positions=int(data.get("max_positions") or os.getenv("AI_MAX_POSITIONS", "2") or 2),
+            risk_per_trade=float(data.get("risk_per_trade") or os.getenv("AI_RISK_PER_TRADE", "0.012") or 0.012),
+            poll_interval_sec=int(data.get("poll_interval_sec") or os.getenv("AI_POLL_SEC", "60") or 60),
             provider=provider,
             execute=_exec,
         )
@@ -2930,7 +2983,7 @@ async def ai_start(data: dict=None):
         _wire_ai_live_cb(ai_bot)
         try:
             import json as _json
-            _cfgkey = 'ai_config:demo' if _demo else 'ai_config:live'
+            _cfgkey = 'ai_config:demo'  # AI engine is DEMO-only → one snapshot
             _raw_cfg = await db.get_setting(_cfgkey)
             if _raw_cfg:
                 _saved_cfg = _json.loads(_raw_cfg)
@@ -3749,6 +3802,8 @@ async def ai_promote_config(request: Request):
         await db.set_setting('ai_config:demo', demo_raw)
     if not demo_raw:
         raise HTTPException(status_code=400, detail='Нет DEMO-настроек для трансляции в LIVE')
+    # Archive copy only: the AI engine always runs on the DEMO manager and
+    # reads ai_config:demo, so this snapshot is never applied at runtime.
     await db.set_setting('ai_config:live', demo_raw)
     if not _env_demo and ai_bot:
         try:
@@ -3759,7 +3814,7 @@ async def ai_promote_config(request: Request):
         await write_audit(request, 'ai.config.promote', detail='demo -> live')
     except Exception:
         pass
-    return {'ok': True, 'promoted': True, 'message': 'Настройки DEMO скопированы в LIVE. В Live-режиме бот использует этот снимок.'}
+    return {'ok': True, 'promoted': True, 'message': 'Копия DEMO-настроек сохранена в LIVE-снимок (архив; движок читает DEMO-снимок).'}
 
 @app.get('/api/ai/logs')
 @policy(ADMIN)
@@ -4082,7 +4137,7 @@ async def health(request: Request):
             _live_en = await db.get_setting('live_mirror_enabled')
     except Exception:
         pass
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)
@@ -4151,7 +4206,7 @@ async def health_guard_status():
 @policy(ADMIN)
 async def risk_status():
     """Public-ish status for UI badges (no secrets)."""
-    st = risk_get_status(daily_pnl=None)
+    st = risk_get_status(daily_pnl=None, ai_bot=ai_bot)
     return st.to_dict()
 
 @app.post('/api/risk/kill')
@@ -4162,7 +4217,7 @@ async def risk_kill(request: Request, data: dict=None):
     enabled = bool(data.get('enabled', True))
     set_kill_switch(enabled)
     await write_audit(request, 'risk.kill_switch', detail=f'enabled={enabled}')
-    return {'ok': True, **risk_get_status().to_dict()}
+    return {'ok': True, **risk_get_status(ai_bot=ai_bot).to_dict()}
 
 @app.get('/api/health/circuit-breaker')
 @policy(PUBLIC)

@@ -535,6 +535,9 @@ class AIStrategy:
         self._lifetime_wins = int(st.get("lifetime_wins") or 0)
         self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
         self._equity = self._capital + self._session_pnl
+        # Real account equity reported by OKX (0 = unknown yet). Config
+        # capital may be a nominal number, so risk limits must not use it alone.
+        self._account_equity = 0.0
         self._last_activity = None
         self._trace = {}
         self._next_tick_at = None
@@ -2138,11 +2141,10 @@ class AIStrategy:
         if not data or not isinstance(data, dict):
             return
         cfg = self.config
+        allowed = set(getattr(cfg, "__dataclass_fields__", {}) or {})
         skip = {"execute"} if keep_execute else set()
         for k, v in data.items():
-            if k in skip or k.startswith("_"):
-                continue
-            if not hasattr(cfg, k):
+            if k in skip or k.startswith("_") or k not in allowed:
                 continue
             try:
                 cur = getattr(cfg, k)
@@ -2162,38 +2164,21 @@ class AIStrategy:
                 continue
 
     def export_config_dict(self) -> dict:
-        """Serializable subset of AIConfig for DEMO/LIVE settings store."""
+        """Serializable AIConfig snapshot (everything except runtime 'execute').
+
+        The previous hand-written whitelist silently dropped new knobs, so
+        saved/promoted configs always fell back to code defaults for them.
+        """
         cfg = self.config
+        fields = getattr(cfg, "__dataclass_fields__", {}) or {}
         out = {}
-        for k, v in getattr(cfg, "__dataclass_fields__", {}).items() if False else []:
-            pass
-        # AIConfig may be a plain class not dataclass — export known attrs
-        keys = [
-            "symbols", "capital", "max_leverage", "max_positions", "risk_per_trade",
-            "allocation_pct", "bar", "candle_limit", "poll_interval_sec",
-            "min_confidence", "min_adx", "adx_soft_floor", "adx_align_bypass",
-            "min_roc_abs", "min_stop_pct", "max_stop_pct", "min_take_pct",
-            "btc_roc_veto",
-            "max_hold_hours", "block_llm_error_opens", "indicator_exit",
-            "min_hold_minutes", "exit_min_profit_pct", "exit_on_ema_cross",
-            "exit_on_price_vs_ema", "exit_on_roc_flip", "exit_weak_adx",
-            "trail_activate_pct", "trail_lock_pct", "ema_fast", "ema_slow",
-            "ema_trend", "adx_period", "roc_period", "rsi_period",
-            "quant_min_align", "block_chop_opens", "adapt_enabled",
-            "adapt_window", "adapt_min_trades", "conf_floor", "conf_ceil",
-            "align_floor", "align_ceil", "size_cap_floor", "size_cap_ceil",
-            "provider",
-            "giveback_enable", "giveback_min_peak_pct", "giveback_retain_frac",
-            "momentum_entry_filter", "thesis_break_exit",
-            "sol_min_adx", "sol_min_align", "loss_reopen_cooldown_min",
-        ]
-        for k in keys:
-            if hasattr(cfg, k):
-                v = getattr(cfg, k)
-                if isinstance(v, list):
-                    out[k] = list(v)
-                else:
-                    out[k] = v
+        for k in fields:
+            if k == "execute":
+                continue
+            if not hasattr(cfg, k):
+                continue
+            v = getattr(cfg, k)
+            out[k] = list(v) if isinstance(v, list) else v
         return out
 
     def _effective_min_confidence(self) -> float:
@@ -2537,6 +2522,12 @@ class AIStrategy:
             if not data or not isinstance(data[0], dict):
                 return 0.0
             acct = data[0]
+            try:
+                _teq = float(acct.get("totalEq") or 0)
+                if _teq > 0:
+                    self._account_equity = _teq
+            except (TypeError, ValueError):
+                pass
             best = 0.0
             for d in (acct.get("details") or []):
                 if str(d.get("ccy") or "").upper() != "USDT":
@@ -5353,14 +5344,19 @@ class AIStrategy:
     def _daily_loss_blocks_open(self) -> bool:
         try:
             from datetime import datetime, timezone
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            from app.services.pnl_engine import PNL_TZ
+            # Daily accounting must use the same day boundary as the PnL
+            # dashboards (Europe/Moscow), not UTC.
+            day = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
             if day != getattr(self, "_daily_realized_day", ""):
                 self._daily_realized_day = day
                 self._daily_realized = 0.0
-            lim = float(getattr(self.config, "daily_loss_limit_pct", 0.03) or 0)
+            lim = float(getattr(self.config, "daily_loss_limit_pct", 0.02) or 0)
             if lim <= 0:
                 return False
-            eq = float(self._capital or 10000)
+            # Prefer exchange equity; nominal config capital would inflate the
+            # allowed daily loss (e.g. 2% of $10k instead of 2% of real $650).
+            eq = float(self._account_equity or 0) or float(self._capital or 10000)
             if eq <= 0:
                 return False
             return float(self._daily_realized) <= -lim * eq
