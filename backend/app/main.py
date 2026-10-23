@@ -862,6 +862,7 @@ async def startup():
                 except Exception as _ce:
                     _slog(f'saved config apply error: {_ce}')
                 ai_bot.start()
+                await _seed_daily_realized(ai_bot)
                 _slog(f'ai_bot started: running={ai_bot._running}')
                 _positions_cache = None
                 try:
@@ -939,6 +940,7 @@ async def startup():
             )
             _wire_ai_live_cb(ai_bot)
             ai_bot.start()
+            await _seed_daily_realized(ai_bot)
             if db:
                 await db.set_setting("ai_bot_running", "1")
                 await db.set_setting("ai_user_stopped", "0")
@@ -1055,6 +1057,7 @@ async def startup():
                             )
                             _wire_ai_live_cb(ai_bot)
                             ai_bot.start()
+                            await _seed_daily_realized(ai_bot)
                             print("[AI-WATCHDOG] rebuilt AIStrategy instance", flush=True)
                     except Exception as e2:
                         print(f"[AI-WATCHDOG] rebuild failed: {e2}", flush=True)
@@ -2999,6 +3002,7 @@ async def ai_start(data: dict=None):
         except Exception as _ce:
             print(f'[AI/start] saved config apply: {_ce}', flush=True)
         ai_bot.start()
+        await _seed_daily_realized(ai_bot)
         global _positions_cache
         _positions_cache = None
         if db:
@@ -7059,6 +7063,26 @@ async def reports_summary():
     return {'as_of': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'realized_total': pnl.get('total'), 'realized_1d': pnl.get('1d'), 'realized_7d': pnl.get('7d'), 'realized_30d': pnl.get('30d'), 'realized_week': pnl.get('week'), 'unrealized': pnl.get('unrealized'), 'fees_reported': round(fees, 4) if fees else pnl.get('fees'), 'funding': round(funding, 4), 'funding_source': funding_source, 'net_approx': round(float(pnl.get('total') or 0) + float(pnl.get('unrealized') or 0) + funding, 2), 'per_bot': pnl.get('per_bot') or {}, 'trades_closed': len(closed), 'wins': wins, 'losses': losses, 'win_rate_pct': win_rate, 'pnl_source': pnl.get('source'), 'note': 'PnL matches History paired trades; funding is OKX bills type=8 (best-effort, last page).'}
 _bot_stats_cache = {'ts': 0, 'data': {}, 'mode': ''}
 _BOT_STATS_TTL = 15
+
+async def _seed_daily_realized(bot) -> None:
+    """Prime the engine's in-memory daily counter from the shared PnL engine.
+
+    Restarts used to reset it to 0 mid-day, silently widening the daily-loss
+    gate. PnL engine already knows today's net realised PnL.
+    """
+    if bot is None:
+        return
+    try:
+        agg = await pnl_engine.compute_stats(db, account_mode='demo', period='today')
+        from app.services.pnl_engine import PNL_TZ
+        day = __import__('datetime').datetime.now(
+            __import__('datetime').timezone.utc).astimezone(PNL_TZ).strftime('%Y-%m-%d')
+        bot._daily_realized = float(agg.get('realized_pnl') or 0.0)
+        bot._daily_realized_day = day
+        print(f"[AI] daily seed: {bot._daily_realized:+.2f} USDT ({day})", flush=True)
+    except Exception as e:
+        print(f"[AI] daily seed: {e}", flush=True)
+
 
 async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
