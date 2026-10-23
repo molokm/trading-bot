@@ -5343,9 +5343,14 @@ async def close_position(data: dict):
 
 
 @app.post('/api/positions/close-all')
-@policy(AUTH_NO_GUEST)
+@policy(ADMIN)
 async def close_all_positions(data: dict = None):
-    """Close ALL open positions on the given account (demo or live)."""
+    """Close ALL open positions on the platform account (demo or live).
+
+    ADMIN-only: this flattens the shared DEMO account or the owner's LIVE
+    mirror. A regular subscriber must use /api/me/positions/close-all, which
+    only touches their own account. Before this was AUTH_NO_GUEST, any
+    provisioned Telegram user could flatten the owner's LIVE book."""
     data = data or {}
     account = str(data.get('account') or 'demo').lower()
     client = None

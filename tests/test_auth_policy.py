@@ -77,6 +77,9 @@ TIGHTENED_IN_3B = {
     '/api/ai/diagnostics', '/api/chart/trades', '/api/live/trades', '/api/portfolio',
     '/api/reports/summary', '/api/risk/status', '/api/stats', '/api/trade/log',
     '/api/trade/orders', '/api/trades',
+    # Destroyed the platform's shared DEMO / owner's LIVE book for any
+    # provisioned Telegram user; use /api/me/positions/close-all instead.
+    '/api/positions/close-all',
 }
 
 
@@ -194,7 +197,6 @@ OWNER_DATA_REACHABLE_BY_USER = {
     '/api/pnl',
     '/api/pnl/summary',
     '/api/positions',
-    '/api/positions/close-all',
     '/api/trades/paired',
 }
 
