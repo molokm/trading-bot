@@ -797,7 +797,7 @@ async def startup():
                 except Exception as _em:
                     _slog(f'pre-AI live ensure: {_em}')
                 ai_cfg = AIConfig(symbols=_syms, capital=_cap, max_leverage=float(os.getenv('AI_MAX_LEVERAGE', '3')), max_positions=int(os.getenv('AI_MAX_POSITIONS', '2')), risk_per_trade=float(os.getenv('AI_RISK_PER_TRADE', '0.012')), poll_interval_sec=int(os.getenv('AI_POLL_SEC', '60')), llm_manage_interval_sec=int(os.getenv('AI_LLM_MANAGE_SEC', '90')), llm_min_interval_sec=int(os.getenv('AI_LLM_MIN_SEC', '180')), execute=_exec)
-                ai_bot = AIStrategy(config=ai_cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+                ai_bot = AIStrategy(config=ai_cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
                 _wire_ai_live_cb(ai_bot)
                 try:
                     import json as _json
@@ -893,7 +893,7 @@ async def startup():
                 execute=True,
             )
             ai_bot = AIStrategy(
-                config=ai_cfg, client_manager=client_manager, db=db,
+                config=ai_cfg, client_manager=showcase_manager, db=db,
                 notifier=telegram, live_client_manager=live_manager,
             )
             _wire_ai_live_cb(ai_bot)
@@ -1007,7 +1007,7 @@ async def startup():
                             ai_bot.stop()
                             ai_bot = AIStrategy(
                                 config=cfg,
-                                client_manager=client_manager,
+                                client_manager=showcase_manager,
                                 db=db,
                                 notifier=telegram,
                                 live_client_manager=live_manager,
@@ -2756,7 +2756,11 @@ async def ai_start(data: dict=None):
                         print('[AI/start] live mirror init rejected (demo=true), skipping', flush=True)
             except Exception as e:
                 print(f'[AI/start] live mirror DB restore: {e}', flush=True)
-        ai_bot = AIStrategy(config=cfg, client_manager=client_manager, db=db, notifier=telegram, live_client_manager=live_manager)
+        try:
+            await _ensure_showcase()
+        except Exception as _es:
+            print(f'[AI/start] ensure showcase demo client: {_es}', flush=True)
+        ai_bot = AIStrategy(config=cfg, client_manager=showcase_manager, db=db, notifier=telegram, live_client_manager=live_manager)
         _wire_ai_live_cb(ai_bot)
         try:
             import json as _json
@@ -4144,6 +4148,11 @@ async def credentials_init(request: Request, data: dict=Body(default=None)):
         _env_key, _env_secret, _env_pass = (key, secret, passphrase)
         _env_demo = True
         await client_manager.init_client(key, secret, passphrase, True)
+        # AI engine runs on the dedicated DEMO manager — keep it on the new keys
+        try:
+            await showcase_manager.init_client(key, secret, passphrase, True)
+        except Exception as _se:
+            print(f'[credentials] showcase demo re-init: {_se}', flush=True)
         await write_audit(request, 'credentials.init', detail='demo=showcase')
         return {'message': 'Showcase DEMO keys set', 'demo': True, 'mode': 'demo'}
     await _save_live_creds(key, secret, passphrase)

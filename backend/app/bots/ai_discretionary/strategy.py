@@ -747,8 +747,17 @@ class AIStrategy:
             return None
         c = self.client_manager.get_client()
         if c is not None and not getattr(c, "demo", True):
-            print("[AI] REFUSED live client as primary (DEMO-only engine)", flush=True)
+            if not getattr(self, "_refused_live_logged", False):
+                self._refused_live_logged = True
+                print(
+                    "[AI] REFUSED live client as primary (DEMO-only engine) — "
+                    "trading is IDLE until a demo client is available",
+                    flush=True,
+                )
             return None
+        if c is None and not getattr(self, "_no_client_logged", False):
+            self._no_client_logged = True
+            print("[AI] no OKX demo client — engine idle (check DEMO keys)", flush=True)
         return c
 
     def _require_demo_twin_open(self, coin: str, side: str) -> tuple:
