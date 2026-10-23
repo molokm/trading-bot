@@ -3854,6 +3854,23 @@ async def health(request: Request):
         want_diag = False
     if want_diag:
         try:
+            diag['ai_trace'] = getattr(ai_bot, '_trace', None) if ai_bot else None
+            _cfg_ai = getattr(ai_bot, 'config', None)
+            if _cfg_ai is not None:
+                diag['ai_params'] = {
+                    k: getattr(_cfg_ai, k, None) for k in (
+                        'execute', 'decide_on_bar_close', 'poll_interval_sec',
+                        'llm_manage_interval_sec', 'llm_min_interval_sec',
+                        'partial_take_enable', 'partial_take_pct', 'partial_take_frac',
+                        'soft_profit_take_pct', 'hard_profit_lock_peak',
+                        'hard_profit_lock_floor', 'giveback_enable',
+                        'giveback_min_peak_pct', 'giveback_retain_frac',
+                        'max_hold_hours', 'time_stop_stale_hours',
+                    )
+                }
+        except Exception as e:
+            diag['ai_trace_err'] = str(e)[:120]
+        try:
             diag['pnl_epoch'] = await get_pnl_epoch()
             _pr = await get_pnl()
             diag['pnl_total'] = _pr.get('total')

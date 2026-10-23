@@ -471,6 +471,7 @@ class AIPosition:
     peak_price: float = 0.0
     peak_upl_pct: float = 0.0            # best unrealized % seen while open
     partial_taken: bool = False          # v1.28 one-shot scale-out done
+    signal_close_notified: str = ""       # signal-only mode: last exit already alerted
     unrealized_pnl: float = 0.0
     sl_algo_id: str = ""
     scale_adds: int = 0
@@ -534,6 +535,7 @@ class AIStrategy:
         self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
         self._equity = self._capital + self._session_pnl
         self._last_activity = None
+        self._trace = {}
         self._next_tick_at = None
         self._last_tick_error = None
         self._started_at = None
@@ -3055,7 +3057,17 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
         if not self._execute_enabled():
-            print(f"[AI] SIGNAL close {coin} ({reason}) execute=0 — still TG notify", flush=True)
+            # Signal-only mode: never drop the position from memory. Dropping it
+            # made the very next tick re-adopt the still-open exchange position,
+            # so stops/TP never executed, peaks reset, and the LLM manage path
+            # was skipped (in_pos=False) — the trade silently gave back its profit.
+            if str(getattr(pos, "signal_close_notified", "") or "") == str(reason):
+                return
+            pos.signal_close_notified = str(reason or "signal_close")
+            print(
+                f"[AI] SIGNAL close {coin} ({reason}) execute=0 — position kept, alerted once",
+                flush=True,
+            )
             mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
             _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
             mode, _k = self._account_mode_tag()
@@ -3063,12 +3075,6 @@ class AIStrategy:
                 await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode=mode)
             except Exception as e:
                 print(f"[AI] TG close (execute=0): {e}", flush=True)
-            del self._positions[coin]
-            if self.db:
-                try:
-                    await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-                except Exception:
-                    pass
             return
         # Safety: verify position still exists on exchange (exchange algo may have closed it)
         try:
@@ -4794,12 +4800,11 @@ class AIStrategy:
                 prev_peak = float(getattr(pos, "peak_upl_pct", 0) or 0)
                 if upl > prev_peak:
                     pos.peak_upl_pct = upl
-                    # persist peak so redeploy cannot erase profit-lock memory
-                    if int(getattr(self, "_tick_count", 0) or 0) % 3 == 0:
-                        try:
-                            await self._persist_peaks()
-                        except Exception:
-                            pass
+                    # persist every new peak: a redeploy must not blind profit-lock
+                    try:
+                        await self._persist_peaks()
+                    except Exception:
+                        pass
             except Exception:
                 pass
             # --- Profit protection (v1.27): soft take → hard lock → giveback ---
@@ -5233,6 +5238,13 @@ class AIStrategy:
                 print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid} opened_at={_oa}", flush=True)
         except Exception as e:
             print(f"[AI] restore error: {e}", flush=True)
+        # Peaks were persisted by the previous process; re-attach them after adopt
+        # or giveback/hard-lock would be blind on the first ticks after a restart.
+        if self._positions:
+            try:
+                await self._restore_peaks()
+            except Exception as e:
+                print(f"[AI] restore_peaks after adopt: {e}", flush=True)
 
     async def _restore_adopt_position(self, client, inst_id: str, coin: str, side: str,
                                       sz: float, entry: float):
@@ -5328,8 +5340,11 @@ class AIStrategy:
             return False
 
     async def _tick(self):
+        # Diagnostics: last stage reached in a tick (exposed via /api/health).
+        self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "start"}
         client = await self._client()
         if not client:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "no_client"}
             if self._tick_count == 0:
                 print("[AI] tick #0: no OKX client — check if mode was switched and API keys are saved", flush=True)
             return
@@ -5407,6 +5422,19 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
+        try:
+            self._trace = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "stage": "managed",
+                "positions": [
+                    {"coin": c, "side": getattr(p, "side", ""),
+                     "peak": round(float(getattr(p, "peak_upl_pct", 0) or 0), 3)}
+                    for c, p in (self._positions or {}).items()
+                ],
+                "execute": self._execute_enabled(),
+            }
+        except Exception:
+            pass
         if self._live_ready():
             try:
                 await self._ensure_live_equity()
@@ -5437,11 +5465,16 @@ class AIStrategy:
         in_pos = bool(self._positions)
         (bool(fresh) or in_pos) and gap_ok
         if decide_bar and not fresh and not in_pos:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "skip_no_bar",
+                           "fresh": 0, "positions": 0}
             if self._tick_count % 10 == 0:
                 print(f"[AI] skip LLM — waiting for next closed {getattr(self.config, 'bar', '1H')} bar", flush=True)
             self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
             return
         if not gap_ok:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "skip_interval",
+                           "min_gap": min_gap,
+                           "since_llm_sec": round(now_ts - float(getattr(self, "_last_llm_ts", 0) or 0), 1)}
             if self._tick_count % 10 == 0:
                 print(f"[AI] skip LLM — min interval {min_gap:.0f}s", flush=True)
             self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
@@ -5478,6 +5511,9 @@ class AIStrategy:
         self._last_decision = self._enrich_decision(decision, snap)
         self._decision_log.append(self._last_decision)
         self._decision_log = self._decision_log[-200:]
+        self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "decided",
+                       "action": decision.get("action"), "symbol": decision.get("symbol"),
+                       "provider": decision.get("provider_used")}
         print(f"[AI] decision {decision} execute={self._execute_enabled()}", flush=True)
         try:
             self.analysis.log(
@@ -6821,6 +6857,9 @@ class AIStrategy:
                     "stop_price": getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0),
                     "take_price": getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0),
                     "leverage": getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0),
+                    "peak_upl_pct": getattr(p, "peak_upl_pct", 0),
+                    "partial_taken": bool(getattr(p, "partial_taken", False)),
+                    "opened_at": getattr(p, "opened_at", ""),
                     "account_mode": "demo",
                 }
                 for p in self._positions.values()
@@ -6876,6 +6915,7 @@ class AIStrategy:
                 "llm_rate_limit_until": self._llm_rate_limit_until,
                 "last_provider_used": self._last_provider_used,
                 "provider_status": self._get_provider_status(),
+                "trace": getattr(self, "_trace", None),
             },
             "live": {
                 "connected": self._live_ready(),
