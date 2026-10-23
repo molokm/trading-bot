@@ -7,6 +7,7 @@ the current process lifetime.
 from __future__ import annotations
 
 import json
+import hmac
 import os
 import time
 import uuid
@@ -293,9 +294,17 @@ def _decode(token: str) -> Optional[dict]:
 
 
 def login(password: str) -> Optional[str]:
+    # FAIL CLOSED: no DASHBOARD_PASSWORD used to mean "any password is admin".
+    # Open login is only allowed if explicitly opted in for local dev.
     if not PASSWORD:
+        allow_open = os.getenv("ALLOW_NO_PASSWORD_LOGIN", "").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if not allow_open:
+            print("[auth] login refused: DASHBOARD_PASSWORD is not set", flush=True)
+            return None
         return _new_token("admin")
-    if password == PASSWORD:
+    if hmac.compare_digest(str(password or ""), PASSWORD):
         return _new_token("admin")
     return None
 
