@@ -27,22 +27,34 @@ async def persist_open_snapshot(db, bot_id: str, positions: list) -> None:
         import json
         payload = []
         for p in positions or []:
+            def _one(src):
+                return {
+                    "coin": src.get("coin") or "",
+                    "inst_id": src.get("inst_id") or "",
+                    "side": norm_side(src.get("side") or "long"),
+                    "size": float(src.get("size") or 0),
+                    "entry_price": float(src.get("entry_price") or 0),
+                    # Protection survives restarts: restoring with synthetic 3%
+                    # stops silently widened every stop after each deploy.
+                    "stop_price": float(src.get("stop_price") or 0),
+                    "take_price": float(src.get("take_price") or 0),
+                    "peak_price": float(src.get("peak_price") or 0),
+                    "opened_at": src.get("opened_at") or "",
+                }
             if isinstance(p, dict):
-                payload.append({
-                    "coin": p.get("coin") or "",
-                    "inst_id": p.get("inst_id") or p.get("instId") or "",
-                    "side": norm_side(p.get("side") or "long"),
-                    "size": float(p.get("size") or 0),
-                    "entry_price": float(p.get("entry_price") or p.get("entry") or 0),
-                })
+                payload.append(_one(p))
             else:
-                payload.append({
+                payload.append(_one({
                     "coin": getattr(p, "coin", "") or "",
                     "inst_id": getattr(p, "inst_id", "") or getattr(p, "symbol", "") or "",
-                    "side": norm_side(getattr(p, "side", "long")),
-                    "size": float(getattr(p, "size", 0) or 0),
-                    "entry_price": float(getattr(p, "entry_price", 0) or 0),
-                })
+                    "side": getattr(p, "side", "long"),
+                    "size": getattr(p, "size", 0),
+                    "entry_price": getattr(p, "entry_price", 0),
+                    "stop_price": getattr(p, "stop_price", 0),
+                    "take_price": getattr(p, "take_price", 0),
+                    "peak_price": getattr(p, "peak_price", 0),
+                    "opened_at": getattr(p, "opened_at", ""),
+                }))
         await db.set_setting(f"open_positions:{bot_id}", json.dumps(payload))
     except Exception as e:
         log.warning("persist_open_snapshot %s: %s", bot_id, e)
@@ -64,10 +76,21 @@ async def upsert_snapshot_position(db, bot_id: str, inst_id: str, side: str, siz
         found = False
         for p in data:
             if (p.get("inst_id") == inst_id and norm_side(p.get("side") or "long") == side_n):
-                out.append({
+                row = dict(p)
+                try:
+                    _old_entry = float(p.get("entry_price") or 0)
+                except (TypeError, ValueError):
+                    _old_entry = 0.0
+                if _old_entry > 0 and entry > 0 and abs(_old_entry - entry) / entry > 1e-3:
+                    # Different entry = new position on the same instrument/side.
+                    # Old protection belongs to the previous trade — drop it.
+                    for _k in ("stop_price", "take_price", "peak_price", "opened_at"):
+                        row.pop(_k, None)
+                row.update({
                     "coin": coin, "inst_id": inst_id, "side": side_n,
                     "size": float(size), "entry_price": float(entry),
                 })
+                out.append(row)
                 found = True
             else:
                 out.append(p)

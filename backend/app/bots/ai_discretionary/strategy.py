@@ -71,6 +71,7 @@ from app.services.pnl_utils import (
 from app.services.position_claim import (
     claim_open,
     claim_or_flatten,
+    persist_open_snapshot,
     release_open,
     sweep_exchange_orphans,
 )
@@ -5171,6 +5172,41 @@ class AIStrategy:
                 except Exception:
                     pass
 
+    async def _snapshot_protection(self) -> dict:
+        """Load persisted stop/take/peak/opened_at per (inst_id, side)."""
+        if not self.db:
+            return {}
+        try:
+            raw = await self.db.get_setting(f"open_positions:{self.BOT_ID}")
+            data = json.loads(raw) if raw else []
+        except Exception:
+            return {}
+        out = {}
+        for row in data or []:
+            if not isinstance(row, dict):
+                continue
+            key = (str(row.get("inst_id") or ""), str(row.get("side") or "").lower())
+            if key[0]:
+                out[key] = row
+        return out
+
+    @staticmethod
+    def _apply_snapshot_protection(entry: float, side: str, prot: dict,
+                                   stop: float, take: float) -> tuple:
+        """Use persisted stop/take when they are sane for this side/entry."""
+        try:
+            s_px = float((prot or {}).get("stop_price") or 0)
+            t_px = float((prot or {}).get("take_price") or 0)
+        except (TypeError, ValueError):
+            return stop, take
+        if entry <= 0:
+            return stop, take
+        if side == "long":
+            ok = 0 < s_px < entry < t_px
+        else:
+            ok = s_px > entry > t_px > 0
+        return (s_px, t_px) if ok else (stop, take)
+
     async def _restore_open_positions(self, client):
         """Adopt exchange positions owned by this bot (DB) after restart."""
         if not client:
@@ -5179,6 +5215,7 @@ class AIStrategy:
         await self._drop_foreign_positions(client)
         if self._positions:
             return
+        _prot_map = await self._snapshot_protection()
         try:
             result = await client.get_positions("SWAP")
             if result.get("error"):
@@ -5270,6 +5307,8 @@ class AIStrategy:
                     stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
                 else:
                     stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+                _prot = _prot_map.get((inst_id, side), {})
+                stop, take = self._apply_snapshot_protection(entry, side, _prot, stop, take)
                 restored_sid = 0
                 if self.db:
                     try:
@@ -5277,13 +5316,17 @@ class AIStrategy:
                         restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
                     except Exception as e:
                         print(f"[AI] restore signal_id: {e}", flush=True)
-                _oa = await _resolve_opened_at(self.db, inst_id, side)
+                _oa = str((_prot or {}).get("opened_at") or "") or await _resolve_opened_at(self.db, inst_id, side)
+                try:
+                    _peak = float((_prot or {}).get("peak_price") or 0) or entry
+                except (TypeError, ValueError):
+                    _peak = entry
                 self._positions[coin] = AIPosition(
                     coin=coin, inst_id=inst_id, side=side, size=sz,
                     entry_price=entry, stop_price=stop, take_price=take,
                     leverage=float(self.config.max_leverage or 2),
                     opened_at=_oa,
-                    peak_price=entry,
+                    peak_price=_peak,
                     signal_id=restored_sid,
                 )
                 await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
@@ -5309,6 +5352,11 @@ class AIStrategy:
             stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
         else:
             stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+        try:
+            _prot = (await self._snapshot_protection()).get((inst_id, side), {})
+        except Exception:
+            _prot = {}
+        stop, take = self._apply_snapshot_protection(entry, side, _prot, stop, take)
         restored_sid = 0
         if self.db:
             try:
@@ -5316,13 +5364,17 @@ class AIStrategy:
                 restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
             except Exception as e:
                 print(f"[AI] restore signal_id: {e}", flush=True)
-        _oa = await _resolve_opened_at(self.db, inst_id, side)
+        _oa = str((_prot or {}).get("opened_at") or "") or await _resolve_opened_at(self.db, inst_id, side)
+        try:
+            _peak = float((_prot or {}).get("peak_price") or 0) or entry
+        except (TypeError, ValueError):
+            _peak = entry
         self._positions[coin] = AIPosition(
             coin=coin, inst_id=inst_id, side=side, size=sz,
             entry_price=entry, stop_price=stop, take_price=take,
             leverage=float(self.config.max_leverage or 2),
             opened_at=_oa,
-            peak_price=entry,
+            peak_price=_peak,
             signal_id=restored_sid,
         )
         await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
@@ -6375,6 +6427,11 @@ class AIStrategy:
             await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", blob)
         except Exception as e:
             print(f"[AI] persist settings: {e}", flush=True)
+        # ── Open-position protection (stop/take/peak/opened_at) ───────────────
+        try:
+            await persist_open_snapshot(self.db, self.BOT_ID, list(self._positions.values()))
+        except Exception as e:
+            print(f"[AI] persist open snapshot: {e}", flush=True)
         # ── LIVE mirror lifetime persist ─────────────────────────────────────
         try:
             live_bid = self._live_bot_id()
