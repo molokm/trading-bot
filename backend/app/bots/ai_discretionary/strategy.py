@@ -5181,7 +5181,18 @@ class AIStrategy:
             return
         try:
             result = await client.get_positions("SWAP")
-            if result.get("error") or not result.get("data"):
+            if result.get("error"):
+                return
+            if not result.get("data"):
+                # Exchange is flat while memory is empty → the durable snapshot
+                # is stale (closed by SL/TP or manually during a restart). Without
+                # this cleanup the AI guard reports "positions_lost" forever and
+                # a later boot could re-adopt a phantom position.
+                try:
+                    await release_open(self.db, self.BOT_ID)
+                    print(f"[{self.BOT_NAME}] cleared stale open_positions snapshot", flush=True)
+                except Exception as e:
+                    print(f"[{self.BOT_NAME}] clear stale snapshot: {e}", flush=True)
                 return
             for p in result.get("data") or []:
                 inst_id = p.get("instId") or ""

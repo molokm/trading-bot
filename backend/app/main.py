@@ -1162,11 +1162,34 @@ async def startup():
                     except Exception as e:
                         print(f"[AI-GUARD] restore: {e}", flush=True)
                     if not positions:
-                        _pending["positions_lost"] = hg.Issue(
-                            "positions_lost", "crit",
-                            f"в базе {len(snap)} позиций, в памяти 0 — стопы/TP не работают",
-                            action="restore/flatten",
-                        )
+                        # Snapshot can be stale: the position was closed by the
+                        # exchange SL/TP (or manually) while the process was
+                        # restarting, so memory is empty on boot. Verify the
+                        # exchange first — if it is flat, drop the stale snapshot
+                        # instead of alerting every hour.
+                        _flat = False
+                        try:
+                            _xp = await client.get_positions("SWAP")
+                            _rows = (_xp.get("data") if isinstance(_xp, dict) else _xp) or []
+                            _flat = not _xp.get("error") if isinstance(_xp, dict) else not _rows
+                            if _rows:
+                                _flat = False
+                        except Exception as _xe:
+                            print(f"[AI-GUARD] flat probe: {_xe}", flush=True)
+                        if _flat and db is not None:
+                            try:
+                                await release_open(db, bot.BOT_ID)
+                                print("[AI-GUARD] stale open_positions snapshot cleared", flush=True)
+                                _log_seen.discard("positions_lost:")
+                                _pending.pop("positions_lost", None)
+                            except Exception as _re:
+                                print(f"[AI-GUARD] clear stale snapshot: {_re}", flush=True)
+                        else:
+                            _pending["positions_lost"] = hg.Issue(
+                                "positions_lost", "crit",
+                                f"в базе {len(snap)} позиций, в памяти 0 — стопы/TP не работают",
+                                action="restore/flatten",
+                            )
 
                 issues = hg.evaluate(
                     positions=positions,
