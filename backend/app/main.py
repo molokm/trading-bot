@@ -1170,10 +1170,14 @@ async def startup():
                         _flat = False
                         try:
                             _xp = await client.get_positions("SWAP")
-                            _rows = (_xp.get("data") if isinstance(_xp, dict) else _xp) or []
-                            _flat = not _xp.get("error") if isinstance(_xp, dict) else not _rows
-                            if _rows:
-                                _flat = False
+                            # Flat only on an explicit empty list — a malformed
+                            # or error response must never wipe DB claims.
+                            _flat = (
+                                isinstance(_xp, dict)
+                                and not str(_xp.get("error") or "")
+                                and isinstance(_xp.get("data"), list)
+                                and not _xp.get("data")
+                            )
                         except Exception as _xe:
                             print(f"[AI-GUARD] flat probe: {_xe}", flush=True)
                         if _flat and db is not None:

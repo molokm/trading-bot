@@ -5183,7 +5183,8 @@ class AIStrategy:
             result = await client.get_positions("SWAP")
             if result.get("error"):
                 return
-            if not result.get("data"):
+            _rows = result.get("data")
+            if not (isinstance(_rows, list) and not _rows):
                 # Exchange is flat while memory is empty → the durable snapshot
                 # is stale (closed by SL/TP or manually during a restart). Without
                 # this cleanup the AI guard reports "positions_lost" forever and
