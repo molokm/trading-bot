@@ -77,6 +77,7 @@ from app.services.position_claim import (
 from app.services.risk_guard import assert_can_open, _symbol_to_group
 from app.services.risk_regime import regime_multiplier
 from app.services.telegram_notifier import TelegramNotifier
+from app.services import health_guard as hg
 from app.services.trade_memory import build_lessons, settle_trade
 
 AI_BOT_ID = "ai_strategy"
@@ -2696,6 +2697,24 @@ class AIStrategy:
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
+            return
+        # Pre-flight: never open while the engine itself is not verifiably alive.
+        _cap = int(getattr(self.config, "max_positions", 1) or 1) + (1 if second else 0)
+        _pf = hg.preflight(
+            has_demo_client=client is not None,
+            live_as_primary=bool(client is not None and not getattr(client, "demo", True)),
+            indicators_ok=bool(ind),
+            llm_rate_limited=bool(getattr(self, "_llm_rate_limited", False)),
+            llm_error=bool(getattr(self, "_last_llm_error", None)),
+            db_ok=self.db is not None,
+            tick_age_sec=hg.beat_age_sec("ai_manage"),
+            open_positions=len(getattr(self, "_positions", {}) or {}),
+            max_positions=_cap,
+        )
+        if _pf:
+            print(f"[AI] PREFLIGHT BLOCK {side} {coin}: {_pf}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side,
+                              reason="preflight:" + ",".join(_pf))
             return
         avail = await self._avail_usdt(client)
         eq_cap = min(self._equity, avail) if avail > 0 else self._equity
@@ -5351,7 +5370,9 @@ class AIStrategy:
     async def _tick(self):
         # Diagnostics: last stage reached in a tick (exposed via /api/health).
         self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "start"}
+        hg.beat("ai_tick", tick=self._tick_count)
         client = await self._client()
+        hg.beat("ai_client", ok=bool(client), demo=(None if client is None else bool(getattr(client, "demo", False))))
         if not client:
             self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "no_client"}
             if self._tick_count == 0:
@@ -5431,6 +5452,7 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
+        hg.beat("ai_manage", positions=len(self._positions or {}))
         try:
             self._trace = {
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -5505,6 +5527,8 @@ class AIStrategy:
         self._last_provider_used = prov_used
         import time as _time
         self._last_llm_ts = _time.time()
+        hg.beat("ai_llm", provider=str(prov_used or ""),
+                error=bool(decision.get("reason") and "llm_error" in str(decision.get("reason"))))
         try:
             self._mark_bars_decided(list(fresh) if fresh else None)
         except Exception:

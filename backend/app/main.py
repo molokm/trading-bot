@@ -52,6 +52,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.bots.ai_discretionary.strategy import AI_BOT_ID, AIConfig, AIStrategy
 from app.database import db
+from app.services import health_guard as hg
 from app.services import pnl_engine
 from app.services.analysis_logger import DEFAULT_PATH
 from app.services.auth import (
@@ -104,6 +105,7 @@ from app.services.okx_client import OKXClient, OKXClientManager
 from app.services.pnl_engine import PNL_EPOCH_ISO
 from app.services.position_claim import (
     claim_open,
+    flatten_position,
     orphan_close_enabled,
     release_open,
     sweep_exchange_orphans,
@@ -1034,11 +1036,175 @@ async def startup():
                 print(f"[AI-WATCHDOG] loop error: {e}", flush=True)
                 await asyncio.sleep(30)
 
+    async def _ai_position_guard_loop():
+        """In-trade guard: prove the engine is managing, otherwise protect capital.
+
+        The engine can look "up" (HTTP 200, ticks counting) while it is in fact
+        not managing anything — a live client hijacking the demo manager, a
+        stuck worker, a lost position map. In that state stops are inert and
+        losses grow silently. This loop checks the beat registry and acts.
+        """
+        await asyncio.sleep(120)
+        _alerted: dict = {}
+        _flattened: dict = {}
+
+        def _flag(name: str, default: str) -> float:
+            try:
+                return float(os.getenv(name, default))
+            except Exception:
+                return float(default)
+
+        _enabled = str(os.getenv("AI_GUARD_ENABLE", "1")).strip().lower() not in ("0", "false", "no", "off")
+        _manage_max = _flag("AI_GUARD_MANAGE_SEC", "300")
+        _tick_max = _flag("AI_GUARD_TICK_SEC", "180")
+        _flatten_after = _flag("AI_GUARD_FLATTEN_SEC", "1200")
+        _notify_gap = _flag("AI_GUARD_NOTIFY_SEC", "1800")
+
+        def _alert(text: str) -> None:
+            try:
+                if telegram is not None:
+                    telegram.fire(text, account_mode="demo")
+            except Exception as e:
+                print(f"[AI-GUARD] notify failed: {e}", flush=True)
+
+        while True:
+            try:
+                await asyncio.sleep(60)
+                bot = ai_bot
+                if not bot:
+                    continue
+                positions = list((getattr(bot, "_positions", {}) or {}).values())
+                if _flattened:
+                    _live_coins = {getattr(p, "coin", "") for p in positions}
+                    for _c in list(_flattened):
+                        if _c not in _live_coins:
+                            _flattened.pop(_c, None)
+                tick_age = hg.beat_age_sec("ai_tick")
+                manage_age = hg.beat_age_sec("ai_manage")
+                try:
+                    _max_hold = float(getattr(bot.config, "max_hold_hours", 18) or 18)
+                except Exception:
+                    _max_hold = 18.0
+
+                # Live marks so stop/breach checks compare against real prices.
+                client = None
+                try:
+                    client = await bot._client()
+                except Exception as e:
+                    print(f"[AI-GUARD] client: {e}", flush=True)
+                if client is not None:
+                    for p in positions:
+                        try:
+                            r = await client.get_ticker(getattr(p, "inst_id", ""))
+                            d = (r.get("data") or [{}])[0]
+                            px = float(d.get("last") or 0)
+                            if px > 0:
+                                p.mark_px = px
+                        except Exception:
+                            pass
+
+                # Engine forgot its positions while the durable snapshot has them.
+                try:
+                    import json as _json
+                    raw = await db.get_setting(f"open_positions:{bot.BOT_ID}") if db is not None else None
+                    snap = _json.loads(raw) if raw else []
+                except Exception:
+                    snap = []
+                if snap and not positions and client is not None:
+                    try:
+                        await bot._restore_open_positions(client)
+                        positions = list((getattr(bot, "_positions", {}) or {}).values())
+                    except Exception as e:
+                        print(f"[AI-GUARD] restore: {e}", flush=True)
+                    if not positions:
+                        key = "positions_lost"
+                        if key not in _alerted or _time.time() - _alerted[key] > _notify_gap:
+                            _alerted[key] = _time.time()
+                            _alert(
+                                f"⚠️ <b>AI guard</b>: движок потерял позиции\n"
+                                f"В базе {len(snap)} шт., в памяти 0. Управление (стопы/TP) не работает."
+                            )
+
+                issues = hg.evaluate(
+                    positions=positions,
+                    manage_age_sec=manage_age,
+                    tick_age_sec=tick_age,
+                    max_manage_age_sec=_manage_max,
+                    max_tick_age_sec=_tick_max,
+                    max_hold_hours=_max_hold,
+                )
+
+                for it in issues:
+                    key = f"{it.code}:{it.coin}"
+                    if key in _alerted and _time.time() - _alerted[key] < _notify_gap:
+                        continue
+                    _alerted[key] = _time.time()
+                    _who = f" {it.coin}" if it.coin else ""
+                    _alert(
+                        f"⚠️ <b>AI guard</b> [{it.severity}]{_who}\n"
+                        f"{it.code}: {it.detail}\naction={it.action or '-'}"
+                    )
+                    print(f"[AI-GUARD] ISSUE {it.severity} {it.code}{_who}: {it.detail}", flush=True)
+
+                # Recovery notice (only after we alerted something).
+                if not issues and _alerted:
+                    _alerted.clear()
+                    _alert("✅ <b>AI guard</b>: все проверки снова проходят.")
+
+                # Act: the engine is unmanaged for too long AND the trade is
+                # bleeding → close it, do not wait for a recovery that may not come.
+                if _enabled and positions and manage_age is not None and manage_age > _flatten_after:
+                    for p in positions:
+                        coin = getattr(p, "coin", "")
+                        if coin in _flattened:
+                            continue
+                        try:
+                            upl = float(getattr(p, "unrealized_pnl", 0) or 0)
+                        except Exception:
+                            upl = 0.0
+                        if upl >= 0:
+                            continue
+                        _flattened[coin] = _time.time()
+                        _alert(
+                            f"🛑 <b>AI guard</b>: {coin} без управления "
+                            f"{manage_age:.0f}с и в убытке {upl:.2f} USDT — закрываю."
+                        )
+                        try:
+                            if client is not None:
+                                await flatten_position(client, p.inst_id, p.side, p.size)
+                        except Exception as e:
+                            print(f"[AI-GUARD] demo flatten {coin}: {e}", flush=True)
+                        # Mirror twin (best-effort): demo close may not reach live.
+                        try:
+                            lpos = (getattr(bot, "_live_positions", {}) or {}).get(coin)
+                            lc = live_manager.get_client() if live_manager else None
+                            if lpos is not None and lc is not None:
+                                await flatten_position(
+                                    lc, getattr(lpos, "inst_id", f"{coin}-USDT-SWAP"),
+                                    getattr(lpos, "side", p.side), getattr(lpos, "size", 0),
+                                )
+                        except Exception as e:
+                            print(f"[AI-GUARD] live flatten {coin}: {e}", flush=True)
+                        try:
+                            await bot._positions.pop(coin, None)
+                        except Exception:
+                            pass
+                        try:
+                            await release_open(db, bot.BOT_ID, p.inst_id, p.side)
+                        except Exception:
+                            pass
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print(f"[AI-GUARD] loop error: {e}", flush=True)
+                await asyncio.sleep(30)
+
     try:
         asyncio.create_task(_ai_autostart_retry())
         asyncio.create_task(_live_mirror_heal())
         asyncio.create_task(_ai_watchdog_loop())
-        print("[startup] AI watchdog scheduled", flush=True)
+        asyncio.create_task(_ai_position_guard_loop())
+        print("[startup] AI watchdog + position guard scheduled", flush=True)
     except Exception as e:
         print(f"[startup] AI retry / live heal / watchdog schedule: {e}", flush=True)
 
@@ -3917,6 +4083,69 @@ async def health(request: Request):
     except Exception:
         pass
     return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status().to_dict(), 'sm_diag': diag}
+
+@app.get('/api/health/guard')
+@policy(PUBLIC)
+async def health_guard_status():
+    """Self-test: is the AI engine actually managing, or only appearing alive?
+
+    Public on purpose (no secrets) — this is the check that would have caught
+    the 'no client for 12h' incident on its own.
+    """
+    bot = ai_bot
+    if not bot:
+        return {'ok': False, 'reason': 'ai_not_started', 'issues': [
+            {'code': 'ai_not_started', 'severity': 'crit', 'detail': 'engine is not running'}
+        ]}
+    positions = list((getattr(bot, "_positions", {}) or {}).values())
+    tick_age = hg.beat_age_sec("ai_tick")
+    manage_age = hg.beat_age_sec("ai_manage")
+    try:
+        max_hold = float(getattr(bot.config, "max_hold_hours", 18) or 18)
+    except Exception:
+        max_hold = 18.0
+    try:
+        manage_max = float(os.getenv("AI_GUARD_MANAGE_SEC", "300"))
+        tick_max = float(os.getenv("AI_GUARD_TICK_SEC", "180"))
+    except Exception:
+        manage_max, tick_max = 300.0, 180.0
+    issues = hg.evaluate(
+        positions=positions, manage_age_sec=manage_age, tick_age_sec=tick_age,
+        max_manage_age_sec=manage_max, max_tick_age_sec=tick_max,
+        max_hold_hours=max_hold,
+    )
+    client = None
+    try:
+        client = bot.client_manager.get_client()
+    except Exception:
+        pass
+    out = hg.summarize(issues)
+    out.update({
+        'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12],
+        'engine': {
+            'running': bool(getattr(bot, '_running', False)),
+            'execute': bool(getattr(bot, '_execute', False)),
+            'client': ('demo' if client is not None and getattr(client, 'demo', False)
+                       else ('LIVE' if client is not None else 'none')),
+            'tick_age_sec': None if tick_age is None else round(tick_age, 1),
+            'manage_age_sec': None if manage_age is None else round(manage_age, 1),
+            'positions': len(positions),
+        },
+        'beats': hg.snapshot(),
+        'open_positions': [
+            {'coin': getattr(p, 'coin', ''), 'side': getattr(p, 'side', ''),
+             'stop': getattr(p, 'stop_price', 0), 'mark': getattr(p, 'mark_px', 0),
+             'opened_at': getattr(p, 'opened_at', '')}
+            for p in positions
+        ],
+        'guard': {
+            'enabled': str(os.getenv('AI_GUARD_ENABLE', '1')).strip().lower()
+                        not in ('0', 'false', 'no', 'off'),
+            'flatten_after_sec': os.getenv('AI_GUARD_FLATTEN_SEC', '1200'),
+        },
+    })
+    return out
+
 
 @app.get('/api/risk/status')
 @policy(ADMIN)

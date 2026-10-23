@@ -24,7 +24,7 @@ from app.services.route_policy import ADMIN, AUTH, AUTH_NO_GUEST, PUBLIC, audit_
 
 # ── Frozen copy of the pre-stage-3 rules (commit c31a0faf) ────────────────────
 LEGACY_PUBLIC = {
-    '/api/health', '/api/health/circuit-breaker', '/api/auth/login', '/api/auth/guest',
+    '/api/health', '/api/health/guard', '/api/health/circuit-breaker', '/api/auth/login', '/api/auth/guest',
     '/api/auth/status', '/api/auth/logout', '/api/auth/telegram', '/api/ai/status',
     '/api/me/dashboard', '/api/meta/product', '/api/startup-log',
 }
@@ -172,6 +172,7 @@ def test_startup_verification_passes(app_module):
         # Policies below are the ones the pre-stage-3 code effectively applied
         # (stage 3 preserved behaviour on purpose). See the gap test under it.
         ('/api/health', PUBLIC),
+        ('/api/health/guard', PUBLIC),
         ('/api/meta/product', PUBLIC),
         ('/api/auth/login', PUBLIC),
         ('/api/me', AUTH_NO_GUEST),
