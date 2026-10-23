@@ -3093,7 +3093,7 @@ async def ai_stop():
     return {'message': 'AI stopped', 'running': False}
 
 @app.get('/api/live/status')
-@policy(AUTH)
+@policy(ADMIN)
 async def live_status():
     """Public — returns live mirror connection state + stats (no secrets). Cached 30s."""
     global ai_bot, live_manager

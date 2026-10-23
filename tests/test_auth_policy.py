@@ -77,6 +77,10 @@ TIGHTENED_IN_3B = {
     '/api/ai/diagnostics', '/api/chart/trades', '/api/live/trades', '/api/portfolio',
     '/api/reports/summary', '/api/risk/status', '/api/stats', '/api/trade/log',
     '/api/trade/orders', '/api/trades',
+    # Owner's real-money LIVE book: guest tokens are free and any verified
+    # Telegram user is auto-provisioned, so AUTH/AUTH_NO_GUEST leaked equity,
+    # PnL and open positions of the owner's live account.
+    '/api/live/status',
     # Destroyed the platform's shared DEMO / owner's LIVE book for any
     # provisioned Telegram user; use /api/me/positions/close-all instead.
     '/api/positions/close-all',
@@ -179,7 +183,7 @@ def test_startup_verification_passes(app_module):
         ('/api/meta/product', PUBLIC),
         ('/api/auth/login', PUBLIC),
         ('/api/me', AUTH_NO_GUEST),
-        ('/api/live/status', AUTH),
+        ('/api/live/status', ADMIN),
         ('/api/admin/users', ADMIN),
         ('/api/debug/server-hits', ADMIN),
         ('/api/risk/kill', ADMIN),
@@ -193,7 +197,6 @@ def test_sensitive_routes_have_expected_policy(matrix, path, expected):
 # The only owner-scoped data a non-admin `user` token may read: exactly what the
 # Mini App calls. Everything else was tightened to ADMIN in stage 3B.
 OWNER_DATA_REACHABLE_BY_USER = {
-    '/api/live/status',
     '/api/pnl',
     '/api/pnl/summary',
     '/api/positions',
