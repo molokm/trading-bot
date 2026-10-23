@@ -3089,11 +3089,6 @@ class AIStrategy:
         pos = self._positions.get(coin)
         if not pos:
             return
-        # Cancel exchange SL/TP algo orders first
-        try:
-            await self._cancel_exchange_sl_tp(client, pos)
-        except Exception as e:
-            print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
         if not self._execute_enabled():
             # Signal-only mode: never drop the position from memory. Dropping it
             # made the very next tick re-adopt the still-open exchange position,
@@ -3114,6 +3109,11 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI] TG close (execute=0): {e}", flush=True)
             return
+        # Real close: cancel exchange SL/TP first so the algo cannot race us.
+        try:
+            await self._cancel_exchange_sl_tp(client, pos)
+        except Exception as e:
+            print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
         # Safety: verify position still exists on exchange (exchange algo may have closed it)
         try:
             ep = await client.get_positions(inst_id=pos.inst_id)
@@ -3245,8 +3245,11 @@ class AIStrategy:
                     except Exception:
                         oid = ""
                     if not oid:
-                        oid = f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
-                    cl = f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
+                        # No exchange id → the bill sync will insert the real row
+                        # (attributed by clOrdId prefix). A synthetic id here
+                        # would show up as a SECOND close and double-count PnL.
+                        raise RuntimeError("no ordId; defer to bill sync")
+                    cl = str((fills[0].get("clOrdId") if fills else "") or "") or f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
                     mode, key = self._account_mode_tag()
                     await self.db.upsert_exchange_close_trades([{
                         "ord_id": oid,
@@ -3281,11 +3284,10 @@ class AIStrategy:
         except Exception:
             pass
         del self._positions[coin]
-        if self.db:
-            try:
-                await self.db.delete_position_inst(self.BOT_ID, pos.inst_id, pos.side)
-            except Exception:
-                pass
+        try:
+            await release_open(self.db, self.BOT_ID, pos.inst_id, pos.side)
+        except Exception as e:
+            print(f"[AI] release_open: {e}", flush=True)
         print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
         self._settle_close_memory(pos, coin, fill_px, pnl, reason)
         try:
@@ -6382,7 +6384,7 @@ class AIStrategy:
             wr = (100.0 * self._lifetime_wins / self._lifetime_trades) if self._lifetime_trades else None
             await self.db.save_metric(
                 bot_id=self.BOT_ID,
-                equity=self._capital + self._lifetime_pnl,
+                equity=float(self._account_equity or (self._capital + self._lifetime_pnl)),
                 total_pnl=self._lifetime_pnl,
                 win_rate=wr,
                 total_trades=self._lifetime_trades,
