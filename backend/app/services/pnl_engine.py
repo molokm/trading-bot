@@ -406,7 +406,7 @@ def aggregate_rows(
         "fees": round(total_fees, 2),
         "fees_informational": True,
         "pnl_includes_fee": True,
-        "fees_note": "OKX bill pnl is net of trading fees for closes.",
+        "fees_note": "Close pnl is stored NET of trading fees (gross bill pnl − fee); fees are shown for information only.",
         "per_bot": {k: round(v, 2) for k, v in sorted(per_bot.items())},
         "per_bot_all": {k: round(v, 2) for k, v in sorted(per_bot.items())},
         "active_bots": active,
@@ -891,12 +891,19 @@ def rows_from_bills(
         if not cl_l.startswith("ai") and not allow_untagged_ai:
             continue
         seen.add(oid)
+        # OKX bill `pnl` is gross of the trade fee; the balance change is
+        # pnl + fee. Every consumer treats row pnl as NET, so subtract here.
+        try:
+            bf = abs(float(b.get("fee") or 0) or 0)
+        except (TypeError, ValueError):
+            bf = 0.0
         out.append({
             "ord_id": oid,
             "inst_id": b.get("instId") or "",
             "cl_ord_id": cl,
-            "pnl": bp,
-            "fee": abs(float(b.get("fee") or 0) or 0),
+            "pnl": bp - bf,
+            "gross_pnl": bp,
+            "fee": bf,
             "close_ts": bts,
             "account_mode": "live",
             "account_key": "live",

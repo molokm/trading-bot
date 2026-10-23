@@ -4206,7 +4206,7 @@ async def health_guard_status():
 @policy(ADMIN)
 async def risk_status():
     """Public-ish status for UI badges (no secrets)."""
-    st = risk_get_status(daily_pnl=None, ai_bot=ai_bot)
+    st = risk_get_status(ai_bot=ai_bot)
     return st.to_dict()
 
 @app.post('/api/risk/kill')
@@ -6032,7 +6032,8 @@ def _pair_bills(bills: list) -> list:
                             cur = None
                         pending = {'size': 0.0, 'pnl': 0.0, 'fee': 0.0, 'ord_id': ord_id, 'time': ts, 'px': px, 'side': side, 'entry_time': cur['time'] if cur else ts, 'inst_id': inst_id}
                     pending['size'] += sz
-                    pending['pnl'] += pnl
+                    # Same convention as pnl_engine: close pnl is NET of fee.
+                    pending['pnl'] += pnl - fee
                     pending['fee'] += fee
                     continue
             except Exception as e:
@@ -6251,7 +6252,8 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
         inst = b.get('instId', '')
         if oid not in close_by_ord:
             close_by_ord[oid] = {'inst_id': inst, 'cl_ord_id': clord, 'ts': ts, 'pnl': 0.0, 'fee': 0.0, 'sz': 0.0, 'px_sum': 0.0, 'px_n': 0, 'sub_type': sub, 'account_mode': b.get('account_mode') or _account_mode()}
-        close_by_ord[oid]['pnl'] += bp
+        # Store NET so every downstream total matches the balance change.
+        close_by_ord[oid]['pnl'] += bp - bf
         close_by_ord[oid]['fee'] += bf
         close_by_ord[oid]['sz'] += bs
         if bpx > 0:
@@ -6781,7 +6783,7 @@ async def _compute_pnl(mode: str = None):
             'funding': 0.0,
             'economic_approx': total,
             'strategy_realized': total,
-            'source': ('app_closed_trades+live_bills' if _mode == 'live' else 'app_closed_trades'),
+            'source': ('exchange_close_trades+app_trades+live_bills' if _mode == 'live' else 'exchange_close_trades+app_trades'),
             'pnl_tz': 'Europe/Moscow',
             'fees': fees,
             'fees_informational': True,
@@ -6993,7 +6995,7 @@ async def pnl_reconcile():
     r_dash = float(dash.get('total') or 0)
     u_dash = float(dash.get('unrealized') or 0)
     f_dash = float(dash.get('funding') or 0)
-    return {'ok': abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0, 'pnl_epoch': epoch, 'dashboard': {'realized_tagged': r_dash, 'unrealized': u_dash, 'funding': f_dash, 'fees_informational': dash.get('fees'), 'economic_approx': dash.get('economic_approx'), 'skipped_untagged': dash.get('skipped_untagged'), 'per_bot': dash.get('per_bot'), 'source': dash.get('source')}, 'okx': {'trade_pnl_all': round(okx_trade_pnl, 4), 'trade_pnl_tagged_clord': round(okx_tagged_pnl, 4), 'trade_pnl_untagged': round(okx_untagged_pnl, 4), 'trade_bills_n': okx_trade_n, 'unrealized_upl': round(upl, 4), 'open_positions': n_pos, 'funding': f_dash}, 'diffs': {'realized_dash_minus_okx_tagged': round(r_dash - okx_tagged_pnl, 4), 'unrealized_dash_minus_okx': round(u_dash - upl, 4), 'okx_all_minus_dash': round(okx_trade_pnl - r_dash, 4)}, 'notes': ['Dashboard realized = strategy-tagged closed trades after pnl_epoch only.', 'OKX trade_pnl_all may include untagged/manual fills.', 'fillPnl usually already net of trading fees; fees on dashboard are informational.', 'Funding is separate (bills type=8), included in economic_approx.', 'Timestamps and epoch filter use UTC.']}
+    return {'ok': abs(u_dash - upl) < 0.5 and abs(r_dash - okx_tagged_pnl) < 5.0, 'pnl_epoch': epoch, 'dashboard': {'realized_tagged': r_dash, 'unrealized': u_dash, 'funding': f_dash, 'fees_informational': dash.get('fees'), 'economic_approx': dash.get('economic_approx'), 'skipped_untagged': dash.get('skipped_untagged'), 'per_bot': dash.get('per_bot'), 'source': dash.get('source')}, 'okx': {'trade_pnl_all': round(okx_trade_pnl, 4), 'trade_pnl_tagged_clord': round(okx_tagged_pnl, 4), 'trade_pnl_untagged': round(okx_untagged_pnl, 4), 'trade_bills_n': okx_trade_n, 'unrealized_upl': round(upl, 4), 'open_positions': n_pos, 'funding': f_dash}, 'diffs': {'realized_dash_minus_okx_tagged': round(r_dash - okx_tagged_pnl, 4), 'unrealized_dash_minus_okx': round(u_dash - upl, 4), 'okx_all_minus_dash': round(okx_trade_pnl - r_dash, 4)}, 'notes': ['Dashboard realized = strategy-tagged closed trades after pnl_epoch only.', 'OKX trade_pnl_all may include untagged/manual fills.', 'Rows store NET pnl (gross bill/fill pnl minus fee); fees are informational only.', 'Funding is separate (bills type=8), included in economic_approx.', 'Timestamps and epoch filter use UTC.']}
 
 @app.get('/api/reports/summary')
 @policy(ADMIN)

@@ -11,6 +11,12 @@ def _bot(**cfg):
     return AIStrategy(config=AIConfig(**cfg))
 
 
+def _today_msk():
+    from datetime import datetime, timezone
+    from app.services.pnl_engine import PNL_TZ
+    return datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+
+
 class TestConfigPersistence:
     def test_export_covers_modern_knobs(self):
         bot = _bot()
@@ -62,6 +68,7 @@ class TestRiskWiring:
         monkeypatch.setenv("RISK_MAX_DAILY_LOSS_USD", "10")
         monkeypatch.setattr(rg, "_runtime_kill", None)
         bot = _bot()
+        bot._daily_realized_day = _today_msk()
         bot._daily_realized = -25.0
         with pytest.raises(RuntimeError, match="max_daily_loss"):
             rg.assert_can_open(ai_bot=bot)

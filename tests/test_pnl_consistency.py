@@ -102,7 +102,7 @@ async def test_live_bills_match_between_stats_and_pnl_engine():
     db = FakeDB([], mode="live")
     stats = await pe.compute_stats(db, account_mode="live", period="all", bills=bills)
     elig, _ = await pe.load_eligible_rows(db, mode="live", bills=bills)
-    assert stats["realized_pnl"] == pe.aggregate_rows(elig)["total"] == 2.5
+    assert stats["realized_pnl"] == pe.aggregate_rows(elig)["total"] == 2.0
     assert stats["trades"] == 2
 
 

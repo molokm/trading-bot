@@ -538,6 +538,7 @@ class AIStrategy:
         # Real account equity reported by OKX (0 = unknown yet). Config
         # capital may be a nominal number, so risk limits must not use it alone.
         self._account_equity = 0.0
+        self._account_equity_ts = 0.0
         self._last_activity = None
         self._trace = {}
         self._next_tick_at = None
@@ -546,8 +547,17 @@ class AIStrategy:
         self._tick_count = 0
         self._last_closed_bar_ts = {}  # coin -> ms of last CLOSED 1H bar we already decided on
         self._last_llm_ts = 0.0
+        # Daily risk counter survives restarts (same MSK day only).
         self._daily_realized = 0.0
         self._daily_realized_day = ""
+        try:
+            from app.services.pnl_engine import PNL_TZ
+            _d = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+            if str(st.get("daily_realized_day") or "") == _d:
+                self._daily_realized = float(st.get("daily_realized") or 0.0)
+                self._daily_realized_day = _d
+        except Exception:
+            pass
         self._funding_cache = {}  # coin -> {rate, ts}
         self._funding_cache_ts = 0.0
         self._tick_fail_count = 0
@@ -2510,6 +2520,15 @@ class AIStrategy:
         return max(0.0, sz), round(lev, 2)
 
     # ── execution helpers ──────────────────────────────────────
+    async def _sync_equity(self, client) -> float:
+        """Refresh real account equity (used for risk limits and the KPI card)."""
+        try:
+            await self._avail_usdt(client)
+        except Exception as e:
+            print(f"[AI] equity sync: {e}", flush=True)
+        self._account_equity_ts = time.time()
+        return float(self._account_equity or 0.0)
+
     async def _avail_usdt(self, client) -> float:
         """Real available USDT on the account backing `client` (demo or live).
         Used to cap sizing — internal equity may drift from exchange balance
@@ -5341,16 +5360,20 @@ class AIStrategy:
             if ts > 0:
                 self._last_closed_bar_ts[coin] = ts
 
+    def daily_realized_pnl(self) -> float:
+        """Realised PnL for the current MSK day (single source for risk gates)."""
+        from datetime import datetime, timezone
+        from app.services.pnl_engine import PNL_TZ
+        # Daily accounting must use the same day boundary as the PnL
+        # dashboards (Europe/Moscow), not UTC.
+        day = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+        if day != getattr(self, "_daily_realized_day", ""):
+            self._daily_realized_day = day
+            self._daily_realized = 0.0
+        return float(getattr(self, "_daily_realized", 0.0) or 0.0)
+
     def _daily_loss_blocks_open(self) -> bool:
         try:
-            from datetime import datetime, timezone
-            from app.services.pnl_engine import PNL_TZ
-            # Daily accounting must use the same day boundary as the PnL
-            # dashboards (Europe/Moscow), not UTC.
-            day = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
-            if day != getattr(self, "_daily_realized_day", ""):
-                self._daily_realized_day = day
-                self._daily_realized = 0.0
             lim = float(getattr(self.config, "daily_loss_limit_pct", 0.02) or 0)
             if lim <= 0:
                 return False
@@ -5359,7 +5382,7 @@ class AIStrategy:
             eq = float(self._account_equity or 0) or float(self._capital or 10000)
             if eq <= 0:
                 return False
-            return float(self._daily_realized) <= -lim * eq
+            return self.daily_realized_pnl() <= -lim * eq
         except Exception:
             return False
 
@@ -5374,6 +5397,11 @@ class AIStrategy:
             if self._tick_count == 0:
                 print("[AI] tick #0: no OKX client — check if mode was switched and API keys are saved", flush=True)
             return
+        try:
+            if time.time() - float(getattr(self, "_account_equity_ts", 0) or 0) > 300:
+                await self._sync_equity(client)
+        except Exception as _ee:
+            print(f"[AI] equity sync tick: {_ee}", flush=True)
         if self._tick_count == 0:
             _demo = getattr(client, "demo", None)
             print(f"[AI] tick #0: OKX client ready, client.demo={_demo}, execute={self._execute_enabled()}, capital=${self._capital:.2f}", flush=True)
@@ -6285,6 +6313,8 @@ class AIStrategy:
             "lifetime_wins": self._lifetime_wins,
             "lifetime_fees": self._lifetime_fees,
             "session_pnl": self._session_pnl,
+            "daily_realized": self._daily_realized,
+            "daily_realized_day": self._daily_realized_day,
             "adapt": {
                 "min_confidence": (self._adapt or {}).get("min_confidence"),
                 "quant_min_align": (self._adapt or {}).get("quant_min_align"),
@@ -6861,14 +6891,18 @@ class AIStrategy:
             "llm": llm_status(),
             "execute": self._execute_enabled(),
             "capital": self._capital,
-            "equity": round(self._equity, 2),
+            # Real exchange equity when known — nominal capital can be 10k
+            # while the demo account holds ~650, which breaks every % metric.
+            "equity": round(float(self._account_equity or self._equity), 2),
+            "equity_source": "exchange" if self._account_equity else "nominal",
             "total_pnl": round(self._lifetime_pnl, 2),
             "session_pnl": round(self._session_pnl, 2),
             "lifetime_pnl": round(self._lifetime_pnl, 2),
             "lifetime_trades": self._lifetime_trades,
             "lifetime_fees": round(self._lifetime_fees, 2),
             "turnover": self._turnover_stats(
-                self._lifetime_pnl, self._lifetime_fees, self._equity),
+                self._lifetime_pnl, self._lifetime_fees,
+                float(self._account_equity or self._equity)),
             "total_trades": self._lifetime_trades,
             "session_trades": len(closed),
             "open_fills": len([t for t in self._trade_log if t.get("reason") == "open"]),

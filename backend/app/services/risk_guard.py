@@ -88,6 +88,20 @@ _daily_pnl: Optional[float] = None
 _daily_pnl_ts: Optional[float] = None
 
 
+def _engine_daily_pnl(ai_bot: "AIStrategy") -> Optional[float]:
+    """Today's realised PnL from the engine (MSK day rollover included)."""
+    fn = getattr(ai_bot, "daily_realized_pnl", None)
+    if callable(fn):
+        try:
+            return float(fn())
+        except Exception:
+            return None
+    try:
+        return float(getattr(ai_bot, "_daily_realized", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return None
+
+
 def _count_open_positions(ai_bot: Optional["AIStrategy"]) -> Dict:
     """Count open positions by symbol and correlation group."""
     if not ai_bot:
@@ -155,6 +169,8 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     max_corr_exp = _f("RISK_MAX_CORRELATED_EXPOSURE_USD", 0.0)
 
     pnl = daily_pnl if daily_pnl is not None else _daily_pnl
+    if pnl is None and ai_bot is not None:
+        pnl = _engine_daily_pnl(ai_bot)
 
     # Count current positions
     pos_counts = _count_open_positions(ai_bot) if ai_bot else {"total": 0, "by_symbol": {}, "by_group": {}}
@@ -196,7 +212,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
         okx_demo=_b("OKX_DEMO", True),
         block_new_entries=block,
         reason=reason,
-        daily_pnl_usd=daily_pnl if daily_pnl is not None else _daily_pnl,
+        daily_pnl_usd=pnl,
         daily_pnl_updated_at=_daily_pnl_ts,
         max_open_positions=int(_f("RISK_MAX_OPEN_POSITIONS", 0)),
         open_positions_count=pos_counts["total"],
@@ -246,10 +262,7 @@ def assert_can_open(
     # Without this the RISK_MAX_DAILY_LOSS_USD knob could never fire because
     # update_daily_pnl() has no producers.
     if daily_pnl is None and ai_bot is not None:
-        try:
-            daily_pnl = float(getattr(ai_bot, "_daily_realized", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            daily_pnl = None
+        daily_pnl = _engine_daily_pnl(ai_bot)
 
     st = get_status(daily_pnl=daily_pnl, ai_bot=ai_bot)
     if st.block_new_entries:
