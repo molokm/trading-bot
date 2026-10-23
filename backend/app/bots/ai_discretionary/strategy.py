@@ -2530,10 +2530,14 @@ class AIStrategy:
         self._account_equity_ts = time.time()
         return float(self._account_equity or 0.0)
 
-    async def _avail_usdt(self, client) -> float:
+    async def _avail_usdt(self, client, update_equity: bool = True) -> float:
         """Real available USDT on the account backing `client` (demo or live).
         Used to cap sizing — internal equity may drift from exchange balance
-        (e.g. 51008: insufficient loan quota on demo)."""
+        (e.g. 51008: insufficient loan quota on demo).
+
+        update_equity=False for the LIVE mirror client: its totalEq must not
+        overwrite the DEMO engine's `_account_equity` (KPI card showed $647
+        instead of the demo account after every mirrored close)."""
         try:
             r = await client.get_balance()
             if (r or {}).get("error"):
@@ -2542,12 +2546,13 @@ class AIStrategy:
             if not data or not isinstance(data[0], dict):
                 return 0.0
             acct = data[0]
-            try:
-                _teq = float(acct.get("totalEq") or 0)
-                if _teq > 0:
-                    self._account_equity = _teq
-            except (TypeError, ValueError):
-                pass
+            if update_equity:
+                try:
+                    _teq = float(acct.get("totalEq") or 0)
+                    if _teq > 0:
+                        self._account_equity = _teq
+                except (TypeError, ValueError):
+                    pass
             best = 0.0
             for d in (acct.get("details") or []):
                 if str(d.get("ccy") or "").upper() != "USDT":
@@ -3377,7 +3382,7 @@ class AIStrategy:
         # NOTE: mirror uses equity-based sizing, NOT avail_usdt.
         # In cross-margin accounts availBal can be near-zero while totalEq is healthy.
         # _size_order already caps via allocation_pct + max_leverage.
-        avail_live = await self._avail_usdt(lc)
+        avail_live = await self._avail_usdt(lc, update_equity=False)
         print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
         if sz <= 0:
