@@ -2032,10 +2032,6 @@ async def me_trades(request: Request, limit: int=50):
         return {'trades': trades[:limit]}
     ub = strategy_mgr.get_or_create(user_id)
     trades = []
-    if ub.rotation and ub.rotation._trade_log:
-        trades += list(ub.rotation._trade_log)
-    if ub.impulse and ub.impulse._trade_log:
-        trades += list(ub.impulse._trade_log)
     try:
         for bid in (ub.rot_bot_id, ub.imp_bot_id):
             rows = await db.get_trades(bot_id=bid, limit=200)
@@ -2043,6 +2039,20 @@ async def me_trades(request: Request, limit: int=50):
                 trades.append({'time': t.get('timestamp', ''), 'side': t.get('side', ''), 'symbol': t.get('inst_id', ''), 'pnl': float(t.get('pnl', 0) or 0), 'entry_price': float(t.get('px', 0) or 0), 'reason': 'closed'})
     except Exception:
         pass
+    # In-memory logs are the same events that were persisted to the DB —
+    # append only entries the DB did not return (no duplicate rows in the UI).
+    seen = {(str(t.get('time', ''))[:19], t.get('symbol', ''), t.get('side', ''),
+             round(float(t.get('pnl', 0) or 0), 8)) for t in trades}
+    for bot in (ub.rotation, ub.impulse):
+        for t in (getattr(bot, '_trade_log', None) or []):
+            row = {'time': t.get('time', ''), 'side': t.get('side', ''), 'symbol': t.get('symbol', ''),
+                   'pnl': float(t.get('pnl', 0) or 0), 'entry_price': float(t.get('entry_price', 0) or 0),
+                   'reason': t.get('reason', 'closed')}
+            key = (str(row['time'])[:19], row['symbol'], row['side'], round(row['pnl'], 8))
+            if key in seen:
+                continue
+            seen.add(key)
+            trades.append(row)
     trades.sort(key=lambda t: t.get('time', ''), reverse=True)
     return {'trades': trades[:limit]}
 
@@ -2054,26 +2064,35 @@ async def me_pnl(request: Request):
     if user_id is None:
         return await get_pnl()
     ub = strategy_mgr.get_or_create(user_id)
-    total = 0.0
-    count = 0
+    rows_all = []
     try:
         for bid in (ub.rot_bot_id, ub.imp_bot_id):
-            rows = await db.get_trades(bot_id=bid, limit=5000)
-            for t in rows:
-                pnl = float(t.get('pnl', 0) or 0)
-                if pnl != 0:
-                    total += pnl
-                    count += 1
+            rows_all += list(await db.get_trades(bot_id=bid, limit=5000) or [])
     except Exception:
-        pass
-    for bot in (ub.rotation, ub.impulse):
-        if bot and bot._trade_log:
-            for t in bot._trade_log:
-                pnl = float(t.get('pnl', 0) or 0)
-                if pnl != 0:
-                    total += pnl
-                    count += 1
-    return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': 'user_bots'}
+        rows_all = []
+    source = 'user_bots_db'
+    if not rows_all:
+        # DB empty (fresh account / wiped table): fall back to in-memory logs.
+        source = 'user_bots_memory'
+        for bot in (ub.rotation, ub.impulse):
+            for t in (getattr(bot, '_trade_log', None) or []):
+                rows_all.append({'timestamp': t.get('time', ''), 'inst_id': t.get('symbol', ''),
+                                 'side': t.get('side', ''), 'pnl': t.get('pnl', 0)})
+    total = 0.0
+    count = 0
+    seen = set()
+    for t in rows_all:
+        pnl = float(t.get('pnl', 0) or 0)
+        if pnl == 0:
+            continue
+        key = (str(t.get('timestamp', ''))[:19], t.get('inst_id', ''), t.get('side', ''),
+               str(t.get('ord_id', '') or ''), round(pnl, 8))
+        if key in seen:  # same event persisted twice (bot_id aliases)
+            continue
+        seen.add(key)
+        total += pnl
+        count += 1
+    return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': source}
 
 @app.get('/api/me/dashboard')
 @policy(PUBLIC)
