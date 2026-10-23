@@ -400,6 +400,16 @@ async def startup():
         print('[startup] 1/7 DB init ...', flush=True)
         await db.init()
         await pnl_engine.ensure_epoch(db)
+        # Opt-in storage retention (default off). Neon/Supabase free tiers have
+        # a hard row/GB cap; DB_RETENTION_DAYS>0 trims old history at boot.
+        try:
+            _ret_days = int(os.getenv('DB_RETENTION_DAYS', '0') or 0)
+            if _ret_days > 0:
+                _pruned = await db.prune_old_rows(_ret_days)
+                print(f'[startup] retention {_ret_days}d pruned: {_pruned}', flush=True)
+                _slog(f'retention {_ret_days}d: {_pruned}')
+        except Exception as _re:
+            print(f'[startup] retention: {_re}', flush=True)
         _slog(f'db backend: pg={db._pg_mode} fallback_kind='
               f'{_db_fallback_kind(getattr(db, "_fallback_reason", ""))}')
         print(f'[startup] pnl_epoch forced {PNL_EPOCH_ISO}', flush=True)

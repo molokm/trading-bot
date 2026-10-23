@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -182,6 +182,7 @@ class Database:
             );
             CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id);
+            CREATE INDEX IF NOT EXISTS idx_trades_bot_ts ON trades(bot_id, timestamp DESC);
 
             CREATE TABLE IF NOT EXISTS positions (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -401,6 +402,7 @@ class Database:
         for _sql in (
             "CREATE INDEX IF NOT EXISTS idx_trades_mode_ts ON trades(account_mode, timestamp DESC)",
             "CREATE INDEX IF NOT EXISTS idx_trades_bot ON trades(bot_id)",
+            "CREATE INDEX IF NOT EXISTS idx_trades_bot_ts ON trades(bot_id, timestamp DESC)",
         ):
             try:
                 await conn.execute(_sql)
@@ -656,6 +658,48 @@ class Database:
         cur = await self._conn.execute(sql, params)
         await self._conn.commit()
         return cur.lastrowid
+
+    async def prune_old_rows(self, days: int) -> dict:
+        """Delete history older than `days` (opt-in via DB_RETENTION_DAYS).
+
+        Keeps Neon/Supabase free-tier storage bounded. 0/negative = disabled.
+        Close bills are the PnL source of truth, so pruning is only safe once
+        the user accepts that old trades disappear from the dashboards.
+        """
+        if not days or int(days) <= 0:
+            return {"trades": 0, "exchange_close_trades": 0, "performance_metrics": 0}
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(days=int(days))
+        cutoff = cutoff_dt.isoformat()
+        cutoff_ms = int(cutoff_dt.timestamp() * 1000)
+        out = {}
+        for table, sql_pg, sql_lite, params in (
+            ("trades",
+             "DELETE FROM trades WHERE timestamp < $1",
+             "DELETE FROM trades WHERE timestamp < ?", (cutoff,)),
+            ("exchange_close_trades",
+             "DELETE FROM exchange_close_trades WHERE close_ts < $1",
+             "DELETE FROM exchange_close_trades WHERE close_ts < ?", (cutoff_ms,)),
+            ("performance_metrics",
+             "DELETE FROM performance_metrics WHERE timestamp < $1",
+             "DELETE FROM performance_metrics WHERE timestamp < ?", (cutoff,)),
+        ):
+            try:
+                if self._pg_mode:
+                    pool = await self._pg_connect()
+                    res = await pool.execute(sql_pg, *params)
+                    try:
+                        n = int(str(res).split()[-1])
+                    except Exception:
+                        n = 0
+                else:
+                    cur = await self._conn.execute(sql_lite, params)
+                    await self._conn.commit()
+                    n = int(cur.rowcount or 0)
+                out[table] = n
+            except Exception as e:
+                print(f"[db] prune {table}: {type(e).__name__}: {e}", flush=True)
+                out[table] = 0
+        return out
 
     # ── Exchange close trades (raw OKX bills → DB) ──
 
@@ -1442,37 +1486,26 @@ class Database:
                             size: float, entry_price: float,
                             current_price: float = None):
         now = datetime.now(timezone.utc).isoformat()
-        existing = await self._fetchone(
-            "SELECT id FROM positions WHERE bot_id = $1 AND inst_id = $2 AND side = $3"
-            if self._pg_mode else
-            "SELECT id FROM positions WHERE bot_id = ? AND inst_id = ? AND side = ?",
-            (bot_id, inst_id, side))
-        if existing:
-            if self._pg_mode:
-                await self._execute(
-                    "UPDATE positions SET size=$1, entry_price=$2, "
-                    "current_price=$3, updated_at=$4 WHERE bot_id=$5 AND inst_id=$6 AND side=$7",
-                    (size, entry_price, current_price or entry_price, now, bot_id, inst_id, side)
-                )
-            else:
-                await self._execute(
-                    "UPDATE positions SET size=?, entry_price=?, "
-                    "current_price=?, updated_at=? WHERE bot_id=? AND inst_id=? AND side=?",
-                    (size, entry_price, current_price or entry_price, now, bot_id, inst_id, side)
-                )
+        # Single atomic UPSERT: the old SELECT-then-INSERT raced on concurrent
+        # claims and could raise a UNIQUE violation right after a fill.
+        if self._pg_mode:
+            await self._execute(
+                "INSERT INTO positions (bot_id, inst_id, side, size, entry_price, current_price, opened_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7) "
+                "ON CONFLICT (bot_id, inst_id, side) DO UPDATE SET "
+                "size = EXCLUDED.size, entry_price = EXCLUDED.entry_price, "
+                "current_price = EXCLUDED.current_price, updated_at = $8",
+                (bot_id, inst_id, side, size, entry_price, current_price or entry_price, now, now)
+            )
         else:
-            if self._pg_mode:
-                await self._execute(
-                    "INSERT INTO positions (bot_id, inst_id, side, size, entry_price, current_price, opened_at) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                    (bot_id, inst_id, side, size, current_price or entry_price, current_price or entry_price, now)
-                )
-            else:
-                await self._execute(
-                    "INSERT INTO positions (bot_id, inst_id, side, size, entry_price, current_price, opened_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (bot_id, inst_id, side, size, current_price or entry_price, current_price or entry_price, now)
-                )
+            await self._execute(
+                "INSERT INTO positions (bot_id, inst_id, side, size, entry_price, current_price, opened_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (bot_id, inst_id, side) DO UPDATE SET "
+                "size = excluded.size, entry_price = excluded.entry_price, "
+                "current_price = excluded.current_price, updated_at = ?",
+                (bot_id, inst_id, side, size, entry_price, current_price or entry_price, now, now)
+            )
 
     async def update_position_price(self, bot_id: str, current_price: float,
                                     unrealized_pnl: float = 0):

@@ -2882,6 +2882,7 @@ class AIStrategy:
             self._positions.pop(coin, None)
             self._record_exec("open_claim_fail_flat", coin=coin, side=side)
             return
+        await self._persist_open_state(force=True)
         self._trade_log.append({
             "account_mode": (
                 "demo"
@@ -5177,6 +5178,22 @@ class AIStrategy:
                 except Exception:
                     pass
 
+    async def _persist_open_state(self, force: bool = False) -> None:
+        """Persist stop/take/peak for open positions (throttled).
+
+        Without this the durable snapshot only got written on close/hydrate, so
+        a deploy between entry and exit restored synthetic 3% stops."""
+        if not self.db:
+            return
+        now = time.time()
+        if not force and (now - float(getattr(self, "_open_state_ts", 0) or 0)) < 30:
+            return
+        self._open_state_ts = now
+        try:
+            await persist_open_snapshot(self.db, self.BOT_ID, list(self._positions.values()))
+        except Exception as e:
+            print(f"[AI] persist open state: {e}", flush=True)
+
     async def _snapshot_protection(self) -> dict:
         """Load persisted stop/take/peak/opened_at per (inst_id, side)."""
         if not self.db:
@@ -5547,6 +5564,7 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] funding refresh: {e}", flush=True)
         await self._manage_stops(client)
+        await self._persist_open_state()
         hg.beat("ai_manage", positions=len(self._positions or {}))
         try:
             self._trace = {
