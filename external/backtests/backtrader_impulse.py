@@ -47,10 +47,9 @@ import bt_okx
 SCALE = 100
 
 # ── Defaults mirroring ImpulseConfig BASE (daily), tuned 2026-08 ────────────
-# Tuned config (safe/live variant): top_k=3, max_adds=0, cooldown=3,
+# Tuned config (safe/live variant): top_k=3, max_adds=0, cooldown=3, max_hold=28, tp1_frac=0.25,
 # entry_roc=3.0, trail=12 ATR, tp2=10 ATR, risk=0.10.
-# Validated on OKX native 1D, 10 coins, 2023-05..2026-08:
-#   BT (live-faithful):  CAGR ~63%, Sharpe 1.58, MaxDD ~-36%.
+# v3 BT: CAGR ~68%, MaxDD ~-39% (full+OOS >= v2 baseline).
 TOP_K = 3
 IMPULSE_BARS = 1
 ENTRY_ROC = 3.0
@@ -71,10 +70,10 @@ TRAIL_ATR_MULT = 12.0
 BE_PCT = 0.005
 COOLDOWN_BARS = 3
 TP1_ATR = 2.0
-TP1_FRAC = 0.3
+TP1_FRAC = 0.25
 TP2_ATR = 10.0
 TP2_FRAC = 0.3
-MAX_HOLD_BARS = 30
+MAX_HOLD_BARS = 28
 ALLOW_SHORT = True
 MAX_MARGIN_PCT = 0.5
 # regime filter (BTC): 0=off, 1=direction (bull:long/bear:short/chop:both),
@@ -99,6 +98,7 @@ class Impulse1D(bt.Strategy):
         ("rsi_conf_min", RSI_CONF_MIN), ("rsi_conf_max", RSI_CONF_MAX),
         ("ema_fast", EMA_FAST), ("ema_slow", EMA_SLOW),
         ("vol_mult", VOL_MULT), ("vol_period", VOL_PERIOD),
+        ("climax_vol_mult", 3.5),
         ("max_adds", MAX_ADDS), ("add_size_ratio", ADD_SIZE_RATIO),
         ("add_window_bars", ADD_WINDOW_BARS), ("add_atr_mult", ADD_ATR_MULT),
         ("max_leverage", MAX_LEVERAGE), ("risk_per_trade", RISK_PER_TRADE),
@@ -353,6 +353,8 @@ class Impulse1D(bt.Strategy):
             if math.isnan(avg_vol) or avg_vol <= 0:
                 continue
             if self.vol[j][-1] < avg_vol * self.p.vol_mult:
+                continue
+            if getattr(self.p, "climax_vol_mult", 0) and avg_vol > 0 and self.vol[j][-1] >= avg_vol * self.p.climax_vol_mult:
                 continue
             ema_t = self.emaf[j][-1] > self.emas[j][-1]
             side = None

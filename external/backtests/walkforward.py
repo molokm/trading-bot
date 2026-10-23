@@ -60,18 +60,20 @@ GRIDS = {
 
 # full-window tuned configs (as baked into defaults)
 TUNED = {
-    "momentum": dict(top_k=2, allocation_pct=0.5, min_roc=4.5, adx_min=25.0,
-                     vol_mult=2.2, corr_threshold=0.85, atr_stop_mult=4.5,
+    "momentum": dict(top_k=2, allocation_pct=0.45, min_roc=3.5, adx_min=25.0,
+                     vol_mult=2.0, corr_threshold=0.85, atr_stop_mult=4.5,
                      trail_atr_mult=3.0, breakeven_pct=0.05, min_hold_days=11,
-                     risk_per_trade=0.20),
-    "impulse": dict(top_k=3, max_adds=0, cooldown_bars=3, max_hold_bars=30,
-                    entry_roc=3.0, vol_mult=1.5, sl_atr_mult=5.0,
-                    trail_atr_mult=12.0, tp1_atr=2.0, tp1_frac=0.3,
+                     risk_per_trade=0.20,
+                     partial_tp_pct=0.06, partial_tp_ratio=0.25,
+                     partial_tp2_pct=0.12, partial_tp2_ratio=0.3),
+    "impulse": dict(top_k=3, max_adds=0, cooldown_bars=3, max_hold_bars=28,
+                    entry_roc=3.0, vol_mult=1.5, climax_vol_mult=3.5, sl_atr_mult=5.0,
+                    trail_atr_mult=12.0, tp1_atr=2.0, tp1_frac=0.25,
                     tp2_atr=10.0, tp2_frac=0.3, risk_per_trade=0.10),
-    "validation": dict(top_k=4, donchian_n=15, macd_fast=12, macd_slow=26,
+    "validation": dict(top_k=2, donchian_n=30, macd_fast=12, macd_slow=26,
                        macd_signal=9, atr_period=14, max_leverage=2.0,
                        risk_per_trade=0.14, allocation_pct=0.5,
-                       chandelier_atr=4.0, tp_pct=0.10, tp_ratio=0.2,
+                       chandelier_atr=4.0, tp_pct=0.08, tp_ratio=0.4,
                        tp2_pct=0.08, be_pct=0.015, max_hold_days=3),
 }
 
@@ -80,7 +82,7 @@ OLD = {
     "momentum": dict(top_k=2, risk_per_trade=0.14, allocation_pct=1.0,
                      adx_min=29.0, vol_mult=1.8, corr_threshold=0.7,
                      atr_stop_mult=2.7, trail_atr_mult=0.2, min_hold_days=11,
-                     min_roc=4.5, breakeven_pct=0.05),
+                     min_roc=3.5, breakeven_pct=0.05),
     "impulse": dict(top_k=4, risk_per_trade=0.10, max_adds=2, cooldown_bars=5,
                     max_hold_bars=30, entry_roc=4.0, vol_mult=1.5,
                     sl_atr_mult=5.0, trail_atr_mult=8.0, tp1_atr=2.0,

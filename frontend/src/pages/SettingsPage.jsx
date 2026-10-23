@@ -1,10 +1,28 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { Key, Shield, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download, Users, Star, RefreshCw } from 'lucide-react'
+import { Key, Shield, ScrollText, CheckCircle, XCircle, Loader2, Eye, EyeOff, Wifi, Trash2, AlertTriangle, Send, MessageCircle, RotateCw, Download, Users, Star, RefreshCw } from 'lucide-react'
 import { api } from '../services/api'
 import { MetricCard, Tip } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 
-export default function SettingsPage({ onConnected, onDemoMode }) {
+const AI_FIELDS = [
+  { key: 'risk_per_trade', label: 'Риск на сделку, %', scale: 100, step: 0.1 },
+  { key: 'max_positions', label: 'Макс. позиций', step: 1 },
+  { key: 'max_leverage', label: 'Макс. плечо', step: 0.1 },
+  { key: 'min_confidence', label: 'Мин. уверенность', step: 0.01 },
+  { key: 'min_adx', label: 'Мин. ADX', step: 1 },
+  { key: 'daily_loss_limit_pct', label: 'Дневной лимит убытка, %', scale: 100, step: 0.1 },
+  { key: 'max_hold_hours', label: 'Макс. удержание, ч', step: 0.5 },
+  { key: 'exit_min_profit_pct', label: 'Мин. профит выхода, %', step: 0.05 },
+  { key: 'giveback_min_peak_pct', label: 'Giveback: пик, %', step: 0.1 },
+  { key: 'giveback_retain_frac', label: 'Giveback: оставить (0–1)', step: 0.05 },
+  { key: 'hard_profit_lock_peak', label: 'Hard lock: пик, %', step: 0.1 },
+  { key: 'hard_profit_lock_floor', label: 'Hard lock: пол, %', step: 0.05 },
+  { key: 'partial_take_pct', label: 'Частичный TP, %', step: 0.1 },
+  { key: 'partial_take_frac', label: 'Доля частичного TP', step: 0.05 },
+  { key: 'soft_profit_take_pct', label: 'Soft TP, %', step: 0.1 },
+]
+
+export default function SettingsPage({ onConnected }) {
   const { t } = useTranslation()
   const [form, setForm] = useState({ api_key: '', secret_key: '', passphrase: '', demo: true })
   const [backendConfig, setBackendConfig] = useState(null)
@@ -13,6 +31,14 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
   const [status, setStatus] = useState(null)
   const [testSteps, setTestSteps] = useState([])
   const [dangerConfirm, setDangerConfirm] = useState(false)
+  const [risk, setRisk] = useState(null)
+  const [riskBusy, setRiskBusy] = useState(false)
+  const [audit, setAudit] = useState([])
+  const [aiCfgMsg, setAiCfgMsg] = useState('')
+  const [aiCfgBusy, setAiCfgBusy] = useState(false)
+  const [aiCfg, setAiCfg] = useState(null)
+  const [aiCfgEditable, setAiCfgEditable] = useState(false)
+  const [liveConfigured, setLiveConfigured] = useState(false)
   const [tg, setTg] = useState({ token: '', chat_id: '', channel_id: '', configured: false, status: 'no_token', token_masked: '', loaded: false })
   const [tgTesting, setTgTesting] = useState(false)
   const [tgSaving, setTgSaving] = useState(false)
@@ -33,7 +59,6 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         if (h.has_credentials) {
           setStatus({ ok: true, message: t('settings.connected_env') })
           onConnected?.(true)
-          onDemoMode?.(h.env_demo)
         }
       }
     }).catch(() => {})
@@ -44,6 +69,43 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       setTg({ ...s, loaded: true })
     }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    api.aiGetConfig?.().then(c => {
+      if (!c) return
+      const src = c.runtime || c.demo || {}
+      const view = { ...src }
+      for (const f of AI_FIELDS) {
+        const v = Number(view[f.key])
+        if (Number.isFinite(v) && f.scale) view[f.key] = +(v * f.scale).toFixed(4)
+      }
+      setAiCfg(view)
+      setAiCfgEditable(!!c.editable)
+    }).catch(() => {})
+    api.riskStatus().then(setRisk).catch(() => setRisk(null))
+    api.getAudit(30).then(r => setAudit(r.items || [])).catch(() => setAudit([]))
+    api.getMode?.().then(m => {
+      if (!m) return
+      setLiveConfigured(!!m.live_configured)
+      setForm(f => ({ ...f, demo: !!m.demo }))
+    }).catch(() => {})
+    api.credentialsStatus?.().then(s => {
+      if (!s) return
+      setLiveConfigured(!!s.live_configured)
+    }).catch(() => {})
+  }, [])
+
+
+  const toggleKill = async (enabled) => {
+    setRiskBusy(true)
+    try {
+      const r = await api.riskKill(enabled)
+      setRisk(r)
+    } catch (e) {
+      console.error(e)
+    }
+    setRiskBusy(false)
+  }
 
   const loadSubs = async () => {
     setSubsLoading(true)
@@ -89,7 +151,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     timersRef.current = [t1, t2]
 
     try {
-      await api.testCredentials(form)
+      await api.testCredentials({
+        apiKey: form.api_key,
+        secretKey: form.secret_key,
+        passphrase: form.passphrase,
+        demo: false,
+      })
       const t3 = setTimeout(() => {
         setTestSteps(prev => [
           { ...prev[0], state: 'done' },
@@ -100,7 +167,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
       const t4 = setTimeout(() => {
         setTestSteps([])
         setStatus({ ok: true, message: t('settings.connect_success') })
-        onConnected?.(true); onDemoMode?.(form.demo)
+        onConnected?.(true)
         setTesting(false)
       }, 1200)
       timersRef.current.push(t3, t4)
@@ -117,12 +184,59 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
     }
   }
 
-  const handleSave = async () => {
+  const handleSaveLive = async () => {
+    // Live keys are stored separately — showcase DEMO (env) is never overwritten
+    const k = (form.api_key || '').trim()
+    const s = (form.secret_key || '').trim()
+    const pw = (form.passphrase || '').trim()
+    if (!k || !s || !pw) {
+      setStatus({
+        ok: false,
+        message: 'Для Live заполните API Key, Secret Key и Passphrase — проверка без всех полей могла пройти по старым DEMO-ключам.',
+      })
+      return
+    }
     setTesting(true); setStatus(null)
     try {
-      await api.initCredentials(form)
+      const r = await api.initCredentials({
+        apiKey: k,
+        secretKey: s,
+        passphrase: pw,
+        demo: false,
+      })
+      setLiveConfigured(true)
+      setStatus({
+        ok: true,
+        message: r?.message || 'Live-ключи сохранены отдельно. DEMO-витрина не затронута — переключайтесь DEMO↔LIVE.',
+      })
+      onConnected?.(true)
+      setForm(f => ({ ...f, demo: false, api_key: '', secret_key: '', passphrase: '' }))
+      const items = await api.getAudit(30).then(x => x.items || []).catch(() => [])
+      setAudit(items)
+    } catch (err) {
+      setStatus({ ok: false, message: err.message })
+    }
+    setTesting(false)
+  }
+
+  const handleSave = async () => {
+    const k = (form.api_key || '').trim()
+    const s = (form.secret_key || '').trim()
+    const pw = (form.passphrase || '').trim()
+    if (!k || !s || !pw) {
+      setStatus({ ok: false, message: 'Заполните API Key, Secret Key и Passphrase.' })
+      return
+    }
+    setTesting(true); setStatus(null)
+    try {
+      await api.initCredentials({
+        apiKey: k,
+        secretKey: s,
+        passphrase: pw,
+        demo: form.demo,
+      })
       setStatus({ ok: true, message: t('settings.keys_saved') })
-      onConnected?.(true); onDemoMode?.(form.demo)
+      onConnected?.(true)
     } catch (err) { setStatus({ ok: false, message: err.message }) }
     setTesting(false)
   }
@@ -248,6 +362,88 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
         <div className="space-y-4">
           <div className="panel">
             <div className="panel-header">
+
+          <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 mb-4">
+            <div className="text-sm font-semibold mb-1">AI — настройки (только админ)</div>
+            <p className="text-xs text-[var(--muted)] mb-3">
+              Редактирование применяется к работающему DEMO-движку сразу и сохраняется
+              как снимок. В LIVE-режиме редактирование отключено.
+            </p>
+            {!aiCfg && <div className="text-xs text-[var(--muted)]">Загрузка настроек…</div>}
+            {aiCfg && (
+              <>
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
+                  {AI_FIELDS.map(f => (
+                    <label key={f.key} className="flex flex-col gap-1 text-2xs text-[var(--txt-muted)]">
+                      {f.label}
+                      <input
+                        type="number"
+                        step={f.step || 1}
+                        disabled={!aiCfgEditable || aiCfgBusy}
+                        value={aiCfg[f.key] ?? ''}
+                        onChange={e => setAiCfg(prev => ({ ...prev, [f.key]: e.target.value }))}
+                        className="px-2 py-1 rounded border border-[var(--border)] bg-[var(--bg)] text-[var(--txt)] mono text-xs disabled:opacity-50"
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2 items-center">
+                  <button
+                    type="button"
+                    disabled={aiCfgBusy || !aiCfgEditable}
+                    className="px-3 py-1.5 rounded-lg text-sm bg-[var(--accent)] text-white disabled:opacity-50"
+                    onClick={async () => {
+                      setAiCfgBusy(true)
+                      setAiCfgMsg('')
+                      try {
+                        const payload = { ...aiCfg }
+                        for (const f of AI_FIELDS) {
+                          const v = Number(aiCfg[f.key])
+                          if (!Number.isFinite(v)) continue
+                          payload[f.key] = f.scale ? v / f.scale : v
+                        }
+                        await api.aiSaveConfig(payload)
+                        const c = await api.aiGetConfig()
+                        const src = (c && (c.runtime || c.demo)) || {}
+                        const view = { ...src }
+                        for (const f of AI_FIELDS) {
+                          const v = Number(view[f.key])
+                          if (Number.isFinite(v) && f.scale) view[f.key] = +(v * f.scale).toFixed(4)
+                        }
+                        setAiCfg(view)
+                        setAiCfgMsg('Сохранено в DEMO и применено')
+                      } catch (e) {
+                        setAiCfgMsg(e.message || 'Ошибка сохранения DEMO')
+                      }
+                      setAiCfgBusy(false)
+                    }}
+                  >
+                    Сохранить в DEMO
+                  </button>
+                  <button
+                    type="button"
+                    disabled={aiCfgBusy}
+                    className="px-3 py-1.5 rounded-lg text-sm border border-[var(--border)]"
+                    onClick={async () => {
+                      if (!window.confirm('Сохранить копию текущих DEMO-настроек в LIVE-снимок?')) return
+                      setAiCfgBusy(true)
+                      setAiCfgMsg('')
+                      try {
+                        const r = await api.aiPromoteConfig()
+                        setAiCfgMsg(r.message || 'Снимок скопирован')
+                      } catch (e) {
+                        setAiCfgMsg(e.message || 'Ошибка копирования')
+                      }
+                      setAiCfgBusy(false)
+                    }}
+                  >
+                    Копия в LIVE
+                  </button>
+                  {aiCfgMsg && <span className="text-xs text-[var(--muted)]">{aiCfgMsg}</span>}
+                </div>
+              </>
+            )}
+          </div>
               <Key size={13} className="text-[var(--profit)]" /> {t('settings.api_keys')}
               {backendConfig?.has_credentials && (
                 <span className="ml-auto status-badge status-live"><span className="dot" /> {t('settings.connected')}</span>
@@ -267,7 +463,7 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <label className="text-2xs font-medium text-[var(--txt-muted)] uppercase tracking-wider flex items-center gap-1">
                   API Key <Tip text={t('settings.get_key_tip')} />
                 </label>
-                <input className="w-full mt-1.5" placeholder="OKX API Key" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
+                <input className="w-full mt-1.5" placeholder="OKX API Key (Live или Demo)" value={form.api_key} onChange={e => setForm({ ...form, api_key: e.target.value })} />
               </div>
 
               <div>
@@ -285,22 +481,21 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
                 <input className="w-full mt-1.5" placeholder="OKX Passphrase" value={form.passphrase} onChange={e => setForm({ ...form, passphrase: e.target.value })} />
               </div>
 
-              <label className="flex items-center gap-3 pt-2">
-                <input type="checkbox" checked={form.demo} onChange={e => setForm({ ...form, demo: e.target.checked })} />
-                <div>
-                  <span className="text-sm text-[var(--txt)] font-medium">{t('settings.demo_mode')}</span>
-                  <p className="text-2xs text-[var(--txt-muted)]">{t('settings.demo_tip')}</p>
-                </div>
-              </label>
+              <div className="p-2.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] text-2xs text-[var(--txt-muted)] leading-relaxed">
+                <strong className="text-[var(--txt)]">Отдельный Live-ключ.</strong>
+                {' '}Витрина DEMO берётся из env и <em>не перезаписывается</em>.
+                Сюда добавляются только ваши Live API-ключи. Переключение DEMO↔LIVE — кнопками ниже.
+                {liveConfigured ? ' · Live уже сохранён.' : ''}
+              </div>
 
               <div className="flex gap-3 pt-2">
                 <button className="btn btn-primary flex-1" onClick={handleTest} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Wifi size={14} />}
-                  {t('settings.test')}
+                  Проверить Live
                 </button>
-                <button className="btn btn-ghost flex-1" onClick={handleSave} disabled={testing}>
+                <button className="btn btn-ghost flex-1" onClick={handleSaveLive} disabled={testing}>
                   {testing ? <Loader2 size={14} className="animate-spin" /> : <Key size={14} />}
-                  {t('settings.save')}
+                  Сохранить Live-ключ
                 </button>
               </div>
 
@@ -549,9 +744,81 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
             </div>
           </div>
 
-          {/* Danger Zone */}
-          <div className="panel border-[var(--loss)]/30">
-            <div className="panel-header border-b-[var(--loss)]/20">
+        {/* Audit log */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <ScrollText size={13} /> {t('settings.audit_title')}
+          </div>
+          <div className="max-h-40 overflow-auto text-2xs space-y-1">
+            {audit.length === 0 ? (
+              <div className="text-[var(--txt-muted)]">{t('settings.audit_empty')}</div>
+            ) : audit.map((row) => (
+              <div key={row.id} className="flex gap-2 border-b border-[var(--border)] py-1">
+                <span className="mono text-[var(--txt-muted)] shrink-0">{(row.ts || '').slice(0, 19)}</span>
+                <span className="font-medium">{row.action}</span>
+                <span className="text-[var(--txt-muted)] truncate">{row.detail}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+   
+        {/* Risk guards */}
+        <div className="panel p-4 space-y-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-[var(--txt)]">
+            <Shield size={13} className="text-[var(--warn)]" /> {t('settings.risk_title')}
+          </div>
+          <p className="text-2xs text-[var(--txt-muted)]">{t('settings.risk_tip')}</p>
+          {risk ? (
+            <div className="grid grid-cols-2 gap-2 text-2xs">
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_kill')}</div>
+                <div className={`font-semibold ${risk.kill_switch ? 'text-[var(--loss)]' : 'text-[var(--profit)]'}`}>
+                  {risk.kill_switch ? t('settings.risk_on') : t('settings.risk_off')}
+                </div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">DEMO</div>
+                <div className="font-semibold">{risk.okx_demo ? 'yes' : 'no'}</div>
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_daily')}</div>
+                <div className="mono">{risk.max_daily_loss_usd > 0 ? `$${risk.max_daily_loss_usd}` : '—'}</div>
+                {risk.daily_pnl_usd != null && (
+                  <div className={`text-[10px] mt-0.5 ${risk.daily_pnl_usd >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                    today {risk.daily_pnl_usd >= 0 ? '+' : ''}{Number(risk.daily_pnl_usd).toFixed(2)}
+                  </div>
+                )}
+              </div>
+              <div className="rounded-lg border border-[var(--border)] p-2">
+                <div className="text-[var(--txt-muted)]">{t('settings.risk_max_pos')}</div>
+                <div className="mono">{risk.max_position_usd > 0 ? `$${risk.max_position_usd}` : '—'}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-2xs text-[var(--txt-muted)]">—</div>
+          )}
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="btn btn-danger btn-sm"
+              disabled={riskBusy || risk?.kill_switch}
+              onClick={() => toggleKill(true)}
+            >
+              {t('settings.risk_enable_kill')}
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              disabled={riskBusy || !risk?.kill_switch}
+              onClick={() => toggleKill(false)}
+            >
+              {t('settings.risk_disable_kill')}
+            </button>
+          </div>
+        </div>
+
+        <div className="panel border-[var(--loss)]/30">
+          <div className="panel-header border-b-[var(--loss)]/20">
               <AlertTriangle size={13} className="text-[var(--loss)]" /> {t('settings.danger_zone')}
             </div>
             <div className="p-4 flex items-start justify-between gap-4">
@@ -565,12 +832,12 @@ export default function SettingsPage({ onConnected, onDemoMode }) {
               >
                 <Trash2 size={12} />
                 {dangerConfirm ? t('settings.confirm_delete') : t('settings.delete')}
-              </button>
-            </div>
-          </div>
-        </div>
+</button>
+             </div>
+           </div>
+         </div>
 
-        {/* Security Info */}
+         {/* Security Info */}
         <div className="space-y-3">
           <div className="panel">
             <div className="panel-header"><Shield size={13} className="text-[var(--warn)]" /> {t('settings.security')}</div>
