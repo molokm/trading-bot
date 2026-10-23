@@ -1186,7 +1186,7 @@ async def startup():
                         except Exception as e:
                             print(f"[AI-GUARD] live flatten {coin}: {e}", flush=True)
                         try:
-                            await bot._positions.pop(coin, None)
+                            bot._positions.pop(coin, None)
                         except Exception:
                             pass
                         try:
@@ -4124,7 +4124,7 @@ async def health_guard_status():
         'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12],
         'engine': {
             'running': bool(getattr(bot, '_running', False)),
-            'execute': bool(getattr(bot, '_execute', False)),
+            'execute': bool(bot._execute_enabled()),
             'client': ('demo' if client is not None and getattr(client, 'demo', False)
                        else ('LIVE' if client is not None else 'none')),
             'tick_age_sec': None if tick_age is None else round(tick_age, 1),
