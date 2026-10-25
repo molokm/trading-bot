@@ -1103,6 +1103,14 @@ class AIStrategy:
                     self._last_tick_error = f"{type(e).__name__}: {str(e)[:200]}"
                 except Exception:
                     pass
+                # A loop that only ever errors never recovers — but only give up
+                # when there is nothing to protect (an open position keeps its
+                # own stops on the exchange).
+                if self._consecutive_fails >= 5 and not self._positions:
+                    print("[AI] 5 consecutive failing ticks with no open "
+                          "position — stopping the loop", flush=True)
+                    await self.stop()
+                    break
             self._tick_count += 1
             # Refresh live equity every few ticks so UI is not stuck at $0
             if self._live_client() and (self._tick_count % 3 == 1):

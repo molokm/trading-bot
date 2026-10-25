@@ -4005,7 +4005,7 @@ async def positions_reclaim(data: dict=Body(default=None)):
         raise HTTPException(status_code=400, detail='symbol required')
     inst = f'{sym}-USDT-SWAP'
     from app.services.position_claim import claim_open, norm_side, release_open
-    norm_side(side) if 'norm_side' in dir() else side
+    # norm_side(side)  # no-op kept for compatibility
     known = ['ai_strategy', 'ai_scale_strategy', 'impulse_strategy', 'validation_strategy', 'rotation_strategy', 'momentum_strategy', 'smart_money', 'vwap_rev_strategy']
     released = []
     for bid in known:
