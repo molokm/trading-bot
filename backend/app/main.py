@@ -763,7 +763,11 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
     _startup_log = []
     def _slog(msg):
+        # Keep the public startup log bounded — a restart that never fails
+        # would otherwise grow without limit.
         _startup_log.append(msg)
+        if len(_startup_log) > 1000:
+            del _startup_log[: len(_startup_log) - 1000]
         print(f'[startup-diag] {msg}', flush=True)
     try:
         _slog('AI auto-start entry point reached')
