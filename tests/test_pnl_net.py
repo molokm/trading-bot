@@ -50,7 +50,6 @@ def test_risk_status_derives_daily_pnl_from_engine(monkeypatch):
     bot = AIStrategy(config=AIConfig())
     bot._daily_realized_day = _today_msk()
     bot._daily_realized = -12.5
-    monkeypatch.setattr(rg, "_daily_pnl", None)
     monkeypatch.setattr(rg, "_runtime_kill", None)
     st = rg.get_status(ai_bot=bot)
     assert st.daily_pnl_usd == -12.5

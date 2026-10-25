@@ -1,13 +1,13 @@
 """Global risk gates (stage-3 + position-level limits).
 
 Env-driven kill switch and soft limits checked before any place_order.
-Daily PnL is fed from the dashboard PnL pipeline via update_daily_pnl().
+Daily PnL comes from the AI engine's own restart-safe counter
+(``_engine_daily_pnl``) — there is no separate producer to keep in sync.
 Position-level limits: max open positions, per-symbol limits, correlation caps.
 """
 from __future__ import annotations
 
 import os
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional
 
@@ -84,8 +84,6 @@ class RiskStatus:
 
 
 _runtime_kill: Optional[bool] = None
-_daily_pnl: Optional[float] = None
-_daily_pnl_ts: Optional[float] = None
 
 
 def _engine_daily_pnl(ai_bot: "AIStrategy") -> Optional[float]:
@@ -168,7 +166,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     max_per_symbol = int(_f("RISK_MAX_POS_PER_SYMBOL", 0))
     max_corr_exp = _f("RISK_MAX_CORRELATED_EXPOSURE_USD", 0.0)
 
-    pnl = daily_pnl if daily_pnl is not None else _daily_pnl
+    pnl = daily_pnl
     if pnl is None and ai_bot is not None:
         pnl = _engine_daily_pnl(ai_bot)
 
@@ -213,7 +211,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
         block_new_entries=block,
         reason=reason,
         daily_pnl_usd=pnl,
-        daily_pnl_updated_at=_daily_pnl_ts,
+        daily_pnl_updated_at=None,
         max_open_positions=int(_f("RISK_MAX_OPEN_POSITIONS", 0)),
         open_positions_count=pos_counts["total"],
         max_positions_per_symbol=int(_f("RISK_MAX_POS_PER_SYMBOL", 0)),
@@ -225,20 +223,6 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
 def set_kill_switch(enabled: bool) -> None:
     global _runtime_kill
     _runtime_kill = bool(enabled)
-
-
-def update_daily_pnl(value: float) -> None:
-    """Called from /api/pnl pipeline so place_order can enforce daily loss."""
-    global _daily_pnl, _daily_pnl_ts
-    try:
-        _daily_pnl = float(value)
-        _daily_pnl_ts = time.time()
-    except (TypeError, ValueError):
-        pass
-
-
-def get_cached_daily_pnl() -> Optional[float]:
-    return _daily_pnl
 
 
 def assert_can_open(
@@ -259,8 +243,6 @@ def assert_can_open(
         return
 
     # Single source for today's realised PnL: the engine's own counter.
-    # Without this the RISK_MAX_DAILY_LOSS_USD knob could never fire because
-    # update_daily_pnl() has no producers.
     if daily_pnl is None and ai_bot is not None:
         daily_pnl = _engine_daily_pnl(ai_bot)
 
