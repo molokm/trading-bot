@@ -451,35 +451,66 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Slow tier — expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
-      const [trades, liveTr, pnlData, livePnlData] = await Promise.all([
-        api.getPairedTrades(500).catch(() => null),
-        api.liveTrades().catch(() => null),
-        api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
-        api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
-      ])
-      if (livePnlData && !livePnlData.detail && livePnlData.total != null) {
-        setLivePnl({ ...livePnlData, account_mode: 'live' })
+      // Single source of truth for the main page: /api/me/dashboard (PUBLIC).
+      // /api/pnl, /api/trades/paired and /api/live/trades are AUTH_NO_GUEST /
+      // ADMIN — without a token they answer 403 and the whole «Сделки» panel
+      // plus Sum PnL used to silently go blank (every .catch(() => null)).
+      const dash = await api.meDashboard().catch(() => null)
+      let pnlData = null
+      let livePnlData = null
+      if (dash) {
+        const demoRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') !== 'live')
+        const liveRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') === 'live')
+        const byKey = new Map()
+        for (const t of demoRows) {
+          const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|demo`
+          byKey.set(k, { ...t, account_mode: 'demo', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
+        }
+        for (const t of liveRows) {
+          const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|live`
+          byKey.set(k, { ...t, account_mode: 'live', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
+        }
+        setTradeLog([...byKey.values()])
+        pnlData = dash?.pnl || {}
+        if (pnlData && pnlData.total != null) {
+          setPnl({ ...pnlData, account_mode: pnlData.account_mode || 'demo' })
+        }
+        if (dash.live && dash.live.live_total != null) {
+          livePnlData = { ...dash.live, account_mode: 'live', total: dash.live.live_total }
+          setLivePnl(livePnlData)
+        }
+      } else {
+        const [trades, liveTr, _pnlData, _livePnlData] = await Promise.all([
+          api.getPairedTrades(500).catch(() => null),
+          api.liveTrades().catch(() => null),
+          api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
+          api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
+        ])
+        livePnlData = _livePnlData
+        if (livePnlData && !livePnlData.detail && livePnlData.total != null) {
+          setLivePnl({ ...livePnlData, account_mode: 'live' })
+        }
+        const demoRows = trades?.trades || []
+        const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
+          ...t,
+          account_mode: 'live',
+          inst_id: t.inst_id || t.symbol,
+          entry_px: t.entry_px ?? t.entry_price ?? t.entry,
+          exit_px: t.exit_px ?? t.exit_price ?? t.exit,
+          bot: t.bot || 'AI Discretionary 1H',
+        }))
+        const byKey = new Map()
+        for (const t of demoRows) {
+          const k = `${t.ord_id || t.entry_ord_id || ''}|${t.inst_id}|${t.exit_time || t.time}|demo`
+          byKey.set(k, { ...t, account_mode: t.account_mode || 'demo' })
+        }
+        for (const t of liveRows) {
+          const k = `${t.ord_id || ''}|${t.inst_id || t.symbol}|${t.time || t.exit_time}|live`
+          byKey.set(k, t)
+        }
+        setTradeLog([...byKey.values()])
+        pnlData = _pnlData
       }
-      const demoRows = trades?.trades || []
-      const liveRows = (liveTr?.trades || liveTr || []).map(t => ({
-        ...t,
-        account_mode: 'live',
-        inst_id: t.inst_id || t.symbol,
-        entry_px: t.entry_px ?? t.entry_price ?? t.entry,
-        exit_px: t.exit_px ?? t.exit_price ?? t.exit,
-        bot: t.bot || 'AI Discretionary 1H',
-      }))
-      // Merge: demo from paired + live from mirror endpoint (tag live)
-      const byKey = new Map()
-      for (const t of demoRows) {
-        const k = `${t.ord_id || t.entry_ord_id || ''}|${t.inst_id}|${t.exit_time || t.time}|demo`
-        byKey.set(k, { ...t, account_mode: t.account_mode || 'demo' })
-      }
-      for (const t of liveRows) {
-        const k = `${t.ord_id || ''}|${t.inst_id || t.symbol}|${t.time || t.exit_time}|live`
-        byKey.set(k, t)
-      }
-      setTradeLog([...byKey.values()])
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
         // ONLY accept pnl_engine payloads — never bot-status seeds
         const src = String(pnlData.source || '')

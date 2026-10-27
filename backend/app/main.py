@@ -2443,6 +2443,27 @@ async def me_dashboard(request: Request):
             live = {'connected': False, 'error': str(e)}
     else:
         live = {'connected': False}
+    # ── Unified PnL for the dashboard (DEMO + LIVE) ──
+    # The public /api/me/dashboard is the single source of truth for the main
+    # page too: /api/pnl and /api/trades/paired are AUTH_NO_GUEST, so a session
+    # without a token (or a stale one) used to silently get [] and the whole
+    # «Сделки» panel + Sum PnL went blank. Same engine totals as the admin page.
+    pnl = {'total': 0, '1d': 0, '7d': 0, '30d': 0, 'week': 0, 'unrealized': 0,
+           'fees': 0, 'trades_counted': 0, 'per_bot': {}, 'source': 'none',
+           'account_mode': 'demo'}
+    try:
+        _demo_pnl = await _get_pnl_cached(mode='demo')
+        if isinstance(_demo_pnl, dict):
+            pnl = {**pnl, **_demo_pnl, 'account_mode': 'demo'}
+    except Exception as _pe:
+        print(f'[me/dashboard] pnl demo: {_pe}', flush=True)
+    try:
+        _live_pnl = await _get_pnl_cached(mode='live')
+        if isinstance(_live_pnl, dict) and _live_pnl.get('total') is not None:
+            pnl['live'] = {**_live_pnl, 'account_mode': 'live'}
+            pnl['live_total'] = _live_pnl.get('total')
+    except Exception as _ple:
+        print(f'[me/dashboard] pnl live: {_ple}', flush=True)
     # ── Closed trades for mini-app (DEMO + LIVE), strict dedupe ──
     # Problem before: multiple sources (DB × bot_ids, bills, AI log, exchange_close)
     # produced near-identical rows with different timestamp formats → duplicates.
@@ -2802,7 +2823,7 @@ async def me_dashboard(request: Request):
     trades = demo_tr + live_tr
     trades.sort(key=_trade_sort_key, reverse=True)
 
-    return {'demo': demo, 'live': live, 'trades': trades[:40], 'role': role, 'user_id': user_id}
+    return {'demo': demo, 'live': live, 'trades': trades[:40], 'pnl': pnl, 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
 @policy(PUBLIC)
@@ -7563,6 +7584,29 @@ def _ts_ms_any(value) -> int:
     return 0
 
 
+def _iso_any(value) -> str:
+    """Timestamp-ish value → ISO string.
+
+    Postgres/asyncpg may hand back ``datetime`` for TIMESTAMP-like columns and
+    the trade pipeline mixes DB rows with OKX rows (ISO strings). Normalising
+    here keeps every sort/slice/JSON comparison string-vs-string.
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, datetime):
+        d = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return d.isoformat()
+    return str(value)
+
+
+def _trade_sort_ts(row) -> int:
+    """Numeric sort key for a trade row (never raises, never mixes types)."""
+    try:
+        return int(_row_ts_ms(row) or 0)
+    except Exception:
+        return 0
+
+
 def _row_ts_ms(row: dict) -> int:
     if not isinstance(row, dict):
         return 0
@@ -7725,7 +7769,7 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
                     _tr = {**_tr, 'account_mode': 'demo'}
             _tagged.append(_tr)
         _tagged = _filter_since_epoch(_tagged, keep_unknown=True)
-        _tagged.sort(key=lambda t: (t.get('exit_time') or t.get('entry_time') or t.get('time') or ''), reverse=True)
+        _tagged.sort(key=_trade_sort_ts, reverse=True)
         trades = _tagged
         resp = {**resp, 'trades': trades, 'account_mode': _mode}
         if trades:
@@ -7767,8 +7811,29 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
                 if _i and _i not in inst_last_bot:
                     inst_last_bot[_i] = _bid_name
     if db:
+        async def _safe_inst_bot():
+            """Latest bot per instrument — placeholder style depends on backend."""
+            sql = ("SELECT inst_id, bot_id, timestamp FROM trades "
+                   "WHERE bot_id IS NOT NULL AND bot_id != '' "
+                   "AND account_mode = {p} ORDER BY timestamp DESC LIMIT 2000")
+            try:
+                if db._pg_mode:
+                    return await db._fetchall(sql.format(p='$1'), (mode,))
+                return await db._fetchall(sql.format(p='?'), (mode,))
+            except Exception as e:
+                # A failed helper must never hide the trade rows fetched below.
+                print(f'[trades/paired] inst/bot map skipped: {e}', flush=True)
+                return []
         try:
-            _ib_rows, _all_rows = await asyncio.gather(db._fetchall("SELECT inst_id, bot_id, timestamp FROM trades WHERE bot_id IS NOT NULL AND bot_id != '' AND account_mode = $1 ORDER BY timestamp DESC LIMIT 2000", (mode,)), db.get_trades_multi_bot(bot_ids, limit=5000, account_mode=mode))
+            _ib_rows, _all_rows = await asyncio.gather(
+                _safe_inst_bot(),
+                db.get_trades_multi_bot(bot_ids, limit=5000, account_mode=mode),
+                return_exceptions=True,
+            )
+            if isinstance(_all_rows, BaseException):
+                raise _all_rows
+            if isinstance(_ib_rows, BaseException):
+                _ib_rows = []
             for _r in _ib_rows:
                 _i = _r.get('inst_id') or ''
                 if _i and _i not in inst_last_bot:
@@ -7783,7 +7848,16 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
                 px = float(t.get('px', 0) or 0)
                 pnl = float(t.get('pnl', 0) or 0)
                 inst = t.get('inst_id', '')
-                raw.append({'time': t.get('timestamp', ''), 'side': t.get('side', ''), 'symbol': inst, 'inst_id': inst, 'ord_id': str(t.get('ord_id', '') or '').strip(), 'entry_price': px, 'exit_price': None, 'pnl': pnl, 'reason': 'open' if pnl == 0 else 'closed', 'pos_side': 'long' if t.get('side') == 'buy' else 'short', 'signal_id': t.get('signal_id', 0), 'bot_id': bid, 'account_mode': row_mode or mode, 'account_key': t.get('account_key') or ('showcase' if mode == 'demo' else 'live')})
+                _side = str(t.get('side', '') or '').lower()
+                _state = str(t.get('state', '') or '').lower()
+                _is_close = _state in ('closed', 'close') or pnl != 0
+                # `side` is the ORDER side: closing a short is a `buy`. Direction
+                # badges and pairing must use the POSITION side, not the order.
+                if _is_close:
+                    _pos_side = 'short' if _side == 'buy' else 'long'
+                else:
+                    _pos_side = 'long' if _side == 'buy' else 'short'
+                raw.append({'time': _iso_any(t.get('timestamp')), 'side': _side, 'symbol': inst, 'inst_id': inst, 'ord_id': str(t.get('ord_id', '') or '').strip(), 'entry_price': px, 'exit_price': None, 'pnl': pnl, 'reason': 'closed' if _is_close else 'open', 'pos_side': _pos_side, 'signal_id': t.get('signal_id', 0), 'bot_id': bid, 'account_mode': row_mode or mode, 'account_key': t.get('account_key') or ('showcase' if mode == 'demo' else 'live')})
         except Exception as e:
             print(f'[trades/paired] DB read error: {e}', flush=True)
     live_bots = [('rotation', rotation), ('impulse', impulse), ('validation', validation), ('ai', ai_bot)]
@@ -7792,7 +7866,7 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
             for t in bot._trade_log:
                 if not _trade_matches_mode(t, mode):
                     continue
-                row = {'time': t.get('time', ''), 'side': t.get('side', ''), 'symbol': t.get('symbol', ''), 'inst_id': t.get('symbol', '') or t.get('inst_id', ''), 'ord_id': str(t.get('ord_id', '') or '').strip(), 'entry_price': t.get('entry_price') or t.get('entry', 0), 'exit_price': t.get('exit_price', None), 'pnl': t.get('pnl', 0), 'reason': t.get('reason', 'open'), 'pos_side': t.get('pos_side', 'long'), 'signal_id': t.get('signal_id', 0), 'bot_id': getattr(bot, 'BOT_ID', key), 'account_mode': t.get('account_mode') or mode, 'account_key': t.get('account_key') or ('showcase' if mode == 'demo' else 'live')}
+                row = {'time': _iso_any(t.get('time')), 'side': t.get('side', ''), 'symbol': t.get('symbol', ''), 'inst_id': t.get('symbol', '') or t.get('inst_id', ''), 'ord_id': str(t.get('ord_id', '') or '').strip(), 'entry_price': t.get('entry_price') or t.get('entry', 0), 'exit_price': t.get('exit_price', None), 'pnl': t.get('pnl', 0), 'reason': t.get('reason', 'open'), 'pos_side': t.get('pos_side', 'long'), 'signal_id': t.get('signal_id', 0), 'bot_id': getattr(bot, 'BOT_ID', key), 'account_mode': t.get('account_mode') or mode, 'account_key': t.get('account_key') or ('showcase' if mode == 'demo' else 'live')}
                 if t.get('bot'):
                     row['bot'] = t.get('bot')
                 raw.append(row)
@@ -8052,7 +8126,7 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
             t['bot'] = _bot_name_map.get(_raw_name, _raw_name) or t.get('bot') or ''
             continue
     if flag_raw:
-        raw.sort(key=lambda t: (t.get('time') or '', t.get('side') or ''))
+        raw.sort(key=lambda t: (_trade_sort_ts(t), str(t.get('side') or '')))
         legacy = []
         for t in raw:
             inst = t.get('inst_id') or t.get('symbol', '')
@@ -8094,7 +8168,7 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
             for entry in entries:
                 bot_name = _db_bot_name(entry.get('bot_id', '')) or 'Momentum'
                 paired.append({'time': entry.get('time', ''), 'entry_time': entry.get('time', ''), 'exit_time': None, 'side': 'buy' if entry.get('pos_side') == 'long' else 'sell', 'symbol': entry.get('symbol', ''), 'inst_id': entry.get('inst_id', '') or entry.get('symbol', ''), 'ord_id': str(entry.get('ord_id', '') or '').strip(), 'entry': entry.get('entry_price', 0), 'entry_px': entry.get('entry_price', 0), 'exit_price': None, 'exit_px': None, 'pnl': None, 'reason': 'open', 'pos_side': entry.get('pos_side', 'long'), 'signal_id': entry.get('signal_id', ''), 'bot': bot_name})
-        paired.sort(key=lambda t: t.get('exit_time') or t.get('entry_time') or '', reverse=True)
+        paired.sort(key=_trade_sort_ts, reverse=True)
         for t in paired:
             key = _dedup_key(t)
             if key in seen:
@@ -8134,7 +8208,7 @@ async def _get_paired_trades_impl(limit: int=500, begin: str=None, end: str=None
                 t['fee'] = str(bill['fee'])
     except Exception:
         pass
-    dedup.sort(key=lambda t: t.get('exit_time') or t.get('entry_time') or '', reverse=True)
+    dedup.sort(key=_trade_sort_ts, reverse=True)
     print(f'[trades/paired] OKX+bills+DB: {len(dedup)} trades (okx_rows={len(okx_rows)}, legacy={(len(paired) if flag_raw else 0)})', flush=True)
     return {'trades': dedup[:limit], 'debug': {'bills': len(bills), 'raw_fills': len(raw_fills), 'okx_rows': len(okx_rows), 'okx_ord_ids': len(okx_ord_ids), 'pair_err': pair_bills_err, 'inst_entry_bot': _json_safe_dict(inst_entry_bot)}}
     try:
