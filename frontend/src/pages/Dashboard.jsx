@@ -18,6 +18,25 @@ const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'A
 const AI_ONLY_MODE = true
 
 
+/** Safe chronological compare for trade timestamps (ms number, ISO string, or empty). */
+function cmpTimeDesc(a, b) {
+  const toMs = (v) => {
+    if (v == null || v === '') return 0
+    if (typeof v === 'number' && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v
+    const s = String(v).trim()
+    if (!s) return 0
+    if (/^\d+$/.test(s)) {
+      const n = Number(s)
+      return n < 1e12 ? n * 1000 : n
+    }
+    const ms = Date.parse(s)
+    return Number.isFinite(ms) ? ms : 0
+  }
+  return toMs(b) - toMs(a)
+}
+
+
+
 /* ======= Animated Value - smooth colour transition ======= */
 function AnimatedValue({ children, className = '' }) {
   return (
@@ -825,9 +844,9 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Keep full log; UI splits DEMO vs MIRROR below
     const combined = [...(tradeLog || [])]
     combined.sort((a, b) => {
-      const ta = a.exit_time || a.entry_time || ''
-      const tb = b.exit_time || b.entry_time || ''
-      return tb.localeCompare(ta)
+      const ta = a.exit_time || a.entry_time || a.time || a.timestamp || ''
+      const tb = b.exit_time || b.entry_time || b.time || b.timestamp || ''
+      return cmpTimeDesc(ta, tb)
     })
     return combined
   }, [tradeLog])
@@ -1088,7 +1107,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     rows.sort((a, b) => {
       if (a.type === 'open' && b.type !== 'open') return -1
       if (a.type !== 'open' && b.type === 'open') return 1
-      return (b.time || '').localeCompare(a.time || '')
+      return cmpTimeDesc(a.time, b.time)
     })
     return rows
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, liveStatus?.open_positions, positions, allTrades, botMap, demoMode])
