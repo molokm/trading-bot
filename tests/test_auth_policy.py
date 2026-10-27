@@ -81,6 +81,8 @@ TIGHTENED_IN_3B = {
     # Telegram user is auto-provisioned, so AUTH/AUTH_NO_GUEST leaked equity,
     # PnL and open positions of the owner's live account.
     '/api/live/status',
+    # Research lab: owner-only experiments, nothing a customer needs.
+    '/api/lab/backtest/run', '/api/lab/backtest/last', '/api/lab/hyperopt',
     # Destroyed the platform's shared DEMO / owner's LIVE book for any
     # provisioned Telegram user; use /api/me/positions/close-all instead.
     '/api/positions/close-all',
