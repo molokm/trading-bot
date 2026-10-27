@@ -417,7 +417,15 @@ async def startup():
         print(f'[startup] pnl_epoch forced {PNL_EPOCH_ISO}', flush=True)
         try:
             marker = await db.get_setting('pnl_clean_slate_20260912')
-            if not marker:
+            _wipe_ok = str(os.getenv('PNL_CLEAN_SLATE_ENABLE', '0')).strip().lower() in (
+                '1', 'true', 'yes', 'on')
+            if not marker and not _wipe_ok:
+                # Destructive one-shot migration: never re-run just because a
+                # settings row went missing (partial DB restore). Opt in with
+                # PNL_CLEAN_SLATE_ENABLE=1 and delete this marker deliberately.
+                await db.set_setting('pnl_clean_slate_20260912', 'skipped')
+                print('[startup] PnL clean slate skipped (opt-in required)', flush=True)
+            elif not marker:
                 epoch = PNL_EPOCH_ISO
                 bot_ids = [AI_BOT_ID, AI_SCALE_BOT_ID, 'ai_scale_strategy', 'ai_strategy']
                 try:

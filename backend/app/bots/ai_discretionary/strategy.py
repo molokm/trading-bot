@@ -476,6 +476,7 @@ class AIPosition:
     partial_taken: bool = False          # v1.28 one-shot scale-out done
     signal_close_notified: str = ""       # signal-only mode: last exit already alerted
     unrealized_pnl: float = 0.0
+    mark_px: float = 0.0          # last mark from guard/tick (UI + breach checks)
     sl_algo_id: str = ""
     scale_adds: int = 0
     tp_algo_id: str = ""
