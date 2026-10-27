@@ -12,13 +12,13 @@ import { fmtTs } from '../utils/time'
 
 const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
-// Coins the bot actively trades — shown as live price cards on the dashboard
+// Coins the bot actively trades - shown as live price cards on the dashboard
 const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
-/** AI product mode — Discretionary + optional Scale-In on dashboard */
+/** AI product mode - Discretionary + optional Scale-In on dashboard */
 const AI_ONLY_MODE = true
 
 
-/* ═══════ Animated Value — smooth colour transition ═══════ */
+/* ======= Animated Value - smooth colour transition ======= */
 function AnimatedValue({ children, className = '' }) {
   return (
     <span className={`transition-all duration-500 ${className}`}>
@@ -27,7 +27,7 @@ function AnimatedValue({ children, className = '' }) {
   )
 }
 
-/* ═══════ Sparkline SVG — 60×20 trend line ═══════ */
+/* ======= Sparkline SVG - 60x20 trend line ======= */
 function Sparkline({ data, width = 60, height = 20 }) {
   if (!data || data.length < 2) return null
   const min = Math.min(...data)
@@ -48,12 +48,12 @@ function Sparkline({ data, width = 60, height = 20 }) {
   )
 }
 
-/* ═══════ Helper: check admin access ═══════ */
+/* ======= Helper: check admin access ======= */
 function isAdmin(isGuest) {
   return !isGuest
 }
 
-/* ═══════ Dashboard ═══════ */
+/* ======= Dashboard ======= */
 
 /** Unified bot panel on Dashboard (same layout for Discretionary & Scale-In). */
 function TopSignals({ signals, t }) {
@@ -138,7 +138,7 @@ function NextTickCountdown({ nextTickAt, pollIntervalSec }) {
 function formatSignalSide(side) {
   if (side === 'long') return 'лонг'
   if (side === 'short') return 'шорт'
-  return side || '—'
+  return side || '-'
 }
 
 function formatRegime(regime) {
@@ -146,7 +146,7 @@ function formatRegime(regime) {
   if (r === 'bear') return 'медвежий'
   if (r === 'bull') return 'бычий'
   if (r === 'chop') return 'боковик'
-  return regime || '—'
+  return regime || '-'
 }
 
 function signalBlockRu(s) {
@@ -185,7 +185,7 @@ function SignalRow({ s, index }) {
           Готовность <span className="mono text-[var(--txt)] font-semibold">{scorePct}%</span>
         </span>
         <span className={weakAdx ? 'text-[var(--warn)]' : ''} title="Сила тренда (ADX)">
-          ADX {s.adx != null ? Number(s.adx).toFixed(0) : '—'}{weakAdx ? ' слаб.' : ''}
+          ADX {s.adx != null ? Number(s.adx).toFixed(0) : '-'}{weakAdx ? ' слаб.' : ''}
         </span>
         {filtersTotal != null && (
           <span className={filtersPassed < filtersTotal ? 'text-[var(--warn)]' : 'text-[var(--profit)]'} title="Сколько фильтров пройдено">
@@ -199,7 +199,7 @@ function SignalRow({ s, index }) {
         </div>
       ) : (
         <div className="text-[0.58rem] leading-snug text-[var(--profit)]">
-          Фильтры допускают вход — ждём подтверждение ИИ
+          Фильтры допускают вход - ждём подтверждение ИИ
         </div>
       )}
     </div>
@@ -244,7 +244,7 @@ function DashBotPanel({
           </div>
           <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
             <div className="text-[var(--txt-muted)]">WR</div>
-            <div className="mono font-semibold">{winRate != null ? `${winRate}%` : '—'}</div>
+            <div className="mono font-semibold">{winRate != null ? `${winRate}%` : '-'}</div>
           </div>
           <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
             <div className="text-[var(--txt-muted)]">Поз.</div>
@@ -316,7 +316,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [aiBusy, setAiBusy] = useState(false)
   const [tradeLog, setTradeLog] = useState([])
   const [pnl, setPnl] = useState(null)
-  // Drop PnL + trade log when switching Demo ↔ Live — never mix modes
+  // Drop PnL + trade log when switching Demo ↔ Live - never mix modes
   useEffect(() => {
     setPnl(null)
     setTradeLog([])
@@ -337,7 +337,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [filterResult, setFilterResult] = useState('all') // all | win | loss
   const [filterReason, setFilterReason] = useState('all')
 
-  // Persisted uptime — calculated from server-side started_at
+  // Persisted uptime - calculated from server-side started_at
   const [uptimeSec, setUptimeSec] = useState(0)
   const uptimeRef = useRef(null)
 
@@ -448,30 +448,27 @@ export default function Dashboard({ health, connected, isGuest }) {
     } catch { setLoading(false) }
     if (opts.fastOnly) return
 
-    // Slow tier — expensive OKX-bills pipelines; served from the server-side
+    // Slow tier - expensive OKX-bills pipelines; served from the server-side
     // 30s cache, so updates arrive a little after the fast tier.
     try {
       // Single source of truth for the main page: /api/me/dashboard (PUBLIC).
       // /api/pnl, /api/trades/paired and /api/live/trades are AUTH_NO_GUEST /
-      // ADMIN — without a token they answer 403 and the whole «Сделки» panel
+      // ADMIN - without a token they answer 403 and the whole «Сделки» panel
       // plus Sum PnL used to silently go blank (every .catch(() => null)).
       const dash = await api.meDashboard().catch(() => null)
       let pnlData = null
       let livePnlData = null
       if (dash) {
-        // Use PnL engine's trades (dash.pnl.trades) for consistency with PnL cards.
-        // dash.trades uses a different dedup logic and can show different trades.
-        const pnlTrades = (dash.pnl && dash.pnl.trades) || []
-        const demoRows = pnlTrades.filter(t => (t.account_mode || 'demo') !== 'live')
-        const liveRows = pnlTrades.filter(t => (t.account_mode || 'demo') === 'live')
+        const demoRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') !== 'live')
+        const liveRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') === 'live')
         const byKey = new Map()
         for (const t of demoRows) {
           const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|demo`
-          byKey.set(k, { ...t, account_mode: 'demo', symbol: t.symbol || t.inst || t.coin || '', inst_id: t.inst_id || (t.inst ? `${t.inst}-USDT-SWAP` : '') || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry ?? t.avg_px, exit_px: t.exit_px ?? t.exit_price ?? t.exit ?? t.avg_px ?? t.px, bot: t.bot || 'AI Discretionary 1H' })
+          byKey.set(k, { ...t, account_mode: 'demo', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
         }
         for (const t of liveRows) {
           const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|live`
-          byKey.set(k, { ...t, account_mode: 'live', symbol: t.symbol || t.inst || t.coin || '', inst_id: t.inst_id || (t.inst ? `${t.inst}-USDT-SWAP` : '') || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry ?? t.avg_px, exit_px: t.exit_px ?? t.exit_price ?? t.exit ?? t.avg_px ?? t.px, bot: t.bot || 'AI Discretionary 1H' })
+          byKey.set(k, { ...t, account_mode: 'live', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
         }
         setTradeLog([...byKey.values()])
         pnlData = dash?.pnl || {}
@@ -515,7 +512,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         pnlData = _pnlData
       }
       if (pnlData && !pnlData.detail && (pnlData.total != null || pnlData['1d'] != null || pnlData.per_bot)) {
-        // ONLY accept pnl_engine payloads — never bot-status seeds
+        // ONLY accept pnl_engine payloads - never bot-status seeds
         const src = String(pnlData.source || '')
         const okSrc = (
           src.startsWith('exchange')
@@ -537,7 +534,7 @@ export default function Dashboard({ health, connected, isGuest }) {
               const oldTot = Math.abs(Number(prev?.total ?? 0))
               const newSrc = String(pnlData.source || '')
               const prevMode = String(prev?.account_mode || '').toLowerCase()
-              // Zero on purpose when live has no closes — do not keep demo total
+              // Zero on purpose when live has no closes - do not keep demo total
               if (prevMode && prevMode !== wantMode) {
                 return { ...pnlData, account_mode: gotMode || wantMode }
               }
@@ -566,7 +563,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     } catch {}
   }
 
-  // Derived values (declared early — before any useMemo that depends on them)
+  // Derived values (declared early - before any useMemo that depends on them)
   const change24hPct = (tk) => {
     if (!tk || !tk.last || !tk.open24h || parseFloat(tk.open24h) <= 0) return 0
     return ((parseFloat(tk.last) - parseFloat(tk.open24h)) / parseFloat(tk.open24h)) * 100
@@ -582,19 +579,19 @@ export default function Dashboard({ health, connected, isGuest }) {
     ? unrealizedFromPositions
     : (pnl?.unrealized || 0)
   const fundingPnl = Number(pnl?.funding ?? 0)
-  // economic mixes account funding with strategy realized — show both explicitly
+  // economic mixes account funding with strategy realized - show both explicitly
   const strategyRealized = Number(pnl?.strategy_realized ?? pnl?.total ?? 0)
   const economicPnl = Number(
     pnl?.economic_approx
     ?? (strategyRealized + unrealizedPnl + fundingPnl)
   )
-  // DEMO positions (bot showcase) + MIRROR positions (live mirror) — always both
+  // DEMO positions (bot showcase) + MIRROR positions (live mirror) - always both
   const demoPositions = useMemo(() => {
     const result = []
     const keys = new Set()
     for (const p of (positions || [])) {
       const mode = String(p.account_mode || 'demo').toLowerCase()
-      // When API is in live-view, positions may be live — skip them here
+      // When API is in live-view, positions may be live - skip them here
       if (mode === 'live') continue
       const key = `${p.instId || ''}|${(p.posSide || 'long').toLowerCase()}`
       if (keys.has(key)) continue
@@ -659,7 +656,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     return result
   }, [liveStatus?.open_positions])
 
-  // One list for the single «Открытые позиции» panel — DEMO + MIRROR with badges
+  // One list for the single «Открытые позиции» panel - DEMO + MIRROR with badges
   const displayPositions = useMemo(
     () => [...demoPositions, ...mirrorPositions],
     [demoPositions, mirrorPositions]
@@ -707,7 +704,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const wantPnlMode = demoMode ? 'demo' : 'live'
   const pnlModeOk = (() => {
     const m = String(pnl?.account_mode || '').toLowerCase()
-    // Live: require explicit live — missing mode = treat as not ready (show 0)
+    // Live: require explicit live - missing mode = treat as not ready (show 0)
     if (!demoMode) return m === 'live'
     // Demo: demo or untagged legacy payload
     return !m || m === 'demo'
@@ -715,7 +712,7 @@ export default function Dashboard({ health, connected, isGuest }) {
 
 
   // Single source of truth: /api/pnl engine (same as Bots card).
-  // Do NOT sum tradeLog client-side — that path mixed untagged/legacy rows and drifted to -$1193.
+  // Do NOT sum tradeLog client-side - that path mixed untagged/legacy rows and drifted to -$1193.
   const discPnlResolved = (() => {
     if (!pnlModeOk) return 0
     if (pnl?.per_bot?.['AI Discretionary 1H'] != null) return Number(pnl.per_bot['AI Discretionary 1H'])
@@ -774,7 +771,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         rows.push({ name: 'AI Discretionary 1H', val: 0 })
         return rows
       }
-      // Same engine total as Sum PnL — never client tradeLog sum
+      // Same engine total as Sum PnL - never client tradeLog sum
       const v = Number(
         per['AI Discretionary 1H']
         ?? per.ai_strategy
@@ -828,14 +825,14 @@ export default function Dashboard({ health, connected, isGuest }) {
     // Keep full log; UI splits DEMO vs MIRROR below
     const combined = [...(tradeLog || [])]
     combined.sort((a, b) => {
-      const ta = String(a.exit_time || a.entry_time || a.time || '')
-      const tb = String(b.exit_time || b.entry_time || b.time || '')
+      const ta = a.exit_time || a.entry_time || ''
+      const tb = b.exit_time || b.entry_time || ''
       return tb.localeCompare(ta)
     })
     return combined
   }, [tradeLog])
 
-  // Closed trades for the single «Сделки» panel — DEMO + LIVE, badge per row
+  // Closed trades for the single «Сделки» panel - DEMO + LIVE, badge per row
   const closedTradesForTable = useMemo(() => {
     return allTrades.filter(t => {
       const r = (t.reason || t.state || '').toLowerCase()
@@ -931,7 +928,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     })
   }, [positions, botMap, momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, smartMoneyStatus?.open_positions])
 
-  // Active trades — open from bots + OKX positions; closed from paired log only
+  // Active trades - open from bots + OKX positions; closed from paired log only
   const activeTrades = useMemo(() => {
     const rows = []
     const openKeys = new Set() // inst|side to avoid double rows
@@ -999,7 +996,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       return false
     }
 
-    // 1a. Bot-owned opens (AI only) — scoped to current account mode
+    // 1a. Bot-owned opens (AI only) - scoped to current account mode
     const modeTag = demoMode ? 'demo' : 'live'
     for (const p of (aiStatus?.open_positions || [])) {
       const pMode = String(p.account_mode || modeTag).toLowerCase()
@@ -1049,7 +1046,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       }, hint || 'AI Discretionary 1H')
     }
 
-    // 2. Closed — paired log only; skip opens still on exchange and partials
+    // 2. Closed - paired log only; skip opens still on exchange and partials
     for (const tr of allTrades) {
       if (tr.bot === 'Smart Money') continue
       const r = (tr.reason || '').toLowerCase()
@@ -1091,7 +1088,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     rows.sort((a, b) => {
       if (a.type === 'open' && b.type !== 'open') return -1
       if (a.type !== 'open' && b.type === 'open') return 1
-      return String(b.time || '').localeCompare(String(a.time || ''))
+      return (b.time || '').localeCompare(a.time || '')
     })
     return rows
   }, [momentumStatus?.open_positions, impulseStatus?.open_positions, validationStatus?.open_positions, aiStatus?.open_positions, aiScaleStatus?.open_positions, smartMoneyStatus?.open_positions, liveStatus?.open_positions, positions, allTrades, botMap, demoMode])
@@ -1143,7 +1140,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     return { totalPnl, wins, losses, count: visible.length }
   }, [filteredTrades, activeTrades])
 
-  // Synthetic BTC sparkline (visual only) — btcChange is now declared above
+  // Synthetic BTC sparkline (visual only) - btcChange is now declared above
   const btcSparkData = useMemo(() => {
     const isUp = parseFloat(btcChange) >= 0
     return Array.from({ length: 10 }, (_, i) =>
@@ -1169,7 +1166,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     try {
       // Pass posSide ONLY when it's a valid OKX value from the position data.
       // p.side is the strategy's internal view ('long'/'short') and must NOT
-      // be used — on net-mode accounts OKX rejects it with error 51011.
+      // be used - on net-mode accounts OKX rejects it with error 51011.
       const okxPosSide = ['net', 'long', 'short'].includes(String(p.posSide || '')) ? p.posSide : undefined
       // Use user endpoint for regular users, admin endpoint for owner (guest)
       if (isGuest) {
@@ -1260,7 +1257,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const dualPnlNode = (demoVal, liveVal, { forceSigned = true } = {}) => {
     const one = (v) => {
       const n = Number(v)
-      if (v == null || Number.isNaN(n)) return '—'
+      if (v == null || Number.isNaN(n)) return '-'
       const abs = Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
       if (!forceSigned && n === 0) return `$${abs}`
       return `${n >= 0 ? '+' : '−'}$${abs}`
@@ -1275,7 +1272,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         <span className={cls(demoVal)} title="Демо">{one(demoVal)}</span>
         <span className="text-[var(--txt-muted)] font-normal text-[0.85em]">/</span>
         <span className={liveConnected ? cls(liveVal) : 'text-[var(--txt-muted)]'} title="Лайф">
-          {liveConnected ? one(liveVal) : '—'}
+          {liveConnected ? one(liveVal) : '-'}
         </span>
       </span>
     )
@@ -1297,7 +1294,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         </div>
       )}
 
-      {/* ═══ Status strip (Phase 5 UX) ═══ */}
+      {/* === Status strip (Phase 5 UX) === */}
       <div className="dash-status-strip flex-shrink-0 flex flex-wrap items-center gap-2 px-1">
         <span
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border ${
@@ -1341,7 +1338,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         )}
 
         {fundingNote !== 0 && (
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Funding — уровень аккаунта, не фильтр стратегий">
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-2xs border border-[var(--border)] text-[var(--txt-muted)]" title="Funding - уровень аккаунта, не фильтр стратегий">
             Funding (acc): {fundingNote >= 0 ? '+' : ''}{fmt(fundingNote)}
           </span>
         )}
@@ -1413,7 +1410,7 @@ export default function Dashboard({ health, connected, isGuest }) {
               <div className="p-2 rounded-lg bg-[var(--bg)] col-span-2">
                 <div className="text-[var(--txt-muted)]">Статус</div>
                 <div className={`font-semibold ${reconcileResult.ok ? 'text-[var(--profit)]' : 'text-[var(--warn)]'}`}>
-                  {reconcileResult.ok ? 'Согласовано' : 'Есть расхождения — проверьте untagged / claims'}
+                  {reconcileResult.ok ? 'Согласовано' : 'Есть расхождения - проверьте untagged / claims'}
                 </div>
               </div>
             </div>
@@ -1422,17 +1419,17 @@ export default function Dashboard({ health, connected, isGuest }) {
         </div>
       )}
 
-      {/* ═══ GOLDEN ZONE — Key Metrics ═══ */}
+      {/* === GOLDEN ZONE - Key Metrics === */}
       <div data-tour="metrics" className="dash-metrics flex-shrink-0 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         <EnhancedMetricCard
           className="metric-hide-mobile max-md:hidden"
           label={t('dash.balance')}
           value={
             <span className="inline-flex items-baseline gap-0.5 mono">
-              <span title="Демо">{totalEquity ? `$${Number(totalEquity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}</span>
+              <span title="Демо">{totalEquity ? `$${Number(totalEquity).toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '-'}</span>
               <span className="text-[var(--txt-muted)] text-[0.85em]">/</span>
               <span title="Лайф" className={liveConnected ? '' : 'text-[var(--txt-muted)]'}>
-                {liveConnected && liveEquity ? `$${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '—'}
+                {liveConnected && liveEquity ? `$${liveEquity.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : '-'}
               </span>
             </span>
           }
@@ -1511,7 +1508,7 @@ export default function Dashboard({ health, connected, isGuest }) {
         />
       </div>
 
-      {/* ═══ MAIN GRID 65/35 ═══ */}
+      {/* === MAIN GRID 65/35 === */}
 
       {/* Mobile: AI status + Russian pulse (same text as bot card) */}
       <div className="dash-ai-strip flex-shrink-0 flex-col gap-1 px-2.5 py-1.5 rounded-[10px] border border-[var(--border)] bg-[var(--surface)]">
@@ -1536,10 +1533,10 @@ export default function Dashboard({ health, connected, isGuest }) {
 
       <div className="dash-main-grid flex-1 grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-3 min-h-0 main-grid">
 
-        {/* ═══ LEFT — Positions + Trades ═══ */}
+        {/* === LEFT - Positions + Trades === */}
         <div className="dash-left flex flex-col gap-3 min-h-0 overflow-hidden">
 
-          {/* Open Positions — DEMO + LIVE in one panel */}
+          {/* Open Positions - DEMO + LIVE in one panel */}
           <div className="dash-positions dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Zap size={13} className="text-[var(--profit)]" />
@@ -1595,7 +1592,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 flex-wrap min-w-0">
-                          <span className="font-semibold text-[var(--txt)] text-sm">{pair || '—'}</span>
+                          <span className="font-semibold text-[var(--txt)] text-sm">{pair || '-'}</span>
                           <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
                             {isLong ? 'LONG' : 'SHORT'}{lever ? ` · ${lever}` : ''}
                           </span>
@@ -1614,9 +1611,9 @@ export default function Dashboard({ health, connected, isGuest }) {
                         </div>
                       </div>
                       <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-2xs text-[var(--txt-muted)] mono">
-                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '—'}</span></span>
-                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
-                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '—'}</span></span>
+                        <span>Размер <span className="text-[var(--txt)]">{size ? size.toFixed(3) : '-'}</span></span>
+                        <span>Вход <span className="text-[var(--txt)]">{entry ? `$${entry.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '-'}</span></span>
+                        <span>Марка <span className="text-[var(--txt)]">{mark ? `$${mark.toLocaleString(undefined, { maximumFractionDigits: 2 })}` : '-'}</span></span>
                         {!isGuest && (
                           <button
                             type="button"
@@ -1637,7 +1634,7 @@ export default function Dashboard({ health, connected, isGuest }) {
             </div>
           </div>
 
-          {/* Trades — DEMO + LIVE; mobile shows last 3 */}
+          {/* Trades - DEMO + LIVE; mobile shows last 3 */}
           <div className="dash-trades dash-panel panel flex-1 flex flex-col min-h-0">
             <div className="panel-header">
               <Activity size={13} className="text-accent-purple" />
@@ -1665,14 +1662,14 @@ export default function Dashboard({ health, connected, isGuest }) {
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
                     const isLong = sideRaw === 'long' || sideRaw === 'buy'
-                    const pair = (tr.symbol || tr.inst || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '').replace('-USDT', '')
+                    const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
                     const reason = (tr.reason || tr.state || 'closed').toLowerCase()
                     const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
                       <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`} className={i >= 3 ? 'row-hide-mobile' : undefined}>
                         <td className="text-2xs mono text-[var(--txt-muted)]">{fmtTime(tr.exit_time || tr.time || tr.entry_time)}</td>
                         <td className="text-[var(--txt)] font-medium whitespace-nowrap">
-                          {pair || '—'}
+                          {pair || '-'}
                           <span className="badge badge-ai ml-1">AI</span>
                           {mode === 'live' ? (
                             <span className="badge badge-live ml-1">LIVE</span>
@@ -1688,19 +1685,19 @@ export default function Dashboard({ health, connected, isGuest }) {
                         <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
                             ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-                            : '—'}
+                            : '-'}
                         </td>
                         <td className="text-right mono text-2xs col-hide-mobile">
                           {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
                             ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-                            : '—'}
+                            : '-'}
                         </td>
                         <td className="text-right">
                           {tr.pnl != null ? (
                             <span className={`mono text-2xs font-bold ${pnlVal >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
                               {pnlVal >= 0 ? '+' : ''}{pnlVal.toFixed(2)}
                             </span>
-                          ) : '—'}
+                          ) : '-'}
                         </td>
                         <td className="col-hide-mobile">
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
@@ -1718,7 +1715,7 @@ export default function Dashboard({ health, connected, isGuest }) {
 
         </div>
 
-                {/* ═══ RIGHT — Filters + Bots ═══ */}
+                {/* === RIGHT - Filters + Bots === */}
         <div className="dash-right-panel flex flex-col gap-3 min-h-0 right-panel overflow-y-auto">
 
 
@@ -1775,7 +1772,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                   </div>
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
                     <div className="text-[var(--txt-muted)]">WR</div>
-                    <div className="mono font-semibold">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '—'}</div>
+                    <div className="mono font-semibold">{liveStatus?.win_rate != null ? `${liveStatus.win_rate}%` : '-'}</div>
                   </div>
                   <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
                     <div className="text-[var(--txt-muted)]">Equity</div>
