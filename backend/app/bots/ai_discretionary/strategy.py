@@ -2625,15 +2625,43 @@ class AIStrategy:
         )
 
 
+    @staticmethod
+    def _norm_pos_side(side) -> str:
+        """Canonical long/short — never leave buy/sell (those flip scale-in into a close)."""
+        s = str(side or "").lower().strip()
+        if s in ("long", "buy"):
+            return "long"
+        if s in ("short", "sell"):
+            return "short"
+        return s
+
     async def _maybe_scale_in(self, client, coin: str, decision: dict) -> bool:
-        """Add to existing position when trend continues — cheaper than close+reopen."""
+        """Add to existing position when trend continues — cheaper than close+reopen.
+
+        Mirror rule: LIVE add is ALWAYS the same *fraction* of the LIVE size
+        (not the absolute DEMO contracts). Order is always risk-increasing
+        (buy for long, sell for short) with is_close=False / reduceOnly off.
+        """
         pos = self._positions.get(coin)
         if not pos:
             return False
         cfg = self.config
-        side = str(decision.get("side") or pos.side).lower()
-        if side != pos.side:
+        pos_side = self._norm_pos_side(getattr(pos, "side", ""))
+        if pos_side not in ("long", "short"):
+            self._record_exec("scale_skip", coin=coin, side=str(getattr(pos, "side", "")),
+                              reason="bad_pos_side")
             return False
+        # Keep in-memory side canonical so later close/scale never flip
+        try:
+            pos.side = pos_side
+        except Exception:
+            pass
+        dec_side = self._norm_pos_side(decision.get("side") or pos_side)
+        if dec_side != pos_side:
+            self._record_exec("scale_skip", coin=coin, side=dec_side,
+                              reason=f"side_mismatch_pos={pos_side}")
+            return False
+        side = pos_side
         adds = int(getattr(pos, "scale_adds", 0) or 0)
         if adds >= int(getattr(cfg, "scale_in_max_adds", 1) or 1):
             self._record_exec("scale_skip", coin=coin, side=side, reason="max_adds")
@@ -2673,9 +2701,10 @@ class AIStrategy:
         if not self._execute_enabled():
             print(f"[AI] SIGNAL scale_in {side} {coin} +{add_sz} align={align:.2f}", flush=True)
             return False
+        # Risk-INCREASING order only (never reduceOnly / is_close)
         order_side = "buy" if side == "long" else "sell"
         try:
-            resp = await self._place(client, pos.inst_id, order_side, add_sz, side)
+            resp = await self._place(client, pos.inst_id, order_side, add_sz, side, is_close=False)
         except Exception as e:
             self._record_exec("scale_error", coin=coin, side=side, reason=str(e)[:80])
             return False
@@ -2709,33 +2738,117 @@ class AIStrategy:
             f"align={align:.2f} upl={upl:+.2f}%",
             flush=True,
         )
-        # Mirror scale-in on LIVE only if that coin is already mirrored
+        # ── Mirror scale-in on LIVE ──────────────────────────────────────
+        # Same fraction of LIVE size (not DEMO contracts). Never close/reduce.
         try:
-            if await self._mirror_enabled() and self._live_ready() and coin in (self._live_positions or {}):
+            if await self._mirror_enabled() and self._live_ready():
                 lc = self._live_client()
-                lpos = self._live_positions[coin]
-                if lc and lpos:
+                lpos = (self._live_positions or {}).get(coin)
+                # Heal memory from exchange if book missing but coin is live
+                if lc and lpos is None:
+                    try:
+                        pr = await lc.get_positions(inst_id=f"{coin}-USDT-SWAP")
+                        for row in (pr.get("data") or []):
+                            try:
+                                psz = abs(float(row.get("pos") or 0))
+                            except (TypeError, ValueError):
+                                continue
+                            if psz <= 1e-12:
+                                continue
+                            ps = self._norm_pos_side(row.get("posSide") or "")
+                            if ps not in ("long", "short"):
+                                raw = float(row.get("pos") or 0)
+                                ps = "long" if raw > 0 else "short"
+                            if ps != side:
+                                print(
+                                    f"[AI-LIVE] SCALE-IN skip {coin}: exchange side={ps} demo={side}",
+                                    flush=True,
+                                )
+                                break
+                            try:
+                                ep = float(row.get("avgPx") or 0)
+                            except (TypeError, ValueError):
+                                ep = fill_px
+                            lpos = AIPosition(
+                                coin=coin,
+                                inst_id=str(row.get("instId") or f"{coin}-USDT-SWAP"),
+                                side=ps,
+                                size=psz,
+                                entry_price=ep or fill_px,
+                                stop_price=0.0,
+                                take_price=0.0,
+                                leverage=float(row.get("lever") or 1),
+                                opened_at=datetime.now(timezone.utc).isoformat(),
+                                peak_price=ep or fill_px,
+                            )
+                            self._live_positions[coin] = lpos
+                            print(f"[AI-LIVE] SCALE-IN adopted exchange pos {coin} sz={psz}", flush=True)
+                            break
+                    except Exception as e:
+                        print(f"[AI-LIVE] SCALE-IN adopt: {e}", flush=True)
+                if lc and lpos and self._norm_pos_side(lpos.side) == side:
+                    lpos.side = side
+                    live_add = round(float(lpos.size or 0) * frac, 8)
+                    if live_add < lot:
+                        live_add = lot
                     oside = "buy" if side == "long" else "sell"
+                    before = float(lpos.size or 0)
                     self._mirror_call_active = True
                     try:
-                        resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                        resp_l = await self._place(
+                            lc, lpos.inst_id, oside, live_add, side, is_close=False,
+                        )
                     finally:
                         self._mirror_call_active = False
-                    if not resp_l.get("error"):
+                    if resp_l.get("error"):
+                        print(
+                            f"[AI-LIVE] SCALE-IN order fail {coin}: {resp_l.get('message')}",
+                            flush=True,
+                        )
+                        self._record_exec(
+                            "live_scale_error", coin=coin, side=side,
+                            reason=str(resp_l.get("message") or "")[:80],
+                        )
+                    else:
                         fills_l = resp_l.get("data") or []
                         fpx, _, _ = extract_fill_avg(fills_l, fill_px)
                         fpx = fpx or fill_px
                         osz = float(lpos.size or 0)
                         oen = float(lpos.entry_price or 0)
-                        nsz = osz + add_sz
-                        if nsz > 0 and oen > 0:
-                            lpos.entry_price = (oen * osz + fpx * add_sz) / nsz
-                        lpos.size = nsz
-                        lpos.scale_adds = int(getattr(lpos, "scale_adds", 0) or 0) + 1
-                        print(f"[AI-LIVE] SCALE-IN {coin} +{add_sz} @ {fpx}", flush=True)
+                        nsz = osz + live_add
+                        # Safety: never shrink on a scale-in path
+                        if nsz < before:
+                            print(
+                                f"[AI-LIVE] SCALE-IN ABORT size shrink {coin} {before}->{nsz}",
+                                flush=True,
+                            )
+                        else:
+                            if nsz > 0 and oen > 0:
+                                lpos.entry_price = (oen * osz + fpx * live_add) / nsz
+                            lpos.size = nsz
+                            lpos.scale_adds = int(getattr(lpos, "scale_adds", 0) or 0) + 1
+                            print(
+                                f"[AI-LIVE] SCALE-IN {side} {coin} +{live_add} @ {fpx} "
+                                f"(frac={frac}) {before}->{nsz}",
+                                flush=True,
+                            )
+                            self._record_exec(
+                                "live_scale_in", coin=coin, side=side, size=live_add,
+                                reason=f"demo_add={add_sz}",
+                            )
+                            try:
+                                self._persist_live()
+                            except Exception:
+                                pass
+                elif lc and not lpos:
+                    print(
+                        f"[AI-LIVE] SCALE-IN skip {coin}: no LIVE twin — will not open/close",
+                        flush=True,
+                    )
         except Exception as e:
             print(f"[AI-LIVE] scale_in mirror: {e}", flush=True)
         return True
+
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str, confidence: float = 0.0, thesis: str = "",
@@ -3401,7 +3514,11 @@ class AIStrategy:
             for _row in (_ep.get("data") or []):
                 try:
                     if abs(float(_row.get("pos") or 0)) > 0:
-                        return _fail(f"{coin}: LIVE already has a position — not ours, refusing to add")
+                        # Existing LIVE size must grow only via _maybe_scale_in (same side),
+                        # never via a second full _open_live (would double risk / flip).
+                        return _fail(
+                            f"{coin}: LIVE already has a position — use scale-in, not re-open"
+                        )
                 except (TypeError, ValueError):
                     continue
         except Exception:
