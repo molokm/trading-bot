@@ -83,6 +83,8 @@ TIGHTENED_IN_3B = {
     '/api/live/status',
     # Research lab: owner-only experiments, nothing a customer needs.
     '/api/lab/backtest/run', '/api/lab/backtest/last', '/api/lab/hyperopt',
+    # LIVE order provenance: owner's real-money fills.
+    '/api/live/audit',
     # Destroyed the platform's shared DEMO / owner's LIVE book for any
     # provisioned Telegram user; use /api/me/positions/close-all instead.
     '/api/positions/close-all',

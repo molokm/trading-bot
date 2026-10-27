@@ -518,6 +518,7 @@ class AIStrategy:
         # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
         # and account_mode="live" for full DB isolation.
         self._live_positions: dict[str, AIPosition] = {}
+        self._live_audit: list = []   # every LIVE order attempt (why/who)
         self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
         self._second_entry_bar: str | None = None  # v1.33: bar already asked for a 2nd slot
         self._live_equity = 0.0
@@ -932,8 +933,6 @@ class AIStrategy:
         """
         if not lc:
             return 0
-        # Only touch orders on mirrored instruments or ones this bot placed.
-        mirrored = {f"{c}-USDT-SWAP" for c in (self._live_positions or {})}
         cancelled = 0
         for kind in ("conditional", "move_order_stop", "oco"):
             try:
@@ -949,8 +948,12 @@ class AIStrategy:
                     cid = str(row.get("clOrdId") or "").lower()
                     if not algo or not inst.endswith("-USDT-SWAP"):
                         continue
-                    if inst not in mirrored and not cid.startswith("ai"):
-                        continue  # user's own algo on an unrelated instrument
+                    # Never cancel a user's own protective orders: only algos
+                    # this bot created (ai* clOrdId) are ours to remove. Older
+                    # builds cancelled every algo on a mirrored instrument,
+                    # stripping manual LIVE positions of their SL/TP.
+                    if not cid.startswith("ai"):
+                        continue
                     r = await lc.cancel_algo_order(inst, algo)
                     if not (r or {}).get("error"):
                         cancelled += 1
@@ -961,6 +964,7 @@ class AIStrategy:
                   f"mirror exits are bot-side only", flush=True)
             self._exec_log.append(_exec_evt(
                 "mirror_purge_algos", "ALL", "-", reason=f"cancelled={cancelled}"))
+            self._audit_live("purge_algos", "ALL", "-", 0, f"cancelled={cancelled}", ok=True)
         return cancelled
 
     async def _try_refresh_live_client(self) -> bool:
@@ -3368,9 +3372,16 @@ class AIStrategy:
         def _fail(msg: str) -> bool:
             self._last_mirror_fail = str(msg)[:200]
             print(f"[AI-LIVE] open_skip: {msg}", flush=True)
+            self._audit_live("open_blocked", coin, side, 0, msg, ok=False)
             return False
         if not await self._mirror_enabled():
             return _fail("mirror disabled by user")
+        # Strict mirror invariant: LIVE may only hold what DEMO already holds
+        # on the same side. No twin → no LIVE order, ever (this is what made
+        # the mirror trade on its own after a manual close).
+        demo_twin = (self._positions or {}).get(coin)
+        if demo_twin is None or str(getattr(demo_twin, "side", "")).lower() != str(side).lower():
+            return _fail(f"no DEMO twin for {coin} {side} — refusing LIVE open")
         lc = self._live_client()
         if not lc:
             try:
@@ -3382,6 +3393,19 @@ class AIStrategy:
                 pass
         if not lc:
             return _fail("no live client (mirror offline)")
+        if coin in (self._live_positions or {}):
+            return _fail(f"{coin}: already mirrored on LIVE")
+        # Never stack on top of a manual/foreign LIVE position.
+        try:
+            _ep = await lc.get_positions(inst_id=f"{coin}-USDT-SWAP")
+            for _row in (_ep.get("data") or []):
+                try:
+                    if abs(float(_row.get("pos") or 0)) > 0:
+                        return _fail(f"{coin}: LIVE already has a position — not ours, refusing to add")
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
         ind = self._latest_indicators.get(coin) or {}
         entry = float(ind.get("close") or 0)
         if entry <= 0:
@@ -3534,6 +3558,9 @@ class AIStrategy:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
               f"lev={lev} (mirror)", flush=True)
+        self._audit_live(
+            "open", coin, side, sz, reason,
+            ord_id=str((fills[0].get("ordId") if fills else "") or ""), ok=True)
         # v1.19: deliberately NOT placing exchange-level SL/TP on LIVE.
         # Independent OKX algo on LIVE can close without DEMO — root cause of
         # LIVE drifting alone. LIVE closes ONLY via _close_live() with DEMO.
@@ -3573,10 +3600,15 @@ class AIStrategy:
                     ps = str(row.get("posSide") or "").lower()
                     raw = float(row.get("pos") or 0)
                     side = ps if ps in ("long", "short") else ("long" if raw > 0 else "short")
+                    own = await self._live_ownership(lc, inst)
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        return False
                     print(f"[AI-LIVE] close {coin}: no memory — flatten exchange {side} sz={sz}", flush=True)
                     from app.services.position_claim import flatten_position
                     await flatten_position(lc, inst, side, sz)
                     self._exec_log.append(_exec_evt("mirror_close_exch", coin, side, reason=reason or "demo_close"))
+                    self._audit_live("close_exch", coin, side, sz, reason or "demo_close", ok=True)
                     return True
             except Exception as e:
                 print(f"[AI-LIVE] close exchange fallback {coin}: {e}", flush=True)
@@ -3622,6 +3654,11 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] close exchange-check: {e}", flush=True)
             return False
+        if not getattr(pos, "demo_trade_id", ""):
+            own = await self._live_ownership(lc, pos.inst_id)
+            if own != "ai":
+                self._warn_foreign_live(coin, own)
+                return False
         live_bid = self._live_bot_id()
         close_side = "sell" if pos.side == "long" else "buy"
         # Strict chokepoint: blocks if DEMO still open (not paired close)
@@ -3633,6 +3670,8 @@ class AIStrategy:
         self._demo_closing_coin = None
         if resp.get("error"):
             print(f"[AI-LIVE] close blocked: {resp.get('message')}", flush=True)
+            self._audit_live("close_blocked", coin, pos.side, pos.size,
+                             str(resp.get("message") or "")[:120], ok=False)
             return False
         fills = resp.get("data") or []
         mark = float(
@@ -3663,6 +3702,7 @@ class AIStrategy:
         else:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
                              CT_VAL.get(coin, 0.01))
+        self._audit_live("close", coin, pos.side, pos.size, reason or "demo_close", ok=True)
         self._live_equity += pnl
         self._live_session_pnl += pnl
         self._live_lifetime_pnl += pnl
@@ -3829,9 +3869,18 @@ class AIStrategy:
                 or str(getattr(demo, "side", "")).lower() != info["side"]
             )
             if not need_flat:
-                # keep memory in sync
+                # keep memory in sync — but only for positions this mirror
+                # opened. A manual LIVE trade that happens to match DEMO must
+                # stay outside the bot's book.
                 mem = (self._live_positions or {}).get(coin)
                 if mem is None:
+                    try:
+                        own = await self._live_ownership(lc, info["inst_id"])
+                    except Exception:
+                        own = "unknown"
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        continue
                     try:
                         self._live_positions[coin] = AIPosition(
                             coin=coin, inst_id=info["inst_id"], side=info["side"],
@@ -3871,6 +3920,8 @@ class AIStrategy:
                     "mirror_sync_close", coin, info["side"],
                     reason="demo_flat_or_side_mismatch",
                 ))
+                self._audit_live("orphan_close", coin, info["side"], info["size"],
+                                 "demo_flat_or_side_mismatch", ok=True)
             except Exception as e:
                 print(f"[AI-LIVE] SYNC flatten {coin}: {e}", flush=True)
                 # Fallback market close via _place
@@ -4031,6 +4082,11 @@ class AIStrategy:
                         flush=True,
                     )
                     continue
+                if not linked_id and not (old and getattr(old, "demo_trade_id", "")):
+                    own = await self._live_ownership(lc, inst or f"{coin}-USDT-SWAP")
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        continue
 
                 pos = AIPosition(
                     coin=coin,
@@ -4282,6 +4338,10 @@ class AIStrategy:
             key = f"live_book:{live_bid}"
             val = json.dumps({c: asdict(p) for c, p in self._live_positions.items()})
             await self.db.set_setting(key, val)
+            await self.db.set_setting(
+                f"live_audit:{live_bid}",
+                json.dumps(getattr(self, "_live_audit", [])[-200:], ensure_ascii=False),
+            )
         except Exception as e:
             print(f"[AI-LIVE] persist: {e}", flush=True)
 
@@ -5459,6 +5519,91 @@ class AIStrategy:
         return ""
 
 
+    async def _live_ownership(self, client, inst_id: str) -> str:
+        """Who opened this LIVE position: 'ai' (ours), 'manual' or 'unknown'.
+
+        Fail-closed by design: only a position whose entry fill carries one of
+        our clOrdIds (aid*/ail*/ai* or a trade id matching a stored DEMO trade)
+        may be adopted, managed or closed by the mirror. Everything else is the
+        user's own money and must be left untouched.
+        """
+        if client is None:
+            return "unknown"
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return "unknown"
+        if not data:
+            return "unknown"
+        known_ids = {
+            str(getattr(p, "demo_trade_id", "") or "")
+            for p in list((self._positions or {}).values())
+            + list((self._live_positions or {}).values())
+            if getattr(p, "demo_trade_id", "")
+        }
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            cid = str(f.get("clOrdId") or "").strip()
+            if not cid:
+                continue
+            low = cid.lower()
+            if low.startswith(("aid", "ail", "ai")):
+                return "ai"
+            tid = self._trade_id_from_clord(cid)
+            if tid and tid in known_ids:
+                return "ai"
+            return "manual"
+        return "unknown"
+
+    def _warn_foreign_live(self, coin: str, own: str) -> None:
+        """Log (once per coin) that a LIVE position is not ours to manage."""
+        warned = getattr(self, "_live_foreign_warned", None)
+        if warned is None:
+            warned = set()
+            self._live_foreign_warned = warned
+        key = f"{coin}:{own}"
+        if key in warned:
+            return
+        warned.add(key)
+        print(
+            f"[AI-LIVE] foreign LIVE position {coin} (owner={own}) — read-only, "
+            f"mirror will not adopt, stop, or close it",
+            flush=True,
+        )
+
+    def _audit_live(self, action: str, coin: str = "", side: str = "",
+                    size: float = 0.0, reason: str = "", ord_id: str = "",
+                    ok: bool = True) -> None:
+        """Record a LIVE order attempt so "who opened/closed this?" is answerable."""
+        try:
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": str(action)[:40],
+                "coin": str(coin or "")[:16],
+                "side": str(side or "")[:8],
+                "size": round(float(size or 0), 8),
+                "reason": str(reason or "")[:160],
+                "ord_id": str(ord_id or "")[:40],
+                "ok": bool(ok),
+            }
+            buf = getattr(self, "_live_audit", None)
+            if buf is None:
+                buf = []
+                self._live_audit = buf
+            buf.append(rec)
+            del buf[:-200]
+            print(f"[AI-LIVE-AUDIT] {rec['action']} {rec['coin']} {rec['side']} "
+                  f"sz={rec['size']} ok={rec['ok']} reason={rec['reason']}", flush=True)
+            if self.db:
+                try:
+                    loop = self._loop or asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self._persist_live_async())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _new_closed_bars(self) -> list:
         """Coins whose last CLOSED 1H bar is newer than last LLM decision for that coin."""
         fresh = []
@@ -6409,17 +6554,15 @@ class AIStrategy:
                         take = 0
                     tid = str(old.get("demo_trade_id") or "")
                     demo_twin = self._positions.get(coin)
-                    if not tid and not (
-                        demo_twin and str(getattr(demo_twin, "side", "")).lower() == side
-                    ):
+                    if not tid and demo_twin:
+                        tid = str(getattr(demo_twin, "demo_trade_id", "") or "")
+                    if not tid:
                         print(
-                            f"[AI-LIVE] hydrate SKIP {coin} {side}: no DEMO twin / "
-                            f"no stored demo_trade_id",
+                            f"[AI-LIVE] hydrate SKIP {coin} {side}: no stored "
+                            f"demo_trade_id — manual/foreign LIVE position",
                             flush=True,
                         )
                         continue
-                    if not tid and demo_twin:
-                        tid = str(getattr(demo_twin, "demo_trade_id", "") or "")
                     pos = AIPosition(
                         coin=coin, inst_id=f"{coin}-USDT-SWAP", side=side, size=sz,
                         entry_price=entry, stop_price=float(old.get("stop_price") or 0),
@@ -6443,11 +6586,10 @@ class AIStrategy:
                             print(f"[AI-LIVE] hydrate exchange孤儿 {coin}: sz={sz}", flush=True)
         except Exception as e:
             print(f"[AI-LIVE] hydrate positions: {e}", flush=True)
-        # Clone demo positions that are missing from live
-        try:
-            await self._clone_missing_to_live()
-        except Exception as e:
-            print(f"[AI-LIVE] clone_missing: {e}", flush=True)
+        # NEVER gap-fill LIVE on boot: a redeploy (or settings change) must not
+        # open real-money positions. Gap-fill only runs from the live tick while
+        # the engine is running and only for positions opened after the user
+        # explicitly connected the mirror.
 
         print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
               f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)

@@ -1281,11 +1281,22 @@ async def startup():
                         try:
                             lpos = (getattr(bot, "_live_positions", {}) or {}).get(coin)
                             lc = live_manager.get_client() if live_manager else None
-                            if lpos is not None and lc is not None:
+                            _ours = bool(getattr(lpos, "demo_trade_id", "")) if lpos else False
+                            if lpos is not None and lc is not None and not _ours:
+                                try:
+                                    _ours = await bot._live_ownership(
+                                        lc, getattr(lpos, "inst_id", f"{coin}-USDT-SWAP")
+                                    ) == "ai"
+                                except Exception:
+                                    _ours = False
+                            if lpos is not None and lc is not None and _ours:
                                 await flatten_position(
                                     lc, getattr(lpos, "inst_id", f"{coin}-USDT-SWAP"),
                                     getattr(lpos, "side", p.side), getattr(lpos, "size", 0),
                                 )
+                            elif lpos is not None and lc is not None:
+                                print(f"[AI-GUARD] live flatten SKIP {coin}: "
+                                      f"not our mirror position", flush=True)
                         except Exception as e:
                             print(f"[AI-GUARD] live flatten {coin}: {e}", flush=True)
                         try:
@@ -3105,6 +3116,82 @@ async def ai_stop():
         except Exception:
             pass
     return {'message': 'AI stopped', 'running': False}
+
+@app.get('/api/live/audit')
+@policy(ADMIN)
+async def live_audit(limit: int = 100):
+    """Who opened/closed each LIVE position: mirror order log + exchange fills.
+
+    The fills half classifies every recent LIVE fill as ``ai`` (mirror clOrdId),
+    ``manual`` (any other clOrdId) or ``unknown`` (no clOrdId) — this is the
+    check that answers "why did LIVE trade while I was configuring?".
+    """
+    import json as _json
+    limit = max(1, min(int(limit or 100), 200))
+    bot = ai_bot
+    mem = list(getattr(bot, "_live_audit", None) or [])[-limit:]
+    stored = []
+    if db is not None and bot is not None:
+        try:
+            raw = await db.get_setting(f"live_audit:{bot.BOT_ID}")
+            if raw:
+                stored = _json.loads(raw)[-limit:]
+        except Exception:
+            stored = []
+    fills = []
+    mirror = {}
+    lc = None
+    if bot is not None:
+        try:
+            lc = bot._live_client()
+        except Exception:
+            lc = None
+        try:
+            mirror = {
+                "enabled": bool(await bot._mirror_enabled()),
+                "connected_at": await bot._live_clone_watermark(),
+                "live_positions": sorted((getattr(bot, "_live_positions", {}) or {}).keys()),
+            }
+        except Exception as e:
+            mirror = {"error": str(e)[:120]}
+    if lc is not None:
+        try:
+            res = await lc.get_fills(limit=limit)
+            for f in (res.get("data") or []):
+                cid = str(f.get("clOrdId") or "")
+                low = cid.lower()
+                if low.startswith("ai"):
+                    owner = "ai"
+                elif cid:
+                    owner = "manual"
+                else:
+                    owner = "unknown"
+                fills.append({
+                    "ts": f.get("fillTime") or f.get("ts"),
+                    "inst": f.get("instId"),
+                    "side": f.get("side"),
+                    "posSide": f.get("posSide"),
+                    "sz": f.get("fillSz") or f.get("sz"),
+                    "px": f.get("fillPx") or f.get("px"),
+                    "pnl": f.get("fillPnl"),
+                    "fee": f.get("fee"),
+                    "subType": f.get("subType"),
+                    "clOrdId": cid,
+                    "owner": owner,
+                })
+        except Exception as e:
+            fills = [{"error": str(e)[:160]}]
+    return {
+        "orders_in_memory": mem,
+        "orders_persisted": stored,
+        "fills": fills,
+        "mirror": mirror,
+        "note": (
+            "owner=ai → bot mirror; manual → order placed outside the bot; "
+            "unknown → no clOrdId (manual UI/OKX app)"
+        ),
+    }
+
 
 @app.get('/api/live/status')
 @policy(ADMIN)
