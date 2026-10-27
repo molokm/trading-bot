@@ -2540,14 +2540,37 @@ async def me_dashboard(request: Request):
             mode = str(row.get('account_mode') or 'demo').lower()
             if mode not in ('demo', 'live'):
                 mode = 'demo'
+            coin = _norm_coin(row.get('inst') or row.get('inst_id') or row.get('symbol') or row.get('coin'))
+            # Prices: tolerate many upstream shapes (paired, bills, exchange_close, db)
+            def _px(*keys):
+                for k in keys:
+                    v = row.get(k)
+                    if v is None or v == '':
+                        continue
+                    try:
+                        f = float(v)
+                        if f > 0:
+                            return round(f, 8)
+                    except (TypeError, ValueError):
+                        continue
+                return None
+            entry_px = _px('entry_px', 'entry_price', 'entry', 'open_avg_px', 'openAvgPx')
+            exit_px = _px('exit_px', 'exit_price', 'exit', 'avg_px', 'avgPx', 'fill_px', 'fillPx', 'px', 'close_px')
             entry = {
                 'time': _norm_ts(row.get('time') or row.get('close_ts') or row.get('ts') or row.get('timestamp')),
-                'inst': _norm_coin(row.get('inst') or row.get('inst_id') or row.get('symbol') or row.get('coin')),
+                'inst': coin,
+                'symbol': coin,
+                'coin': coin,
+                'inst_id': str(row.get('inst_id') or row.get('instId') or (f'{coin}-USDT-SWAP' if coin else '') or ''),
                 'side': _norm_side(row),
                 'pnl': round(pnl, 4),
                 'account_mode': mode,
                 'reason': reason or 'closed',
                 'ord_id': str(row.get('ord_id') or row.get('ordId') or '').strip(),
+                'entry_px': entry_px,
+                'exit_px': exit_px,
+                'entry_price': entry_px,
+                'exit_price': exit_px,
             }
             # Unified PnL filter: only AI Discretionary closes in set T
             try:
@@ -2591,11 +2614,15 @@ async def me_dashboard(request: Request):
                     _push_trade({
                         'time': t.get('close_ts') or t.get('ts'),
                         'inst_id': t.get('inst_id'),
+                        'inst': t.get('inst_id'),
                         'side': t.get('side') or '',
                         'pnl': t.get('pnl'),
                         'reason': 'closed',
                         'account_mode': 'demo',
                         'ord_id': t.get('ord_id'),
+                        'exit_px': t.get('avg_px') or t.get('avgPx') or t.get('px'),
+                        'avg_px': t.get('avg_px'),
+                        'entry_px': t.get('entry_px') or t.get('entry_price'),
                     })
         except Exception as _e:
             print(f'[me/dashboard] demo exchange_close: {_e}', flush=True)
@@ -2623,6 +2650,8 @@ async def me_dashboard(request: Request):
                             'reason': 'closed' if st in ('closed', 'close') else (t.get('reason') or 'closed'),
                             'account_mode': 'demo',
                             'ord_id': t.get('ord_id'),
+                            'exit_px': t.get('px') or t.get('exit_px') or t.get('exit_price'),
+                            'entry_px': t.get('entry_px') or t.get('entry_price'),
                         })
         except Exception as _e:
             print(f'[me/dashboard] demo db trades: {_e}', flush=True)
@@ -2639,12 +2668,15 @@ async def me_dashboard(request: Request):
                     _push_trade({
                         'time': t.get('time') or t.get('ts'),
                         'inst': t.get('coin') or t.get('symbol') or t.get('inst_id'),
+                        'inst_id': t.get('inst_id') or t.get('symbol'),
                         'side': t.get('pos_side') or t.get('side'),
                         'pos_side': t.get('pos_side') or '',
                         'pnl': t.get('pnl'),
                         'reason': reason or 'closed',
                         'account_mode': 'demo',
                         'ord_id': t.get('ord_id') or '',
+                        'entry_px': t.get('entry_price') or t.get('entry') or t.get('entry_px'),
+                        'exit_px': t.get('exit_price') or t.get('exit') or t.get('exit_px') or t.get('px'),
                     })
         except Exception as _e:
             print(f'[me/dashboard] demo ai log: {_e}', flush=True)
@@ -2707,9 +2739,23 @@ async def me_dashboard(request: Request):
                         if oid not in by_ord:
                             by_ord[oid] = {
                                 'pnl': 0.0, 'ts': bts, 'inst': b.get('instId', ''),
-                                'side': ps,
+                                'side': ps, 'exit_px': None, 'sz': 0.0,
                             }
                         by_ord[oid]['pnl'] += bp
+                        try:
+                            fpx = float(b.get('px') or 0)
+                            fsz = abs(float(b.get('sz') or 0))
+                            if fpx > 0 and fsz > 0:
+                                # volume-weighted exit approx
+                                prev_sz = float(by_ord[oid].get('sz') or 0)
+                                prev_px = float(by_ord[oid].get('exit_px') or 0)
+                                if prev_sz > 0 and prev_px > 0:
+                                    by_ord[oid]['exit_px'] = (prev_px * prev_sz + fpx * fsz) / (prev_sz + fsz)
+                                else:
+                                    by_ord[oid]['exit_px'] = fpx
+                                by_ord[oid]['sz'] = prev_sz + fsz
+                        except (TypeError, ValueError):
+                            pass
                         if bts >= by_ord[oid]['ts']:
                             by_ord[oid]['ts'] = bts
                             by_ord[oid]['side'] = ps
@@ -2729,6 +2775,7 @@ async def me_dashboard(request: Request):
                             'reason': 'closed',
                             'account_mode': 'live',
                             'ord_id': oid,
+                            'exit_px': g.get('exit_px'),
                         })
                     # refresh live aggregates from grouped closes
                     wins_n = losses_n = 0
