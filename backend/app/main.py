@@ -4248,6 +4248,20 @@ async def health_guard_status():
         client = bot.client_manager.get_client()
     except Exception:
         pass
+    # Fill marks here when the guard beat has not run yet (fresh restart) so
+    # consumers never see stop + mark=0 on an open position.
+    if client is not None:
+        for p in positions:
+            if float(getattr(p, "mark_px", 0) or 0) > 0:
+                continue
+            try:
+                r = await client.get_ticker(getattr(p, "inst_id", ""))
+                d = (r.get("data") or [{}])[0]
+                px = float(d.get("last") or 0)
+                if px > 0:
+                    p.mark_px = px
+            except Exception:
+                pass
     out = hg.summarize(issues)
     out.update({
         'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12],
