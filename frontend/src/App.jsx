@@ -2,7 +2,8 @@ import React, { useState, useEffect, createContext, useContext, lazy, Suspense }
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { BarChart3, 
   LayoutDashboard, Bot, ScrollText, Settings, Users,
-  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers
+  TrendingUp, LogOut, User, Shield, Sun, Moon, HelpCircle, Globe, Layers,
+  FlaskConical
 } from 'lucide-react'
 import LoginPage from './pages/LoginPage'
 import { api } from './services/api'
@@ -16,6 +17,7 @@ const SettingsPage = lazy(() => import('./pages/SettingsPage'))
 const AdminPage = lazy(() => import('./pages/AdminPage'))
 const DocsPage = lazy(() => import('./pages/DocsPage'))
 const MiniAppPage = lazy(() => import('./pages/MiniAppPage'))
+const LabPage = lazy(() => import('./pages/LabPage'))
 import { ThemeProvider, useTheme } from './context/ThemeContext'
 import { OnboardingProvider } from './context/OnboardingContext'
 import { TranslationProvider, useTranslation } from './hooks/useTranslation'
@@ -154,6 +156,7 @@ function AppLayout() {
     { to: '/stats', icon: BarChart3, label: t('nav.stats') },
     ...(isAdmin ? [
       { to: '/admin', icon: Users, label: 'Админка' },
+      { to: '/lab', icon: FlaskConical, label: 'Лаборатория' },
       { to: '/settings', icon: Settings, label: t('nav.settings') },
     ] : []),
   ]
@@ -272,6 +275,7 @@ function AppLayout() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/admin" element={<AdminPage />} />
+          <Route path="/lab" element={<LabPage />} />
           <Route path="/settings" element={<SettingsPage onConnected={setConnected} />} />
           <Route path="/docs" element={<DocsPage />} />
         </Routes>

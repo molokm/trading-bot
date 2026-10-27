@@ -248,6 +248,12 @@ export const api = {
     request('/ai/start', { method: 'POST', body: JSON.stringify(config) }),
   aiStop: () =>
     request('/ai/stop', { method: 'POST' }),
+  labBacktestRun: (body) =>
+    request('/lab/backtest/run', { method: 'POST', body: JSON.stringify(body || {}) }),
+  labBacktestLast: () => request('/lab/backtest/last'),
+  labHyperopt: () =>
+    request('/lab/hyperopt', { method: 'POST', body: JSON.stringify({}) }),
+
   aiGetConfig: () => request('/ai/config'),
   aiSaveConfig: (config) =>
     request('/ai/config', { method: 'PUT', body: JSON.stringify(config || {}) }),
