@@ -934,6 +934,14 @@ async def load_eligible_rows(
             print(f"[pnl_engine] load sync: {e}", flush=True)
     ep = epoch_ms()
     raw: list = []
+    
+    # Ensure DB connection is alive before querying
+    if hasattr(db, '_conn') and db._conn is None and not db._pg_mode:
+        try:
+            await db.init()
+        except Exception as e:
+            print(f"[pnl_engine] db reconnect failed: {e}", flush=True)
+
     try:
         raw.extend(await db.get_exchange_close_trades_detail(
             epoch_ms=ep, limit=5000, account_mode=mode) or [])

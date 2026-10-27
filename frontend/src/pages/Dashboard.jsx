@@ -459,8 +459,11 @@ export default function Dashboard({ health, connected, isGuest }) {
       let pnlData = null
       let livePnlData = null
       if (dash) {
-        const demoRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') !== 'live')
-        const liveRows = (dash.trades || []).filter(t => (t.account_mode || 'demo') === 'live')
+        // Use PnL engine's trades (dash.pnl.trades) for consistency with PnL cards.
+        // dash.trades uses a different dedup logic and can show different trades.
+        const pnlTrades = (dash.pnl && dash.pnl.trades) || []
+        const demoRows = pnlTrades.filter(t => (t.account_mode || 'demo') !== 'live')
+        const liveRows = pnlTrades.filter(t => (t.account_mode || 'demo') === 'live')
         const byKey = new Map()
         for (const t of demoRows) {
           const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|demo`
