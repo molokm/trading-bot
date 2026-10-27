@@ -8241,6 +8241,129 @@ async def mini_log_read():
     return {'count': len(_MINI_LOG_RING), 'logs': _MINI_LOG_RING[-150:]}
 
 
+# ── Research lab: point-in-time backtest + PBO + threshold hyperopt ──────────
+_lab_cache: dict = {}
+_lab_lock = asyncio.Lock()
+_LAB_MAX_SYMBOLS = 4
+
+
+def _lab_default_symbols() -> list:
+    try:
+        from app.services.ai_agent import ALLOWED_SYMBOLS as _syms
+        return list(_syms)[:3]
+    except Exception:
+        return ["BTC", "ETH", "SOL"]
+
+
+async def _lab_fetch_candles(inst_id: str, bar: str, pages: int = 4) -> list:
+    """Paginate OKX public candles (newest first pages) into one old→new list."""
+    client = await _ensure_showcase()
+    if client is None:
+        raise HTTPException(status_code=503, detail="market data unavailable")
+    out: list = []
+    seen = set()
+    anchor = None
+    for _ in range(max(1, min(int(pages), 6))):
+        try:
+            res = await client.get_candles(inst_id, bar=bar, limit=300, after=anchor)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"candles: {e}")
+        data = (res or {}).get("data") or []
+        if not data:
+            break
+        for row in data:
+            ts = str(row[0])
+            if ts not in seen:
+                seen.add(ts)
+                out.append(row)
+        anchor = str(data[-1][0])
+        if len(data) < 300:
+            break
+    return out
+
+
+def _lab_run_sync(candles_by_sym: dict, grid: dict | None):
+    from app.services import backtest_lab as lab
+    dfs = {sym: lab.prepare(lab.frame_from_candles(rows)) for sym, rows in candles_by_sym.items()}
+    results = lab.run_grid(dfs, grid)
+    summary = lab.summarise_grid(results)
+    summary["symbols"] = sorted(candles_by_sym)
+    summary["bars"] = {sym: len(rows) for sym, rows in candles_by_sym.items()}
+    return summary
+
+
+@app.post('/api/lab/backtest/run')
+@policy(ADMIN)
+async def lab_backtest_run(data: dict = Body(default=None)):
+    """Run the deterministic skeleton over a param grid; returns PBO + table.
+
+    Body: { "symbols": ["BTC","ETH"], "bar": "1H", "pages": 4, "grid": {...} }
+    """
+    data = data or {}
+    symbols = [str(x).upper().replace("-USDT-SWAP", "").strip()
+               for x in (data.get("symbols") or _lab_default_symbols())]
+    symbols = [x for x in symbols if x][:_LAB_MAX_SYMBOLS]
+    if not symbols:
+        raise HTTPException(status_code=400, detail="symbols required")
+    bar = str(data.get("bar") or "1H")
+    pages = int(data.get("pages") or 4)
+    grid = data.get("grid") if isinstance(data.get("grid"), dict) else None
+    async with _lab_lock:
+        candles = {}
+        for sym in symbols:
+            rows = await _lab_fetch_candles(f"{sym}-USDT-SWAP", bar, pages)
+            if len(rows) < 120:
+                raise HTTPException(status_code=502,
+                                    detail=f"not enough candles for {sym}: {len(rows)}")
+            candles[sym] = rows
+        summary = await asyncio.to_thread(_lab_run_sync, candles, grid)
+        summary["ts"] = datetime.now(timezone.utc).isoformat()
+        summary["bar"] = bar
+        _lab_cache.clear()
+        _lab_cache.update(summary)
+    return _lab_cache
+
+
+@app.get('/api/lab/backtest/last')
+@policy(ADMIN)
+async def lab_backtest_last():
+    return _lab_cache or {"configs": [], "pbo": None, "best": None}
+
+
+@app.post('/api/lab/hyperopt')
+@policy(ADMIN)
+async def lab_hyperopt(data: dict = Body(default=None)):
+    """Suggest AIConfig overrides from the cached grid, if it is not overfit.
+
+    Only the knobs the lab actually models are suggested. A high PBO (> 0.3)
+    or a non-positive best config yields no recommendation.
+    """
+    data = data or {}
+    if not _lab_cache:
+        raise HTTPException(status_code=409, detail="run /api/lab/backtest/run first")
+    best = _lab_cache.get("best") or {}
+    pbo = _lab_cache.get("pbo")
+    try:
+        pbo_f = float(pbo)
+    except (TypeError, ValueError):
+        pbo_f = 1.0
+    if not best or pbo_f > float(data.get("max_pbo", 0.3)):
+        return {"apply": False,
+                "reason": f"PBO {pbo_f:.2f} too high or no profitable config",
+                "pbo": pbo, "best": best}
+    p = best.get("params") or {}
+    overrides = {
+        "min_adx": float(p.get("min_adx") or 0) or None,
+        "min_roc_abs": float(p.get("min_roc") or 0) or None,
+        "atr_stop_mult": float(p.get("atr_stop_mult") or 0) or None,
+        "max_hold_hours": float(p.get("max_hold_bars") or 0) or None,
+    }
+    overrides = {k: v for k, v in overrides.items() if v is not None}
+    return {"apply": True, "pbo": pbo, "best": best,
+            "overrides": overrides,
+            "note": "tp_r not mapped: live TP is governed by partial/soft/hard locks"}
+
+
 # ── Access policy: build the lookup table and fail loud if anything is unmarked ──
 # Must run after every route is registered. verify_route_policies() raises at
 # import/boot when an /api route lacks @policy(...) — an undeclared route means
