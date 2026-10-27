@@ -1992,9 +1992,21 @@ class AIStrategy:
                 pass
         if exit_px <= 0:
             exit_px = entry_px  # unknown fill — book flat, never a phantom total loss
+        # No fills here (exchange closed it), so estimate the round-trip cost
+        # instead of booking fee=0 — otherwise engine counters drift from bills.
+        _fee_est = 0.0
+        try:
+            _cfg = self.config
+            _ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+            _rate = 2.0 * (float(getattr(_cfg, "fee_taker_pct", 0.0005) or 0.0)
+                           + float(getattr(_cfg, "slippage_pct", 0.0002) or 0.0))
+            _fee_est = abs(float(getattr(pos, "size", 0) or 0)) * _ct * entry_px * _rate
+        except Exception:
+            _fee_est = 0.0
         try:
             _e, exit_px, pnl, _fee = compute_close_metrics(
-                pos, coin, exit_px, fee=0)
+                pos, coin, exit_px, fee=_fee_est)
+            self._lifetime_fees += float(_fee or _fee_est)
         except Exception:
             pnl = 0.0
 
