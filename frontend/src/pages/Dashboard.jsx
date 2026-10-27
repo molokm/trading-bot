@@ -483,11 +483,11 @@ export default function Dashboard({ health, connected, isGuest }) {
         const byKey = new Map()
         for (const t of demoRows) {
           const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|demo`
-          byKey.set(k, { ...t, account_mode: 'demo', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
+          byKey.set(k, { ...t, account_mode: 'demo', symbol: t.symbol || t.inst || t.coin || '', coin: t.coin || t.inst || t.symbol || '', inst_id: t.inst_id || (t.inst ? `${String(t.inst).replace(/-USDT-SWAP$/,'')}-USDT-SWAP` : '') || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry ?? t.avg_px, exit_px: t.exit_px ?? t.exit_price ?? t.exit ?? t.avg_px ?? t.px, bot: t.bot || 'AI Discretionary 1H' })
         }
         for (const t of liveRows) {
           const k = `${t.ord_id || ''}|${t.inst || t.symbol || ''}|${t.time || ''}|live`
-          byKey.set(k, { ...t, account_mode: 'live', inst_id: t.inst_id || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry, exit_px: t.exit_px ?? t.exit_price ?? t.exit, bot: t.bot || 'AI Discretionary 1H' })
+          byKey.set(k, { ...t, account_mode: 'live', symbol: t.symbol || t.inst || t.coin || '', coin: t.coin || t.inst || t.symbol || '', inst_id: t.inst_id || (t.inst ? `${String(t.inst).replace(/-USDT-SWAP$/,'')}-USDT-SWAP` : '') || t.symbol || '', entry_px: t.entry_px ?? t.entry_price ?? t.entry ?? t.avg_px, exit_px: t.exit_px ?? t.exit_price ?? t.exit ?? t.avg_px ?? t.px, bot: t.bot || 'AI Discretionary 1H' })
         }
         setTradeLog([...byKey.values()])
         pnlData = dash?.pnl || {}
@@ -1681,7 +1681,8 @@ export default function Dashboard({ health, connected, isGuest }) {
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
                     const isLong = sideRaw === 'long' || sideRaw === 'buy'
-                    const pair = (tr.symbol || tr.inst_id || tr.coin || '').replace('-USDT-SWAP', '')
+                    const pair = String(tr.symbol || tr.inst || tr.inst_id || tr.coin || '')
+                      .replace(/-USDT-SWAP$/i, '').replace(/-USDT$/i, '').replace(/-SWAP$/i, '')
                     const reason = (tr.reason || tr.state || 'closed').toLowerCase()
                     const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
@@ -1702,14 +1703,20 @@ export default function Dashboard({ health, connected, isGuest }) {
                           </span>
                         </td>
                         <td className="text-right mono text-2xs col-hide-mobile">
-                          {(tr.entry_px ?? tr.entry_price ?? tr.entry) != null && (tr.entry_px ?? tr.entry_price ?? tr.entry) !== ''
-                            ? `$${Number(tr.entry_px ?? tr.entry_price ?? tr.entry).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-                            : '-'}
+                          {(() => {
+                            const v = Number(tr.entry_px ?? tr.entry_price ?? tr.entry ?? 0)
+                            return Number.isFinite(v) && v > 0
+                              ? `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                              : '—'
+                          })()}
                         </td>
                         <td className="text-right mono text-2xs col-hide-mobile">
-                          {(tr.exit_px ?? tr.exit_price ?? tr.exit) != null && (tr.exit_px ?? tr.exit_price ?? tr.exit) !== ''
-                            ? `$${Number(tr.exit_px ?? tr.exit_price ?? tr.exit).toLocaleString(undefined, { maximumFractionDigits: 2 })}`
-                            : '-'}
+                          {(() => {
+                            const v = Number(tr.exit_px ?? tr.exit_price ?? tr.exit ?? tr.avg_px ?? tr.px ?? 0)
+                            return Number.isFinite(v) && v > 0
+                              ? `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`
+                              : '—'
+                          })()}
                         </td>
                         <td className="text-right">
                           {tr.pnl != null ? (
