@@ -17,6 +17,42 @@ def _today_msk():
     return datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
 
 
+def _week_msk():
+    from datetime import datetime, timezone
+    from app.services.pnl_engine import PNL_TZ
+    return datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%G-W%V")
+
+
+class TestWeeklyRiskGate:
+    def test_weekly_loss_blocks_after_limit(self):
+        bot = _bot(weekly_loss_limit_pct=0.06)
+        bot._account_equity = 10000.0
+        bot._weekly_realized_week = _week_msk()
+        bot._weekly_realized = -650.0
+        assert bot._weekly_loss_blocks_open() is True
+
+    def test_weekly_loss_allows_below_limit(self):
+        bot = _bot(weekly_loss_limit_pct=0.06)
+        bot._account_equity = 10000.0
+        bot._weekly_realized_week = _week_msk()
+        bot._weekly_realized = -500.0
+        assert bot._weekly_loss_blocks_open() is False
+
+    def test_weekly_counter_resets_on_new_week(self):
+        bot = _bot(weekly_loss_limit_pct=0.06)
+        bot._account_equity = 10000.0
+        bot._weekly_realized_week = "2000-W01"
+        bot._weekly_realized = -9999.0
+        assert bot.weekly_realized_pnl() == 0.0
+
+    def test_weekly_gate_can_be_disabled(self):
+        bot = _bot(weekly_loss_limit_pct=0)
+        bot._account_equity = 10000.0
+        bot._weekly_realized_week = _week_msk()
+        bot._weekly_realized = -9999.0
+        assert bot._weekly_loss_blocks_open() is False
+
+
 class TestConfigPersistence:
     def test_export_covers_modern_knobs(self):
         bot = _bot()
@@ -25,7 +61,8 @@ class TestConfigPersistence:
             "second_entry_margin_pct", "fee_taker_pct", "slippage_pct",
             "cost_min_edge_mult", "atr_stop_mult", "breakeven_min_pct",
             "partial_take_pct", "partial_take_frac", "hard_profit_lock_peak",
-            "soft_profit_take_pct", "daily_loss_limit_pct", "llm_min_interval_sec",
+            "soft_profit_take_pct", "daily_loss_limit_pct", "weekly_loss_limit_pct",
+            "llm_min_interval_sec",
             "funding_block_abs", "btc_roc_veto", "scale_in_max_adds",
         ):
             assert key in out, f"{key} missing from export_config_dict"

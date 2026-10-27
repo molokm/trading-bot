@@ -55,6 +55,28 @@ def test_risk_status_derives_daily_pnl_from_engine(monkeypatch):
     assert st.daily_pnl_usd == -12.5
 
 
+def test_risk_status_weekly_limit_from_env(monkeypatch):
+    from app.services import risk_guard as rg
+    from app.services.ai_strategy import AIStrategy
+    from app.bots.ai_discretionary.strategy import AIConfig
+
+    bot = AIStrategy(config=AIConfig())
+    from datetime import datetime, timezone
+    from app.services.pnl_engine import PNL_TZ
+
+    bot._weekly_realized_week = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%G-W%V")
+    monkeypatch.setattr(rg, "_runtime_kill", None)
+    monkeypatch.setenv("RISK_MAX_WEEKLY_LOSS_USD", "100")
+    monkeypatch.delenv("RISK_MAX_DAILY_LOSS_USD", raising=False)
+    fn = getattr(bot, "weekly_realized_pnl", None)
+    assert callable(fn)
+    bot._weekly_realized = -150.0
+    st = rg.get_status(ai_bot=bot)
+    assert st.block_new_entries is True
+    assert "max_weekly_loss" in (st.reason or "")
+    assert st.max_weekly_loss_usd == pytest.approx(100.0)
+
+
 def test_status_equity_prefers_exchange_balance():
     from app.services.ai_strategy import AIStrategy
     from app.bots.ai_discretionary.strategy import AIConfig

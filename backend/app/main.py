@@ -201,6 +201,8 @@ def _ai_default_config(**overrides):
         poll_interval_sec=_num("AI_POLL_SEC", 60, int),
         llm_manage_interval_sec=_num("AI_LLM_MANAGE_SEC", 90, int),
         llm_min_interval_sec=_num("AI_LLM_MIN_SEC", 180, int),
+        daily_loss_limit_pct=_num("AI_DAILY_LOSS_LIMIT_PCT", 0.02, float),
+        weekly_loss_limit_pct=_num("AI_WEEKLY_LOSS_LIMIT_PCT", 0.06, float),
         execute=True,
     )
     for k, v in overrides.items():

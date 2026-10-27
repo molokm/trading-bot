@@ -335,6 +335,7 @@ class AIConfig:
     llm_manage_interval_sec: int = 90       # v1.15: more frequent LLM while in a position
 
     daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
+    weekly_loss_limit_pct: float = 0.06    # ...and after -6% week (MSK ISO week)
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
@@ -548,15 +549,22 @@ class AIStrategy:
         self._tick_count = 0
         self._last_closed_bar_ts = {}  # coin -> ms of last CLOSED 1H bar we already decided on
         self._last_llm_ts = 0.0
-        # Daily risk counter survives restarts (same MSK day only).
+        # Daily/weekly risk counters survive restarts (same MSK period only).
         self._daily_realized = 0.0
         self._daily_realized_day = ""
+        self._weekly_realized = 0.0
+        self._weekly_realized_week = ""
         try:
             from app.services.pnl_engine import PNL_TZ
-            _d = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+            _now = datetime.now(timezone.utc).astimezone(PNL_TZ)
+            _d = _now.strftime("%Y-%m-%d")
+            _w = _now.strftime("%G-W%V")
             if str(st.get("daily_realized_day") or "") == _d:
                 self._daily_realized = float(st.get("daily_realized") or 0.0)
                 self._daily_realized_day = _d
+            if str(st.get("weekly_realized_week") or "") == _w:
+                self._weekly_realized = float(st.get("weekly_realized") or 0.0)
+                self._weekly_realized_week = _w
         except Exception:
             pass
         self._funding_cache = {}  # coin -> {rate, ts}
@@ -1991,6 +1999,7 @@ class AIStrategy:
 
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
@@ -3199,6 +3208,7 @@ class AIStrategy:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
@@ -5468,6 +5478,28 @@ class AIStrategy:
             self._daily_realized = 0.0
         return float(getattr(self, "_daily_realized", 0.0) or 0.0)
 
+    def weekly_realized_pnl(self) -> float:
+        """Realised PnL for the current MSK ISO week (Mon 00:00 MSK)."""
+        from datetime import datetime, timezone
+        from app.services.pnl_engine import PNL_TZ
+        week = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%G-W%V")
+        if week != getattr(self, "_weekly_realized_week", ""):
+            self._weekly_realized_week = week
+            self._weekly_realized = 0.0
+        return float(getattr(self, "_weekly_realized", 0.0) or 0.0)
+
+    def _weekly_loss_blocks_open(self) -> bool:
+        try:
+            lim = float(getattr(self.config, "weekly_loss_limit_pct", 0.06) or 0)
+            if lim <= 0:
+                return False
+            eq = float(self._account_equity or 0) or float(self._capital or 10000)
+            if eq <= 0:
+                return False
+            return self.weekly_realized_pnl() <= -lim * eq
+        except Exception:
+            return False
+
     def _daily_loss_blocks_open(self) -> bool:
         try:
             lim = float(getattr(self.config, "daily_loss_limit_pct", 0.02) or 0)
@@ -5946,6 +5978,10 @@ class AIStrategy:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="daily_loss_limit")
                 return
+            if self._weekly_loss_blocks_open():
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="weekly_loss_limit")
+                return
             ind = self._latest_indicators.get(coin) or {}
             adx = float(ind.get("adx") or 0)
             roc = float(ind.get("roc_3") or 0)
@@ -6412,6 +6448,8 @@ class AIStrategy:
             "session_pnl": self._session_pnl,
             "daily_realized": self._daily_realized,
             "daily_realized_day": self._daily_realized_day,
+            "weekly_realized": self._weekly_realized,
+            "weekly_realized_week": self._weekly_realized_week,
             "adapt": {
                 "min_confidence": (self._adapt or {}).get("min_confidence"),
                 "quant_min_align": (self._adapt or {}).get("quant_min_align"),

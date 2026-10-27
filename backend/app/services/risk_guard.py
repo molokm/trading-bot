@@ -55,8 +55,10 @@ class RiskStatus:
     okx_demo: bool
     block_new_entries: bool
     reason: Optional[str] = None
+    max_weekly_loss_usd: float = 0.0
     daily_pnl_usd: Optional[float] = None
     daily_pnl_updated_at: Optional[float] = None
+    weekly_pnl_usd: Optional[float] = None
     # Position-level limits
     max_open_positions: int = 0
     open_positions_count: int = 0
@@ -68,6 +70,7 @@ class RiskStatus:
         return {
             "kill_switch": self.kill_switch,
             "max_daily_loss_usd": self.max_daily_loss_usd,
+            "max_weekly_loss_usd": self.max_weekly_loss_usd,
             "max_position_usd": self.max_position_usd,
             "max_leverage": self.max_leverage,
             "okx_demo": self.okx_demo,
@@ -75,6 +78,7 @@ class RiskStatus:
             "reason": self.reason,
             "daily_pnl_usd": self.daily_pnl_usd,
             "daily_pnl_updated_at": self.daily_pnl_updated_at,
+            "weekly_pnl_usd": self.weekly_pnl_usd,
             "max_open_positions": self.max_open_positions,
             "open_positions_count": self.open_positions_count,
             "max_positions_per_symbol": self.max_positions_per_symbol,
@@ -98,6 +102,17 @@ def _engine_daily_pnl(ai_bot: "AIStrategy") -> Optional[float]:
         return float(getattr(ai_bot, "_daily_realized", 0.0) or 0.0)
     except (TypeError, ValueError):
         return None
+
+
+def _engine_weekly_pnl(ai_bot: "AIStrategy") -> Optional[float]:
+    """This week's realised PnL from the engine (MSK ISO week rollover)."""
+    fn = getattr(ai_bot, "weekly_realized_pnl", None)
+    if callable(fn):
+        try:
+            return float(fn())
+        except Exception:
+            return None
+    return None
 
 
 def _count_open_positions(ai_bot: Optional["AIStrategy"]) -> Dict:
@@ -160,6 +175,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     env_kill = _b("RISK_KILL_SWITCH", False)
     kill = env_kill if _runtime_kill is None else _runtime_kill
     max_daily = _f("RISK_MAX_DAILY_LOSS_USD", 0.0)  # 0 = disabled
+    max_weekly = _f("RISK_MAX_WEEKLY_LOSS_USD", 0.0)  # 0 = disabled
 
     # Position-level limits from env
     max_open_pos = int(_f("RISK_MAX_OPEN_POSITIONS", 0))  # 0 = unlimited
@@ -169,6 +185,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     pnl = daily_pnl
     if pnl is None and ai_bot is not None:
         pnl = _engine_daily_pnl(ai_bot)
+    weekly_pnl = _engine_weekly_pnl(ai_bot) if ai_bot is not None else None
 
     # Count current positions
     pos_counts = _count_open_positions(ai_bot) if ai_bot else {"total": 0, "by_symbol": {}, "by_group": {}}
@@ -183,6 +200,9 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     elif max_daily > 0 and pnl is not None and pnl <= -abs(max_daily):
         block = True
         reason = f"max_daily_loss ({pnl:.2f} <= -{max_daily:.2f})"
+    elif max_weekly > 0 and weekly_pnl is not None and weekly_pnl <= -abs(max_weekly):
+        block = True
+        reason = f"max_weekly_loss ({weekly_pnl:.2f} <= -{max_weekly:.2f})"
 
     # Position-level checks
     if max_open_pos > 0 and pos_counts["total"] >= max_open_pos:
@@ -205,6 +225,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
     return RiskStatus(
         kill_switch=kill,
         max_daily_loss_usd=_f("RISK_MAX_DAILY_LOSS_USD", 0.0),
+        max_weekly_loss_usd=max_weekly,
         max_position_usd=_f("RISK_MAX_POSITION_USD", 0.0),
         max_leverage=_f("RISK_MAX_LEVERAGE", 0.0),
         okx_demo=_b("OKX_DEMO", True),
@@ -212,6 +233,7 @@ def get_status(daily_pnl: Optional[float] = None, ai_bot: Optional["AIStrategy"]
         reason=reason,
         daily_pnl_usd=pnl,
         daily_pnl_updated_at=None,
+        weekly_pnl_usd=weekly_pnl,
         max_open_positions=int(_f("RISK_MAX_OPEN_POSITIONS", 0)),
         open_positions_count=pos_counts["total"],
         max_positions_per_symbol=int(_f("RISK_MAX_POS_PER_SYMBOL", 0)),

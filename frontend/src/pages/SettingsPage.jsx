@@ -11,6 +11,7 @@ const AI_FIELDS = [
   { key: 'min_confidence', label: 'Мин. уверенность', step: 0.01 },
   { key: 'min_adx', label: 'Мин. ADX', step: 1 },
   { key: 'daily_loss_limit_pct', label: 'Дневной лимит убытка, %', scale: 100, step: 0.1 },
+  { key: 'weekly_loss_limit_pct', label: 'Недельный лимит убытка, %', scale: 100, step: 0.1 },
   { key: 'max_hold_hours', label: 'Макс. удержание, ч', step: 0.5 },
   { key: 'exit_min_profit_pct', label: 'Мин. профит выхода, %', step: 0.05 },
   { key: 'giveback_min_peak_pct', label: 'Giveback: пик, %', step: 0.1 },
