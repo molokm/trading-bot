@@ -338,6 +338,8 @@ _demo_key, _demo_secret, _demo_pass = (_env_key, _env_secret, _env_pass)
 _live_key = ''
 _live_secret = ''
 _live_pass = ''
+# Last permission probe for the LIVE key: {"ok", "has_trade", "perm", ...}
+_live_key_perms: dict = {}
 _bots_auto_start = os.getenv('BOTS_AUTO_START', '1').strip().lower() not in ('0', 'false', 'no', 'off')
 _mom_auto = os.getenv('MOM_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
 _imp_auto = os.getenv('IMP_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
@@ -3556,6 +3558,7 @@ async def live_status():
             'win_rate': None,
             'open_positions': [],
             'pnl_source': 'disabled',
+            'key_trade': None,
         }
     if lc is not None and getattr(lc, 'demo', False):
         lc = None
@@ -3971,6 +3974,11 @@ async def live_status():
         'pnl_epoch': '2026-09-01T00:00:00+00:00',
         'engine': 'unified_filter_v1',
         'enabled': True,
+        # Whether the connected LIVE key may actually place orders. A read-only
+        # key looks "connected" but every mirrored order is rejected by OKX.
+        'key_trade': (None if not _live_key_perms
+                      else bool(_live_key_perms.get('has_trade'))),
+        'key_perm': (_live_key_perms.get('perm') if _live_key_perms else None),
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
     _live_status_cache['ts'] = _time.time()
@@ -3982,7 +3990,7 @@ async def live_status():
 @policy(ADMIN)
 async def live_connect(request: Request, data: dict = Body(default=None)):
     """Connect LIVE mirror. Body: {key, secret, passphrase, capital, confirm:'LIVE'}."""
-    global ai_bot, live_manager, _live_key, _live_secret, _live_pass
+    global ai_bot, live_manager, _live_key, _live_secret, _live_pass, _live_key_perms
     _live_status_cache.clear()
     # Robust body parse (Form/empty/proxy edge cases)
     if not data or not isinstance(data, dict):
@@ -4044,9 +4052,24 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         live_manager = OKXClientManager.new_instance()
     try:
         await live_manager.init_client(key, secret, passphrase, False)
-        await _verify_key_perms(live_manager.get_client(), "LIVE")
+        _perms = await _verify_key_perms(live_manager.get_client(), "LIVE")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f'OKX init failed: {e}')
+    _live_key_perms = _perms if isinstance(_perms, dict) else {}
+    # A read-only key used to connect "successfully" and then reject every
+    # mirrored order with "This API Key does not have trading permission for
+    # the Crypto" — the mirror stayed silently dead for days. Refuse it loudly.
+    if _live_key_perms.get('ok') and not _live_key_perms.get('has_trade'):
+        try:
+            live_manager = None
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=400,
+            detail=('Ключ LIVE без права Trade: OKX отклонит каждый зеркальный ордер. '
+                    'Включите "Trade" у API-ключа в OKX (Read + Trade, без Withdrawal) '
+                    'и подключите LIVE заново.'),
+        )
     lc = live_manager.get_client() if live_manager else None
     if not lc or not getattr(lc, 'has_credentials', lambda: False)():
         raise HTTPException(status_code=400, detail='Live client init failed')
@@ -4777,7 +4800,7 @@ async def _ensure_live_mirror_client() -> bool:
 
     Respects live_mirror_enabled=0 after explicit Disconnect (do not auto-heal).
     """
-    global live_manager, ai_bot, _live_key, _live_secret, _live_pass
+    global live_manager, ai_bot, _live_key, _live_secret, _live_pass, _live_key_perms
     try:
         en = await db.get_setting('live_mirror_enabled') if db else None
         # Explicit disconnect → stay offline until /api/live/connect
@@ -4809,7 +4832,7 @@ async def _ensure_live_mirror_client() -> bool:
         print('[LIVE] ensure: created new live_manager', flush=True)
     try:
         await live_manager.init_client(key, secret, passphrase, False)
-        await _verify_key_perms(live_manager.get_client(), "LIVE")
+        _live_key_perms = await _verify_key_perms(live_manager.get_client(), "LIVE")
     except Exception as e:
         print(f'[LIVE] ensure init_client: {e}', flush=True)
         return False

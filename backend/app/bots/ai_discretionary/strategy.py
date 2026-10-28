@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.38.0-disaster"
+STRATEGY_VERSION = "v1.39.0-fills"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -922,6 +922,15 @@ class AIStrategy:
         """Distinct bot_id for live mirror records (positions table has no account_mode)."""
         return f"{self.BOT_ID}_live"
 
+    def _live_trade_blocked(self) -> bool:
+        """True when OKX rejected the LIVE key for trading (no Trade permission).
+
+        Sticky until a LIVE order actually goes through or the user reconnects;
+        otherwise every open triggers an 8-second "pending mirror" tick and a
+        retry storm against an account that cannot trade.
+        """
+        return bool(str(getattr(self, "_live_trade_blocked_reason", "") or ""))
+
     def _live_client(self):
         """Live OKXClient when connected, else None. Never the demo client."""
         if not self.live_client_manager:
@@ -1212,11 +1221,17 @@ class AIStrategy:
             _sleep = max(30, int(self.config.poll_interval_sec or 180))
             # Pending LIVE mirror gaps → poll every 8s (not 1–3 min)
             try:
-                if await self._mirror_enabled() and self._positions:
+                if (await self._mirror_enabled() and self._positions
+                        and not self._live_trade_blocked()):
                     _miss = [c for c in self._positions if c not in self._live_positions]
                     if _miss:
                         _sleep = min(_sleep, 8)
                         print(f"[AI-LIVE] pending mirror {_miss} — next tick in {_sleep}s", flush=True)
+                elif self._positions and self._live_trade_blocked():
+                    _miss = [c for c in self._positions if c not in self._live_positions]
+                    if _miss:
+                        print(f"[AI-LIVE] pending mirror {_miss} paused: LIVE key cannot trade",
+                              flush=True)
             except Exception:
                 pass
             import time as _t
@@ -2143,63 +2158,225 @@ class AIStrategy:
             print(f"[AI] reflection on close: {e}", flush=True)
         return st
 
+    async def _fetch_recent_fills(self, client, inst: str) -> list:
+        """Recent fills for one instrument (live fills, then 3-month history)."""
+        for call in (
+            lambda: client.get_fills(inst_id=inst, limit=50),
+            lambda: client.get_fills_history(inst_type="SWAP", instId=inst, limit=50),
+        ):
+            try:
+                resp = await call()
+            except Exception:
+                continue
+            if isinstance(resp, dict) and not resp.get("error") and resp.get("data"):
+                return list(resp.get("data") or [])
+        return []
+
+    async def _recover_close_fill(self, client, pos) -> dict:
+        """Find the real closing fill of ``pos`` on the exchange.
+
+        Returns ``{confirmed, px, gross, fees, has_pnl}``. Only a real fill may
+        be booked as a trade. Before v1.39 the exit price fell back to the entry
+        price, so a position that vanished on the exchange was booked as
+        ``exit == entry`` with ``pnl = -estimated_fee`` — the four "ADA −2.07"
+        rows on 28 Oct were exactly that artefact, not trades.
+        """
+        inst = str(getattr(pos, "inst_id", "") or "")
+        if not client or not inst:
+            return {"confirmed": False}
+        pos_side = str(getattr(pos, "side", "") or "").lower()
+        close_side = "sell" if pos_side == "long" else "buy"
+        try:
+            want_sz = abs(float(getattr(pos, "size", 0) or 0))
+        except (TypeError, ValueError):
+            want_sz = 0.0
+        try:
+            opened_ms = int(datetime.fromisoformat(
+                str(getattr(pos, "opened_at", "")).replace("Z", "+00:00")
+            ).timestamp() * 1000)
+        except Exception:
+            opened_ms = 0
+        rows: list = []
+        for _ in range(3):
+            rows = await self._fetch_recent_fills(client, inst)
+            if rows:
+                break
+            await asyncio.sleep(0.5)
+        if not rows:
+            return {"confirmed": False}
+        try:
+            rows = sorted(rows, key=lambda r: int(float((r or {}).get("ts") or 0)))
+        except Exception:
+            pass
+        picked = []
+        total_sz = 0.0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            try:
+                ts = int(float(r.get("ts") or 0))
+                if opened_ms and ts < opened_ms - 5_000:
+                    continue
+                if str(r.get("side") or "").lower() != close_side:
+                    continue
+                r_ps = str(r.get("posSide") or "").lower()
+                if r_ps in ("long", "short") and r_ps != pos_side:
+                    continue
+                sz = abs(float(r.get("fillSz") or 0))
+                px = float(r.get("fillPx") or 0)
+                if sz <= 0 or px <= 0:
+                    continue
+                gross = float(r.get("fillPnl") or 0)
+                fee = float(r.get("fee") or 0)
+                has_pnl = bool(str(r.get("fillPnl") or "").strip())
+            except (TypeError, ValueError):
+                continue
+            picked.append((sz, px, gross, fee, has_pnl))
+            total_sz += sz
+            if want_sz > 0 and total_sz >= want_sz * 1.02:
+                break
+        if not picked:
+            return {"confirmed": False}
+        tot = sum(p[0] for p in picked) or 1.0
+        return {
+            "confirmed": True,
+            "px": sum(p[0] * p[1] for p in picked) / tot,
+            "gross": sum(p[2] for p in picked),
+            "fees": sum(p[3] for p in picked),
+            "has_pnl": any(p[4] for p in picked),
+        }
+
+    async def _remember_close(self, coin: str, side: str, pnl: float,
+                              reason: str) -> None:
+        """Remember (and persist) the last close per coin for the anti-churn cooldown.
+
+        `_last_closes` used to live in memory only, so every redeploy reset the
+        loss cooldown and the same losing setup was re-opened within a minute
+        (four ADA shorts on 28 Oct, each 56 s–7 min after the previous loss).
+        """
+        rec = {"side": str(side or "").lower(), "ts": time.time(),
+               "pnl": float(pnl or 0), "reason": str(reason or "")}
+        try:
+            cutoff = time.time() - 86_400
+            live = {k: v for k, v in (self._last_closes or {}).items()
+                    if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff}
+            live[coin] = rec
+            self._last_closes = live
+        except Exception:
+            try:
+                self._last_closes[coin] = rec
+            except Exception:
+                return
+        if not self.db:
+            return
+        try:
+            await self.db.set_setting(
+                f"last_closes:{self.BOT_ID}", json.dumps(self._last_closes))
+        except Exception as e:
+            print(f"[AI] persist last_closes: {e}", flush=True)
+
+    async def _restore_last_closes(self) -> None:
+        """Load the persisted anti-churn cooldown (survives redeploys)."""
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting(f"last_closes:{self.BOT_ID}")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            if not isinstance(data, dict):
+                return
+            cutoff = time.time() - 86_400
+            self._last_closes = {
+                str(k): v for k, v in data.items()
+                if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff
+            }
+            if self._last_closes:
+                print(f"[AI] hydrate last_closes: {len(self._last_closes)} "
+                      f"(anti-churn survives redeploy)", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate last_closes: {e}", flush=True)
+
     async def _record_flat_close(self, client, pos, coin: str, exit_px: float,
                                  reason: str) -> None:
         """Book a close that already happened on the exchange (SL/TP, manual, race).
 
-        The old code just dropped such positions from memory: PnL, lifetime stats
-        and the journal were never updated. This keeps books and memory in sync.
+        Rules:
+          * only a real exchange fill is booked (see ``_recover_close_fill``);
+          * the close is claimed once, before any await — two reconcilers (or
+            two instances during a deploy) used to book the same event twice;
+          * no ``exit = entry`` fallback, so a vanished position can no longer
+            masquerade as a trade that lost exactly the fee.
         """
         if not pos:
             return
         inst = getattr(pos, "inst_id", "") or f"{coin}-USDT-SWAP"
         side = str(getattr(pos, "side", "") or "")
-        entry_px = float(getattr(pos, "entry_price", 0) or 0)
+        _key = f"{inst}|{side}|{getattr(pos, 'opened_at', '')}"
+        seen = getattr(self, "_closed_keys", None)
+        if seen is None:
+            seen = self._closed_keys = set()
+        if _key in seen:
+            return
+        seen.add(_key)
+        if len(seen) > 400:
+            self._closed_keys = set(list(seen)[-200:])
+        # Drop it from memory now: no concurrent path may close it again.
+        self._positions.pop(coin, None)
+        mode, key = self._account_mode_tag()
+
         try:
-            exit_px = float(exit_px or 0)
-        except (TypeError, ValueError):
-            exit_px = 0.0
-        # Resolve the real exit BEFORE computing PnL: exit=0 would book a -100% loss.
-        if exit_px <= 0 and client is not None:
+            info = await self._recover_close_fill(client, pos)
+        except Exception as e:
+            print(f"[AI] recover close fill {coin}: {e}", flush=True)
+            info = {"confirmed": False}
+        if not info.get("confirmed"):
+            # Reconciliation anomaly, not a trade. Do not invent PnL — the
+            # exchange-bill sync attributes the real close independently.
+            print(f"[AI] CLOSE {coin} unconfirmed (no exchange fill) — not booked", flush=True)
+            self._record_exec("flat_unconfirmed", coin=coin, side=side,
+                              reason=reason or "exchange_close")
+            if self.db:
+                try:
+                    await self.db.delete_position_inst(self.BOT_ID, inst, side)
+                except Exception:
+                    pass
             try:
-                ticker = await client.get_ticker(inst)
-                _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
-                if isinstance(_td, list) and _td:
-                    exit_px = float(_td[0].get("last") or 0)
+                await release_open(self.db, self.BOT_ID, inst, side)
             except Exception:
                 pass
-        if exit_px <= 0:
-            exit_px = entry_px  # unknown fill — book flat, never a phantom total loss
-        # No fills here (exchange closed it), so estimate the round-trip cost
-        # instead of booking fee=0 — otherwise engine counters drift from bills.
-        _fee_est = 0.0
-        try:
-            _cfg = self.config
-            _ct = float(CT_VAL.get(coin, 0.01) or 0.01)
-            _rate = 2.0 * (float(getattr(_cfg, "fee_taker_pct", 0.0005) or 0.0)
-                           + float(getattr(_cfg, "slippage_pct", 0.0002) or 0.0))
-            _fee_est = abs(float(getattr(pos, "size", 0) or 0)) * _ct * entry_px * _rate
-        except Exception:
-            _fee_est = 0.0
-        try:
-            _e, exit_px, pnl, _fee = compute_close_metrics(
-                pos, coin, exit_px, fee=_fee_est)
-            self._lifetime_fees += float(_fee or _fee_est)
-        except Exception:
-            pnl = 0.0
+            return
+
+        exit_px = float(info.get("px") or 0)
+        fee_c = abs(float(info.get("fees") or 0))
+        if info.get("has_pnl"):
+            pnl = float(info.get("gross") or 0) + float(info.get("fees") or 0)
+            self._lifetime_fees += fee_c
+        else:
+            try:
+                _e, exit_px, pnl, fee_c = compute_close_metrics(
+                    pos, coin, exit_px, fee=fee_c)
+                self._lifetime_fees += abs(float(fee_c or 0))
+            except Exception:
+                pnl = 0.0
+        pnl = round(float(pnl or 0), 2)
+        # The engine drops zero-PnL rows; only bump the counters for rows it
+        # will actually count, otherwise internal KPI can never converge.
+        counted = abs(pnl) >= 1e-9
 
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
         self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
-        self._lifetime_trades += 1
+        if counted:
+            self._lifetime_trades += 1
+            if pnl > 0:
+                self._lifetime_wins += 1
         # A close just landed: force the next engine recompute so the 5-min
         # cache cannot overwrite these fresh counters with a stale snapshot
         # (that made lifetime_pnl_internal drift from the card for minutes).
         self._engine_stats_ts = 0.0
-        if pnl > 0:
-            self._lifetime_wins += 1
         try:
             self._refresh_adaptive()
         except Exception:
@@ -2208,22 +2385,22 @@ class AIStrategy:
 
         side_order = "sell" if side == "long" else "buy"
         self._trade_log.append({
-            "account_mode": self._account_mode_tag()[0],
+            "account_mode": mode,
             "time": datetime.now(timezone.utc).isoformat(),
             "side": side_order, "symbol": inst,
-            "size": getattr(pos, "size", 0), "pnl": round(pnl, 2),
+            "size": getattr(pos, "size", 0), "pnl": pnl,
             "entry_price": getattr(pos, "entry_price", 0),
-            "exit_price": exit_px, "fee": 0.0,
+            "exit_price": exit_px, "fee": round(float(fee_c or 0), 4),
             "reason": reason, "pos_side": side, "coin": coin,
             "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+            "confirmed": True,
         })
-        mode, key = self._account_mode_tag()
         if self.db:
             try:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=side_order, sz=getattr(pos, "size", 0),
                     px=exit_px, ord_id="", inst_id=inst, ord_type="market",
-                    fee=0.0, fee_ccy="USDT", pnl=round(pnl, 2),
+                    fee=round(float(fee_c or 0), 4), fee_ccy="USDT", pnl=pnl,
                     state="closed", signal_id=int(getattr(pos, "signal_id", 0) or 0) or None,
                     account_mode=mode, account_key=key,
                 )
@@ -2237,13 +2414,7 @@ class AIStrategy:
             await release_open(self.db, self.BOT_ID, inst, side)
         except Exception:
             pass
-        try:
-            self._last_closes[coin] = {
-                "side": side, "ts": time.time(),
-                "pnl": float(pnl or 0), "reason": str(reason or "exchange_stop"),
-            }
-        except Exception:
-            pass
+        await self._remember_close(coin, side, pnl, reason or "exchange_stop")
         try:
             await self._notify_close_tg(
                 pos, coin, reason or "exchange_stop", exit_px, pnl, account_mode=mode)
@@ -2251,8 +2422,7 @@ class AIStrategy:
             print(f"[AI] TG close (flat): {e}", flush=True)
 
         self._settle_close_memory(pos, coin, exit_px, pnl, reason or "exchange_stop")
-        self._positions.pop(coin, None)
-        print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason or 'exchange_stop'}) [flat]", flush=True)
+        print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} exit={exit_px} ({reason or 'exchange_stop'}) [flat]", flush=True)
 
     def _refresh_adaptive(self, force_log: bool = False) -> dict:
         """Bounded self-tune from rolling trade outcomes. Never exceeds floor/ceil."""
@@ -2936,6 +3106,57 @@ class AIStrategy:
             print(f"[AI-LIVE] scale_in mirror: {e}", flush=True)
         return True
 
+    async def _confirm_fill(self, client, inst: str, side: str, sz: float,
+                            ord_id: str = "", cl_ord_id: str = "") -> tuple:
+        """Return (avg_px, size) for an order we believe filled, else (0, 0).
+
+        The exchange position is the ground truth (works for both net and hedge
+        accounts); the order itself is the fallback while the position is still
+        being booked.
+        """
+        if not client:
+            return 0.0, 0.0
+        want = str(side or "").lower()
+        for _ in range(5):
+            try:
+                ep = await client.get_positions(inst_id=inst)
+                for row in (ep.get("data") or []):
+                    try:
+                        psz = abs(float(row.get("pos") or 0))
+                        avg = float(row.get("avgPx") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if psz <= 0 or avg <= 0:
+                        continue
+                    ps = str(row.get("posSide") or "").lower()
+                    if ps in ("long", "short") and ps != want:
+                        continue
+                    return avg, psz
+            except Exception:
+                pass
+            if ord_id or cl_ord_id:
+                try:
+                    o = await client.get_order(
+                        inst, ord_id=ord_id or None,
+                        cl_ord_id=None if ord_id else (cl_ord_id or None),
+                    )
+                    rows = (o or {}).get("data") or []
+                    if rows:
+                        r = rows[0]
+                        try:
+                            px = float(r.get("avgPx") or 0)
+                            filled = float(r.get("accFillSz") or 0)
+                        except (TypeError, ValueError):
+                            px, filled = 0.0, 0.0
+                        if px > 0 and filled > 0:
+                            return px, filled
+                        if str(r.get("state") or "") in ("canceled", "mmp_canceled"):
+                            return 0.0, 0.0
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
+        return 0.0, 0.0
+
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str, confidence: float = 0.0, thesis: str = "",
                     second: bool = False, size_pct: float = 0.0):
@@ -3078,24 +3299,58 @@ class AIStrategy:
                 )
                 return
         fills = resp.get("data") or []
+        # A market ack carries no avgPx/fee, and `entry` is the last 1H candle
+        # close (up to a minute old). That must never become a position price:
+        # confirm the order with the exchange and use its avgPx. Before v1.39 an
+        # acked-but-unfilled order became a "position" that vanished seconds
+        # later and was booked as a fake −fee trade (four ADA rows on 28 Oct).
+        _ord_id = ""
+        if fills:
+            _ord_id = str(fills[0].get("ordId") or fills[0].get("ord_id") or "")
+            _scode = str(fills[0].get("sCode") or "")
+            if _scode not in ("", "0"):
+                self._record_exec(
+                    "open_error", coin=coin, side=side,
+                    reason=f"{_scode}: {fills[0].get('sMsg') or 'order rejected'}"[:200],
+                    size=sz, leverage=lev, ord_id=_ord_id,
+                )
+                return
         # Market ack often has ordId but no avgPx — resolve via get_order
-        fill_px, fee, _ = extract_fill_avg(fills, entry)
-        if (not fill_px or fill_px <= 0) and fills:
-            ord_id = fills[0].get("ordId") or fills[0].get("ord_id")
-            if ord_id:
-                for _ in range(4):
-                    await asyncio.sleep(0.35)
-                    try:
-                        o = await client.get_order(inst, ord_id=ord_id)
-                        rows = o.get("data") or []
-                        if rows:
-                            fill_px, fee, _ = extract_fill_avg(rows, entry)
-                            if fill_px and fill_px > 0:
-                                break
-                    except Exception:
-                        pass
+        fill_px, fee, _ = extract_fill_avg(fills, 0.0)
+        if (not fill_px or fill_px <= 0) and _ord_id:
+            for _ in range(4):
+                await asyncio.sleep(0.35)
+                try:
+                    o = await client.get_order(inst, ord_id=_ord_id)
+                    rows = o.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, 0.0)
+                        if fill_px and fill_px > 0:
+                            break
+                except Exception:
+                    pass
+        real_px, real_sz = await self._confirm_fill(
+            client, inst, side, sz, ord_id=_ord_id, cl_ord_id=cl_demo)
+        if real_px > 0:
+            fill_px = real_px
+            if real_sz > 0:
+                sz = real_sz
         if not fill_px or fill_px <= 0:
-            fill_px = entry
+            self._record_exec(
+                "open_no_fill", coin=coin, side=side,
+                reason="order acked but no fill/position on exchange",
+                size=sz, leverage=lev, ord_id=_ord_id,
+            )
+            print(f"[AI] open_no_fill {coin} {side}: no exchange fill — not booked", flush=True)
+            try:
+                if _ord_id:
+                    await client.cancel_order(inst, _ord_id)
+            except Exception:
+                pass
+            return
+        if entry > 0 and abs(fill_px - entry) / entry > 0.005:
+            print(f"[AI] fill {coin} {side} {fill_px} vs mark {entry} "
+                  f"({(fill_px - entry) / entry * 100:+.2f}%)", flush=True)
         if side == "long":
             stop = fill_px * (1 - stop_pct)
             take = fill_px * (1 + take_pct)
@@ -3548,16 +3803,9 @@ class AIStrategy:
                 print(f"[AI] exchange_close tag: {e}", flush=True)
         mode, _key = self._account_mode_tag()
         await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode=mode)
-        try:
-            self._last_closes[coin] = {
-                "side": getattr(pos, "side", ""),
-                "ts": time.time(),
-                "pnl": float(pnl or 0),
-                "reason": str(reason or ""),
-            }
-        except Exception:
-            pass
-        del self._positions[coin]
+        await self._remember_close(coin, getattr(pos, "side", ""),
+                                   float(pnl or 0), str(reason or ""))
+        self._positions.pop(coin, None)
         try:
             await release_open(self.db, self.BOT_ID, pos.inst_id, pos.side)
         except Exception as e:
@@ -3603,6 +3851,11 @@ class AIStrategy:
         self._last_mirror_fail = ""
         def _fail(msg: str) -> bool:
             self._last_mirror_fail = str(msg)[:200]
+            _low = str(msg).lower()
+            if "permission" in _low or "does not have trading" in _low:
+                # Sticky: the LIVE key cannot trade at all. Retrying every 8 s
+                # only spams OKX and hammers reconcile — stop until reconnect.
+                self._live_trade_blocked_reason = str(msg)[:200]
             print(f"[AI-LIVE] open_skip: {msg}", flush=True)
             self._audit_live("open_blocked", coin, side, 0, msg, ok=False)
             return False
@@ -3701,6 +3954,8 @@ class AIStrategy:
         )
         if resp.get("error"):
             return _fail(f"order blocked: {resp.get('message')}")
+        # A real order got through: the key is allowed to trade again.
+        self._live_trade_blocked_reason = ""
         fills = resp.get("data") or []
         fill_px, fee, _ = extract_fill_avg(fills, entry)
         if (not fill_px or fill_px <= 0) and fills:
@@ -4475,6 +4730,9 @@ class AIStrategy:
                 return
             if not await self._mirror_enabled():
                 return
+            if self._live_trade_blocked():
+                print(f"[AI-LIVE] fast_retry abort {coin}: LIVE key cannot trade", flush=True)
+                return
             try:
                 await self._try_refresh_live_client()
                 if not self._live_ready():
@@ -4632,8 +4890,36 @@ class AIStrategy:
         inst = pos.inst_id
         sz_str = self._fmt_sz(pos.coin, pos.size)
         sl_side = "sell" if pos.side == "long" else "buy"
-        sl_px = str(round(pos.stop_price, 4)) if pos.stop_price else None
-        tp_px = str(round(pos.take_price, 4)) if pos.take_price else None
+        _long = str(pos.side).lower() == "long"
+        _sl = float(pos.stop_price or 0)
+        _tp = float(pos.take_price or 0)
+        # A trigger the market has already crossed is executed at market the
+        # instant OKX accepts the algo — the position then "vanishes" seconds
+        # after it opened and used to be booked as a fake −fee trade (ADA,
+        # 28 Oct). Rebase such a stop on the current mark and drop a TP that is
+        # already beyond the mark (software management keeps pos.take_price).
+        try:
+            mark = float(await self._ticker_last(client, inst) or 0)
+        except Exception:
+            mark = 0.0
+        if mark > 0:
+            ent = float(pos.entry_price or 0)
+            if _sl > 0 and ent > 0:
+                crossed = (mark <= _sl) if _long else (mark >= _sl)
+                if crossed:
+                    pct = min(0.15, max(0.005, abs(ent - _sl) / ent))
+                    _sl = mark * (1 - pct) if _long else mark * (1 + pct)
+                    pos.stop_price = _sl
+                    print(f"[AI] exchange SL rebased {pos.coin} -> {_sl:.4f} (mark {mark})",
+                          flush=True)
+            if _tp > 0:
+                done = (mark >= _tp) if _long else (mark <= _tp)
+                if done:
+                    print(f"[AI] exchange TP skipped {pos.coin}: mark {mark} already past {_tp}",
+                          flush=True)
+                    _tp = 0.0
+        sl_px = str(round(_sl, 4)) if _sl else None
+        tp_px = str(round(_tp, 4)) if _tp else None
         if not sl_px and not tp_px:
             return
         try:
@@ -7122,6 +7408,11 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] hydrate settings: {e}", flush=True)
 
+        # 1b) anti-churn cooldown — must survive a redeploy. It used to be
+        # in-memory only, so every deploy reset the loss cooldown and the same
+        # losing setup was re-opened within a minute (four ADA shorts on 28 Oct).
+        await self._restore_last_closes()
+
         # 2) trades table aggregate (authoritative if more complete)
         try:
             summary = await self.db.get_trades_summary(self.BOT_ID)
@@ -8064,6 +8355,7 @@ class AIStrategy:
                 "disaster_stop_enabled": bool(
                     getattr(self.config, "live_disaster_stop", True)),
                 "disaster_stop_mult": getattr(self.config, "live_disaster_stop_mult", 1.8),
+                "trade_blocked": str(getattr(self, "_live_trade_blocked_reason", "") or ""),
                 "unprotected_open": [
                     p.coin for p in self._live_positions.values()
                     if not getattr(p, "disaster_algo_id", "")
