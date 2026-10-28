@@ -6705,6 +6705,7 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] engine stats: {e}", flush=True)
             return getattr(self, "_engine_stats", None)
+        self._engine_diag = dict(_diag or {})
         self._engine_rows = rows
         self._engine_stats_ts = now
         if not rows:

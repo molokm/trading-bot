@@ -3033,6 +3033,14 @@ async def ai_status():
     internal = status.get('lifetime_pnl', status.get('total_pnl'))
     status['total_pnl_internal'] = internal
     status['lifetime_pnl_internal'] = internal
+    try:
+        # Accounting diagnostics: what set the bot's own counters came from.
+        # Lets us diff internal vs card without reading Render logs.
+        status['engine_stats'] = dict(getattr(ai_bot, '_engine_stats', None) or {})
+        status['engine_diag'] = dict(getattr(ai_bot, '_engine_diag', None) or {})
+        status['engine_rows'] = len(getattr(ai_bot, '_engine_rows', None) or [])
+    except Exception:
+        pass
     status = await _apply_history_kpi(status, 'AI Discretionary 1H')
     # History overlay replaces lifetime_pnl, so rebuild turnover from the same
     # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
