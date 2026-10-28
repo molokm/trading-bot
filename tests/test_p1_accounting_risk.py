@@ -157,3 +157,71 @@ def test_second_slot_entry_inherits_sibling_ownership_guard():
     # cannot open a coin the sibling bot already owns.
     src = inspect.getsource(AIStrategy._open)
     assert "_other_ai_owns" in src
+
+
+# ── 4. align internal stats with the PnL engine ─────────────────────────
+
+_DB_ROWS = [
+    {"state": "filled", "inst_id": "BTC-USDT-SWAP", "ord_id": "e1", "px": 100.0,
+     "sz": 1.0, "timestamp": "2026-10-27T06:00:00+00:00", "account_mode": "demo",
+     "side": "buy", "pnl": 0.0},
+    {"state": "closed", "inst_id": "BTC-USDT-SWAP", "ord_id": "c1", "px": 102.0,
+     "sz": 1.0, "timestamp": "2026-10-27T06:55:00+00:00", "account_mode": "demo",
+     "side": "sell", "pnl": -83.24},
+]
+
+_ENG_ROWS = [
+    {"ord_id": "c1", "inst_id": "BTC-USDT-SWAP", "pnl": -103.78,
+     "close_ts": 1793084100000, "entry_px": 100.0, "exit_px": 101.5,
+     "side": "sell", "account_mode": "demo", "fee": 2.0},
+    {"ord_id": "c2", "inst_id": "ETH-USDT-SWAP", "pnl": 20.0,
+     "close_ts": 1793084700000, "entry_px": 3000.0, "exit_px": 3010.0,
+     "side": "buy", "account_mode": "demo", "fee": 1.0},
+]
+
+
+def test_engine_pnl_overrides_bot_close_estimate_by_ord_id():
+    bot = _bot()
+    log, stats = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
+    by_oid = {t["ord_id"]: t for t in log}
+    assert by_oid["c1"]["pnl"] == pytest.approx(-103.78)
+    assert by_oid["c1"]["exit_price"] == pytest.approx(101.5)
+
+
+def test_engine_only_close_is_appended():
+    bot = _bot()
+    log, _ = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
+    assert any(t["ord_id"] == "c2" and t["pnl"] == pytest.approx(20.0) for t in log)
+
+
+def test_entry_rows_stay_out_of_closed_stats():
+    bot = _bot()
+    log, _ = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
+    bot._trade_log = log
+    closed = bot._closed_trades(demo_only=True)
+    assert [t["ord_id"] for t in closed] == ["c1", "c2"]  # chronological
+    assert all(t["reason"] != "open" for t in closed)
+
+
+def test_engine_stats_match_deduped_set():
+    bot = _bot()
+    _, stats = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
+    assert stats["trades"] == 2
+    assert stats["wins"] == 1
+    assert stats["pnl"] == pytest.approx(-83.78)
+    assert stats["fees"] == pytest.approx(3.0)
+
+
+def test_without_engine_rows_falls_back_to_trades_table():
+    bot = _bot()
+    log, stats = bot._rebuild_trade_log(_DB_ROWS, [])
+    assert stats is None
+    assert len(log) == 2
+    assert {t["reason"] for t in log} == {"open", "closed"}
+
+
+def test_engine_rows_are_sorted_chronologically():
+    bot = _bot()
+    log, _ = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
+    keys = [bot._ts_sort_key(t) for t in log]
+    assert keys == sorted(keys)

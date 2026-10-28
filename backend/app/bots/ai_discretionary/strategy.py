@@ -6556,6 +6556,109 @@ class AIStrategy:
         )
         return out
 
+    @staticmethod
+    def _ts_sort_key(t: dict) -> float:
+        """Comparable ms timestamp for rows that mix ISO strings and epochs."""
+        v = t.get("ts_ms")
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(t.get("time") or "").strip()
+        if not s:
+            return 0.0
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000.0
+        except Exception:
+            pass
+        try:
+            f = float(s)
+            return f if abs(f) > 1e11 else f * 1000.0
+        except Exception:
+            return 0.0
+
+    def _rebuild_trade_log(self, db_rows, eng_rows) -> tuple[list, dict | None]:
+        """Merge the `trades` table with the engine's authoritative closes.
+
+        The bot writes its own close-time estimate into `trades` (mark fallback
+        on exchange SL/TP fills), while the dashboard/PnL engine uses OKX bills
+        deduped by ord_id. Without this overlay adaptive/reflection were scored
+        on a different PnL series than the card (34.45 vs 106.07 internal).
+        Engine values win per ord_id; engine-only closes are appended so the
+        closed set matches the card exactly.
+        """
+        rebuilt = []
+        for r in reversed(db_rows or []):
+            state = str(r.get("state") or "").strip().lower()
+            # `filled`/empty = an executed entry, NOT a closed trade. Map it
+            # to "open" so _closed_trades skips it; otherwise openings are
+            # scored as 0-PnL losses and corrupt adaptive + reflection.
+            reason = "open" if state in ("", "filled", "new", "pending") else state
+            try:
+                pnl = float(r.get("pnl") or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            rebuilt.append({
+                "account_mode": str(r.get("account_mode") or "demo").lower(),
+                "time": r.get("timestamp") or r.get("created_at") or "",
+                "side": r.get("side"),
+                "symbol": r.get("inst_id"),
+                "size": r.get("sz") or r.get("size"),
+                "pnl": pnl,
+                "entry_price": (r.get("px") if reason != "open" else None),
+                "exit_price": (r.get("px") if reason != "open" else None),
+                "reason": reason,
+                "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                "ord_id": str(r.get("ord_id") or r.get("ordId") or ""),
+            })
+        by_oid = {}
+        for er in (eng_rows or []):
+            oid = str(er.get("ord_id") or "")
+            if oid:
+                by_oid[oid] = er
+        seen = set()
+        for t in rebuilt:
+            oid = str(t.get("ord_id") or "")
+            if oid:
+                seen.add(oid)
+            er = by_oid.get(oid) if oid else None
+            if not er:
+                continue
+            if str(t.get("reason") or "").strip().lower() in self._NON_CLOSE_REASONS:
+                continue
+            t["pnl"] = round(float(er.get("pnl") or 0), 4)
+            if er.get("entry_px") is not None:
+                t["entry_price"] = er.get("entry_px")
+            if er.get("exit_px") is not None:
+                t["exit_price"] = er.get("exit_px")
+        for er in (eng_rows or []):
+            oid = str(er.get("ord_id") or "")
+            if not oid or oid in seen:
+                # No-ord rows come from the same `trades` table read above.
+                continue
+            seen.add(oid)
+            rebuilt.append({
+                "account_mode": str(er.get("account_mode") or "demo").lower(),
+                "time": er.get("close_ts") or er.get("ts") or "",
+                "side": er.get("side"),
+                "symbol": er.get("inst_id"),
+                "size": None,
+                "pnl": round(float(er.get("pnl") or 0), 4),
+                "entry_price": er.get("entry_px"),
+                "exit_price": er.get("exit_px"),
+                "reason": "closed",
+                "coin": str(er.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                "ord_id": oid,
+            })
+        rebuilt.sort(key=self._ts_sort_key)
+        stats = None
+        if eng_rows:
+            stats = {
+                "trades": len(eng_rows),
+                "wins": sum(1 for r in eng_rows if float(r.get("pnl") or 0) > 0),
+                "pnl": round(sum(float(r.get("pnl") or 0) for r in eng_rows), 2),
+                "fees": round(sum(float(r.get("fee") or 0) for r in eng_rows), 2),
+            }
+        return rebuilt[-120:], stats
+
     async def _hydrate_from_db(self):
         """Reload lifetime stats + open positions from Postgres after deploy.
 
@@ -6643,33 +6746,34 @@ class AIStrategy:
                 self._lifetime_pnl = pnl
                 print(f"[AI] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}"
                       f" (was {prev_n})", flush=True)
-            # rebuild recent trade log for UI / adapt
+            # rebuild recent trade log for UI / adapt, then overlay the engine's
+            # authoritative PnL by ord_id (same set T as the dashboard card).
             rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=200)
-            rebuilt = []
-            for r in reversed(rows or []):
-                state = str(r.get("state") or "").strip().lower()
-                # `filled`/empty = an executed entry, NOT a closed trade. Map it
-                # to "open" so _closed_trades skips it; otherwise openings are
-                # scored as 0-PnL losses and corrupt adaptive + reflection.
-                reason = "open" if state in ("", "filled", "new", "pending") else state
-                try:
-                    pnl = float(r.get("pnl") or 0)
-                except (TypeError, ValueError):
-                    pnl = 0.0
-                rebuilt.append({
-                    "account_mode": str(r.get("account_mode") or "demo").lower(),
-                    "time": r.get("timestamp") or r.get("created_at") or "",
-                    "side": r.get("side"),
-                    "symbol": r.get("inst_id"),
-                    "size": r.get("sz") or r.get("size"),
-                    "pnl": pnl,
-                    "entry_price": (r.get("px") if reason != "open" else None),
-                    "exit_price": (r.get("px") if reason != "open" else None),
-                    "reason": reason,
-                    "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
-                })
+            eng_rows = []
+            try:
+                from app.services import pnl_engine as _pe
+                _mode, _k = self._account_mode_tag()
+                eng_rows, _diag = await _pe.load_eligible_rows(
+                    self.db, mode=("live" if _mode == "live" else "demo"),
+                    ai_only=True,
+                )
+            except Exception as _ee:
+                print(f"[AI] hydrate engine rows: {_ee}", flush=True)
+            rebuilt, eng_stats = self._rebuild_trade_log(rows, eng_rows)
             if rebuilt:
-                self._trade_log = rebuilt[-50:]
+                self._trade_log = rebuilt
+            self._engine_stats = eng_stats
+            if eng_stats:
+                # One source of truth: internal counters must equal the engine
+                # total, otherwise lifetime_pnl_internal drifts from the card.
+                self._lifetime_trades = int(eng_stats["trades"])
+                self._lifetime_wins = int(eng_stats["wins"])
+                self._lifetime_pnl = float(eng_stats["pnl"])
+                if float(eng_stats.get("fees") or 0) > 0:
+                    self._lifetime_fees = float(eng_stats["fees"])
+                print(f"[AI] hydrate engine: trades={self._lifetime_trades} "
+                      f"wins={self._lifetime_wins} pnl={self._lifetime_pnl:.2f} "
+                      f"fees={self._lifetime_fees:.2f}", flush=True)
         except Exception as e:
             print(f"[AI] hydrate trades: {e}", flush=True)
 
@@ -6701,11 +6805,18 @@ class AIStrategy:
             if not flag:
                 await self.correct_misattributed("SOL", "impulse_strategy")
             else:
-                # Even if already moved, refresh lifetime from DB so card matches trades
-                summary = await self.db.get_trades_summary(self.BOT_ID)
-                self._lifetime_trades = int(summary.get("total") or 0)
-                self._lifetime_wins = int(summary.get("wins") or 0)
-                self._lifetime_pnl = float(summary.get("total_pnl") or 0)
+                # Refresh lifetime from the SAME engine as the dashboard card.
+                # Fall back to the trades table only when the engine is empty.
+                _es = getattr(self, "_engine_stats", None)
+                if _es:
+                    self._lifetime_trades = int(_es["trades"])
+                    self._lifetime_wins = int(_es["wins"])
+                    self._lifetime_pnl = float(_es["pnl"])
+                else:
+                    summary = await self.db.get_trades_summary(self.BOT_ID)
+                    self._lifetime_trades = int(summary.get("total") or 0)
+                    self._lifetime_wins = int(summary.get("wins") or 0)
+                    self._lifetime_pnl = float(summary.get("total_pnl") or 0)
                 try:
                     await self.db.set_setting(
                         f"ai_lifetime:{self.BOT_ID}",

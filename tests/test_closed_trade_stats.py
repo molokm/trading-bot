@@ -73,6 +73,9 @@ def test_hydrate_maps_filled_rows_to_open():
     """The rebuild path must not fabricate `filled` as a close reason."""
     from app.bots.ai_discretionary import strategy as mod
 
-    src = inspect.getsource(mod.AIStrategy._hydrate_from_db)
+    # The row mapping moved into _rebuild_trade_log (v1.35 engine overlay);
+    # hydration now delegates to it.
+    src = inspect.getsource(mod.AIStrategy._rebuild_trade_log)
     assert 'reason = "open" if state in ("", "filled", "new", "pending")' in src
     assert '"reason": reason' in src
+    assert "_rebuild_trade_log" in inspect.getsource(mod.AIStrategy._hydrate_from_db)
