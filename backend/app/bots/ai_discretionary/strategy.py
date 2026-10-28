@@ -4129,7 +4129,18 @@ class AIStrategy:
             )
             try:
                 from app.services.position_claim import flatten_position
-                await flatten_position(lc, info["inst_id"], info["side"], info["size"])
+                # Tag the cleanup with the slot's trade_id so it pairs with the
+                # DEMO close instead of looking like an untagged AI order.
+                _old_live = self._live_positions.get(coin)
+                _cl_close = self._clord_live_close(
+                    getattr(_old_live, "demo_trade_id", "")) or None
+                if _old_live is not None:
+                    try:
+                        await self._cancel_live_disaster_stop(lc, _old_live)
+                    except Exception:
+                        pass
+                await flatten_position(lc, info["inst_id"], info["side"], info["size"],
+                                       cl_ord_id=_cl_close)
                 self._exec_log.append(_exec_evt(
                     "mirror_sync_close", coin, info["side"],
                     reason="demo_flat_or_side_mismatch",
@@ -4144,7 +4155,7 @@ class AIStrategy:
                     close_side = "sell" if info["side"] == "long" else "buy"
                     await self._place(
                         lc, info["inst_id"], close_side, info["size"], info["side"],
-                        is_close=True,
+                        is_close=True, cl_ord_id=_cl_close,
                     )
                 except Exception as e2:
                     print(f"[AI-LIVE] SYNC place-close {coin}: {e2}", flush=True)

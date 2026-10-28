@@ -207,8 +207,13 @@ async def release_open(db, bot_id: str, inst_id: str = None, side: str = None) -
         log.warning("release_open %s: %s", bot_id, e)
 
 
-async def flatten_position(client, inst_id: str, side: str, size: float) -> dict:
-    """Market close a position (anti-orphan)."""
+async def flatten_position(client, inst_id: str, side: str, size: float,
+                           cl_ord_id: str = None) -> dict:
+    """Market close a position (anti-orphan).
+
+    ``cl_ord_id`` lets callers tag the emergency close (the AI mirror uses
+    ``ail{tid}c``) so the exchange bill stays attributable and pairable.
+    """
     if not client or not inst_id or size <= 0:
         return {"error": "bad args"}
     side_n = norm_side(side)
@@ -226,6 +231,8 @@ async def flatten_position(client, inst_id: str, side: str, size: float) -> dict
             }
             if ps:
                 params["pos_side"] = ps
+            if cl_ord_id:
+                params["cl_ord_id"] = cl_ord_id
             try:
                 resp = await client.place_order(**params)
             except TypeError:

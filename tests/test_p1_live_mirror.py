@@ -197,3 +197,27 @@ async def test_live_reads_prefer_the_dedicated_live_manager(monkeypatch):
     assert await m._okx_call_account(lambda c: c.ping(), mode="live") == "live"
     assert shared.inited is False, "shared client_manager must stay demo"
     assert m._live_read_client() is not None
+
+
+# ── orphan cleanup keeps the tag and drops the guard ────────────────────
+
+def test_orphan_sync_close_is_tagged_and_cancels_the_guard():
+    src = inspect.getsource(AIStrategy._manage_live_orphans)
+    assert "cl_ord_id=_cl_close" in src
+    assert "_cancel_live_disaster_stop" in src
+
+
+@pytest.mark.asyncio
+async def test_flatten_position_forwards_the_close_tag():
+    from app.services.position_claim import flatten_position
+
+    calls = []
+
+    class _Client:
+        async def place_order(self, **kw):
+            calls.append(kw)
+            return {"data": [{}]}
+
+    await flatten_position(_Client(), "ETH-USDT-SWAP", "long", 1.0,
+                           cl_ord_id="aila1b2c3d4e5f6c")
+    assert calls[0]["cl_ord_id"] == "aila1b2c3d4e5f6c"
