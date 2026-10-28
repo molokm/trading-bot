@@ -1686,7 +1686,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {closedTradesForTable.slice(0, 40).map((tr, i) => {
+                  {closedTradesForTable.slice(0, 200).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
                     const isLong = sideRaw === 'long' || sideRaw === 'buy'
