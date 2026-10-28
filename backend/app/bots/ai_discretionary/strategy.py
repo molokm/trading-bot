@@ -2194,6 +2194,10 @@ class AIStrategy:
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
         if pnl > 0:
             self._lifetime_wins += 1
         try:
@@ -3453,6 +3457,10 @@ class AIStrategy:
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
         if pnl > 0:
             self._lifetime_wins += 1
         self._lifetime_fees += fee_c
@@ -5181,6 +5189,10 @@ class AIStrategy:
         self._session_pnl += pnl
         self._lifetime_pnl += pnl
         self._lifetime_trades += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
         if pnl > 0:
             self._lifetime_wins += 1
         self._lifetime_fees += fee_c

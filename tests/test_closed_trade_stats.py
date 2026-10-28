@@ -79,3 +79,14 @@ def test_hydrate_maps_filled_rows_to_open():
     assert 'reason = "open" if state in ("", "filled", "new", "pending")' in src
     assert '"reason": reason' in src
     assert "_rebuild_trade_log" in inspect.getsource(mod.AIStrategy._hydrate_from_db)
+
+
+def test_booking_a_close_invalidates_the_engine_cache():
+    """Fresh internal counters must not be overwritten by a stale snapshot.
+
+    The 300s engine-stats cache was re-applied on the next tick, so right after
+    a close `lifetime_pnl_internal` fell back to the pre-close value and only
+    matched the card minutes later. Each booking now expires the cache.
+    """
+    assert "_engine_stats_ts = 0.0" in inspect.getsource(AIStrategy._close)
+    assert "_engine_stats_ts = 0.0" in inspect.getsource(AIStrategy._book_partial)
