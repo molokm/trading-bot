@@ -1842,10 +1842,15 @@ class AIStrategy:
             return out
 
         max_per_group = int(getattr(cfg, "max_positions_per_group", 1) or 0)
+        # Concentration governs NEW positions only: an already-open coin is a
+        # scale-in (handled later in the open path), not a second slot.
+        open_coins = _open_coins()
+        if coin in open_coins:
+            return None
         if max_per_group > 0:
             grp = self._corr_group(coin)
             if grp and grp != "other":
-                same = [c for c in _open_coins() if self._corr_group(c) == grp]
+                same = [c for c in open_coins if self._corr_group(c) == grp]
                 if len(same) >= max_per_group:
                     return f"concentration:group:{grp}:" + ",".join(sorted(same)[:3])
 

@@ -89,6 +89,11 @@ def test_btc_dominance_requires_higher_confidence():
     assert bot2._concentration_veto("BTC", "long", 0.70) is None
 
 
+def test_scale_in_same_coin_is_not_blocked_as_concentration():
+    bot = _bot({"BTC": _pos("BTC")})
+    assert bot._concentration_veto("BTC", "long", 0.70) is None
+
+
 def test_corr_group_taxonomy():
     assert AIStrategy._corr_group("BTC") == "crypto_major"
     assert AIStrategy._corr_group("eth") == "crypto_major"
