@@ -493,11 +493,19 @@ async def _call_llm_once(snapshot: dict, provider: Optional[str] = None,
         "adaptive": snapshot.get("adaptive"),
     }
     raw_json = json.dumps(user_payload, ensure_ascii=False)
-    max_chars = int(os.getenv("AI_LLM_PAYLOAD_CHARS", "6000") or 6000)
+    # 6000 chars used to cut the payload mid-JSON, so the model could lose
+    # `costs`, `adaptive` and the tail coins entirely. Default is now roomy
+    # enough for the full snapshot; the env var still allows tuning, and a
+    # truncation is logged instead of happening silently.
+    max_chars = int(os.getenv("AI_LLM_PAYLOAD_CHARS", "16000") or 16000)
+    if max_chars > 0 and len(raw_json) > max_chars:
+        print(f"[llm] payload truncated {len(raw_json)}→{max_chars} chars "
+              f"(raise AI_LLM_PAYLOAD_CHARS if the tail matters)", flush=True)
+        raw_json = raw_json[:max_chars]
     user_msg = (
         "Full quant snapshot for discretionary analysis. "
         "Follow checklist in system prompt; then decide.\n"
-        + raw_json[:max_chars]
+        + raw_json
     )
 
     if provider == "mock" or not provider:

@@ -236,11 +236,14 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.35.0-accounting"
+STRATEGY_VERSION = "v1.36.0-entry"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.35 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
-    "ADX≥20, align≥0.62, conf≥0.68. Дебаты bull/bear на втором проходе LLM "
+    "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "ADX≥20, align≥0.62, conf≥0.68. Cost-edge: ожидаемое движение (ATR 1H) "
+    "должно превышать round-trip издержки минимум в 3×, иначе вход вето. "
+    "Chop-вето по режиму самой монеты; глобальный chop больше не блокирует "
+    "монету в собственном тренде. Дебаты bull/bear на втором проходе LLM "
     "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
     "soft take +5.0%, partial 30%@+2.6%. Второй слот: при открытой и уже "
     "зелёной позиции бот может взять ещё одну — но только сильный (align≥0.85, "
@@ -250,7 +253,8 @@ STRATEGY_DESC = (
     "BTC требует conf≥0.85. Partial-закрытие учитывается как реализованный "
     "результат в сделках/equity/дневном лимите; scale-in вызывается и по "
     "open, и по явному action=add; риск-гейт получает notional и leverage. "
-    "Издержки явные: LLM видит round-trip fee+slippage, "
+    "Размер: заявленный LLM size_pct_equity масштабирует риск и не превышает "
+    "adaptive size_cap. Издержки явные: LLM видит round-trip fee+slippage, "
     "статус показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый "
     "трейд оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
 )
@@ -1719,8 +1723,10 @@ class AIStrategy:
         if (decision.get("action") or "").lower() != "open":
             return None
         q = self._build_quant()
-        if q.get("block_open") and getattr(self.config, "block_chop_opens", True):
-            return "quant_veto:global_chop"
+        # NOTE: no global-chop veto here. A BTC/global chop reading used to
+        # block every coin before the per-coin gate below ran, so a coin in its
+        # own trend could never trade — the opposite of the intent. Each coin's
+        # own regime decides via q['coins'][coin]['block_open'].
         coin = (decision.get("symbol") or "").upper()
         side = (decision.get("side") or "").lower()
         conf = float(decision.get("confidence") or 0)
@@ -1733,6 +1739,22 @@ class AIStrategy:
         cq = (q.get("coins") or {}).get(coin) or {}
         if cq.get("block_open"):
             return f"quant_veto:coin_block:{coin}"
+        # Cost-aware edge: the move this setup can realistically deliver must
+        # clear the round trip (fees + slippage) by cost_min_edge_mult. ATR is
+        # the honest 1H estimate; the LLM's take_pct is aspirational, so it is
+        # only the fallback when ATR is unavailable.
+        try:
+            ind_e = (self._latest_indicators or {}).get(coin) or {}
+            px_e = float(ind_e.get("close") or 0)
+            atr_pct = float(self._atr_pct(coin, px_e) or 0) * 100.0
+            exp_pct = atr_pct if atr_pct > 0 else take * 100.0
+            need_pct = self._round_trip_cost_pct() * float(
+                getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+            if need_pct > 0 and exp_pct < need_pct:
+                return (f"quant_veto:cost_edge:exp={exp_pct:.2f}%"
+                        f"<need={need_pct:.2f}%")
+        except Exception:
+            pass
         if side == "long" and float(cq.get("align_long") or 0) < float(q["min_align"]) - 1e-9:
             return f"quant_veto:weak_long_align"
         if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]) - 1e-9:
@@ -2591,6 +2613,27 @@ class AIStrategy:
         print(f"[AI] exec {event} {data}", flush=True)
 
     # ── sizing (anti-liq) ──────────────────────────────────────
+    def _size_factor(self, size_pct: float) -> float:
+        """LLM `size_pct_equity` → multiplier of the base risk (0.25…1.0).
+
+        The model requests a share of the allowed size (policy `max_size_pct` =
+        adaptive size_cap). Anything above the cap is clamped to 1.0; a very
+        small request is floored at 0.25 so a valid setup still gets a position.
+        """
+        try:
+            req = float(size_pct or 0)
+        except (TypeError, ValueError):
+            req = 0.0
+        if req <= 0:
+            return 1.0
+        try:
+            cap = float((self._adapt or {}).get("size_cap") or 0.10)
+        except (TypeError, ValueError):
+            cap = 0.10
+        if cap <= 0:
+            return 1.0
+        return max(0.25, min(1.0, req / cap))
+
     def _size_order(self, coin: str, entry: float, stop_pct: float,
                     equity: float = None, risk_pct: float = None,
                     margin_pct: float = None) -> tuple[float, float]:
@@ -2827,7 +2870,7 @@ class AIStrategy:
 
     async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
                     reason: str, confidence: float = 0.0, thesis: str = "",
-                    second: bool = False):
+                    second: bool = False, size_pct: float = 0.0):
         if client is not None and not getattr(client, "demo", True):
             print(f"[AI] BLOCK open on non-demo client {coin}", flush=True)
             self._record_exec("open_skip", coin=coin, side=side, reason="live_client_forbidden")
@@ -2871,6 +2914,16 @@ class AIStrategy:
         if second:
             _risk_pct = float(getattr(self.config, "second_entry_risk_pct", 0.006) or 0.006)
             _margin_pct = float(getattr(self.config, "second_entry_margin_pct", 0.30) or 0.30)
+        # Honor the model's requested size share and the adaptive size_cap.
+        # `size_pct_equity` used to be dropped on the floor (only the LLM saw
+        # it), and the validator's 0.12 ceiling ignored a 0.06/0.08 preset.
+        _sf = self._size_factor(size_pct)
+        _base_risk = (_risk_pct if _risk_pct is not None
+                      else float(getattr(self.config, "risk_per_trade", 0.012) or 0.012))
+        _risk_pct = _base_risk * _sf
+        if _sf < 0.999:
+            print(f"[AI] size trim {coin}: size_pct={float(size_pct or 0):.3f} "
+                  f"factor={_sf:.2f} risk={_risk_pct:.4f}", flush=True)
         sz, lev = self._size_order(coin, entry, stop_pct, equity=eq_cap,
                                    risk_pct=_risk_pct, margin_pct=_margin_pct)
         if sz <= 0:
@@ -6465,6 +6518,7 @@ class AIStrategy:
                 reason=reason or "ai_open",
                 confidence=float(decision.get("confidence") or 0),
                 thesis=str(decision.get("thesis") or ""),
+                size_pct=float(decision.get("size_pct_equity") or 0),
             )
 
 
