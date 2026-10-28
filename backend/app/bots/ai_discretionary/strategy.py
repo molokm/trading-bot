@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.37.0-mirror"
+STRATEGY_VERSION = "v1.38.0-disaster"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -255,8 +255,13 @@ STRATEGY_DESC = (
     "open, и по явному action=add; риск-гейт получает notional и leverage. "
     "Размер: заявленный LLM size_pct_equity масштабирует риск и не превышает "
     "adaptive size_cap. Издержки явные: LLM видит round-trip fee+slippage, "
-    "статус показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый "
-    "трейд оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
+    "статус показывает долю брутто-PnL, съеденную комиссиями. LIVE-зеркало "
+    "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
+    "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
+    "стоит широкий reduce-only disaster stop за стратегическим стопом: "
+    "обычное управление его не задевает, но падение процесса не оставит "
+    "позицию без защиты. Каждый закрытый трейд оценивается по alpha vs BTC "
+    "и R-multiple — уроки идут обратно в промпт."
 )
 
 CT_VAL = {
@@ -332,6 +337,13 @@ class AIConfig:
     fee_taker_pct: float = 0.0005          # OKX USDT-M taker, per side
     slippage_pct: float = 0.0002           # market-order slippage estimate, per side
     cost_min_edge_mult: float = 3.0        # expected move should clear cost by >=3x
+    # LIVE disaster stop: a wide reduce-only exchange STOP that only fires if the
+    # bot process dies. Set beyond the strategy stop so normal management never
+    # reaches it (v1.19 removed tighter algos because they closed LIVE alone).
+    live_disaster_stop: bool = True
+    live_disaster_stop_mult: float = 1.8   # × strategic stop distance
+    live_disaster_stop_extra: float = 0.01 # at least this much wider (fraction)
+    live_disaster_stop_max: float = 0.15   # hard ceiling so it stays a guard, not a trap
     # v1.33: opportunistic second slot. Only when the first trade already works.
     second_entry_enabled: bool = True
     second_entry_margin_pct: float = 0.30  # max margin for the 2nd pos (1st stays 40%)
@@ -490,6 +502,8 @@ class AIPosition:
     unrealized_pnl: float = 0.0
     mark_px: float = 0.0          # last mark from guard/tick (UI + breach checks)
     sl_algo_id: str = ""
+    disaster_algo_id: str = ""     # wide reduce-only STOP (LIVE only, process-death guard)
+    disaster_stop_px: float = 0.0
     scale_adds: int = 0
     tp_algo_id: str = ""
     owner_checked: bool = False   # cache _entry_fill_owner — historical fact
@@ -3744,10 +3758,15 @@ class AIStrategy:
         self._audit_live(
             "open", coin, side, sz, reason,
             ord_id=str((fills[0].get("ordId") if fills else "") or ""), ok=True)
-        # v1.19: deliberately NOT placing exchange-level SL/TP on LIVE.
-        # Independent OKX algo on LIVE can close without DEMO — root cause of
-        # LIVE drifting alone. LIVE closes ONLY via _close_live() with DEMO.
-        # Trade-off: if bot process dies, LIVE has no exchange stop until restart.
+        # v1.19 removed *tight* exchange SL/TP on LIVE because an independent
+        # algo could close LIVE while DEMO stayed open. v1.38 keeps that intent
+        # but adds a wide reduce-only disaster stop: it sits beyond the strategy
+        # stop, so normal management never reaches it, and it only fires if the
+        # bot process dies with a position open. It is cancelled on our close.
+        try:
+            await self._place_live_disaster_stop(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop wire: {e}", flush=True)
         self._persist_live()
         return True
 
@@ -3803,6 +3822,11 @@ class AIStrategy:
             await self._cancel_exchange_sl_tp(lc, pos)
         except Exception as e:
             print(f"[AI-LIVE] cancel exchange SL/TP: {e}", flush=True)
+        # Cancel the disaster guard too, so it cannot fire mid-close.
+        try:
+            await self._cancel_live_disaster_stop(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] cancel disaster stop: {e}", flush=True)
         # Safety: verify position still exists on exchange
         try:
             ep = await lc.get_positions(inst_id=pos.inst_id)
@@ -4299,6 +4323,10 @@ class AIStrategy:
                 # Compute default stop/take from entry when adopting after restart
                 self._ensure_default_stops(pos)
                 self._live_positions[coin] = pos
+                try:
+                    await self._ensure_live_disaster_stop(self._live_client(), pos)
+                except Exception as _de:
+                    print(f"[AI-LIVE] disaster stop after adopt {coin}: {_de}", flush=True)
                 print(
                     f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} "
                     f"upl={unc:+.2f} trade_id={pos.demo_trade_id or '-'}",
@@ -4598,6 +4626,92 @@ class AIStrategy:
             print(f"[AI] exchange SL/TP cancel exception {pos.coin}: {e}", flush=True)
         pos.sl_algo_id = ""
         pos.tp_algo_id = ""
+
+    # ── LIVE disaster stop (process-death guard) ──────────────────────────────
+
+    def _live_disaster_px(self, side: str, entry: float, stop_pct: float) -> float:
+        """Price for the wide LIVE guard, safely beyond the strategy stop."""
+        cfg = self.config
+        try:
+            base = abs(float(stop_pct or 0))
+        except (TypeError, ValueError):
+            base = 0.0
+        if base <= 0:
+            base = float(getattr(cfg, "min_stop_pct", 0.016) or 0.016)
+        mult = float(getattr(cfg, "live_disaster_stop_mult", 1.8) or 1.8)
+        extra = float(getattr(cfg, "live_disaster_stop_extra", 0.01) or 0.0)
+        cap = float(getattr(cfg, "live_disaster_stop_max", 0.15) or 0.15)
+        pct = min(cap, max(base * mult, base + extra))
+        px = float(entry or 0)
+        if px <= 0:
+            return 0.0
+        return px * (1 - pct) if str(side).lower() == "long" else px * (1 + pct)
+
+    async def _place_live_disaster_stop(self, client, pos) -> None:
+        """Wide reduce-only STOP on LIVE: protection if the process dies.
+
+        Deliberately well beyond the strategy stop, so normal management never
+        reaches it — this does not reintroduce the v1.19 "LIVE closed alone"
+        problem. ``cxlOnClosePos`` cancels it when the position closes, and
+        ``_close_live`` also cancels it explicitly before placing our own close.
+        """
+        if not client or not pos or not getattr(self.config, "live_disaster_stop", True):
+            return
+        try:
+            entry = float(pos.entry_price or 0)
+            stop_pct = 0.0
+            if entry > 0 and float(pos.stop_price or 0) > 0:
+                if str(pos.side).lower() == "long":
+                    stop_pct = (entry - float(pos.stop_price)) / entry
+                else:
+                    stop_pct = (float(pos.stop_price) - entry) / entry
+            px = self._live_disaster_px(pos.side, entry, stop_pct)
+            if px <= 0:
+                return
+            sz_str = self._fmt_sz(pos.coin, pos.size)
+            sl_side = "sell" if str(pos.side).lower() == "long" else "buy"
+            tid = re.sub(r"[^a-zA-Z0-9]", "", str(getattr(pos, "demo_trade_id", "") or ""))[:12]
+            resp = await client.place_algo_order(
+                inst_id=pos.inst_id, side=sl_side, sz=sz_str, td_mode="cross",
+                pos_side=pos.side, reduce_only=True,
+                sl_trigger_px=str(round(px, 4)), sl_ord_px="-1",
+                cxl_on_close_pos=True,
+                cl_ord_id=(f"ails{tid}"[:32] if tid else None),
+            )
+            if resp.get("error"):
+                msg = str(resp.get("message") or "")[:120]
+                print(f"[AI-LIVE] disaster stop error {pos.coin}: {msg}", flush=True)
+                self._audit_live("disaster_stop", pos.coin, pos.side, pos.size, msg, ok=False)
+                return
+            data = resp.get("data") or []
+            algo_id = str(data[0].get("algoId") or "") if data else ""
+            if algo_id:
+                pos.disaster_algo_id = algo_id
+                pos.disaster_stop_px = float(px)
+            print(f"[AI-LIVE] disaster stop {pos.coin} sl={px:.4f} algo={algo_id}", flush=True)
+            self._audit_live("disaster_stop", pos.coin, pos.side, pos.size,
+                             f"sl={px:.4f}", algo_id, ok=True)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop exception {pos.coin}: {e}", flush=True)
+
+    async def _cancel_live_disaster_stop(self, client, pos) -> None:
+        """Cancel the guard before we close the position ourselves."""
+        if not client or not pos or not getattr(pos, "disaster_algo_id", ""):
+            return
+        try:
+            resp = await client.cancel_algo_order(pos.inst_id, pos.disaster_algo_id)
+            if not resp.get("error"):
+                print(f"[AI-LIVE] disaster stop cancelled {pos.coin}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop cancel exception {pos.coin}: {e}", flush=True)
+        pos.disaster_algo_id = ""
+        pos.disaster_stop_px = 0.0
+
+    async def _ensure_live_disaster_stop(self, client, pos) -> None:
+        """Place the guard only if this position does not have one yet."""
+        if not client or not pos or getattr(pos, "disaster_algo_id", ""):
+            return
+        await self._place_live_disaster_stop(client, pos)
 
     async def _amend_exchange_sl(self, client, pos, new_sl_px: float) -> None:
         """Move the exchange SL order to a new price (trailing / breakeven)."""
@@ -7111,6 +7225,10 @@ class AIStrategy:
                     self._ensure_default_stops(pos)
                     self._live_positions[coin] = pos
                     used.add(coin)
+                    try:
+                        await self._ensure_live_disaster_stop(lc, pos)
+                    except Exception as _de:
+                        print(f"[AI-LIVE] disaster stop after hydrate {coin}: {_de}", flush=True)
                     print(f"[AI-LIVE] hydrate adopt {coin}: sz={sz} entry={entry} "
                           f"pnl={unc:+.2f} trade_id={tid or '-'}", flush=True)
                 # report live exchange positions we cannot restore
@@ -7831,6 +7949,13 @@ class AIStrategy:
                     round(100.0 * self._live_lifetime_wins / self._live_lifetime_trades, 1)
                     if self._live_lifetime_trades else None
                 ),
+                "disaster_stop_enabled": bool(
+                    getattr(self.config, "live_disaster_stop", True)),
+                "disaster_stop_mult": getattr(self.config, "live_disaster_stop_mult", 1.8),
+                "unprotected_open": [
+                    p.coin for p in self._live_positions.values()
+                    if not getattr(p, "disaster_algo_id", "")
+                ],
                 "open_positions": [
                     {
                         "coin": p.coin,
@@ -7842,6 +7967,8 @@ class AIStrategy:
                         "take_price": p.take_price,
                         "leverage": p.leverage,
                         "opened_at": p.opened_at,
+                        "disaster_stop_px": getattr(p, "disaster_stop_px", 0.0),
+                        "protected": bool(getattr(p, "disaster_algo_id", "")),
                         "account_mode": "live",
                     }
                     for p in self._live_positions.values()

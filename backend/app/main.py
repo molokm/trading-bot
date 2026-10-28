@@ -3050,6 +3050,19 @@ async def ai_status():
     # notional (that is why some DEMO trades never reach LIVE).
     try:
         from app.services.pnl_engine import epoch_ms as _epm
+        # LIVE closes only reached exchange_close_trades when an admin opened
+        # the LIVE card (_get_pnl_cached('live') → _compute_pnl → sync). With
+        # nobody on that page, sync_exchange_close_trades(mode='live') never ran
+        # (sync diag had a 'demo' key only) and the table held just the rows
+        # _close_live wrote by hand (14 vs 49 on the dashboard). Kick it here so
+        # the audit is always based on fresh bills; the 60s TTL bounds OKX calls.
+        try:
+            if live_manager is not None:
+                _lc0 = live_manager.get_client()
+                if _lc0 is not None and not getattr(_lc0, 'demo', True):
+                    await sync_exchange_close_trades(mode='live')
+        except Exception as _lse:
+            print(f'[ai/status] live sync: {_lse}', flush=True)
         _rows = await db.get_exchange_close_trades_detail(
             epoch_ms=int(_epm()), limit=400)
         _live = [r for r in _rows if str(r.get('account_mode') or '').lower() == 'live']
