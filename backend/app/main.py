@@ -3042,6 +3042,77 @@ async def ai_status():
     except Exception:
         pass
     status = await _apply_history_kpi(status, 'AI Discretionary 1H')
+    # ── LIVE mirror audit (read-only diagnostics) ──────────────────────
+    # Answers "why 30/49 LIVE closes have no DEMO twin": every LIVE close is
+    # classified by clOrdId (ail* = mirror, ai* = AI without mirror, untagged =
+    # manual/OKX app). Also reports which coins cannot be mirrored at the
+    # current LIVE equity because one lot is already larger than the target
+    # notional (that is why some DEMO trades never reach LIVE).
+    try:
+        from app.services.pnl_engine import epoch_ms as _epm
+        _rows = await db.get_exchange_close_trades_detail(
+            epoch_ms=int(_epm()), limit=400)
+        _live = [r for r in _rows if str(r.get('account_mode') or '').lower() == 'live']
+        _demo = [r for r in _rows if str(r.get('account_mode') or '').lower() != 'live']
+
+        def _owner(r):
+            cl = str(r.get('cl_ord_id') or '').strip().lower()
+            if cl.startswith('ail'):
+                return 'mirror'
+            if cl.startswith('ai'):
+                return 'ai_other'
+            return 'untagged'
+
+        _mix = {'mirror': 0, 'ai_other': 0, 'untagged': 0}
+        for r in _live:
+            _mix[_owner(r)] += 1
+        _unt = [r for r in _live if _owner(r) == 'untagged']
+        status['live_audit'] = {
+            'live_closes': len(_live),
+            'demo_closes': len(_demo),
+            'owner_mix': _mix,
+            'untagged_pnl': round(sum(float(r.get('pnl') or 0) for r in _unt), 2),
+            'untagged_recent': [
+                {'ts': r.get('close_ts'), 'inst': r.get('inst_id'),
+                 'pnl': round(float(r.get('pnl') or 0), 2),
+                 'cl': str(r.get('cl_ord_id') or '')[:12]}
+                for r in _unt[:8]
+            ],
+        }
+    except Exception as e:
+        print(f'[ai/status] live audit: {e}', flush=True)
+    try:
+        _leq = float((status.get('live') or {}).get('equity') or 0)
+        _cap = 0.0
+        try:
+            _raw = await db.get_setting('live_mirror_capital')
+            _cap = float(_raw or 0)
+        except Exception:
+            _cap = 0.0
+        _size_eq = _cap if _cap >= 10 else _leq
+        from app.bots.ai_discretionary.strategy import CT_VAL, LOT_SZ
+        _inds = status.get('indicators') or {}
+        _coins = []
+        for _c in (status.get('config') or {}).get('symbols') or []:
+            _px = float((_inds.get(_c) or {}).get('close') or 0)
+            _lot = float(LOT_SZ.get(_c, 0.01))
+            _ct = float(CT_VAL.get(_c, 0.01))
+            _min_n = _lot * _ct * _px
+            _target = (_size_eq * 0.012 / 0.02) if _size_eq else 0.0
+            _coins.append({
+                'coin': _c,
+                'min_notional': round(_min_n, 2),
+                'target_notional': round(_target, 2),
+                'blocked': bool(_target and _min_n > _target),
+            })
+        status['live_sizing'] = {
+            'size_eq': round(_size_eq, 2),
+            'live_capital_setting': _cap,
+            'blocked': [r['coin'] for r in _coins if r['blocked']],
+            'coins': _coins,
+        }
+    except Exception as e:
+        print(f'[ai/status] live sizing: {e}', flush=True)
     # History overlay replaces lifetime_pnl, so rebuild turnover from the same
     # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
     try:
