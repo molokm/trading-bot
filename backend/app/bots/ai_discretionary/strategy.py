@@ -236,10 +236,10 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.34.0-stats-exit"
+STRATEGY_VERSION = "v1.35.0-accounting"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.34 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "AI Discretionary 1H v1.35 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
     "ADX≥20, align≥0.62, conf≥0.68. Дебаты bull/bear на втором проходе LLM "
     "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
     "soft take +5.0%, partial 30%@+2.6%. Второй слот: при открытой и уже "
@@ -247,7 +247,10 @@ STRATEGY_DESC = (
     "ADX≥25, conf≥0.80) и НЕкоррелированный актив, с половинным риском и "
     "маржой ≤30%. Ограничение концентрации: не более 1 позиции на "
     "корреляционную группу; при доле BTC ≥50% в последних 10 сделках вход по "
-    "BTC требует conf≥0.85. Издержки явные: LLM видит round-trip fee+slippage, "
+    "BTC требует conf≥0.85. Partial-закрытие учитывается как реализованный "
+    "результат в сделках/equity/дневном лимите; scale-in вызывается и по "
+    "open, и по явному action=add; риск-гейт получает notional и leverage. "
+    "Издержки явные: LLM видит round-trip fee+slippage, "
     "статус показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый "
     "трейд оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
 )
@@ -2833,6 +2836,16 @@ class AIStrategy:
         entry = float(ind.get("close") or 0)
         if entry <= 0:
             return
+        # Sibling-bot ownership guard belongs here so EVERY entry path (main
+        # open, 2nd slot, scale-in) is covered. The 2nd slot calls _open()
+        # directly and previously skipped the check done in the dispatch.
+        try:
+            if await self._other_ai_owns(f"{coin}-USDT-SWAP", side):
+                self._record_exec("open_skip", coin=coin, side=side,
+                                  reason="sibling_bot_owns")
+                return
+        except Exception as e:
+            print(f"[AI] sibling check: {e}", flush=True)
         # Pre-flight: never open while the engine itself is not verifiably alive.
         _cap = int(getattr(self.config, "max_positions", 1) or 1) + (1 if second else 0)
         _pf = hg.preflight(
@@ -2864,8 +2877,13 @@ class AIStrategy:
             self._record_exec("open_skip", coin=coin, side=side, reason="size=0",
                               entry=entry, stop_pct=stop_pct)
             return
+        _ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+        _notional = abs(float(sz)) * _ct * float(entry or 0)
         try:
-            assert_can_open(is_reduce_only=False, ai_bot=self, symbol=coin)
+            # `notional_usd`/`leverage` used to be omitted, which silently
+            # disabled RISK_MAX_POSITION_USD and RISK_MAX_LEVERAGE.
+            assert_can_open(is_reduce_only=False, ai_bot=self, symbol=coin,
+                            notional_usd=_notional, leverage=float(lev))
         except Exception as e:
             self._record_exec("open_skip", coin=coin, side=side, reason=f"risk:{e}")
             return
@@ -4804,6 +4822,13 @@ class AIStrategy:
             pos.size = remain
             pos.partial_taken = True
             print(f"[AI] partial close {coin} sz={close_sz} remain={remain} ({reason})", flush=True)
+            # Book the realized leg. Before this the 30% that was banked only
+            # shrank pos.size: trades/equity/daily/lifetime never saw the
+            # realized PnL, so adaptive + risk limits under-counted the trade.
+            try:
+                await self._book_partial(client, coin, pos, close_sz, resp, reason)
+            except Exception as e:
+                print(f"[AI] partial book: {e}", flush=True)
             # Mirror reduce on live
             try:
                 if await self._mirror_enabled() and self._live_ready():
@@ -4832,6 +4857,117 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] partial exception {coin}: {e}", flush=True)
             return False
+
+
+    async def _book_partial(self, client, coin: str, pos, close_sz: float,
+                            resp: dict, reason: str) -> dict:
+        """Book a partial close as a realized event (books, log, DB, equity).
+
+        A partial is a real close fill on the exchange (its own OKX bill), so it
+        must hit the same books as a full close. Otherwise `_trade_log` /
+        adaptive / `_daily_realized` (risk limits) miss the banked share.
+        """
+        fills = list((resp or {}).get("data") or [])
+        mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) \
+            or float(getattr(pos, "entry_price", 0) or 0)
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        # Market ack often carries ordId but no avgPx/fee — resolve once.
+        if fills and (not fill_px or abs(fill_px - mark) < 1e-12):
+            try:
+                oid0 = fills[0].get("ordId") or fills[0].get("ord_id")
+                if oid0 and hasattr(client, "get_order"):
+                    od = await client.get_order(pos.inst_id, oid0)
+                    rows = list(od.get("data") or [])
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+                        fills = rows
+            except Exception:
+                pass
+        if not fill_px or fill_px <= 0:
+            fill_px = mark
+        fee_c = fee_cost(fee)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee,
+                            CT_VAL.get(coin, 0.01))
+        pnl = float(pnl or 0)
+        self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + pnl
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + pnl
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        if pnl > 0:
+            self._lifetime_wins += 1
+        self._lifetime_fees += fee_c
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+        self._persist()
+        close_side = "buy" if pos.side == "short" else "sell"
+        oid = ""
+        try:
+            oid = str((fills[0].get("ordId") if fills else "") or "")
+        except Exception:
+            oid = ""
+        cl = ""
+        try:
+            cl = str((fills[0].get("clOrdId") if fills else "") or "")
+        except Exception:
+            cl = ""
+        mode, key = self._account_mode_tag()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        self._trade_log.append({
+            "account_mode": mode,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "side": close_side, "symbol": pos.inst_id,
+            "size": close_sz, "pnl": round(pnl, 2),
+            "entry_price": pos.entry_price, "exit_price": fill_px,
+            "fee": round(fee_c, 6), "reason": "partial",
+            "pos_side": pos.side, "coin": coin,
+            "signal_id": signal_id, "ord_id": oid,
+        })
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=close_side, sz=close_sz, px=fill_px,
+                    ord_id=oid, inst_id=pos.inst_id, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="closed", signal_id=signal_id or None,
+                    account_mode=mode, account_key=key,
+                )
+            except Exception as e:
+                print(f"[AI] db partial: {e}", flush=True)
+            # Same authoritative attribution as a full close so the engine's
+            # dedupe (ord_id) sees one row, not a twin from the bill sync.
+            try:
+                if oid and hasattr(self.db, "upsert_exchange_close_trades"):
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid,
+                        "inst_id": pos.inst_id,
+                        "cl_ord_id": cl or f"{self._clord_prefix()}{int(time.time() * 1000)}",
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(close_sz or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(time.time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": mode,
+                        "account_key": key,
+                    }])
+            except Exception as e:
+                print(f"[AI] exchange_close partial: {e}", flush=True)
+        print(f"[AI] PARTIAL BOOK {coin} pnl={pnl:+.2f} sz={close_sz} "
+              f"remain={float(getattr(pos, 'size', 0) or 0)} ({reason})", flush=True)
+        return {"pnl": pnl, "px": float(fill_px or 0), "fee": fee_c, "ord_id": oid}
 
 
     def _indicator_exit_reason(self, pos, ind: dict, held_min: float) -> str | None:
@@ -6126,6 +6262,28 @@ class AIStrategy:
                     pass
             await self._close(client, coin, decision.get("reason") or "ai_reduce")
             return
+        if action == "add" and coin:
+            # Explicit LLM "add" was previously unhandled (silently dropped).
+            # Route it to the same scale-in gate as an open on an existing coin.
+            if coin in self._positions:
+                side_add = str(decision.get("side") or "").lower()
+                pos_a = self._positions.get(coin)
+                if (side_add and str(getattr(pos_a, "side", "")).lower() != side_add):
+                    self._record_exec("scale_skip", coin=coin, side=side_add,
+                                      reason="add_opposite_side")
+                elif not getattr(self.config, "scale_in_enabled", True):
+                    self._record_exec("scale_skip", coin=coin, side=side_add,
+                                      reason="scale_in_disabled")
+                else:
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in(add): {e}", flush=True)
+            else:
+                self._record_exec("scale_skip", coin=coin,
+                                  side=decision.get("side"),
+                                  reason="add_without_position")
+            return
         if action == "open" and coin and decision.get("side"):
             conf = float(decision.get("confidence") or 0)
             reason = str(decision.get("reason") or "")
@@ -6152,9 +6310,21 @@ class AIStrategy:
                 self._record_exec("open_skip", coin=coin, side=decision.get("side"),
                                   reason="blocked_mock_or_llm_error")
                 return
+            side_dec = str(decision.get("side") or "").lower()
+            # Already in this coin: same side = scale-in, opposite = churn.
+            # This MUST run before the blanket `already_open` skip below — with
+            # the old order the early return made the scale-in branch dead code.
             if coin in self._positions:
-                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
-                                  reason="already_open")
+                pos0 = self._positions.get(coin)
+                if (str(getattr(pos0, "side", "")).lower() == side_dec
+                        and getattr(self.config, "scale_in_enabled", True)):
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in: {e}", flush=True)
+                else:
+                    self._record_exec("open_skip", coin=coin, side=side_dec,
+                                      reason="already_open")
                 return
             try:
                 inst = f"{coin}-USDT-SWAP"
@@ -6171,17 +6341,6 @@ class AIStrategy:
                     return
             except Exception as e:
                 print(f"[{self.BOT_NAME}] sibling check: {e}", flush=True)
-            side_dec = str(decision.get("side") or "").lower()
-            # Scale-in: already in same coin+side and trend continues → add size, don't churn
-            if coin in self._positions and getattr(self._positions[coin], "side", "") == side_dec:
-                if getattr(self.config, "scale_in_enabled", True):
-                    try:
-                        await self._maybe_scale_in(client, coin, decision)
-                    except Exception as e:
-                        print(f"[AI] scale_in: {e}", flush=True)
-                else:
-                    self._record_exec("open_skip", coin=coin, side=side_dec, reason="already_in")
-                return
             # Anti-churn: just closed same side → wait (unless align is exceptional)
             try:
                 lc = (self._last_closes or {}).get(coin) or {}
