@@ -225,3 +225,20 @@ def test_engine_rows_are_sorted_chronologically():
     log, _ = bot._rebuild_trade_log(_DB_ROWS, _ENG_ROWS)
     keys = [bot._ts_sort_key(t) for t in log]
     assert keys == sorted(keys)
+
+
+def test_hydrate_uses_card_loader_args():
+    # Card: load_eligible_rows(allow_untagged_ai=AI_ONLY_MODE, sync_fn=...).
+    # Hydrating with defaults lost the untagged close (46 vs 47 trades).
+    src = inspect.getsource(AIStrategy._refresh_engine_stats)
+    assert "allow_untagged_ai=" in src
+    assert "sync_fn=" in src
+    hydrate = inspect.getsource(AIStrategy._hydrate_from_db)
+    assert "_refresh_engine_stats(force=True)" in hydrate
+    assert "_engine_rows" in hydrate
+
+
+def test_tick_refreshes_lifetime_from_engine():
+    src = inspect.getsource(AIStrategy._tick)
+    assert "_refresh_engine_stats" in src
+    assert "_lifetime_pnl" in src

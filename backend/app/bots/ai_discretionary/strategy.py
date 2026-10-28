@@ -5912,6 +5912,17 @@ class AIStrategy:
                 await self._sync_equity(client)
         except Exception as _ee:
             print(f"[AI] equity sync tick: {_ee}", flush=True)
+        # Keep internal lifetime counters on the SAME rows/values as the card.
+        try:
+            _es = await self._refresh_engine_stats()
+            if _es:
+                self._lifetime_trades = int(_es["trades"])
+                self._lifetime_wins = int(_es["wins"])
+                self._lifetime_pnl = float(_es["pnl"])
+                if float(_es.get("fees") or 0) > 0:
+                    self._lifetime_fees = float(_es["fees"])
+        except Exception as _se:
+            print(f"[AI] engine stats tick: {_se}", flush=True)
         if self._tick_count == 0:
             _demo = getattr(client, "demo", None)
             print(f"[AI] tick #0: OKX client ready, client.demo={_demo}, execute={self._execute_enabled()}, capital=${self._capital:.2f}", flush=True)
@@ -6659,6 +6670,54 @@ class AIStrategy:
             }
         return rebuilt[-120:], stats
 
+    async def _refresh_engine_stats(self, force: bool = False) -> dict | None:
+        """Read the authoritative close set with the SAME args as the card.
+
+        The dashboard calls load_eligible_rows(allow_untagged_ai=AI_ONLY_MODE,
+        sync_fn=sync_exchange_close_trades). Hydrating with the defaults counted
+        one row less (46 vs 47 trades, WR 56.5 vs 55.3), so "internal" never
+        really matched the card. Cache 5 min: one DB read + a TTL-guarded sync.
+        """
+        if not self.db:
+            return None
+        now = time.time()
+        if not force and (now - float(getattr(self, "_engine_stats_ts", 0) or 0)) < 300:
+            return getattr(self, "_engine_stats", None)
+        allow_untagged = True
+        sync_fn = None
+        try:
+            import sys as _sys
+            _mp = _sys.modules.get("app.main")
+            if _mp is not None:
+                allow_untagged = bool(getattr(_mp, "AI_ONLY_MODE", True))
+                sync_fn = getattr(_mp, "sync_exchange_close_trades", None)
+        except Exception:
+            pass
+        mode, _key = self._account_mode_tag()
+        _m = "live" if mode == "live" else "demo"
+        try:
+            from app.services import pnl_engine as _pe
+            rows, _diag = await _pe.load_eligible_rows(
+                self.db, mode=_m, ai_only=True,
+                allow_untagged_ai=allow_untagged,
+                sync_fn=(lambda: sync_fn(mode=_m)) if sync_fn else None,
+            )
+        except Exception as e:
+            print(f"[AI] engine stats: {e}", flush=True)
+            return getattr(self, "_engine_stats", None)
+        self._engine_rows = rows
+        self._engine_stats_ts = now
+        if not rows:
+            return None
+        stats = {
+            "trades": len(rows),
+            "wins": sum(1 for r in rows if float(r.get("pnl") or 0) > 0),
+            "pnl": round(sum(float(r.get("pnl") or 0) for r in rows), 2),
+            "fees": round(sum(float(r.get("fee") or 0) for r in rows), 2),
+        }
+        self._engine_stats = stats
+        return stats
+
     async def _hydrate_from_db(self):
         """Reload lifetime stats + open positions from Postgres after deploy.
 
@@ -6749,20 +6808,11 @@ class AIStrategy:
             # rebuild recent trade log for UI / adapt, then overlay the engine's
             # authoritative PnL by ord_id (same set T as the dashboard card).
             rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=200)
-            eng_rows = []
-            try:
-                from app.services import pnl_engine as _pe
-                _mode, _k = self._account_mode_tag()
-                eng_rows, _diag = await _pe.load_eligible_rows(
-                    self.db, mode=("live" if _mode == "live" else "demo"),
-                    ai_only=True,
-                )
-            except Exception as _ee:
-                print(f"[AI] hydrate engine rows: {_ee}", flush=True)
-            rebuilt, eng_stats = self._rebuild_trade_log(rows, eng_rows)
+            eng_stats = await self._refresh_engine_stats(force=True)
+            eng_rows = list(getattr(self, "_engine_rows", None) or [])
+            rebuilt, _stats = self._rebuild_trade_log(rows, eng_rows)
             if rebuilt:
                 self._trade_log = rebuilt
-            self._engine_stats = eng_stats
             if eng_stats:
                 # One source of truth: internal counters must equal the engine
                 # total, otherwise lifetime_pnl_internal drifts from the card.
