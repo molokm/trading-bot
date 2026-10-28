@@ -90,3 +90,36 @@ def test_booking_a_close_invalidates_the_engine_cache():
     """
     assert "_engine_stats_ts = 0.0" in inspect.getsource(AIStrategy._close)
     assert "_engine_stats_ts = 0.0" in inspect.getsource(AIStrategy._book_partial)
+
+
+def _counter_bot(trades, pnl):
+    bot = object.__new__(AIStrategy)
+    bot._lifetime_trades = trades
+    bot._lifetime_pnl = pnl
+    bot._lifetime_wins = 0
+    bot._lifetime_fees = 0.0
+    return bot
+
+
+def test_engine_overlay_never_moves_backwards():
+    """A pre-close snapshot must not overwrite the fresh booking.
+
+    Observed on prod: 58 trades in both places, but internal PnL 94.09 vs card
+    90.35 — the tick applied an engine snapshot missing the last (-3.74) close.
+    """
+    bot = _counter_bot(5, 10.0)
+    assert bot._apply_engine_stats({"trades": 4, "wins": 2, "pnl": 8.0}) is False
+    assert (bot._lifetime_trades, bot._lifetime_pnl) == (5, 10.0)
+
+
+def test_engine_overlay_applies_equal_or_newer_snapshots():
+    bot = _counter_bot(5, 10.0)
+    assert bot._apply_engine_stats({"trades": 5, "wins": 3, "pnl": 10.0}) is True
+    assert bot._apply_engine_stats({"trades": 6, "wins": 4, "pnl": 12.5}) is True
+    assert (bot._lifetime_trades, bot._lifetime_wins, bot._lifetime_pnl) == (6, 4, 12.5)
+
+
+def test_engine_overlay_force_applies_on_hydrate():
+    bot = _counter_bot(9, 99.0)
+    assert bot._apply_engine_stats({"trades": 4, "wins": 1, "pnl": 8.0}, force=True) is True
+    assert (bot._lifetime_trades, bot._lifetime_pnl) == (4, 8.0)

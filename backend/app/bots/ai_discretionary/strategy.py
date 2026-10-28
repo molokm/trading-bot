@@ -6206,11 +6206,7 @@ class AIStrategy:
         try:
             _es = await self._refresh_engine_stats()
             if _es:
-                self._lifetime_trades = int(_es["trades"])
-                self._lifetime_wins = int(_es["wins"])
-                self._lifetime_pnl = float(_es["pnl"])
-                if float(_es.get("fees") or 0) > 0:
-                    self._lifetime_fees = float(_es["fees"])
+                self._apply_engine_stats(_es)
         except Exception as _se:
             print(f"[AI] engine stats tick: {_se}", flush=True)
         if self._tick_count == 0:
@@ -7032,6 +7028,32 @@ class AIStrategy:
         self._engine_stats = stats
         return stats
 
+    def _apply_engine_stats(self, stats, force: bool = False) -> bool:
+        """Overlay engine counters — but never move backwards on trade count.
+
+        A snapshot taken before the latest close has fewer trades and an older
+        PnL. Applying it on the next tick made `lifetime_pnl_internal` fall below
+        the card for up to five minutes after every close (58 trades in both
+        places, but PnL 94.09 vs 90.35). `force` is used on hydrate, where the
+        DB read happens after everything is persisted.
+        """
+        try:
+            n = int((stats or {}).get("trades") or 0)
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if not force and n < int(getattr(self, "_lifetime_trades", 0) or 0):
+            return False
+        self._lifetime_trades = n
+        self._lifetime_wins = int(stats.get("wins") or 0)
+        self._lifetime_pnl = float(stats.get("pnl") or 0)
+        try:
+            fees = float(stats.get("fees") or 0)
+        except (TypeError, ValueError):
+            fees = 0.0
+        if fees > 0:
+            self._lifetime_fees = fees
+        return True
+
     async def _hydrate_from_db(self):
         """Reload lifetime stats + open positions from Postgres after deploy.
 
@@ -7130,11 +7152,10 @@ class AIStrategy:
             if eng_stats:
                 # One source of truth: internal counters must equal the engine
                 # total, otherwise lifetime_pnl_internal drifts from the card.
-                self._lifetime_trades = int(eng_stats["trades"])
-                self._lifetime_wins = int(eng_stats["wins"])
-                self._lifetime_pnl = float(eng_stats["pnl"])
-                if float(eng_stats.get("fees") or 0) > 0:
-                    self._lifetime_fees = float(eng_stats["fees"])
+                # force=True — hydration reads after everything is persisted,
+                # so the engine may legitimately have fewer rows than a stale
+                # local counter (reset/repair).
+                self._apply_engine_stats(eng_stats, force=True)
                 print(f"[AI] hydrate engine: trades={self._lifetime_trades} "
                       f"wins={self._lifetime_wins} pnl={self._lifetime_pnl:.2f} "
                       f"fees={self._lifetime_fees:.2f}", flush=True)
