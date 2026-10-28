@@ -79,3 +79,13 @@ def test_mirror_audit_classifies_ail_as_mirror():
     src = inspect.getsource(m.ai_status)
     assert "startswith('ail')" in src
     assert "startswith('ai')" in src
+
+
+def test_live_sync_runs_from_status_using_the_bot_client():
+    # The module-global live_manager is stale: /api/live/connect builds a local
+    # manager and assigns it to ai_bot. Asking the bot is the only reliable check.
+    import app.main as m
+
+    src = inspect.getsource(m.ai_status)
+    assert "ai_bot._live_ready()" in src
+    assert "sync_exchange_close_trades(mode='live')" in src

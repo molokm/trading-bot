@@ -3056,11 +3056,11 @@ async def ai_status():
         # (sync diag had a 'demo' key only) and the table held just the rows
         # _close_live wrote by hand (14 vs 49 on the dashboard). Kick it here so
         # the audit is always based on fresh bills; the 60s TTL bounds OKX calls.
+        # NB: ask the BOT for its client — the /api/live/connect endpoints build a
+        # local manager and hand it to ai_bot, leaving the module global stale.
         try:
-            if live_manager is not None:
-                _lc0 = live_manager.get_client()
-                if _lc0 is not None and not getattr(_lc0, 'demo', True):
-                    await sync_exchange_close_trades(mode='live')
+            if ai_bot is not None and ai_bot._live_ready():
+                await sync_exchange_close_trades(mode='live')
         except Exception as _lse:
             print(f'[ai/status] live sync: {_lse}', flush=True)
         _rows = await db.get_exchange_close_trades_detail(
