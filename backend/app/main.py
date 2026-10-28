@@ -2339,22 +2339,20 @@ async def me_dashboard(request: Request):
         demo = {'error': str(e)}
     trades = []
     has_live = False
+    _lrc = None
     if role == 'admin':
-        # Owner admin session (token or cookie) — platform mirror
-        has_live = bool(_live_key and _live_secret and _live_pass)
-        if not has_live and live_manager is not None:
-            try:
-                has_live = bool(live_manager.get_client())
-            except Exception:
-                has_live = False
+        # Owner admin session (token or cookie) — platform mirror.
+        # Resolve the client itself: creds may be present while the module
+        # global live_manager is stale (the bot holds the fresh manager).
+        _lrc = _live_read_client()
+        has_live = bool(_lrc is not None or (_live_key and _live_secret and _live_pass))
     elif user_id and user_row:
         has_live = bool(user_row.get('okx_key_enc')) and not bool(user_row.get('okx_demo', 1))
     if has_live:
         try:
             client = None
             if role == 'admin' and user_id is None:
-                lc = live_manager.get_client() if live_manager else None
-                client = lc
+                client = _lrc
             elif user_id:
                 client = await _user_okx_client(str(user_id))
             if client:

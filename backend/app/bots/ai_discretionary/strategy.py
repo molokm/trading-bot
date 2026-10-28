@@ -684,6 +684,33 @@ class AIStrategy:
             return s[3:15]
         return ""
 
+    async def _live_close_tag_for_inst(self, client, inst_id: str) -> str:
+        """Recover the slot's close tag from the entry fill's clOrdId.
+
+        Used when memory has no AIPosition (restart/manual desync) but the
+        position is still ours: keeps the cleanup attributable and pairable
+        instead of emitting an untagged ``ai{ms}`` order.
+        """
+        if client is None or not inst_id:
+            return ""
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        best, best_ts = "", 0
+        for f in data:
+            tid = self._trade_id_from_clord(str(f.get("clOrdId") or ""))
+            if not tid:
+                continue
+            try:
+                ts = int(f.get("fillTime") or f.get("ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if not best or ts >= best_ts:
+                best, best_ts = tid, ts
+        return self._clord_live_close(best) if best else ""
+
     def start(self):
         if self._running:
             return
@@ -4686,13 +4713,23 @@ class AIStrategy:
             sz_str = self._fmt_sz(pos.coin, pos.size)
             sl_side = "sell" if str(pos.side).lower() == "long" else "buy"
             tid = re.sub(r"[^a-zA-Z0-9]", "", str(getattr(pos, "demo_trade_id", "") or ""))[:12]
-            resp = await client.place_algo_order(
-                inst_id=pos.inst_id, side=sl_side, sz=sz_str, td_mode="cross",
-                pos_side=pos.side, reduce_only=True,
-                sl_trigger_px=str(round(px, 4)), sl_ord_px="-1",
-                cxl_on_close_pos=True,
-                cl_ord_id=(f"ails{tid}"[:32] if tid else None),
-            )
+            cl = f"ails{tid}"[:32] if tid else None
+            resp = {}
+            # Hedge accounts want posSide=long/short; net accounts want net/omit.
+            # Mirror the fallback used by market orders, otherwise the guard can
+            # be rejected on one of the two position modes.
+            for _ps in (pos.side, "net", None):
+                try:
+                    resp = await client.place_algo_order(
+                        inst_id=pos.inst_id, side=sl_side, sz=sz_str, td_mode="cross",
+                        pos_side=_ps, reduce_only=True,
+                        sl_trigger_px=str(round(px, 4)), sl_ord_px="-1",
+                        cxl_on_close_pos=True, cl_ord_id=cl,
+                    )
+                except Exception as _e:
+                    resp = {"error": True, "message": str(_e)}
+                if not resp.get("error"):
+                    break
             if resp.get("error"):
                 msg = str(resp.get("message") or "")[:120]
                 print(f"[AI-LIVE] disaster stop error {pos.coin}: {msg}", flush=True)

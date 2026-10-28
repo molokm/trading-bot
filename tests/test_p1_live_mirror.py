@@ -221,3 +221,12 @@ async def test_flatten_position_forwards_the_close_tag():
     await flatten_position(_Client(), "ETH-USDT-SWAP", "long", 1.0,
                            cl_ord_id="aila1b2c3d4e5f6c")
     assert calls[0]["cl_ord_id"] == "aila1b2c3d4e5f6c"
+
+
+def test_dashboard_live_card_uses_the_fresh_client():
+    # /api/me/dashboard reported {"live": {"connected": false}} while
+    # /api/ai/status had the mirror connected — it read the stale global.
+    import app.main as m
+
+    src = inspect.getsource(m.me_dashboard)
+    assert "_live_read_client()" in src
