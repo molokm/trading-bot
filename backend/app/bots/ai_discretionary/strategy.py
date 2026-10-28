@@ -7734,6 +7734,14 @@ class AIStrategy:
                 "effective_min_confidence": self._effective_min_confidence(),
                 "effective_min_align": self._effective_min_align(),
                 "adapt_preset": (self._adapt or {}).get("preset"),
+                "adapt_size_cap": (self._adapt or {}).get("size_cap"),
+                "cost_min_edge_mult": getattr(self.config, "cost_min_edge_mult", 3.0),
+                "min_edge_pct": round(
+                    self._round_trip_cost_pct() * float(
+                        getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0), 3),
+                "block_chop_opens": bool(getattr(self.config, "block_chop_opens", True)),
+                "scale_in_enabled": bool(getattr(self.config, "scale_in_enabled", True)),
+                "second_entry_enabled": bool(getattr(self.config, "second_entry_enabled", True)),
             },
             "indicators": self._latest_indicators,
             "last_decision": (
