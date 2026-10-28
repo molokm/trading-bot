@@ -7597,6 +7597,46 @@ async def _bot_history_stats() -> dict:
             c = counts.get(bot) or {'total_trades': 0, 'wins': 0, 'losses': 0}
             total = int(c['total_trades'])
             stats[bot] = {'total_pnl': round(total_pnl, 2), 'total_trades': total, 'wins': int(c.get('wins', 0)), 'losses': int(c.get('losses', 0)), 'win_rate': round(c['wins'] / total * 100, 1) if total else 0.0, 'total_pnl_source': 'exchange_close_trades'}
+        # AI Discretionary: count the EXACT set T the dashboard card uses.
+        # The timebucket read above skips rows without a bot_label, so KPI showed
+        # 46 trades / 56.5% WR while the card showed 47 / 55.3%.
+        try:
+            from app.services import pnl_engine as _pe
+            _rows, _diag = await _pe.load_eligible_rows(
+                db, mode=current_mode, ai_only=True,
+                allow_untagged_ai=bool(AI_ONLY_MODE),
+            )
+            _ep = _pe.epoch_ms()
+            _n = _w = _l = 0
+            _sum = 0.0
+            for _r in _rows:
+                try:
+                    _p = float(_r.get('pnl') or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(_p) < 1e-12:
+                    continue
+                _ts = _pe._parse_ts_ms(
+                    _r.get('close_ts') or _r.get('ts') or _r.get('timestamp'))
+                if not _ts or _ts < _ep:
+                    continue
+                if not _pe.resolve_bot(_r, ai_only=True):
+                    continue
+                _n += 1
+                _sum += _p
+                if _p > 0:
+                    _w += 1
+                elif _p < 0:
+                    _l += 1
+            if _n:
+                stats['AI Discretionary 1H'] = {
+                    'total_pnl': round(_sum, 2), 'total_trades': _n,
+                    'wins': _w, 'losses': _l,
+                    'win_rate': round(_w / _n * 100, 1),
+                    'total_pnl_source': 'pnl_engine',
+                }
+        except Exception as e:
+            print(f'[bot_stats] engine overlay: {e}', flush=True)
     except Exception as e:
         print(f'[bot_stats] error: {e}', flush=True)
     _bot_stats_cache['ts'] = now_s

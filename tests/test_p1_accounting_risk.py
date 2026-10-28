@@ -273,3 +273,13 @@ async def test_refresh_engine_stats_counts_only_rows_the_card_counts(monkeypatch
     assert seen["allow_untagged_ai"] is True
     assert seen["ai_only"] is True
     assert len(bot._engine_rows) == 1
+
+
+def test_bot_history_stats_counts_the_card_set():
+    """KPI (lifetime_trades/win_rate) must come from the same set T as the card."""
+    import app.main as m
+
+    src = inspect.getsource(m._bot_history_stats)
+    assert "load_eligible_rows" in src
+    assert "resolve_bot" in src
+    assert "total_pnl_source': 'pnl_engine'" in src
