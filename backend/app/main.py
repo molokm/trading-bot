@@ -2891,6 +2891,8 @@ async def me_dashboard(request: Request):
                 _oid = str(_r.get('ord_id') or '').strip()
                 _px = _price_by_ord.get((_oid, _mode)) or {}
                 _coin = _eng_coin(_r.get('inst'))
+                _entry_px = _r.get('entry_px') if _r.get('entry_px') is not None else _px.get('entry_px')
+                _exit_px = _r.get('exit_px') if _r.get('exit_px') is not None else _px.get('exit_px')
                 _eng_list.append({
                     'time': _norm_ts(_r.get('time')),
                     'inst': _coin,
@@ -2903,10 +2905,10 @@ async def me_dashboard(request: Request):
                     'reason': _r.get('reason') or 'closed',
                     'ord_id': _oid,
                     'bot': _r.get('bot') or 'AI Discretionary 1H',
-                    'entry_px': _px.get('entry_px'),
-                    'exit_px': _px.get('exit_px'),
-                    'entry_price': _px.get('entry_px'),
-                    'exit_price': _px.get('exit_px'),
+                    'entry_px': _entry_px,
+                    'exit_px': _exit_px,
+                    'entry_price': _entry_px,
+                    'exit_price': _exit_px,
                 })
         if _eng_list:
             trades = _eng_list
@@ -7122,6 +7124,8 @@ async def _compute_pnl(mode: str = None):
                     'bot': r.get('bot') or 'AI Discretionary 1H',
                     'ord_id': r.get('ord_id') or '',
                     'reason': 'closed',
+                    'entry_px': r.get('entry_px'),
+                    'exit_px': r.get('exit_px'),
                 }
                 for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:500]
             ],

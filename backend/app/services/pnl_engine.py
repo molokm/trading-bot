@@ -175,6 +175,25 @@ def normalize_close_row(r: dict) -> Optional[dict]:
         mode = "demo"
     inst = str(r.get("inst_id") or r.get("instId") or r.get("symbol") or r.get("inst") or r.get("coin") or "")
     side = str(r.get("side") or r.get("posSide") or r.get("pos_side") or "").lower()
+
+    def _px(*keys):
+        for k in keys:
+            v = r.get(k)
+            if v in (None, ""):
+                continue
+            try:
+                f = float(v)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    # Prices are informational only — never used for totals, but the «Сделки»
+    # panel shows the pair. Keep them on the canonical row so the list can be
+    # built from the same rows as the card without a second lookup.
+    entry_px = _px("entry_px", "entry_price", "entry", "open_avg_px", "openAvgPx")
+    exit_px = _px("exit_px", "exit_price", "exit", "avg_px", "avgPx", "fill_px", "fillPx", "px", "close_px")
     return {
         "pnl": pnl,
         "fee": abs(float(r.get("fee") or 0) or 0),
@@ -187,6 +206,8 @@ def normalize_close_row(r: dict) -> Optional[dict]:
         "ord_id": str(r.get("ord_id") or r.get("ordId") or "").strip(),
         "account_mode": mode,
         "side": side,
+        "entry_px": entry_px,
+        "exit_px": exit_px,
     }
 
 
