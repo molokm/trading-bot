@@ -173,6 +173,76 @@ showcase_manager = OKXClientManager.new_instance()
 live_manager = OKXClientManager.new_instance()
 
 
+# exit-v2 policy: raise the profit-taking bar so winners are not cut at
+# fee-level gains. The dataclass defaults were changed too, but the full config
+# snapshot is persisted in `ai_config:*` and re-applied at every boot, so a
+# one-shot migration is required for the change to reach an already-running
+# deployment (see _apply_exit_policy_v34).
+_EXIT_POLICY_V34 = {
+    "partial_take_pct": 2.60,
+    "partial_take_frac": 0.30,
+    "soft_profit_take_pct": 5.00,
+    "hard_profit_lock_peak": 2.60,
+    "hard_profit_lock_floor": 0.30,
+    "giveback_min_peak_pct": 1.80,
+    "giveback_retain_frac": 0.40,
+    "breakeven_atr_mult": 0.90,
+    "breakeven_min_pct": 1.00,
+    "breakeven_lock_pct": 0.20,
+    "trail_activate_atr_mult": 1.50,
+    "trail_activate_pct": 2.00,
+    "trail_atr_mult": 1.10,
+    "exit_min_profit_pct": 0.60,
+    "ind_exit_soft_hold_pct": 2.00,
+    # Concentration limits (also new AIConfig fields — listed so the persisted
+    # snapshot carries them explicitly).
+    "max_positions_per_group": 1,
+    "btc_max_recent_share": 0.50,
+    "btc_min_confidence": 0.85,
+}
+
+
+async def _apply_exit_policy_v34(db, bot=None) -> dict:
+    """One-shot: force exit-v2 into the persisted AI config.
+
+    Guarded by a settings marker, so an admin can retune afterwards without the
+    migration overriding the new values on the next restart.
+    """
+    marker = 'ai_exit_policy_v34'
+    try:
+        if (await db.get_setting(marker)) == 'applied':
+            return {}
+    except Exception:
+        pass
+    applied = {}
+    for key in ('ai_config:demo', 'ai_config:live'):
+        try:
+            raw = await db.get_setting(key)
+            if not raw:
+                continue
+            cfg = json.loads(raw)
+            if not isinstance(cfg, dict):
+                continue
+            for k, v in _EXIT_POLICY_V34.items():
+                cfg[k] = v
+                applied[k] = v
+            await db.set_setting(key, json.dumps(cfg, ensure_ascii=False))
+        except Exception as e:
+            print(f'[exit-policy] {key}: {e}', flush=True)
+    if bot is not None and applied:
+        try:
+            bot.apply_config_dict(_EXIT_POLICY_V34, keep_execute=True)
+        except Exception as e:
+            print(f'[exit-policy] runtime apply: {e}', flush=True)
+    if applied:
+        try:
+            await db.set_setting(marker, 'applied')
+        except Exception:
+            pass
+    print(f'[exit-policy] exit-v2 applied to {len(applied)} knobs', flush=True)
+    return applied
+
+
 def _ai_default_config(**overrides):
     """Single source of truth for AI defaults (boot, UI start, retry paths).
 
@@ -885,6 +955,10 @@ async def startup():
                         _slog(f'applied saved config ({_cfgkey}, {len(_saved_cfg)} keys)')
                 except Exception as _ce:
                     _slog(f'saved config apply error: {_ce}')
+                try:
+                    await _apply_exit_policy_v34(db, ai_bot)
+                except Exception as _ep:
+                    _slog(f'exit policy exit-v2: {_ep}')
                 ai_bot.start()
                 await _seed_daily_realized(ai_bot)
                 _slog(f'ai_bot started: running={ai_bot._running}')
@@ -3204,6 +3278,10 @@ async def ai_start(data: dict=None):
                 print(f'[AI/start] applied saved AI config ({_cfgkey})', flush=True)
         except Exception as _ce:
             print(f'[AI/start] saved config apply: {_ce}', flush=True)
+        try:
+            await _apply_exit_policy_v34(db, ai_bot)
+        except Exception as _ep:
+            print(f'[AI/start] exit policy exit-v2: {_ep}', flush=True)
         ai_bot.start()
         await _seed_daily_realized(ai_bot)
         global _positions_cache

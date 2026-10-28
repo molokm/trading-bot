@@ -1463,7 +1463,10 @@ class Database:
                 "COALESCE(SUM(pnl), 0) as total_pnl, "
                 "COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win, "
                 "COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss "
-                "FROM trades WHERE bot_id = $1 AND state IN ('filled', 'closed')",
+                # Only closes carry a realized result. `filled` rows are executed
+                # entries (fee-only pnl≈0) and used to inflate the trade count,
+                # dragging the lifetime win-rate down (19% vs the real ~55%).
+                "FROM trades WHERE bot_id = $1 AND state = 'closed'",
                 (bot_id,)
             )
         else:
@@ -1474,7 +1477,7 @@ class Database:
                 "COALESCE(SUM(pnl), 0) as total_pnl, "
                 "COALESCE(AVG(CASE WHEN pnl > 0 THEN pnl END), 0) as avg_win, "
                 "COALESCE(AVG(CASE WHEN pnl < 0 THEN pnl END), 0) as avg_loss "
-                "FROM trades WHERE bot_id = ? AND state IN ('filled', 'closed')",
+                "FROM trades WHERE bot_id = ? AND state = 'closed'",
                 (bot_id,)
             )
         return row or {"total": 0, "wins": 0, "losses": 0, "total_pnl": 0,

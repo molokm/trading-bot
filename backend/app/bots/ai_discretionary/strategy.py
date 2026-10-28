@@ -236,18 +236,20 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.33.0-second-slot"
+STRATEGY_VERSION = "v1.34.0-stats-exit"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.33 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "AI Discretionary 1H v1.34 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
     "ADX≥20, align≥0.62, conf≥0.68. Дебаты bull/bear на втором проходе LLM "
     "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
-    "soft take +2.8%, partial 25%@+1.8%. Второй слот: при открытой и уже "
+    "soft take +5.0%, partial 30%@+2.6%. Второй слот: при открытой и уже "
     "зелёной позиции бот может взять ещё одну — но только сильный (align≥0.85, "
     "ADX≥25, conf≥0.80) и НЕкоррелированный актив, с половинным риском и "
-    "маржой ≤30%. Издержки явные: LLM видит round-trip fee+slippage, статус "
-    "показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый трейд "
-    "оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
+    "маржой ≤30%. Ограничение концентрации: не более 1 позиции на "
+    "корреляционную группу; при доле BTC ≥50% в последних 10 сделках вход по "
+    "BTC требует conf≥0.85. Издержки явные: LLM видит round-trip fee+slippage, "
+    "статус показывает долю брутто-PnL, съеденную комиссиями. Каждый закрытый "
+    "трейд оценивается по alpha vs BTC и R-multiple — уроки идут обратно в промпт."
 )
 
 CT_VAL = {
@@ -311,6 +313,11 @@ class AIConfig:
     capital: float = 10000.0
     max_leverage: float = 3.0
     max_positions: int = 2                 # v1.29: allow 2 concurrent trends
+    # exit-v2 concentration limits: 62% of all trades were BTC yet BTC lost
+    # money, so a single coin/group must not dominate the book.
+    max_positions_per_group: int = 1       # at most 1 open per correlation group
+    btc_max_recent_share: float = 0.50     # >50% of last 10 closes => BTC needs more
+    btc_min_confidence: float = 0.85       # ...this confidence when that share holds
     risk_per_trade: float = 0.015          # ~1.5% equity at stop (medium-aggressive)
     allocation_pct: float = 0.40           # max margin / equity per pos (medium-aggressive)
     # v1.32 cost model: what one open->close round trip actually costs us.
@@ -361,16 +368,16 @@ class AIConfig:
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
     min_hold_minutes: float = 90.0         # v1.30: hold through 1H noise
-    exit_min_profit_pct: float = 0.20      # v1.21: was 0.10 — lock profitable gains after fees
+    exit_min_profit_pct: float = 0.60      # exit-v2: 0.20→0.60 — a "lock" below
+                                           # 3× round-trip (~0.42%) is just fees
+    ind_exit_soft_hold_pct: float = 2.00   # exit-v2: let a trending winner run to
+                                           # +2% before a soft EMA/ROC flip exits
     exit_on_ema_cross: bool = True
     exit_on_price_vs_ema: bool = True
     exit_on_roc_flip: bool = True
     exit_weak_adx: float = 12.0
-    trail_activate_pct: float = 1.20       # v1.16: 0.40→0.65 — kept in sync with
-                                            # trail_activate_atr_mult (OR'd together;
-                                            # the smaller of the two always wins, so
-                                            # leaving this low would have silently
-                                            # undone the ATR widening above)
+    trail_activate_pct: float = 2.00       # exit-v2: % fallback, kept ABOVE the
+                                            # ATR trigger so ATR governs arming
     trail_lock_pct: float = 0.22           # v1.30: wider trail — less noise stops
     # Anti-churn: close→same-side reopen wastes fees when trend continues
     reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
@@ -385,15 +392,16 @@ class AIConfig:
     # (35% → 50%). Cuts the round-trip "was green, closed red" without the
     # v1.10 mistake of trailing winners from the first tick.
     giveback_enable: bool = True
-    giveback_min_peak_pct: float = 1.20   # v1.30: need real peak before giveback
-    giveback_retain_frac: float = 0.35   # keep 35% of peak min
+    giveback_min_peak_pct: float = 1.80   # exit-v2: was 1.20 — don't cut a runner
+    giveback_retain_frac: float = 0.40   # exit-v2: keep 40% of peak min
     hard_profit_lock_enable: bool = True
-    hard_profit_lock_peak: float = 1.80  # v1.29: was 0.80 — ignore micro peaks
-    hard_profit_lock_floor: float = 0.40
-    soft_profit_take_pct: float = 2.80     # v1.30: bank only after real leg
+    hard_profit_lock_peak: float = 2.60  # exit-v2: was 1.80 — ignore sub-partial peaks
+    hard_profit_lock_floor: float = 0.30
+    soft_profit_take_pct: float = 5.00     # exit-v2: was 2.80 — it pre-empted the
+                                           # ≥3.8% hard TP, capping every winner
     partial_take_enable: bool = True
-    partial_take_pct: float = 1.80       # v1.30: was 1.50
-    partial_take_frac: float = 0.25      # bank 25%, ride 75%
+    partial_take_pct: float = 2.60       # exit-v2: was 1.80 — bank after a real leg
+    partial_take_frac: float = 0.30      # bank 30%, ride 70%
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
@@ -416,15 +424,12 @@ class AIConfig:
                                             # (was cut to 1.90 under v1.10's "closer TP"
                                             # fix, which worked against its own diagnosis)
     scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
-    breakeven_atr_mult: float = 0.55       # v1.29: BE later — stop less noise
-                                            # locking BE (was triggering too early)
-    breakeven_min_pct: float = 0.70        # v1.29: need real green before BE
-                                            # upl>=0.35 OR-fallback (was firing before the
-                                            # ATR condition, defeating the widening above)
-    trail_atr_mult: float = 0.75           # v1.29: wider trail room
-                                            # distance once active, less whipsaw-prone
-    trail_activate_atr_mult: float = 0.90  # v1.29: trail only after real move
-                                            # before trailing starts clamping it down
+    breakeven_atr_mult: float = 0.90       # exit-v2: was 0.55 — BE only after a real move
+    breakeven_min_pct: float = 1.00        # exit-v2: was 0.70 — need real green before BE
+    breakeven_lock_pct: float = 0.20       # exit-v2: BE stop sits this % above entry
+                                           # (round-trip cost is ~0.14%, so 0.20 nets green)
+    trail_atr_mult: float = 1.10           # exit-v2: was 0.75 — 1.0–1.2×ATR room
+    trail_activate_atr_mult: float = 1.50  # exit-v2: was 0.90 — trail only after a real leg
     time_stop_hold_align: float = 0.85     # skip time_stop_stale if same-side align still strong
     ema_fast: int = 21
     ema_slow: int = 50
@@ -1805,16 +1810,91 @@ class AIStrategy:
             need_al = float(getattr(self.config, "sol_min_align", 0.88) or 0.88)
             if adx_sol < need_adx or align_sol < need_al:
                 return f"quant_veto:sol_quality:adx={adx_sol:.0f}/align={align_sol:.2f}"
+        conc = self._concentration_veto(coin, side, conf)
+        if conc:
+            return conc
         return None
 
+    @staticmethod
+    def _corr_group(coin: str) -> str:
+        """Correlation group for a coin (reuses risk_guard's taxonomy)."""
+        try:
+            from app.services.risk_guard import _symbol_to_group
+            return _symbol_to_group(f"{str(coin).upper()}-USDT-SWAP")
+        except Exception:
+            return "other"
+
+    def _concentration_veto(self, coin: str, side: str, conf: float = 0.0) -> str | None:
+        """Block portfolio concentration: one position per correlation group and
+        a higher bar for BTC once it already dominates the recent book."""
+        coin = str(coin or "").upper()
+        cfg = self.config
+        pos = getattr(self, "_positions", {}) or {}
+
+        def _open_coins():
+            out = []
+            for c, p in pos.items():
+                try:
+                    if abs(float(getattr(p, "size", 0) or 0)) > 1e-12:
+                        out.append(str(c).upper())
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        max_per_group = int(getattr(cfg, "max_positions_per_group", 1) or 0)
+        if max_per_group > 0:
+            grp = self._corr_group(coin)
+            if grp and grp != "other":
+                same = [c for c in _open_coins() if self._corr_group(c) == grp]
+                if len(same) >= max_per_group:
+                    return f"concentration:group:{grp}:" + ",".join(sorted(same)[:3])
+
+        if coin == "BTC":
+            max_share = float(getattr(cfg, "btc_max_recent_share", 0.0) or 0)
+            if max_share > 0:
+                recent = self._closed_trades(demo_only=True)[-10:]
+                if recent:
+                    btc_n = sum(
+                        1 for t in recent
+                        if str(t.get("coin") or t.get("symbol") or "").upper().startswith("BTC")
+                    )
+                    share = btc_n / float(len(recent))
+                    if share >= max_share:
+                        need = float(getattr(cfg, "btc_min_confidence", 0.0) or 0)
+                        if need > 0 and float(conf or 0) < need:
+                            return (f"concentration:btc_share:{share:.0%}"
+                                    f">={max_share:.0%},conf={float(conf or 0):.2f}<{need:.2f}")
+        return None
+
+    # Reasons that describe an executed ENTRY (or an unknown/non-final state),
+    # never a realized result. `filled` is what _hydrate_from_db used to write
+    # for every open row, which made openings look like 0-PnL losses and drove
+    # the adaptive preset into a false "defensive" mode.
+    _NON_CLOSE_REASONS = frozenset({
+        "", "open", "opening", "add", "filled", "pending", "new",
+        "cancelled", "canceled", "rejected", "db",
+    })
+
     def _closed_trades(self, demo_only: bool = False) -> list:
+        """Realized closes only — the basis for adaptive/reflection stats.
+
+        Openings carry fee-only PnL (~0) and were previously counted as losing
+        trades; zero/near-zero rows are excluded for the same reason.
+        """
         out = []
         for t in self._trade_log:
-            if t.get("pnl") is None:
+            if not isinstance(t, dict):
                 continue
-            if t.get("reason") in (None, "open"):
+            reason = str(t.get("reason") or "").strip().lower()
+            if reason in self._NON_CLOSE_REASONS:
                 continue
-            if demo_only and t.get("account_mode") == "live":
+            try:
+                pnl = float(t.get("pnl"))
+            except (TypeError, ValueError):
+                continue
+            if abs(pnl) < 1e-9:
+                continue  # entry fee-only row or BE noise, not a realized close
+            if demo_only and str(t.get("account_mode") or "demo").lower() == "live":
                 continue
             out.append(t)
         return out
@@ -4845,7 +4925,8 @@ class AIStrategy:
         # In profit + soft signal: only if align already faded OR move is real (≥1.2%).
         # v1.30: soft EMA/ROC flips alone were cutting trend legs in 20–40m.
         if soft and upl >= min_p:
-            if align_side >= hold_al and upl < 1.20 and not too_deep:
+            soft_hold = float(getattr(cfg, "ind_exit_soft_hold_pct", 2.00) or 0)
+            if align_side >= hold_al and upl < soft_hold and not too_deep:
                 print(
                     f"[AI] hold soft-ind noise {pos.coin} {pos.side}: "
                     f"upl={upl:+.2f}% align={align_side:.2f} reasons={reasons[:3]}",
@@ -4950,7 +5031,7 @@ class AIStrategy:
                 peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
                 # 0) Partial scale-out once — bank half, trail the rest
                 if self._cfg_b("partial_take_enable", True) and not bool(getattr(pos, "partial_taken", False)):
-                    part_lvl = self._cfg_f("partial_take_pct", 1.50)
+                    part_lvl = self._cfg_f("partial_take_pct", 2.60)
                     part_frac = self._cfg_f("partial_take_frac", 0.25)
                     if part_lvl > 0 and upl >= part_lvl:
                         ok = await self._scale_out_partial(
@@ -4959,7 +5040,7 @@ class AIStrategy:
                         if ok:
                             continue
                 # 1) Soft profit take: bank a clean green without waiting for far TP
-                soft_take = self._cfg_f("soft_profit_take_pct", 2.50)
+                soft_take = self._cfg_f("soft_profit_take_pct", 5.00)
                 if soft_take > 0 and upl >= soft_take:
                     print(
                         f"[AI] soft_profit_take {coin} {pos.side}: upl={upl:+.2f}% "
@@ -5018,22 +5099,24 @@ class AIStrategy:
             # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
             # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
             # override the other (see v1.16 notes on the config fields above).
-            be_need = self._cfg_f("breakeven_atr_mult", 0.55)
-            be_min_pct = self._cfg_f("breakeven_min_pct", 0.70)
+            be_need = self._cfg_f("breakeven_atr_mult", 0.90)
+            be_min_pct = self._cfg_f("breakeven_min_pct", 1.00)
+            be_lock = self._cfg_f("breakeven_lock_pct", 0.20) / 100.0
             if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
                 if pos.side == "long":
-                    be = float(pos.entry_price) * 1.0005
+                    be = float(pos.entry_price) * (1.0 + be_lock)
                     if be > float(pos.stop_price or 0):
                         pos.stop_price = be
                 else:
-                    be = float(pos.entry_price) * 0.9995
+                    be = float(pos.entry_price) * (1.0 - be_lock)
                     if not pos.stop_price or be < float(pos.stop_price):
                         pos.stop_price = be
             # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
-            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 0.70) or 0.70)
-            trail_m = float(getattr(self.config, "trail_atr_mult", 0.65) or 0.65)
-            act_pct = float(getattr(self.config, "trail_activate_pct", 0.65) or 0)
-            lock = float(getattr(self.config, "trail_lock_pct", 0.12) or 0)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 1.50) or 1.50)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 1.10) or 1.10)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 2.00) or 0)
+            lock = float(getattr(self.config, "trail_lock_pct", 0.22) or 0)
+            be_lock = self._cfg_f("breakeven_lock_pct", 0.20) / 100.0
             trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
             if trail_on and pos.entry_price:
                 old_stop = pos.stop_price
@@ -5041,13 +5124,13 @@ class AIStrategy:
                     # Distance from peak in price units
                     dist = trail_m * atr_p * float(pos.entry_price)
                     if pos.side == "long":
-                        be = pos.entry_price * 1.0005
+                        be = pos.entry_price * (1.0 + be_lock)
                         trail = float(pos.peak_price or px) - dist
                         new_stop = max(be, trail)
                         if new_stop > float(pos.stop_price or 0):
                             pos.stop_price = new_stop
                     else:
-                        be = pos.entry_price * 0.9995
+                        be = pos.entry_price * (1.0 - be_lock)
                         trail = float(pos.peak_price or px) + dist
                         new_stop = min(be, trail) if pos.stop_price else trail
                         if not pos.stop_price or new_stop < float(pos.stop_price):
@@ -6006,7 +6089,7 @@ class AIStrategy:
                     # Allow LLM close only if: red enough, or big green, or aged + thesis weak
                     allow = (
                         upl <= -0.35
-                        or upl >= self._cfg_f("soft_profit_take_pct", 2.50)
+                        or upl >= self._cfg_f("soft_profit_take_pct", 5.00)
                         or (held >= max(min_hold, 90.0) and upl < 0.15)
                     )
                     if not allow:
@@ -6031,7 +6114,7 @@ class AIStrategy:
                 try:
                     px = await self._price_for_exit(client, coin, pos)
                     upl = self._unrealized_pct(pos, px) if px else 0.0
-                    if -0.20 < upl < self._cfg_f("partial_take_pct", 1.50):
+                    if -0.20 < upl < self._cfg_f("partial_take_pct", 2.60):
                         print(f"[AI] LLM reduce BLOCKED {coin}: upl={upl:+.2f}%", flush=True)
                         return
                 except Exception:
@@ -6383,26 +6466,42 @@ class AIStrategy:
             total = int(summary.get("total") or 0)
             wins = int(summary.get("wins") or 0)
             pnl = float(summary.get("total_pnl") or 0)
-            if total > self._lifetime_trades or (
-                self._lifetime_trades == 0 and (total > 0 or abs(pnl) > 1e-9)
-            ):
+            # The summary is the authoritative closed-trade set. Adopt it even
+            # when it is SMALLER than the stored value: older builds inflated
+            # this counter with `filled` (entry) rows and persisted the inflated
+            # number, so a "only if larger" guard would keep the bad lifetime
+            # win-rate forever. A genuinely empty/failed read returns 0 and is
+            # ignored below.
+            if total > 0 and total != self._lifetime_trades:
+                prev_n = self._lifetime_trades
                 self._lifetime_trades = total
                 self._lifetime_wins = wins
                 self._lifetime_pnl = pnl
-                print(f"[AI] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}",
-                      flush=True)
+                print(f"[AI] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}"
+                      f" (was {prev_n})", flush=True)
             # rebuild recent trade log for UI / adapt
-            rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=40)
+            rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=200)
             rebuilt = []
             for r in reversed(rows or []):
+                state = str(r.get("state") or "").strip().lower()
+                # `filled`/empty = an executed entry, NOT a closed trade. Map it
+                # to "open" so _closed_trades skips it; otherwise openings are
+                # scored as 0-PnL losses and corrupt adaptive + reflection.
+                reason = "open" if state in ("", "filled", "new", "pending") else state
+                try:
+                    pnl = float(r.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    pnl = 0.0
                 rebuilt.append({
+                    "account_mode": str(r.get("account_mode") or "demo").lower(),
                     "time": r.get("timestamp") or r.get("created_at") or "",
                     "side": r.get("side"),
                     "symbol": r.get("inst_id"),
                     "size": r.get("sz") or r.get("size"),
-                    "pnl": r.get("pnl"),
-                    "entry_price": r.get("px"),
-                    "reason": r.get("state") or "db",
+                    "pnl": pnl,
+                    "entry_price": (r.get("px") if reason != "open" else None),
+                    "exit_price": (r.get("px") if reason != "open" else None),
+                    "reason": reason,
                     "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
                 })
             if rebuilt:
@@ -7172,8 +7271,7 @@ class AIStrategy:
             return "Рынок: данные обновляются. Позиций у этого бота нет."
 
     def get_status(self) -> dict:
-        closed = [t for t in self._trade_log if t.get("reason") not in (None, "open") and "pnl" in t]
-        sum(1 for t in closed if float(t.get("pnl") or 0) > 0)
+        closed = self._closed_trades()
         return {
             "running": self._running,
             "strategy": STRATEGY_NAME,
