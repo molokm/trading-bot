@@ -260,6 +260,7 @@ def filter_pnl_rows(
     excluded_pnl = 0.0
     reasons: dict[str, int] = {}
     seen_oid: set[str] = set()
+    by_oid: dict[str, dict] = {}
     for raw in rows or []:
         norm = normalize_close_row(raw) if "close_ts" not in (raw or {}) or "pnl" not in (raw or {}) else None
         row = norm or (dict(raw) if isinstance(raw, dict) else None)
@@ -285,9 +286,18 @@ def filter_pnl_rows(
         if oid and oid in seen_oid:
             excluded_n += 1
             reasons["dup_ord"] = reasons.get("dup_ord", 0) + 1
+            # The duplicate is not counted, but it may carry price metadata the
+            # kept row lacks (exchange rows store only the exit avg). Merge the
+            # missing pair so the «Сделки» panel can still show entry/exit.
+            kept = by_oid.get(oid)
+            if kept is not None:
+                for k in ("entry_px", "exit_px"):
+                    if kept.get(k) is None and row.get(k) is not None:
+                        kept[k] = row.get(k)
             continue
         if oid:
             seen_oid.add(oid)
+            by_oid[oid] = row
         bot = resolve_bot(row, ai_only=ai_only) or "AI Discretionary 1H"
         row["bot"] = bot
         row["bot_label"] = bot
