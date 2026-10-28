@@ -230,3 +230,31 @@ def test_dashboard_live_card_uses_the_fresh_client():
 
     src = inspect.getsource(m.me_dashboard)
     assert "_live_read_client()" in src
+
+
+@pytest.mark.asyncio
+async def test_close_tag_is_recovered_from_the_entry_fill():
+    """Memory miss after restart: recover ail{tid}c from the newest ai fill."""
+    bot = object.__new__(AIStrategy)
+
+    class _C:
+        async def get_fills(self, inst_id=None, limit=30):
+            return {"data": [
+                {"clOrdId": "aildeadbeef1234", "fillTime": "100"},
+                {"clOrdId": "ailcafebabe5678", "fillTime": "200"},
+                {"clOrdId": "manual-order", "fillTime": "300"},
+            ]}
+
+    tag = await bot._live_close_tag_for_inst(_C(), "ETH-USDT-SWAP")
+    assert tag == AIStrategy._clord_live_close("cafebabe5678")
+
+
+@pytest.mark.asyncio
+async def test_close_tag_recovery_returns_empty_without_our_fills():
+    bot = object.__new__(AIStrategy)
+
+    class _C:
+        async def get_fills(self, inst_id=None, limit=30):
+            return {"data": [{"clOrdId": "manual", "fillTime": "1"}]}
+
+    assert await bot._live_close_tag_for_inst(_C(), "ETH-USDT-SWAP") == ""

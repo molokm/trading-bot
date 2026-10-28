@@ -4760,9 +4760,34 @@ class AIStrategy:
         pos.disaster_stop_px = 0.0
 
     async def _ensure_live_disaster_stop(self, client, pos) -> None:
-        """Place the guard only if this position does not have one yet."""
+        """Place the guard only if this position does not have one yet.
+
+        Before placing, look for an existing ``ails*`` conditional on the
+        exchange: a restart that died before `_persist_live` would otherwise
+        stack a second guard on the same position.
+        """
         if not client or not pos or getattr(pos, "disaster_algo_id", ""):
             return
+        try:
+            resp = await client.get_algo_orders(
+                ord_type="conditional", inst_type="SWAP", state="live",
+                limit=50, instId=pos.inst_id,
+            )
+            for r in (resp or {}).get("data") or []:
+                cid = str(r.get("clOrdId") or "").lower()
+                if not cid.startswith("ails"):
+                    continue
+                pos.disaster_algo_id = str(r.get("algoId") or "")
+                try:
+                    pos.disaster_stop_px = float(r.get("slTriggerPx") or 0)
+                except (TypeError, ValueError):
+                    pos.disaster_stop_px = 0.0
+                if pos.disaster_algo_id:
+                    print(f"[AI-LIVE] disaster stop adopted {pos.coin} "
+                          f"algo={pos.disaster_algo_id}", flush=True)
+                    return
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop list {pos.coin}: {e}", flush=True)
         await self._place_live_disaster_stop(client, pos)
 
     async def _amend_exchange_sl(self, client, pos, new_sl_px: float) -> None:

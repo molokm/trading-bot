@@ -175,3 +175,45 @@ def test_restore_keeps_the_guard_id_so_it_is_not_stacked():
         AIStrategy._hydrate_from_db)
     assert 'getattr(old, "disaster_algo_id"' in inspect.getsource(
         AIStrategy._reconcile_live_from_exchange)
+
+
+class _FakeAlgoWithPending(_FakeAlgo):
+    def __init__(self, pending):
+        super().__init__()
+        self.pending = pending
+
+    async def get_algo_orders(self, **kw):
+        self.calls.append({"list": kw})
+        return {"data": self.pending}
+
+
+@pytest.mark.asyncio
+async def test_existing_guard_is_adopted_instead_of_duplicated():
+    """A restart that died before persist leaves a guard only on the exchange."""
+    bot = _bot()
+    client = _FakeAlgoWithPending([
+        {"algoId": "algo-old", "clOrdId": "ailsa1b2c3d4e5f6",
+         "slTriggerPx": "95.0"},
+    ])
+    pos = _pos()
+    await bot._ensure_live_disaster_stop(client, pos)
+
+    assert pos.disaster_algo_id == "algo-old"
+    assert pos.disaster_stop_px == 95.0
+    # No new order was placed — only the pending-list lookup happened.
+    assert not any("sl_trigger_px" in c for c in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_foreign_or_tight_algos_are_not_adopted():
+    bot = _bot()
+    client = _FakeAlgoWithPending([
+        {"algoId": "other", "clOrdId": "manual-1", "slTriggerPx": "1.0"},
+        {"algoId": "ai-old", "clOrdId": "ai123", "slTriggerPx": "2.0"},
+    ])
+    pos = _pos()
+    await bot._ensure_live_disaster_stop(client, pos)
+
+    # None of them are our guard → the bot places its own.
+    assert pos.disaster_algo_id == "algo-42"
+    assert any("sl_trigger_px" in c for c in client.calls)
