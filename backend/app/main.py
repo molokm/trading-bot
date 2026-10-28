@@ -2855,6 +2855,64 @@ async def me_dashboard(request: Request):
         import traceback
         traceback.print_exc()
 
+    # -- Single source of truth for the «Сделки» panel -----------------------
+    # The list must contain exactly the rows that produce the PnL card total:
+    # same epoch, same AI-only filter, same ord_id dedupe. Before this the list
+    # was assembled from four ad-hoc sources (exchange_close / DB / in-memory
+    # log / LIVE bills) with a different dedupe, so its sum could never match
+    # the card (e.g. list 365.66 vs card 123.42), and LIVE rows for guests were
+    # missing entirely even though the engine counted them.
+    try:
+        _price_by_ord: dict = {}
+        for _t in trades or []:
+            _oid = str(_t.get('ord_id') or '').strip()
+            if not _oid:
+                continue
+            _price_by_ord[(_oid, str(_t.get('account_mode') or 'demo'))] = {
+                'entry_px': _t.get('entry_px'),
+                'exit_px': _t.get('exit_px'),
+            }
+
+        def _eng_coin(v) -> str:
+            s = str(v or '').upper()
+            for suf in ('-USDT-SWAP', '-USD-SWAP', '-USDT', '-USDC-SWAP'):
+                if s.endswith(suf):
+                    s = s[: -len(suf)]
+            return s.strip()
+
+        _eng_list = []
+        for _mp in (pnl or {}, (pnl or {}).get('live') or {}):
+            if not isinstance(_mp, dict):
+                continue
+            for _r in (_mp.get('trades') or []):
+                _mode = str(_r.get('account_mode') or 'demo').lower()
+                if _mode not in ('demo', 'live'):
+                    _mode = 'demo'
+                _oid = str(_r.get('ord_id') or '').strip()
+                _px = _price_by_ord.get((_oid, _mode)) or {}
+                _coin = _eng_coin(_r.get('inst'))
+                _eng_list.append({
+                    'time': _norm_ts(_r.get('time')),
+                    'inst': _coin,
+                    'symbol': _coin,
+                    'coin': _coin,
+                    'inst_id': (_coin + '-USDT-SWAP') if _coin else '',
+                    'side': _r.get('side') or '',
+                    'pnl': round(float(_r.get('pnl') or 0), 4),
+                    'account_mode': _mode,
+                    'reason': _r.get('reason') or 'closed',
+                    'ord_id': _oid,
+                    'bot': _r.get('bot') or 'AI Discretionary 1H',
+                    'entry_px': _px.get('entry_px'),
+                    'exit_px': _px.get('exit_px'),
+                    'entry_price': _px.get('entry_px'),
+                    'exit_price': _px.get('exit_px'),
+                })
+        if _eng_list:
+            trades = _eng_list
+    except Exception as _e:
+        print(f'[me/dashboard] engine trades: {_e}', flush=True)
+
     def _trade_sort_key(t):
         v = t.get('time', 0)
         try:
@@ -2862,13 +2920,9 @@ async def me_dashboard(request: Request):
         except Exception:
             return 0
     trades.sort(key=_trade_sort_key, reverse=True)
-    # Cap per mode so DEMO tab is full and LIVE is not starved
-    demo_tr = [x for x in trades if x.get('account_mode') == 'demo'][:30]
-    live_tr = [x for x in trades if x.get('account_mode') == 'live'][:30]
-    trades = demo_tr + live_tr
-    trades.sort(key=_trade_sort_key, reverse=True)
-
-    return {'demo': demo, 'live': live, 'trades': trades[:40], 'pnl': pnl, 'role': role, 'user_id': user_id}
+    # Do NOT cap: a capped list cannot add up to the card total. The engine
+    # already bounds the set (epoch + AI-only + dedupe), so ship all of it.
+    return {'demo': demo, 'live': live, 'trades': trades[:400], 'pnl': pnl, 'role': role, 'user_id': user_id}
 
 @app.get('/api/ai/status')
 @policy(PUBLIC)
@@ -6573,6 +6627,14 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
             _exchange_sync_ts = _time.time()
             _sd.update({'ok': True, 'stored': n, 'err': ''})
             print(f'[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders', flush=True)
+            # Fresh closes must hit the dashboard immediately: _PNL_TTL would
+            # otherwise serve the previous total for up to 30s while the list
+            # (built from the DB) already shows the new trade — an apparent
+            # card-vs-list mismatch right after every sync.
+            try:
+                _pnl_cache.clear()
+            except Exception:
+                pass
             return n
         except Exception as e:
             _sd.update({'ok': False, 'stored': 0, 'err': str(e)[:200]})
@@ -7061,7 +7123,7 @@ async def _compute_pnl(mode: str = None):
                     'ord_id': r.get('ord_id') or '',
                     'reason': 'closed',
                 }
-                for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:80]
+                for r in sorted(rows, key=lambda x: int(x.get('close_ts') or 0), reverse=True)[:500]
             ],
         }
         _sig = (

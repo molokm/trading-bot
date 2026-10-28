@@ -494,8 +494,14 @@ export default function Dashboard({ health, connected, isGuest }) {
         if (pnlData && pnlData.total != null) {
           setPnl({ ...pnlData, account_mode: pnlData.account_mode || 'demo' })
         }
-        if (dash.live && dash.live.live_total != null) {
-          livePnlData = { ...dash.live, account_mode: 'live', total: dash.live.live_total }
+        // LIVE card: the engine payload lives under pnl.live / pnl.live_total
+        // (top-level dash.live is the legacy mirror summary and has neither).
+        const liveEngine = (pnlData && pnlData.live) || null
+        if (liveEngine && liveEngine.total != null) {
+          livePnlData = { ...liveEngine, account_mode: 'live' }
+          setLivePnl(livePnlData)
+        } else if (pnlData && pnlData.live_total != null) {
+          livePnlData = { ...pnlData, account_mode: 'live', total: pnlData.live_total }
           setLivePnl(livePnlData)
         }
       } else {
@@ -713,7 +719,10 @@ export default function Dashboard({ health, connected, isGuest }) {
       if (!isActiveBotTrade(t)) continue
       const ts = t.exit_time || t.time || t.timestamp || ''
       if (!ts) continue
-      const ms = Date.parse(ts)
+      // Times are ms-epoch numbers from the engine; Date.parse(number) is NaN.
+      const ms = typeof ts === 'number'
+        ? ts
+        : (/^\d+$/.test(String(ts)) ? Number(ts) : Date.parse(ts))
       if (!Number.isFinite(ms) || ms < cutoff) continue
       s += Number(t.pnl) || 0
     }
