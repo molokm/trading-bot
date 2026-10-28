@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.39.0-fills"
+STRATEGY_VERSION = "v1.40.0-p2"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -364,6 +364,7 @@ class AIConfig:
     weekly_loss_limit_pct: float = 0.06    # ...and after -6% week (MSK ISO week)
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
+    funding_fail_closed: bool = True       # P2.2: unknown funding rate → block open (no data = no trade)
     funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
@@ -383,6 +384,8 @@ class AIConfig:
     max_hold_hours: float = 18.0            # v1.30: allow multi-session trends
     time_stop_stale_hours: float = 10.0     # v1.30: give trend more room
     time_stop_min_progress_pct: float = 0.20
+    time_stop_require_dead_trend: bool = True  # P2.3: only exit a stalled trade when trend is dead
+    time_stop_dead_adx: float = 18.0           # P2.3: ADX at/above this in-direction = trend alive
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
@@ -1417,16 +1420,25 @@ class AIStrategy:
                 rows = list(reversed(resp.get("data") or []))
                 if len(rows) < 60:
                     continue
-                # OKX candle[0] = ts ms; [-1] forming, [-2] last closed
+                # OKX candle[0] = ts ms; [-1] is the FORMING bar.
+                # P2.1: every indicator is computed on CLOSED bars only, so a
+                # decision can never repaint when the live bar rolls over.
+                bars = rows[:-1] if len(rows) >= 2 else rows
                 try:
-                    closed_idx = -2 if len(rows) >= 2 else -1
-                    closed_bar_ts = int(float(rows[closed_idx][0]))
+                    closed_bar_ts = int(float(bars[-1][0]))
                 except Exception:
                     closed_bar_ts = 0
-                closes = [float(r[4]) for r in rows]
-                highs = [float(r[2]) for r in rows]
-                lows = [float(r[3]) for r in rows]
-                vols = [float(r[5]) if len(r) > 5 else 0.0 for r in rows]
+                closes = [float(r[4]) for r in bars]
+                highs = [float(r[2]) for r in bars]
+                lows = [float(r[3]) for r in bars]
+                vols = [float(r[5]) if len(r) > 5 else 0.0 for r in bars]
+                # Latest traded price (forming bar close) — kept as "close" for
+                # every price consumer; "last_closed" is the bar we decide on.
+                last_closed = closes[-1]
+                try:
+                    live_px = float(rows[-1][4]) if len(rows) >= 2 else last_closed
+                except Exception:
+                    live_px = last_closed
 
                 ema21 = self._ema(closes, getattr(cfg, "ema_fast", 21))
                 ema50 = self._ema(closes, getattr(cfg, "ema_slow", 50))
@@ -1509,11 +1521,14 @@ class AIStrategy:
                     r4 = await client.get_candles(inst, bar="4H", limit=80)
                     rows4 = list(reversed(r4.get("data") or []))
                     if len(rows4) >= 40:
-                        c4 = [float(r[4]) for r in rows4]
+                        # P2.1: 4H context also from closed bars only.
+                        bars4 = rows4[:-1] if len(rows4) >= 2 else rows4
+                        c4 = [float(r[4]) for r in bars4]
                         e4f = self._ema(c4, 21)
                         e4s = self._ema(c4, 50)
                         tf4 = {
                             "close": c4[-1],
+                            "last_closed": c4[-1],
                             "ema21": e4f[-1],
                             "ema50": e4s[-1],
                             "trend_up": bool(e4f[-1] and e4s[-1] and e4f[-1] > e4s[-1]),
@@ -1532,7 +1547,7 @@ class AIStrategy:
                         return None
 
                 # Last 5 closed closes for LLM structure context
-                bar_closes = [_r(x) for x in closes[-6:-1]] if len(closes) >= 6 else [_r(x) for x in closes[:-1][-5:]]
+                bar_closes = [_r(x) for x in closes[-5:]]
                 ema_slope = None
                 try:
                     if e21 and len(ema21) >= 4 and ema21[-4]:
@@ -1540,7 +1555,8 @@ class AIStrategy:
                 except Exception:
                     ema_slope = None
                 out[coin] = {
-                    "close": _r(c),
+                    "close": _r(live_px),
+                    "last_closed": _r(last_closed),
                     "closed_bar_ts": closed_bar_ts,
                     "ema21": _r(e21),
                     "ema50": _r(e50),
@@ -1615,6 +1631,7 @@ class AIStrategy:
                 resp = await client.get_funding_rate(inst)
                 rows = resp.get("data") or []
                 if resp.get("error") or not rows:
+                    print(f"[AI] funding {coin}: empty/error resp={resp.get('error')}", flush=True)
                     continue
                 row = rows[0]
                 rate = float(row.get("fundingRate") or row.get("nextFundingRate") or 0)
@@ -1887,7 +1904,13 @@ class AIStrategy:
             except (TypeError, ValueError):
                 fr = None
             lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
-            if fr is not None and lim > 0:
+            if fr is None:
+                # P2.2: no funding data → fail closed. A missing rate used to
+                # silently pass the filter; on OKX a stale/empty response then
+                # let a high-funding hold through.
+                if bool(getattr(self.config, "funding_fail_closed", True)) and lim > 0:
+                    return "quant_veto:funding_unknown"
+            elif lim > 0:
                 # long pays when funding > 0; short pays when funding < 0
                 if side == "long" and fr >= lim:
                     return f"quant_veto:funding_long:{fr:.5f}"
@@ -5707,10 +5730,25 @@ class AIStrategy:
                         ash = float(ind.get("align_short") or 0)
                         align_side = ash if pos.side == "short" else al
                         hold_al = self._cfg_f("time_stop_hold_align", 0.85)
-                        if hold_al > 0 and align_side >= hold_al:
+                        trend_alive = bool(hold_al > 0 and align_side >= hold_al)
+                        # P2.3: only time-stop a DEAD trend. A live trend with
+                        # decent ADX in the position's own direction gets room,
+                        # even below the strong-align bypass.
+                        if bool(self._cfg_b("time_stop_require_dead_trend", True)):
+                            try:
+                                adx_v = float(ind.get("adx") or 0)
+                            except (TypeError, ValueError):
+                                adx_v = 0.0
+                            reg_v = str(ind.get("regime") or "unknown")
+                            dir_trend = (reg_v == "bull") if pos.side == "long" else (reg_v == "bear")
+                            dead_adx = self._cfg_f("time_stop_dead_adx", 18.0)
+                            if adx_v >= dead_adx and dir_trend:
+                                trend_alive = True
+                        if trend_alive:
                             print(
                                 f"[AI] time_stop HOLD {coin} {pos.side}: held={held_h:.1f}h "
-                                f"upl={upl0:+.2f}% align={align_side:.2f}>={hold_al}",
+                                f"upl={upl0:+.2f}% align={align_side:.2f}>={hold_al} "
+                                f"adx={float(ind.get('adx') or 0):.0f} reg={ind.get('regime')}",
                                 flush=True,
                             )
                         else:
@@ -8471,16 +8509,64 @@ class AIStrategy:
             if side == "long" and btc_roc <= -_btc_roc_veto_thr:
                 vetoes.append(f"long_vs_btc_roc({btc_roc:.4f}<=-{_btc_roc_veto_thr})")
 
-            # 5. Funding
-            if funding_filter_on and funding is not None:
-                try:
-                    fr = float(funding)
-                    if side == "long" and fr >= funding_lim:
-                        vetoes.append(f"funding_toxic_long({fr:.6f}>={funding_lim})")
-                    if side == "short" and fr <= -funding_lim:
-                        vetoes.append(f"funding_toxic_short({fr:.6f}<=-{funding_lim})")
-                except (TypeError, ValueError):
-                    pass
+            # 5. Funding (P2.2: unknown funding is fail-closed, mirrors the gate)
+            if funding_filter_on:
+                if funding is None:
+                    if bool(getattr(self.config, "funding_fail_closed", True)) and funding_lim > 0:
+                        vetoes.append("funding_unknown")
+                else:
+                    try:
+                        fr = float(funding)
+                        if side == "long" and fr >= funding_lim:
+                            vetoes.append(f"funding_toxic_long({fr:.6f}>={funding_lim})")
+                        if side == "short" and fr <= -funding_lim:
+                            vetoes.append(f"funding_toxic_short({fr:.6f}<=-{funding_lim})")
+                    except (TypeError, ValueError):
+                        pass
+
+            # 5b. 4H trend fight (mirrors quant_veto:short_vs_4h_bull / long_vs_4h_bear)
+            tf4 = ind.get("tf_4h") or c.get("tf_4h") or {}
+            try:
+                e4f = float(tf4.get("ema21") or tf4.get("ema_fast") or 0)
+                e4s = float(tf4.get("ema50") or tf4.get("ema_slow") or 0)
+                c4 = float(tf4.get("close") or 0)
+            except (TypeError, ValueError):
+                e4f = e4s = c4 = 0.0
+            if e4f and e4s and c4:
+                if side == "short" and e4f > e4s and c4 > e4s:
+                    vetoes.append("short_vs_4h_bull")
+                if side == "long" and e4f < e4s and c4 < e4s:
+                    vetoes.append("long_vs_4h_bear")
+
+            # 5c. Momentum filter (mirrors quant_veto:momentum)
+            mom = self._momentum_against(side, ind)
+            if mom:
+                vetoes.append(f"momentum:{mom}")
+
+            # 5d. SOL quality (mirrors quant_veto:sol_quality)
+            if coin == "SOL":
+                need_adx = float(getattr(self.config, "sol_min_adx", 28) or 28)
+                need_al = float(getattr(self.config, "sol_min_align", 0.88) or 0.88)
+                if adx < need_adx or max(al_l, al_s) < need_al:
+                    vetoes.append(f"sol_quality(adx={adx:.0f}/align={max(al_l, al_s):.2f})")
+
+            # 5e. Cost-aware edge (mirrors quant_veto:cost_edge; ATR branch only)
+            try:
+                atr_pct = float(self._atr_pct(coin, close) or 0) * 100.0
+                need_pct = self._round_trip_cost_pct() * float(
+                    getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+                if need_pct > 0 and atr_pct > 0 and atr_pct < need_pct:
+                    vetoes.append(f"cost_edge(exp={atr_pct:.2f}%<need={need_pct:.2f}%)")
+            except Exception:
+                pass
+
+            # 5f. Concentration (mirrors _concentration_veto)
+            try:
+                conc = self._concentration_veto(coin, side, 0.0)
+                if conc:
+                    vetoes.append(conc)
+            except Exception:
+                pass
 
             # 6. BTC impulse
             if btc_filter_on and coin != "BTC":
@@ -8556,6 +8642,8 @@ class AIStrategy:
                 "min_confidence": min_conf,
                 "btc_roc_veto": _btc_roc_veto_thr,
                 "funding_block_abs": funding_lim,
+                "funding_fail_closed": bool(getattr(self.config, "funding_fail_closed", True)),
+                "cost_min_edge_mult": float(getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0),
                 "btc_filter_enabled": btc_filter_on,
                 "funding_filter_enabled": funding_filter_on,
             },

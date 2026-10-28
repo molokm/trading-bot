@@ -29,11 +29,15 @@ def _bot(inds):
 
 
 def _inds(eth_atr=1.0, eth_regime="bull", btc_regime="chop"):
+    # funding_rate is set so the P2.2 fail-closed funding gate is satisfied;
+    # these tests target the cost-edge / chop gates, not funding.
     return {
         "BTC": {"close": 100.0, "atr": 0.6, "align_long": 0.5,
-                "align_short": 0.5, "regime": btc_regime, "adx": 18.0},
+                "align_short": 0.5, "regime": btc_regime, "adx": 18.0,
+                "funding_rate": 0.0},
         "ETH": {"close": 100.0, "atr": eth_atr, "align_long": 0.9,
-                "align_short": 0.1, "regime": eth_regime, "adx": 30.0},
+                "align_short": 0.1, "regime": eth_regime, "adx": 30.0,
+                "funding_rate": 0.0},
     }
 
 
