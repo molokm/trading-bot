@@ -241,7 +241,9 @@ def test_hydrate_uses_card_loader_args():
 def test_tick_refreshes_lifetime_from_engine():
     src = inspect.getsource(AIStrategy._tick)
     assert "_refresh_engine_stats" in src
-    assert "_lifetime_pnl" in src
+    # The overlay moved into a helper so it can refuse stale snapshots.
+    assert "_apply_engine_stats" in src
+    assert "_lifetime_pnl" in inspect.getsource(AIStrategy._apply_engine_stats)
 
 
 @pytest.mark.asyncio
