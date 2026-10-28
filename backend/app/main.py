@@ -1604,13 +1604,26 @@ def _account_mode() -> str:
 async def _okx_call_account(coro_factory, mode: str=None):
     """Call OKX on the isolated account for mode (demo showcase vs live keys).
 
-    Demo → showcase_manager (env simulated). Live → client_manager with live keys.
-    Does not cross-read the other environment.
+    Demo → showcase_manager (env simulated). Live → the *dedicated* live_manager
+    with live keys. Does not cross-read the other environment.
+
+    P0/audit fix: this used to read the shared `client_manager` and re-init it
+    with LIVE keys whenever it looked like demo. `client_manager` is the trading
+    context for the momentum/impulse/validation bots and several admin
+    endpoints — flipping it to LIVE just to read bills could silently move those
+    bots onto the real account. Prefer `live_manager` (the mirror's own client)
+    and only touch `client_manager` as a last resort.
     """
     mode = (mode or _account_mode()).lower()
     if mode == 'live':
         await _load_live_creds_from_db()
-        client = client_manager.get_client()
+        client = None
+        try:
+            client = live_manager.get_client() if live_manager else None
+        except Exception:
+            client = None
+        if client is None or getattr(client, 'demo', True):
+            client = client_manager.get_client()
         if not client or getattr(client, 'demo', True):
             if not (_live_key and _live_secret and _live_pass):
                 return {'error': True, 'message': 'Live keys not configured'}
@@ -3056,10 +3069,10 @@ async def ai_status():
         # (sync diag had a 'demo' key only) and the table held just the rows
         # _close_live wrote by hand (14 vs 49 on the dashboard). Kick it here so
         # the audit is always based on fresh bills; the 60s TTL bounds OKX calls.
-        # NB: ask the BOT for its client — the /api/live/connect endpoints build a
-        # local manager and hand it to ai_bot, leaving the module global stale.
+        # NB: ask for the freshest live client — the module global
+        # `live_manager` goes stale after /api/live/connect rebinds it.
         try:
-            if ai_bot is not None and ai_bot._live_ready():
+            if _live_read_client() is not None:
                 await sync_exchange_close_trades(mode='live')
         except Exception as _lse:
             print(f'[ai/status] live sync: {_lse}', flush=True)
@@ -6706,6 +6719,9 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
     if _mode not in ('demo', 'live'):
         _mode = _account_mode()
     now = _time.time()
+    if not isinstance(_exchange_sync_ts, dict):
+        # Defensive: an old bug once replaced the dict with a float.
+        _exchange_sync_ts = {}
     last = _exchange_sync_ts.get(_mode, 0)
     if last and now - last < _EXCHANGE_SYNC_TTL:
         return 0
@@ -6814,7 +6830,11 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)
-            _exchange_sync_ts = _time.time()
+            # Per-mode stamp. This used to assign a float to the whole dict,
+            # which made the next `.get()` raise AttributeError — so after the
+            # very first (demo) sync of each process, *every* later sync died
+            # and the live table was never filled (14 rows vs 49 on the board).
+            _exchange_sync_ts[_mode] = _time.time()
             _sd.update({'ok': True, 'stored': n, 'err': ''})
             print(f'[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders', flush=True)
             # Fresh closes must hit the dashboard immediately: _PNL_TTL would
@@ -6840,7 +6860,10 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
 async def pnl_rebuild_exchange():
     """Force re-sync of exchange close trades from OKX bills → DB, then return stats."""
     global _exchange_sync_ts
-    _exchange_sync_ts = 0
+    try:
+        _exchange_sync_ts.clear()
+    except AttributeError:
+        _exchange_sync_ts = {}
     n = await sync_exchange_close_trades()
     epoch = await get_pnl_epoch()
     epoch_ms = 0
@@ -7240,8 +7263,8 @@ async def _compute_pnl(mode: str = None):
         bills = None
         if _mode == 'live':
             try:
-                lc = live_manager.get_client() if live_manager else None
-                if lc is not None and not getattr(lc, 'demo', False):
+                lc = _live_read_client()
+                if lc is not None:
                     bills = await _fetch_all_trade_bills(limit_per_page=100, mode='live')
             except Exception as _be:
                 print(f'[pnl] live bills fetch: {_be}', flush=True)
@@ -7777,20 +7800,40 @@ _pnl_last_unified: tuple = ()
 _live_okx_cache: dict = {'ts': 0.0, 'trades': []}
 _LIVE_OKX_TTL = 60.0
 
-async def _fetch_live_okx_trades_direct() -> list:
-    """Fetch live OKX trades directly via live_manager (no _okx_call_account).
 
-    This avoids corrupting client_manager which happens when _okx_call_account
-    is called with mode='live' from a demo server.
+def _live_read_client():
+    """Freshest read-only LIVE client, or None if LIVE is not connected.
+
+    The module-global `live_manager` goes stale: `/api/live/connect` may bind a
+    manager straight onto the bot, and restarts rebuild it. Ask the bot first,
+    then the global mirror manager, and only then the shared client_manager.
+    """
+    for _mgr in (getattr(ai_bot, 'live_client_manager', None), live_manager):
+        try:
+            c = _mgr.get_client() if _mgr else None
+        except Exception:
+            c = None
+        if c is not None and not getattr(c, 'demo', True):
+            return c
+    try:
+        c = client_manager.get_client() if client_manager else None
+    except Exception:
+        c = None
+    if c is not None and not getattr(c, 'demo', True):
+        return c
+    return None
+
+
+async def _fetch_live_okx_trades_direct() -> list:
+    """Fetch live OKX trades directly via the mirror client (no _okx_call_account).
+
+    This avoids rebinding the shared client_manager to LIVE keys, which is what
+    used to happen when _okx_call_account was called with mode='live'.
     """
     now = _time.time()
     if _live_okx_cache['trades'] and now - _live_okx_cache['ts'] < _LIVE_OKX_TTL:
         return list(_live_okx_cache['trades'])
-    lc = None
-    try:
-        lc = live_manager.get_client() if live_manager else None
-    except Exception:
-        lc = None
+    lc = _live_read_client()
     if not lc:
         return []
     bills_raw = []
@@ -8004,14 +8047,9 @@ async def get_paired_trades(limit: int=500, begin: str=None, end: str=None):
             _live_trades = []
             _live_positions_count = 0
             # 1) Check if live mirror is active (has open positions or ever had trades)
-            _lc = None
-            if live_manager:
-                try:
-                    _lc = live_manager.get_client()
-                except Exception:
-                    _lc = None
-            _live_connected = bool(_lc and not getattr(_lc, 'demo', True)
-                                   and getattr(_lc, 'has_credentials', lambda: False)())
+            _lc = _live_read_client()
+            _live_connected = bool(
+                _lc and getattr(_lc, 'has_credentials', lambda: False)())
             if _live_connected and ai_bot:
                 _live_positions_count = len(getattr(ai_bot, '_live_positions', {}))
             # 2) DB trades with account_mode='live'
