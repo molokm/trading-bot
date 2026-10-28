@@ -6709,11 +6709,33 @@ class AIStrategy:
         self._engine_stats_ts = now
         if not rows:
             return None
+        # Use aggregate_rows' membership rules — `len(rows)` counted one row
+        # the card skips (before epoch / no bot label), so WR stayed 56.5 vs 55.3.
+        try:
+            ep = _pe.epoch_ms()
+            elig = []
+            for r in rows:
+                try:
+                    p = float(r.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(p) < 1e-12:
+                    continue
+                ts = _pe._parse_ts_ms(
+                    r.get("close_ts") or r.get("ts") or r.get("timestamp"))
+                if not ts or ts < ep:
+                    continue
+                if not _pe.resolve_bot(r, ai_only=True):
+                    continue
+                elig.append((r, p))
+        except Exception:
+            elig = [(r, float(r.get("pnl") or 0)) for r in rows]
+        self._engine_rows = [r for r, _p in elig]
         stats = {
-            "trades": len(rows),
-            "wins": sum(1 for r in rows if float(r.get("pnl") or 0) > 0),
-            "pnl": round(sum(float(r.get("pnl") or 0) for r in rows), 2),
-            "fees": round(sum(float(r.get("fee") or 0) for r in rows), 2),
+            "trades": len(elig),
+            "wins": sum(1 for _r, p in elig if p > 0),
+            "pnl": round(sum(p for _r, p in elig), 2),
+            "fees": round(sum(abs(float(_r.get("fee") or 0)) for _r, _p in elig), 2),
         }
         self._engine_stats = stats
         return stats

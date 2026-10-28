@@ -242,3 +242,34 @@ def test_tick_refreshes_lifetime_from_engine():
     src = inspect.getsource(AIStrategy._tick)
     assert "_refresh_engine_stats" in src
     assert "_lifetime_pnl" in src
+
+
+@pytest.mark.asyncio
+async def test_refresh_engine_stats_counts_only_rows_the_card_counts(monkeypatch):
+    """len(rows) over-counted: before-epoch, zero and retired-bot rows are skipped."""
+    from app.services import pnl_engine as pe
+
+    bot = _bot()
+    bot.db = object()
+    rows = [
+        {"pnl": 5.0, "close_ts": 1793000000000, "cl_ord_id": "ai1", "fee": 1.0},
+        {"pnl": 1.0, "close_ts": 1, "cl_ord_id": "ai2", "fee": 0.0},
+        {"pnl": 0.0, "close_ts": 1793000000000, "cl_ord_id": "ai3", "fee": 0.0},
+        {"pnl": -2.0, "close_ts": 1793000000001, "cl_ord_id": "ais1", "fee": 0.5},
+    ]
+    seen = {}
+
+    async def fake_load(db, **kw):
+        seen.update(kw)
+        return rows, {}
+
+    monkeypatch.setattr(pe, "load_eligible_rows", fake_load)
+    stats = await bot._refresh_engine_stats(force=True)
+
+    assert stats["trades"] == 1
+    assert stats["wins"] == 1
+    assert stats["pnl"] == pytest.approx(5.0)
+    assert stats["fees"] == pytest.approx(1.0)
+    assert seen["allow_untagged_ai"] is True
+    assert seen["ai_only"] is True
+    assert len(bot._engine_rows) == 1
