@@ -3113,6 +3113,24 @@ async def ai_status():
         }
     except Exception as e:
         print(f'[ai/status] live sizing: {e}', flush=True)
+    try:
+        # Why does exchange_close_trades hold fewer LIVE closes than the
+        # dashboard list? These per-mode counters (rows stored, fetch errors,
+        # OKX endpoint health) answer it without reading Render logs.
+        status['exchange_sync'] = {
+            'sync': {k: dict(v) for k, v in (_sync_diag or {}).items()},
+            'bills': {
+                m: {
+                    'pages': {ep: d.get('pages') for ep, d in (v.get('endpoints') or {}).items()},
+                    'rows': {ep: d.get('rows') for ep, d in (v.get('endpoints') or {}).items()},
+                    'errors': {ep: d.get('error') for ep, d in (v.get('endpoints') or {}).items()
+                               if d.get('error')},
+                }
+                for m, v in (_bills_diag or {}).items()
+            },
+        }
+    except Exception as e:
+        print(f'[ai/status] exchange sync diag: {e}', flush=True)
     # History overlay replaces lifetime_pnl, so rebuild turnover from the same
     # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
     try:

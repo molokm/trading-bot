@@ -1,0 +1,81 @@
+"""P1 «LIVE-зеркало»: paired close tag + mirror audit classification.
+
+Audit finding this locks down: `_close_live` passed `cl_ord_id=None`, so
+`_place` generated `ai{ms}` for every LIVE close. The mirror audit therefore
+reported ``mirror=0, ai_other=N`` — mirror closes were indistinguishable from
+untagged AI orders and could not be paired with their DEMO twin. DEMO closes had
+the same problem (`ai{ms}` instead of the open's trade id).
+"""
+import inspect
+
+import pytest
+
+from app.bots.ai_discretionary.strategy import AIStrategy
+from app.services.pnl_engine import label_from_clord
+
+
+TID = "a1b2c3d4e5f6"
+
+
+# ── tag format + round-trip ─────────────────────────────────────────────
+
+def test_live_close_tag_is_a_mirror_tag():
+    cl = AIStrategy._clord_live_close(TID)
+    assert cl == f"ail{TID}c"
+    assert label_from_clord(cl) == "AI Discretionary 1H"
+
+
+def test_demo_close_tag_is_an_ai_tag():
+    cl = AIStrategy._clord_demo_close(TID)
+    assert cl == f"aid{TID}c"
+    assert label_from_clord(cl) == "AI Discretionary 1H"
+
+
+def test_close_tags_round_trip_to_the_same_trade_id():
+    # This is what makes a DEMO close pairable with its LIVE twin.
+    assert AIStrategy._trade_id_from_clord(AIStrategy._clord_demo_close(TID)) == TID
+    assert AIStrategy._trade_id_from_clord(AIStrategy._clord_live_close(TID)) == TID
+    # And both still match the open tags of the same slot.
+    assert AIStrategy._trade_id_from_clord(AIStrategy._clord_demo(TID)) == TID
+    assert AIStrategy._trade_id_from_clord(AIStrategy._clord_live(TID)) == TID
+
+
+def test_close_tag_differs_from_open_tag():
+    # OKX wants clOrdId unique among pending orders → close must not reuse open.
+    assert AIStrategy._clord_live_close(TID) != AIStrategy._clord_live(TID)
+
+
+def test_unknown_trade_id_keeps_fallback():
+    # No id → empty string, so `_place` keeps its ai{ms} fallback instead of
+    # fabricating a link to a trade that never existed.
+    assert AIStrategy._clord_live_close("") == ""
+    assert AIStrategy._clord_demo_close("") == ""
+    assert AIStrategy._clord_live_close(None) == ""
+    assert AIStrategy._clord_demo_close(None) == ""
+
+
+# ── wiring: the tags actually reach the orders / DB ─────────────────────
+
+def test_close_live_sends_the_mirror_tag():
+    src = inspect.getsource(AIStrategy._close_live)
+    assert "_clord_live_close" in src
+    assert "cl_ord_id=(_cl_close or None)" in src
+
+
+def test_close_live_stores_the_same_tag_in_db():
+    src = inspect.getsource(AIStrategy._close_live)
+    assert "cl = _cl_close or" in src
+    assert 'cl = f"ai{int(time.time() * 1000)}"' not in src
+
+
+def test_demo_close_sends_the_demo_tag():
+    src = inspect.getsource(AIStrategy._close)
+    assert "_clord_demo_close" in src
+
+
+def test_mirror_audit_classifies_ail_as_mirror():
+    import app.main as m
+
+    src = inspect.getsource(m.ai_status)
+    assert "startswith('ail')" in src
+    assert "startswith('ai')" in src

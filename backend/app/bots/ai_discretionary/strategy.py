@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.36.0-entry"
+STRATEGY_VERSION = "v1.37.0-mirror"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -637,6 +637,29 @@ class AIStrategy:
     def _clord_live(trade_id: str) -> str:
         tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
         return f"ail{tid}"[:32]
+
+    @staticmethod
+    def _clord_demo_close(trade_id: str) -> str:
+        """DEMO close shares the open's trade_id (aid{tid}c) — enables pairing.
+
+        Returns "" when the id is unknown so `_place` keeps its ai{ms} fallback
+        rather than fabricating a link to a trade that never existed.
+        """
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"aid{tid}c"[:32] if tid else ""
+
+    @staticmethod
+    def _clord_live_close(trade_id: str) -> str:
+        """LIVE close tagged ``ail{tid}c`` so mirror closes are attributable.
+
+        Before this, `_close_live` passed cl_ord_id=None and `_place` generated
+        `ai{ms}` — every LIVE close looked like an untagged AI order
+        (audit mix: mirror=0, ai_other=N) and could not be paired with its DEMO
+        twin. The suffix keeps it distinct from the still-recent open order
+        (OKX only requires clOrdId uniqueness among pending orders).
+        """
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"ail{tid}c"[:32] if tid else ""
 
     @staticmethod
     def _trade_id_from_clord(cl_ord_id: str) -> str:
@@ -3331,8 +3354,12 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] close exchange-check: {e}", flush=True)
         close_side = "sell" if pos.side == "long" else "buy"
+        # Tag the close with the open's trade_id (aid{tid}c) so DEMO and LIVE
+        # closes of the same slot are recognisably a pair.
         resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side,
-                                 is_close=True)
+                                 is_close=True,
+                                 cl_ord_id=(self._clord_demo_close(
+                                     getattr(pos, "demo_trade_id", "")) or None))
         if resp.get("error"):
             print(f"[AI] close error {coin}: {resp.get('message')}", flush=True)
             # If exchange already flat (race with algo SL), still notify + cleanup
@@ -3817,11 +3844,15 @@ class AIStrategy:
                 return False
         live_bid = self._live_bot_id()
         close_side = "sell" if pos.side == "long" else "buy"
+        # Tag the close with the position's own trade_id (ail{tid}c) so the
+        # exchange bill is recognisable as a mirror close and pairs with the
+        # DEMO close (aid{tid}c). Empty id → keep the ai{ms} fallback.
+        _cl_close = self._clord_live_close(getattr(pos, "demo_trade_id", ""))
         # Strict chokepoint: blocks if DEMO still open (not paired close)
         self._demo_closing_coin = coin  # marker for paired close
         resp = await self._live_market_order(
             lc, inst=pos.inst_id, order_side=close_side, sz=pos.size, pos_side=pos.side,
-            cl_ord_id=None, coin=coin, is_close=True, reason=reason,
+            cl_ord_id=(_cl_close or None), coin=coin, is_close=True, reason=reason,
         )
         self._demo_closing_coin = None
         if resp.get("error"):
@@ -3890,7 +3921,10 @@ class AIStrategy:
                     oid = str((fills[0].get("ordId") if fills else "") or "")
                     if not oid:
                         oid = f"ai{int(time.time() * 1000)}"
-                    cl = f"ai{int(time.time() * 1000)}"
+                    # Store the SAME clOrdId the order was sent with, so this
+                    # row matches the exchange bill (previously hardcoded ai{ms}
+                    # → looked like a non-mirror AI close in the audit).
+                    cl = _cl_close or f"ai{int(time.time() * 1000)}"
                     await self.db.upsert_exchange_close_trades([{
                         "ord_id": oid, "inst_id": pos.inst_id, "cl_ord_id": cl,
                         "bot_label": self.BOT_NAME,
