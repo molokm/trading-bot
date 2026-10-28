@@ -133,12 +133,30 @@ def resolve_bot(row: dict, *, ai_only: bool) -> str:
 
 
 
+def _is_open_state(row: dict) -> bool:
+    """True when a `trades` row is an entry/partial, not a realized close.
+
+    The writers are unambiguous: `AIStrategy._open` stores state="filled" once
+    the order is accepted, every close stores state="closed". Treating a bare
+    "filled" as a close was harmless while a market ack carried no fee (pnl=0
+    → dropped as `zero_pnl`); once the real order fee came back from OKX the
+    OPEN row became eligible and each entry added a fake -fee trade (NEAR,
+    28 Oct: pnl = -19.32 == open fee, exit == entry, position still open).
+    """
+    st = str((row or {}).get("state") or "").strip().lower()
+    return st in ("open", "add", "live", "opening", "filled", "new",
+                  "pending", "partially_filled", "canceled", "cancelled",
+                  "rejected")
+
+
 def normalize_close_row(r: dict) -> Optional[dict]:
     """Normalize a DB/API close row into the canonical shape used by aggregate_rows.
 
-    Returns None if the row has no usable pnl.
+    Returns None if the row has no usable pnl or is an unrealized entry.
     """
     if not isinstance(r, dict):
+        return None
+    if _is_open_state(r):
         return None
     try:
         pnl = float(
@@ -224,6 +242,10 @@ def pnl_eligible(
     """
     if not isinstance(row, dict):
         return False, "not_dict"
+    if _is_open_state(row):
+        # Defence in depth: an entry row must never reach the eligible set even
+        # if a caller passes raw `trades` rows straight here.
+        return False, "not_closed"
     try:
         pnl = float(row.get("pnl") or 0)
     except (TypeError, ValueError):
@@ -495,22 +517,22 @@ async def _rows_from_db_trades(db, ai_only: bool = True, account_mode: str = "de
             continue
         if abs(pnl) < 1e-12:
             continue
-        # Only realized closes — skip opens / adds / partial fills tagged open
+        # Only realized closes — skip opens / adds / partial-order rows.
+        # Our writers are unambiguous: `_open` stores state="filled" once the
+        # order is accepted, every close stores state="closed". The old
+        # "filled with |pnl| >= $1 counts as a close" fallback was harmless
+        # while a market ack carried no fee (pnl=0 → dropped as zero_pnl).
+        # Once the real order fee came back from OKX, the OPEN row became
+        # eligible and every entry added a fake -fee trade (NEAR, 28 Oct:
+        # pnl=-19.32 == open fee, exit == entry, position still open) and it
+        # broke card/internal parity. "filled" is an open, always.
         state = str(r.get("state") or r.get("reason") or "").lower()
-        if state in ("open", "add", "live", "opening"):
+        if state in ("open", "add", "live", "opening", "filled", "new",
+                     "pending", "partially_filled", "canceled", "cancelled",
+                     "rejected"):
             continue
-        # Prefer explicit close markers; bare "filled" often is an open fill with fee-as-pnl
-        if state not in ("closed", "close", "closing", "filled_close"):
-            # legacy filled rows: keep only if |pnl| looks like a real close (>= $1)
-            # and not a tiny fee marker
-            try:
-                _pnl_chk = abs(float(r.get("pnl") or 0))
-            except (TypeError, ValueError):
-                _pnl_chk = 0.0
-            if state == "filled" and _pnl_chk < 1.0:
-                continue
-            if state and state not in ("filled", "closed", "close", ""):
-                continue
+        if state and state not in ("closed", "close", "closing", "filled_close"):
+            continue
         ts_raw = r.get("timestamp") or r.get("created_at") or r.get("time") or 0
         ts_ms = _parse_ts_ms(ts_raw)
         if not ts_ms and isinstance(ts_raw, str) and ts_raw:
@@ -979,8 +1001,11 @@ async def load_eligible_rows(
     except Exception as e:
         print(f"[pnl_engine] load exchange rows: {e}", flush=True)
     try:
-        raw.extend(await db.get_trades_multi_bot(
-            ["ai_strategy", "ai_strategy_live"], limit=5000, account_mode=mode) or [])
+        # Use the state-aware loader: it drops entry rows (`state="filled"`)
+        # that the raw query returned and that used to slip into the eligible
+        # set once the open fee became non-zero.
+        raw.extend(await _rows_from_db_trades(
+            db, ai_only=ai_only, account_mode=mode) or [])
     except Exception as e:
         print(f"[pnl_engine] load db trades: {e}", flush=True)
     if bills:

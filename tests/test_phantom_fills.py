@@ -11,7 +11,8 @@ round-trip fee), по 2 дубля на одно событие, и они по�
   * дубли закрытий невозможны (идемпотентность до первого await);
   * `_open` не создаёт позицию, если биржа не подтвердила филл, и берёт avgPx;
   * анти-чарн кулдаун переживает редеплой;
-  * read-only LIVE-ключ не может «успешно подключиться».
+  * read-only LIVE-ключ не может «успешно подключиться»;
+  * строка входа (`state="filled"`) никогда не считается сделкой.
 """
 import inspect
 from datetime import datetime
@@ -384,3 +385,72 @@ def test_live_status_exposes_trade_permission():
     src = inspect.getsource(m.live_status)
     assert "key_trade" in src
     assert "trade_blocked" in inspect.getsource(AIStrategy.get_status)
+
+# ── строка входа (state="filled") — не сделка ────────────────────────────
+#
+# Прод 28.10: после деплоя v1.39 в карточке появилась «сделка» NEAR
+# pnl=-19.32 (== комиссия входа), exit == entry, при всё ещё открытой позиции,
+# а карточка (66.74) разошлась с внутренним счётчиком (86.06). Причина: движок
+# брал строки `trades` без фильтра по state, и как только реальная комиссия
+# ордера стала приходит от OKX, строка входа стала «eligible» (|pnl| >= 1e-12).
+
+from app.services import pnl_engine as pe
+
+
+def _open_row(pnl=-19.3165, state="filled", oid="o1"):
+    return {
+        "ord_id": oid, "inst_id": "NEAR-USDT-SWAP", "bot_id": "ai_strategy",
+        "bot_label": "AI Discretionary 1H", "state": state, "pnl": pnl,
+        "fee": abs(pnl), "timestamp": pe.epoch_ms() + 86_400_000,
+        "account_mode": "demo", "side": "buy",
+    }
+
+
+def _close_row(pnl=12.0, oid="c1"):
+    return {
+        "ord_id": oid, "inst_id": "BTC-USDT-SWAP", "bot_id": "ai_strategy",
+        "bot_label": "AI Discretionary 1H", "state": "closed", "pnl": pnl,
+        "fee": 0.5, "timestamp": pe.epoch_ms() + 86_400_000,
+        "account_mode": "demo", "side": "sell",
+    }
+
+
+def test_open_state_rows_are_not_eligible():
+    ok, reason = pe.pnl_eligible(_open_row(), mode="demo")
+    assert ok is False and reason == "not_closed"
+
+
+def test_filled_row_with_big_pnl_is_still_an_open():
+    # Раньше «filled с |pnl| >= $1» считался закрытием — именно эта эвристика
+    # и превращала вход в сделку.
+    assert pe.normalize_close_row(_open_row(pnl=-19.3165)) is None
+    assert pe.normalize_close_row(_close_row()) is not None
+
+
+@pytest.mark.asyncio
+async def test_rows_from_db_trades_skip_entry_rows():
+    class _DB:
+        async def get_trades_multi_bot(self, bot_ids, limit=5000, account_mode=None):
+            return [_open_row(), _close_row()]
+
+    rows = await pe._rows_from_db_trades(_DB(), ai_only=True, account_mode="demo")
+    assert [r["ord_id"] for r in rows] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_load_eligible_rows_ignores_open_fee_rows():
+    class _DB:
+        async def set_setting(self, k, v):
+            return None
+
+        async def get_exchange_close_trades_detail(self, **kw):
+            return []
+
+        async def get_trades_multi_bot(self, bot_ids, limit=5000, account_mode=None):
+            return [_open_row(), _close_row()]
+
+    rows, diag = await pe.load_eligible_rows(_DB(), mode="demo")
+    assert [r.get("ord_id") for r in rows] == ["c1"]
+    agg = pe.aggregate_rows(rows, ai_only=True)
+    assert agg["total"] == pytest.approx(12.0)
+    assert agg["trades_counted"] == 1
