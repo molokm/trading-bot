@@ -166,3 +166,12 @@ def test_status_surfaces_unprotected_live_positions():
     src = inspect.getsource(AIStrategy.get_status)
     assert "unprotected_open" in src
     assert "protected" in src
+
+
+def test_restore_keeps_the_guard_id_so_it_is_not_stacked():
+    # Restart rebuilds AIPosition; without restoring disaster_algo_id the bot
+    # would place a second guard on every redeploy.
+    assert 'old.get("disaster_algo_id")' in inspect.getsource(
+        AIStrategy._hydrate_from_db)
+    assert 'getattr(old, "disaster_algo_id"' in inspect.getsource(
+        AIStrategy._reconcile_live_from_exchange)

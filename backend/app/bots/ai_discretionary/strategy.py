@@ -4319,6 +4319,10 @@ class AIStrategy:
                     demo_trade_id=linked_id or (
                         str(getattr(demo_pos, "demo_trade_id", "") or "") if demo_pos else ""
                     ),
+                    # Keep the existing guard id so a restart does not stack a
+                    # second disaster stop on the same LIVE position.
+                    disaster_algo_id=str(getattr(old, "disaster_algo_id", "") or ""),
+                    disaster_stop_px=float(getattr(old, "disaster_stop_px", 0) or 0),
                 )
                 # Compute default stop/take from entry when adopting after restart
                 self._ensure_default_stops(pos)
@@ -7221,6 +7225,8 @@ class AIStrategy:
                         tg_message_id=int(old.get("tg_message_id") or 0),
                         signal_id=sr or 0,
                         demo_trade_id=tid,
+                        disaster_algo_id=str(old.get("disaster_algo_id") or ""),
+                        disaster_stop_px=float(old.get("disaster_stop_px") or 0),
                     )
                     self._ensure_default_stops(pos)
                     self._live_positions[coin] = pos
