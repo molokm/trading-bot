@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.41.0-profit"
+STRATEGY_VERSION = "v1.42.0-ctval"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -264,17 +264,27 @@ STRATEGY_DESC = (
     "и R-multiple — уроки идут обратно в промпт."
 )
 
+# Contract value (in coins per contract) and lot size for the USDT-M SWAPs the
+# bot trades. These MUST match /api/v5/public/instruments — a wrong `ctVal`
+# scales every position by the error factor, because `_size_order` converts a
+# target notional into contracts as ``notional / (entry * ctVal)``.
+#
+# 28 Oct incident: NEAR was 1.0 here but OKX ctVal is 10 (1 contract = 10 NEAR).
+# The bot therefore ordered 10x the intended contracts — a $3.9k position became
+# $38.6k (810 contracts instead of ~81) and lost -557.72 instead of ~-56, i.e.
+# ~10x the 1.2% risk budget. `tests/test_contract_specs.py` locks this table to
+# the exchange truth so it can never drift silently again.
 CT_VAL = {
     "BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0,
-    "OKB": 1.0, "DOGE": 1000.0, "BCH": 0.1, "DAI": 10.0,
+    "OKB": 0.01, "DOGE": 1000.0, "BCH": 0.1, "DAI": 10.0,
     "LINK": 1.0, "AVAX": 1.0, "ADA": 100.0,
-    "LTC": 1.0, "DOT": 1.0, "UNI": 1.0, "NEAR": 1.0,
+    "LTC": 1.0, "DOT": 1.0, "UNI": 1.0, "NEAR": 10.0,
 }
 LOT_SZ = {
-    "BTC": 0.01, "ETH": 0.01, "SOL": 0.1, "XRP": 0.01,
-    "OKB": 0.1, "DOGE": 1.0, "BCH": 0.01, "DAI": 1.0,
-    "LINK": 0.1, "AVAX": 0.1, "ADA": 1.0,
-    "LTC": 0.1, "DOT": 0.1, "UNI": 0.1, "NEAR": 0.1,
+    "BTC": 0.01, "ETH": 0.01, "SOL": 0.01, "XRP": 0.01,
+    "OKB": 1.0, "DOGE": 0.01, "BCH": 0.1, "DAI": 1.0,
+    "LINK": 0.1, "AVAX": 0.1, "ADA": 0.1,
+    "LTC": 0.1, "DOT": 1.0, "UNI": 1.0, "NEAR": 0.1,
 }
 
 
