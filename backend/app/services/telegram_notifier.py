@@ -67,13 +67,14 @@ class TelegramNotifier:
 
     @property
     def configured(self) -> bool:
-        return bool(self.token and self.chat_id)
+        # Channel-only setups are valid (public free signals without private chat).
+        return bool(self.token and (self.chat_id or self.channel_id))
 
     @property
     def status(self) -> str:
         if not self.token:
             return "no_token"
-        if not self.chat_id:
+        if not self.chat_id and not self.channel_id:
             return "no_chat"
         return "ok"
 
@@ -274,7 +275,11 @@ class TelegramNotifier:
         # Pass 2: plain message (open messages, or close fallback)
         for attempt in range(3):
             try:
-                data = await _post(base)
+                payload = dict(base)
+                # Last attempt: drop HTML if Telegram rejected parse entities
+                if attempt == 2:
+                    payload.pop("parse_mode", None)
+                data = await _post(payload)
                 if data.get("ok"):
                     if reply_id:
                         print(f"[TG] sent CLOSE without reply (open mid={reply_id} missing)", flush=True)
@@ -282,14 +287,17 @@ class TelegramNotifier:
                         return int((data.get("result") or {}).get("message_id") or 0)
                     except (TypeError, ValueError):
                         return 0
-                print(f"[TG] send not ok: {data.get('description')}", flush=True)
+                desc = str(data.get("description") or data)
+                print(f"[TG] send not ok: {desc}", flush=True)
+                low = desc.lower()
+                if "parse" in low or "entity" in low or "can't parse" in low:
+                    base.pop("parse_mode", None)
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
             except Exception as e:
                 print(f"[TG] send exception: {e}", flush=True)
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
-        print(f"[TG] send FAILED chat={chat_id} text={text[:80]!r}", flush=True)
         return 0
 
     async def send_trade(

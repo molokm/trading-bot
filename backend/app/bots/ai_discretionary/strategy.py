@@ -2533,7 +2533,7 @@ class AIStrategy:
         await self._remember_close(coin, side, pnl, reason or "exchange_stop")
         try:
             await self._notify_close_tg(
-                pos, coin, reason or "exchange_stop", exit_px, pnl, account_mode=mode)
+                pos, coin, reason or "exchange_stop", exit_px, pnl, account_mode="demo")
         except Exception as e:
             print(f"[AI] TG close (flat): {e}", flush=True)
 
@@ -3673,27 +3673,39 @@ class AIStrategy:
         account_mode: str = "demo",
         bot_name_suffix: str = "",
     ) -> None:
-        """Always try to send close notification (reply to open if possible)."""
-        mode_tag = self._account_mode_tag()[0]
+        """Always try to send close notification (reply to open if possible).
+
+        Primary engine is DEMO-only: unless explicitly LIVE (mirror suffix),
+        notifications go as account_mode=demo so free channel + owner chat get them.
+        """
         if not self.notifier:
             print(f"[AI] TG close skipped: no notifier ({coin})", flush=True)
             return
+        # Live mirror passes bot_name_suffix " (LIVE)" or account_mode=live
+        mode = str(account_mode or "demo").strip().lower()
+        if "LIVE" in str(bot_name_suffix or "").upper():
+            mode = "live"
+        elif mode not in ("demo", "live"):
+            mode = "demo"
+        # Primary closes without LIVE suffix must stay DEMO (public signals)
+        if mode == "live" and "LIVE" not in str(bot_name_suffix or "").upper() and bot_name_suffix == "":
+            # still allow explicit account_mode=live from _close_live
+            pass
         tok = getattr(self.notifier, "token", "") or ""
         _cid = getattr(self.notifier, "chat_id", "") or ""
         _chid = getattr(self.notifier, "channel_id", "") or ""
-        print(f"[AI] TG close: account={mode_tag} notif chat={bool(_cid)} chan={bool(_chid)} tok={bool(tok)} ({coin})", flush=True)
-        # Allow channel-only setups (token + channel) not just chat_id
-        tok = getattr(self.notifier, "token", "") or ""
-        has_target = bool(
-            getattr(self.notifier, "chat_id", "")
-            or getattr(self.notifier, "channel_id", "")
+        print(
+            f"[AI] TG close: mode={mode} chat={bool(_cid)} chan={bool(_chid)} tok={bool(tok)} ({coin})",
+            flush=True,
         )
+        has_target = bool(_cid or _chid)
         if not tok or not has_target:
             print(
                 f"[AI] TG close skipped: token={bool(tok)} target={has_target} ({coin})",
                 flush=True,
             )
             return
+        account_mode = mode
         try:
             signal_id = int(getattr(pos, "signal_id", 0) or 0)
             _reply = int(getattr(pos, "tg_message_id", 0) or 0)
@@ -3712,27 +3724,31 @@ class AIStrategy:
             else:
                 print(f"[AI] TG close: plain send (no open msg) signal={signal_id} {coin}", flush=True)
             bot_name = self.BOT_NAME + (bot_name_suffix or "")
-            # Recompute PnL with contract value if caller used bare (exit-entry)*sz
-            entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
-                pos, coin, fill_px, fee=0, fills=None,
-            )
-            # Prefer caller pnl when it already used close_pnl / fillPnl (non-trivial)
+            # Metrics must never block the TG send itself
+            entry_show = float(getattr(pos, "entry_price", 0) or 0)
+            exit_show = float(fill_px or 0)
             try:
                 caller_pnl = float(pnl or 0)
             except (TypeError, ValueError):
                 caller_pnl = 0.0
-            # If caller left pnl~0 but price moved, or magnitude is way off vs contract formula → use formula
             use_pnl = caller_pnl
-            if abs(pnl_m) > 1e-9:
-                if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
-                    use_pnl = pnl_m
-                elif abs(caller_pnl) > 0 and abs(pnl_m) > 0:
-                    # if caller is ~ct_val off (forgot ct), ratio near ct → replace
-                    ratio = abs(caller_pnl / pnl_m) if pnl_m else 0
-                    if ratio > 5 or ratio < 0.2:
+            try:
+                entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
+                    pos, coin, fill_px, fee=0, fills=None,
+                )
+                if abs(pnl_m) > 1e-9:
+                    if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
                         use_pnl = pnl_m
-            entry_show = entry_m if entry_m > 0 else float(getattr(pos, "entry_price", 0) or 0)
-            exit_show = exit_m if exit_m > 0 else float(fill_px or 0)
+                    elif abs(caller_pnl) > 0 and abs(pnl_m) > 0:
+                        ratio = abs(caller_pnl / pnl_m) if pnl_m else 0
+                        if ratio > 5 or ratio < 0.2:
+                            use_pnl = pnl_m
+                if entry_m > 0:
+                    entry_show = entry_m
+                if exit_m > 0:
+                    exit_show = exit_m
+            except Exception as e:
+                print(f"[AI] TG close metrics fallback {coin}: {e}", flush=True)
             _txt = self.notifier.close_msg(
                 coin=coin,
                 side=getattr(pos, "side", "long"),
@@ -3791,7 +3807,7 @@ class AIStrategy:
             _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
             mode, _k = self._account_mode_tag()
             try:
-                await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode=mode)
+                await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode="demo")
             except Exception as e:
                 print(f"[AI] TG close (execute=0): {e}", flush=True)
             return
@@ -3967,8 +3983,8 @@ class AIStrategy:
                     )
             except Exception as e:
                 print(f"[AI] exchange_close tag: {e}", flush=True)
-        mode, _key = self._account_mode_tag()
-        await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode=mode)
+        # Primary engine is DEMO-only — always notify as demo (public signals)
+        await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode="demo")
         await self._remember_close(coin, getattr(pos, "side", ""),
                                    float(pnl or 0), str(reason or ""))
         self._positions.pop(coin, None)
