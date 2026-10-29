@@ -13,7 +13,7 @@ import { fmtTs } from '../utils/time'
 const PAIRS = ['Все', 'BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
 
 // Coins the bot actively trades - shown as live price cards on the dashboard
-const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'AVAX', 'LTC']
+const PRICE_COINS = ['BTC', 'ETH', 'SOL', 'XRP', 'NEAR', 'DOGE']
 /** AI product mode - Discretionary + optional Scale-In on dashboard */
 const AI_ONLY_MODE = true
 
@@ -389,18 +389,26 @@ export default function Dashboard({ health, connected, isGuest }) {
   // Fast tier ~20s (bot pulse / prices). Slow tier ~75s (PnL + trades).
   const slowRef = useRef(0)
   useEffect(() => {
-    loadData({ fastOnly: false })
+    // First paint: only fast tier (status + prices). Heavy PnL/trades after short delay.
+    loadData({ fastOnly: true })
+    const slowTimer = setTimeout(() => {
+      slowRef.current = Date.now()
+      loadData({ fastOnly: false })
+    }, 150)
     const fastId = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       const now = Date.now()
-      if (now - (slowRef.current || 0) >= 75000) {
+      if (now - (slowRef.current || 0) >= 90000) {
         slowRef.current = now
         loadData({ fastOnly: false })
       } else {
         loadData({ fastOnly: true })
       }
-    }, 20000)
-    return () => clearInterval(fastId)
+    }, 25000)
+    return () => {
+      clearInterval(fastId)
+      clearTimeout(slowTimer)
+    }
   }, [connected, demoMode])
 
   useEffect(() => {

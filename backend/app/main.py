@@ -837,7 +837,33 @@ async def startup():
                 print(f'[startup] warmer ended: {e}', flush=True)
         _warm_task = asyncio.create_task(_delayed_bg())
         print('[startup] Dashboard cache warmer scheduled (+8s)', flush=True)
+    except Exception as e:
+        print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
 
+    async def _me_dash_warm_loop():
+        """Keep PnL engine cache warm (avoid 1s+ cold rebuild on first page open)."""
+        await asyncio.sleep(15)
+        while True:
+            try:
+                if ai_bot is not None:
+                    try:
+                        await _get_pnl_cached(mode='demo')
+                    except Exception as _pe:
+                        print(f'[warm] pnl demo: {_pe}', flush=True)
+                    try:
+                        await _warm_dashboard_caches()
+                    except Exception:
+                        pass
+            except Exception as _we2:
+                print(f'[warm] loop: {_we2}', flush=True)
+            await asyncio.sleep(45)
+    try:
+        asyncio.create_task(_me_dash_warm_loop())
+        print('[startup] me/dashboard warm loop scheduled', flush=True)
+    except Exception as _wex:
+        print(f'[startup] me/dashboard warm loop: {_wex}', flush=True)
+
+    try:
         async def _exchange_sync_bg():
             await asyncio.sleep(10)
             try:
@@ -854,7 +880,7 @@ async def startup():
         asyncio.create_task(_delayed_orphan())
         print('[startup] Orphan sweeper scheduled (+120s)', flush=True)
     except Exception as e:
-        print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
+        print(f'[startup] Exchange/orphan schedule error: {e}', flush=True)
     _startup_log = []
     def _slog(msg):
         # Keep the public startup log bounded — a restart that never fails
@@ -2290,7 +2316,7 @@ async def me_pnl(request: Request):
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': source}
 
 _ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
-_ME_DASH_TTL = 20.0  # seconds — bounds OKX bills / PnL work on the public dashboard
+_ME_DASH_TTL = 45.0  # seconds — public dashboard; longer TTL = faster reloads
 
 @app.get('/api/me/dashboard')
 @policy(PUBLIC)
@@ -2304,7 +2330,8 @@ async def me_dashboard(request: Request):
     # Short TTL cache — same role/user shares one payload (cuts 600ms rebuilds)
     try:
         import time as _tmod
-        _ck = f"{role}:{user_id}"
+        # Guests share one public payload (no per-user live data)
+        _ck = "guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}"
         _age = _tmod.time() - float(_ME_DASH_CACHE.get("ts") or 0)
         if (
             _ME_DASH_CACHE.get("data") is not None
@@ -3099,11 +3126,36 @@ async def me_dashboard(request: Request):
     trades.sort(key=_trade_sort_key, reverse=True)
     # Do NOT cap: a capped list cannot add up to the card total. The engine
     # already bounds the set (epoch + AI-only + dedupe), so ship all of it.
-    _out = {'demo': demo, 'live': live, 'trades': trades[:400], 'pnl': pnl, 'role': role, 'user_id': user_id}
+    # UI only needs recent closed rows; full engine list is huge JSON.
+    _trades_out = trades[:80] if isinstance(trades, list) else []
+    # Strip nested trade arrays from pnl cards (metrics only) — cuts ~25KB.
+    def _pnl_cards_only(obj):
+        if not isinstance(obj, dict):
+            return obj
+        out = {k: v for k, v in obj.items() if k not in ('trades', 'rows', 'fills', 'items')}
+        for nested in ('live', 'demo', 'per_bot'):
+            if isinstance(out.get(nested), dict):
+                out[nested] = {k: v for k, v in out[nested].items()
+                               if k not in ('trades', 'rows', 'fills', 'items')}
+            elif isinstance(out.get(nested), list) and nested == 'per_bot':
+                out[nested] = [
+                    ({k: v for k, v in x.items() if k not in ('trades', 'rows')}
+                     if isinstance(x, dict) else x)
+                    for x in out[nested]
+                ]
+        return out
+    _pnl_out = _pnl_cards_only(pnl) if isinstance(pnl, dict) else pnl
+    _out = {
+        'demo': demo, 'live': live,
+        'trades': _trades_out,
+        'pnl': _pnl_out,
+        'role': role, 'user_id': user_id,
+        'trades_truncated': len(trades) if isinstance(trades, list) else 0,
+    }
     try:
         import time as _tmod
         _ME_DASH_CACHE["ts"] = _tmod.time()
-        _ME_DASH_CACHE["key"] = f"{role}:{user_id}"
+        _ME_DASH_CACHE["key"] = ("guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}")
         _ME_DASH_CACHE["data"] = _out
     except Exception:
         pass
@@ -6077,7 +6129,7 @@ _live_status_cache: dict = {}
 _SM_DISCOVER_LOCK = None
 
 @app.get('/api/market/ticker')
-@policy(AUTH)
+@policy(PUBLIC)
 async def get_ticker(inst_id: str='BTC-USDT'):
     now_s = _time.time()
     if _ticker_cache.get(inst_id) and now_s - _ticker_cache_ts.get(inst_id, 0) < _TICKER_TTL:
@@ -6092,7 +6144,7 @@ async def get_ticker(inst_id: str='BTC-USDT'):
     return data
 
 @app.get('/api/market/tickers')
-@policy(AUTH)
+@policy(PUBLIC)
 async def get_tickers(inst_id: str=''):
     """Batch ticker fetch — one request replaces N individual /market/ticker
     calls (the dashboard's 10 coin-price strip)."""
