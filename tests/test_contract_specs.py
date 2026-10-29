@@ -10,6 +10,8 @@
 (`/api/v5/public/instruments`, instType=SWAP), чтобы дрейф больше не проходил
 незамеченным.
 """
+import pytest
+
 from app.bots.ai_discretionary.strategy import (
     AIConfig,
     AIStrategy,
@@ -102,9 +104,29 @@ def test_compare_contract_specs_flags_the_near_1ctval_regression():
 
 
 def test_compare_contract_specs_flags_lot_size_drift():
-    # OKB lotSz=1.0 на OKX; строка с 0.1 должна попасть в отчёт.
-    out = compare_contract_specs([_okx_row("OKB", 0.01, 0.1)], coins=["OKB"])
-    assert [(m["coin"], m["field"]) for m in out] == [("OKB", "lotSz")]
+    # Код требует шаг мельче биржевого (BTC 0.01 против 1.0) — ордера могут
+    # отклоняться, это реальная аномалия.
+    out = compare_contract_specs([_okx_row("BTC", 0.01, 1.0)], coins=["BTC"])
+    assert [(m["coin"], m["field"]) for m in out] == [("BTC", "lotSz")]
+
+
+def test_compare_contract_specs_accepts_coarser_lot_step():
+    # Обратное направление безопасно: OKX demo даёт OKB lotSz=0.1, а наш шаг
+    # 1.0 — кратное ему значение. Не должно считаться дрейфом.
+    assert compare_contract_specs([_okx_row("OKB", 0.01, 0.1)], coins=["OKB"]) == []
+
+
+@pytest.mark.parametrize("coin,demo_lot", [
+    ("BCH", 0.01), ("LINK", 0.01), ("ADA", 0.01), ("DOT", 0.1),
+])
+def test_compare_contract_specs_accepts_okx_demo_finer_lots(coin, demo_lot):
+    """OKX demo (x-simulated-trading) даёт более мелкий шаг, чем live.
+
+    Наша таблица следует LIVE; более грубый шаг — валидное подмножество,
+    поэтому это не аномалия (иначе валидатор шумит на каждом запуске).
+    """
+    rows = [_okx_row(coin, CT_VAL[coin], demo_lot)]
+    assert compare_contract_specs(rows, coins=[coin]) == []
 
 
 def test_compare_contract_specs_ignores_coins_missing_on_okx():

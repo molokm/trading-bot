@@ -292,8 +292,9 @@ def compare_contract_specs(rows, coins=None) -> list:
     """Compare CT_VAL/LOT_SZ with OKX `/api/v5/public/instruments` rows.
 
     A wrong `ctVal` multiplies every position by the error factor (NEAR was
-    ordered 10x too big on 28 Oct), so callers should treat a non-empty return
-    as a hard anomaly. Empty list == everything matches.
+    ordered 10x too big on 28 Oct), so any ctVal drift is a hard anomaly.
+    For `lotSz` only a step finer than the exchange is reported: a coarser one
+    is a valid subset and is what LIVE requires anyway. Empty list == all good.
     """
     by_inst = {}
     for r in (rows or []):
@@ -314,9 +315,14 @@ def compare_contract_specs(rows, coins=None) -> list:
         if okx_ct > 0 and abs(okx_ct - float(CT_VAL.get(coin, 0))) > 1e-12:
             out.append({"coin": coin, "field": "ctVal",
                         "code": float(CT_VAL.get(coin, 0)), "okx": okx_ct})
-        if okx_lot > 0 and abs(okx_lot - float(LOT_SZ.get(coin, 0))) > 1e-12:
+        # Only a FINER step than the exchange is dangerous (orders get rejected).
+        # A coarser one is always a valid subset — e.g. OKX demo allows 0.01 for
+        # BCH/ADA/LINK and 0.1 for DOT while LIVE requires 0.1 / 1.0, and our
+        # table follows LIVE. Reporting that as drift would be pure noise.
+        code_lot = float(LOT_SZ.get(coin, 0))
+        if okx_lot > 0 and 0 < code_lot < (okx_lot - 1e-12):
             out.append({"coin": coin, "field": "lotSz",
-                        "code": float(LOT_SZ.get(coin, 0)), "okx": okx_lot})
+                        "code": code_lot, "okx": okx_lot})
     return out
 
 
@@ -3075,11 +3081,15 @@ class AIStrategy:
             for m in mism:
                 key = f"{m.get('field')}:{m.get('coin')}"
                 if key not in prev:
-                    _factor = (float(m.get("code") or 0) / float(m.get("okx") or 0)) if m.get("okx") else 0.0
+                    if m.get("field") == "lotSz":
+                        _detail = (f"lot step {m.get('code')} is finer than OKX "
+                                   f"{m.get('okx')} — orders may be rejected")
+                    else:
+                        _factor = (float(m.get("code") or 0) / float(m.get("okx") or 0)) if m.get("okx") else 0.0
+                        _detail = (f"code={m.get('code')} okx={m.get('okx')} "
+                                   f"(orders ~{_factor:.4f}x intended size)")
                     print(
-                        f"[AI-SPEC] MISMATCH {m.get('coin')} {m.get('field')}: "
-                        f"code={m.get('code')} okx={m.get('okx')} "
-                        f"(orders ~{_factor:.4f}x intended size)",
+                        f"[AI-SPEC] MISMATCH {m.get('coin')} {m.get('field')}: {_detail}",
                         flush=True,
                     )
             if not mism and prev:
