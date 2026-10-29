@@ -1709,6 +1709,11 @@ def _invalidate_account_caches():
     """Drop mode-sensitive caches so Live never shows Demo numbers (and vice versa)."""
     global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts, _bills_cache
     global _positions_cache, _positions_cache_ts
+    try:
+        _ME_DASH_CACHE["ts"] = 0.0
+        _ME_DASH_CACHE["data"] = None
+    except Exception:
+        pass
     _fills_cache = None
     _fills_cache_ts = 0
     _positions_cache = None
@@ -2284,14 +2289,31 @@ async def me_pnl(request: Request):
         count += 1
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': source}
 
+_ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
+_ME_DASH_TTL = 20.0  # seconds — bounds OKX bills / PnL work on the public dashboard
+
 @app.get('/api/me/dashboard')
 @policy(PUBLIC)
 async def me_dashboard(request: Request):
+
     """MiniApp dashboard: DEMO (shared server bot data) and LIVE (user's own OKX account)."""
     try:
         role, user_id, user_row = await _me_ctx(request)
     except Exception:
         role, user_id, user_row = 'guest', None, None
+    # Short TTL cache — same role/user shares one payload (cuts 600ms rebuilds)
+    try:
+        import time as _tmod
+        _ck = f"{role}:{user_id}"
+        _age = _tmod.time() - float(_ME_DASH_CACHE.get("ts") or 0)
+        if (
+            _ME_DASH_CACHE.get("data") is not None
+            and _ME_DASH_CACHE.get("key") == _ck
+            and _age < float(_ME_DASH_TTL)
+        ):
+            return _ME_DASH_CACHE["data"]
+    except Exception:
+        pass
     demo = {}
     live = {}
     try:
@@ -3077,7 +3099,15 @@ async def me_dashboard(request: Request):
     trades.sort(key=_trade_sort_key, reverse=True)
     # Do NOT cap: a capped list cannot add up to the card total. The engine
     # already bounds the set (epoch + AI-only + dedupe), so ship all of it.
-    return {'demo': demo, 'live': live, 'trades': trades[:400], 'pnl': pnl, 'role': role, 'user_id': user_id}
+    _out = {'demo': demo, 'live': live, 'trades': trades[:400], 'pnl': pnl, 'role': role, 'user_id': user_id}
+    try:
+        import time as _tmod
+        _ME_DASH_CACHE["ts"] = _tmod.time()
+        _ME_DASH_CACHE["key"] = f"{role}:{user_id}"
+        _ME_DASH_CACHE["data"] = _out
+    except Exception:
+        pass
+    return _out
 
 @app.get('/api/ai/status')
 @policy(PUBLIC)
@@ -3136,6 +3166,39 @@ async def ai_status(request: Request):
         status.pop('recent_decisions', None)
         status.pop('recent_exec', None)
         status.pop('adapt_log', None)
+        # Further slim for main dashboard: drop static blurb + trim indicators
+        status.pop('strategy_blurb', None)
+        status.pop('reflection', None)
+        status.pop('engine_rows', None)
+        status.pop('engine_diag', None)
+        # Indicators only for open coins + top signal + BTC (not full universe)
+        try:
+            keep = set()
+            for p in (status.get('open_positions') or []):
+                c = str((p or {}).get('coin') or '').upper()
+                if c:
+                    keep.add(c)
+            for s in (status.get('top_signals') or [])[:2]:
+                c = str((s or {}).get('coin') or '').upper()
+                if c:
+                    keep.add(c)
+            keep.add('BTC')
+            inds = status.get('indicators') or {}
+            if isinstance(inds, dict) and inds:
+                slim = {}
+                for k, v in inds.items():
+                    ku = str(k).upper()
+                    if ku in keep:
+                        # drop bulky series if present
+                        if isinstance(v, dict):
+                            vv = {ik: iv for ik, iv in v.items()
+                                  if ik not in ('bar_closes', 'closes', 'candles', 'history')}
+                            slim[ku] = vv
+                        else:
+                            slim[ku] = v
+                status['indicators'] = slim
+        except Exception:
+            pass
 
     if diag:
         # ── LIVE mirror audit (read-only diagnostics) ──────────────────────

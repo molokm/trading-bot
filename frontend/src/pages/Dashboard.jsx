@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
@@ -386,18 +386,26 @@ export default function Dashboard({ health, connected, isGuest }) {
     trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
   }
 
+  // Fast tier ~20s (bot pulse / prices). Slow tier ~75s (PnL + trades).
+  const slowRef = useRef(0)
   useEffect(() => {
     loadData({ fastOnly: false })
-    const interval = setInterval(() => {
+    const fastId = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
-      loadData({ fastOnly: false })
-    }, 30000)
-    return () => clearInterval(interval)
+      const now = Date.now()
+      if (now - (slowRef.current || 0) >= 75000) {
+        slowRef.current = now
+        loadData({ fastOnly: false })
+      } else {
+        loadData({ fastOnly: true })
+      }
+    }, 20000)
+    return () => clearInterval(fastId)
   }, [connected, demoMode])
 
   useEffect(() => {
     const onVis = () => { if (!document.hidden) loadData({ fastOnly: true }) }
-    const onMode = () => { loadData({ fastOnly: false }) }
+    const onMode = () => { slowRef.current = 0; loadData({ fastOnly: false }) }
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('trading-mode-changed', onMode)
     return () => {
@@ -409,22 +417,24 @@ export default function Dashboard({ health, connected, isGuest }) {
   async function loadData(opts = {}) {
     if (!connected) { setLoading(false); return }
     if (document.hidden && !opts.force) return
-    
+
+    const hasAuth = !!(typeof localStorage !== 'undefined' && localStorage.getItem('auth_token'))
+
     try {
-      // One round of parallel calls. `safeCall` bounds each request so a single
-      // stuck endpoint cannot hold the whole dashboard hostage. BTC is taken
-      // from the tickers response instead of a second /market/ticker request.
-      const [pf, pos, aiSt, priceTickers, liveSt] = await Promise.all([
-        safeCall(api.getPortfolio()),
-        safeCall(api.getPositions('SWAP')),
+      // Fast tier: lean AI status + public tickers. Auth-only endpoints only when logged in.
+      const tasks = [
         safeCall(api.aiStatus()),
         safeCall(api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`))),
-        safeCall(api.liveStatus()),
-      ])
-      if (pf) setPortfolio(pf)
-      if (pos) setPositions(pos.positions || [])
+      ]
+      if (hasAuth) {
+        tasks.push(safeCall(api.getPortfolio()))
+        tasks.push(safeCall(api.getPositions('SWAP')))
+        tasks.push(safeCall(api.liveStatus()))
+      }
+      const results = await Promise.all(tasks)
+      const aiSt = results[0]
+      const priceTickers = results[1]
       if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-      if (liveSt) setLiveStatus(liveSt)
       if (priceTickers?.tickers) {
         const byCoin = {}
         priceTickers.tickers.forEach(tp => {
@@ -434,17 +444,20 @@ export default function Dashboard({ health, connected, isGuest }) {
         setTickers(byCoin)
         if (byCoin.BTC) setTicker(byCoin.BTC)
       }
+      if (hasAuth) {
+        const pf = results[2]
+        const pos = results[3]
+        const liveSt = results[4]
+        if (pf) setPortfolio(pf)
+        if (pos) setPositions(pos.positions || [])
+        if (liveSt) setLiveStatus(liveSt)
+      }
       setLoading(false)
     } catch { setLoading(false) }
     if (opts.fastOnly) return
 
-    // Slow tier - expensive OKX-bills pipelines; served from the server-side
-    // 30s cache, so updates arrive a little after the fast tier.
+    // Slow tier: single public payload (20s server cache) — PnL + trades + demo/live cards.
     try {
-      // Single source of truth for the main page: /api/me/dashboard (PUBLIC).
-      // /api/pnl, /api/trades/paired and /api/live/trades are AUTH_NO_GUEST /
-      // ADMIN - without a token they answer 403 and the whole «Сделки» panel
-      // plus Sum PnL used to silently go blank (every .catch(() => null)).
       const dash = await safeCall(api.meDashboard(), 15000)
       let pnlData = null
       let livePnlData = null
