@@ -38,6 +38,43 @@ class TestPreflight:
         )
 
 
+class TestFlattenDecision:
+    """Guard may only market-close a losing position that is provably unmanaged."""
+
+    def _decide(self, **kw):
+        base = dict(
+            upl=-10.0,
+            pos_age_sec=3600.0,
+            manage_age_sec=2000.0,
+            flatten_after_sec=1200.0,
+            min_pos_age_sec=1200.0,
+            confirm_sec=300.0,
+            bleeding_since=1000.0,
+            now=1400.0,
+        )
+        base.update(kw)
+        return hg.flatten_decision(**base)
+
+    def test_managed_position_is_held(self):
+        assert self._decide(manage_age_sec=600.0) == (False, "managed")
+        assert self._decide(manage_age_sec=None) == (False, "managed")
+
+    def test_profitable_position_is_held(self):
+        assert self._decide(upl=0.0) == (False, "not_losing")
+        assert self._decide(upl=5.0) == (False, "not_losing")
+
+    def test_young_position_is_held(self):
+        # NEAR on 28.10 was ~9 minutes old and got dumped — must not happen now.
+        assert self._decide(pos_age_sec=540.0) == (False, "young")
+
+    def test_unconfirmed_bleed_is_held(self):
+        assert self._decide(bleeding_since=None) == (False, "confirm")
+        assert self._decide(bleeding_since=1300.0, now=1400.0) == (False, "confirm")
+
+    def test_old_unmanaged_bleeding_position_is_flattened(self):
+        assert self._decide() == (True, "flatten")
+
+
 class TestEvaluate:
     def _pos(self, **kw):
         base = {

@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.42.0-ctval"
+STRATEGY_VERSION = "v1.43.0-guard-specs"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -286,6 +286,38 @@ LOT_SZ = {
     "LINK": 0.1, "AVAX": 0.1, "ADA": 0.1,
     "LTC": 0.1, "DOT": 1.0, "UNI": 1.0, "NEAR": 0.1,
 }
+
+
+def compare_contract_specs(rows, coins=None) -> list:
+    """Compare CT_VAL/LOT_SZ with OKX `/api/v5/public/instruments` rows.
+
+    A wrong `ctVal` multiplies every position by the error factor (NEAR was
+    ordered 10x too big on 28 Oct), so callers should treat a non-empty return
+    as a hard anomaly. Empty list == everything matches.
+    """
+    by_inst = {}
+    for r in (rows or []):
+        if isinstance(r, dict) and r.get("instId"):
+            by_inst[str(r["instId"])] = r
+    out = []
+    for coin in (coins if coins is not None else list(CT_VAL.keys())):
+        if coin not in CT_VAL:
+            continue
+        d = by_inst.get(f"{coin}-USDT-SWAP")
+        if not d:
+            continue
+        try:
+            okx_ct = float(d.get("ctVal") or 0)
+            okx_lot = float(d.get("lotSz") or 0)
+        except (TypeError, ValueError):
+            continue
+        if okx_ct > 0 and abs(okx_ct - float(CT_VAL.get(coin, 0))) > 1e-12:
+            out.append({"coin": coin, "field": "ctVal",
+                        "code": float(CT_VAL.get(coin, 0)), "okx": okx_ct})
+        if okx_lot > 0 and abs(okx_lot - float(LOT_SZ.get(coin, 0))) > 1e-12:
+            out.append({"coin": coin, "field": "lotSz",
+                        "code": float(LOT_SZ.get(coin, 0)), "okx": okx_lot})
+    return out
 
 
 def _fmt_px(px: float, coin: str = "") -> str:
@@ -616,6 +648,10 @@ class AIStrategy:
         # capital may be a nominal number, so risk limits must not use it alone.
         self._account_equity = 0.0
         self._account_equity_ts = 0.0
+        # Runtime contract-spec validation (ctVal/lotSz vs OKX). A wrong ctVal
+        # scaled NEAR 10x on 28.10 and lost 557 USDT, so anomalies are surfaced.
+        self._contract_specs: list = []
+        self._contract_specs_ts = 0.0
         self._last_activity = None
         self._trace = {}
         self._next_tick_at = None
@@ -3010,6 +3046,48 @@ class AIStrategy:
             print(f"[AI] equity sync: {e}", flush=True)
         self._account_equity_ts = time.time()
         return float(self._account_equity or 0.0)
+
+    async def _validate_contract_specs(self, client) -> list:
+        """Hourly check that CT_VAL/LOT_SZ still match OKX instrument specs.
+
+        A stale ctVal silently multiplies order size (NEAR was ordered 10x too
+        big on 28.10). Anomalies are cached on the instance so /api/health and
+        /api/ai/status can flag them, and logged once when they appear.
+        """
+        try:
+            if client is None:
+                return list(getattr(self, "_contract_specs", []) or [])
+            now = time.time()
+            if (now - float(getattr(self, "_contract_specs_ts", 0) or 0)) < 3600:
+                return list(getattr(self, "_contract_specs", []) or [])
+            r = await client.get_instruments("SWAP")
+            rows = (r or {}).get("data") if isinstance(r, dict) else None
+            if not rows:
+                return list(getattr(self, "_contract_specs", []) or [])
+            coins = list(getattr(self.config, "symbols", None) or []) or None
+            mism = compare_contract_specs(rows, coins=coins)
+            self._contract_specs_ts = now
+            prev = {
+                f"{m.get('field')}:{m.get('coin')}": m
+                for m in (getattr(self, "_contract_specs", []) or [])
+            }
+            self._contract_specs = mism
+            for m in mism:
+                key = f"{m.get('field')}:{m.get('coin')}"
+                if key not in prev:
+                    _factor = (float(m.get("code") or 0) / float(m.get("okx") or 0)) if m.get("okx") else 0.0
+                    print(
+                        f"[AI-SPEC] MISMATCH {m.get('coin')} {m.get('field')}: "
+                        f"code={m.get('code')} okx={m.get('okx')} "
+                        f"(orders ~{_factor:.4f}x intended size)",
+                        flush=True,
+                    )
+            if not mism and prev:
+                print("[AI-SPEC] contract specs realigned with OKX", flush=True)
+            return mism
+        except Exception as e:
+            print(f"[AI-SPEC] validate failed: {e}", flush=True)
+            return list(getattr(self, "_contract_specs", []) or [])
 
     async def _avail_usdt(self, client, update_equity: bool = True) -> float:
         """Real available USDT on the account backing `client` (demo or live).
@@ -6612,6 +6690,11 @@ class AIStrategy:
                 await self._sync_equity(client)
         except Exception as _ee:
             print(f"[AI] equity sync tick: {_ee}", flush=True)
+        # Guard against a stale ctVal/lotSz table (NEAR 28.10 = 10x size bug).
+        try:
+            await self._validate_contract_specs(client)
+        except Exception as _spe:
+            print(f"[AI] contract spec tick: {_spe}", flush=True)
         # Keep internal lifetime counters on the SAME rows/values as the card.
         try:
             _es = await self._refresh_engine_stats()
@@ -7294,6 +7377,21 @@ class AIStrategy:
         closed set matches the card exactly.
         """
         rebuilt = []
+        try:
+            from app.services.pnl_engine import BUG_EXCLUDED_ORD_IDS as _BUG_IDS
+        except Exception:
+            _BUG_IDS = {}
+
+        def _excluded(r: dict) -> bool:
+            if not _BUG_IDS:
+                return False
+            oid = str((r or {}).get("ord_id") or (r or {}).get("ordId") or "").strip()
+            return bool(oid) and oid in _BUG_IDS
+
+        # Defect-driven closes are never scored, so they must not reach the
+        # adaptive/reflection layer either.
+        db_rows = [r for r in (db_rows or []) if not _excluded(r)]
+        eng_rows = [r for r in (eng_rows or []) if not _excluded(r)]
         for r in reversed(db_rows or []):
             state = str(r.get("state") or "").strip().lower()
             # `filled`/empty = an executed entry, NOT a closed trade. Map it
@@ -8357,6 +8455,8 @@ class AIStrategy:
             "running": self._running,
             "strategy": STRATEGY_NAME,
             "version": STRATEGY_VERSION,
+            # Runtime spec drift (empty = CT_VAL/LOT_SZ match OKX).
+            "contract_specs": list(getattr(self, "_contract_specs", []) or []),
             # Card text = live market pulse (not static STRATEGY_DESC)
             "description": self._safe_pulse_text(),
             "strategy_blurb": STRATEGY_DESC,

@@ -10,7 +10,13 @@
 (`/api/v5/public/instruments`, instType=SWAP), чтобы дрейф больше не проходил
 незамеченным.
 """
-from app.bots.ai_discretionary.strategy import AIConfig, AIStrategy, CT_VAL, LOT_SZ
+from app.bots.ai_discretionary.strategy import (
+    AIConfig,
+    AIStrategy,
+    CT_VAL,
+    LOT_SZ,
+    compare_contract_specs,
+)
 
 # coin -> (ctVal, lotSz) — как отдаёт OKX для USDT-M SWAP на 2026-10.
 OKX_TRUTH = {
@@ -73,3 +79,34 @@ def test_near_ten_x_bug_would_be_caught_by_the_table_bootstrapping():
 
     # Каким был бы размер при прежнем ctVal=1: он ровно в 10 раз больше.
     assert abs((good * 10) - 810) < 60, "связь 10x должна воспроизводиться"
+
+
+# ── Runtime-валидация против OKX ──────────────────────────────────────────
+
+def _okx_row(coin, ct, lot):
+    return {"instId": f"{coin}-USDT-SWAP", "ctVal": str(ct), "lotSz": str(lot)}
+
+
+def test_compare_contract_specs_ok_when_the_table_matches_okx():
+    rows = [_okx_row(c, ct, lot) for c, (ct, lot) in OKX_TRUTH.items()]
+    assert compare_contract_specs(rows, coins=list(OKX_TRUTH)) == []
+
+
+def test_compare_contract_specs_flags_the_near_1ctval_regression():
+    # Ровно та ошибка, что стоила 557 USDT: в коде 10, на OKX 1.
+    out = compare_contract_specs([_okx_row("NEAR", 1.0, 0.1)], coins=["NEAR"])
+    assert len(out) == 1
+    assert out[0]["coin"] == "NEAR"
+    assert out[0]["field"] == "ctVal"
+    assert out[0]["code"] == 10.0 and out[0]["okx"] == 1.0
+
+
+def test_compare_contract_specs_flags_lot_size_drift():
+    # OKB lotSz=1.0 на OKX; строка с 0.1 должна попасть в отчёт.
+    out = compare_contract_specs([_okx_row("OKB", 0.01, 0.1)], coins=["OKB"])
+    assert [(m["coin"], m["field"]) for m in out] == [("OKB", "lotSz")]
+
+
+def test_compare_contract_specs_ignores_coins_missing_on_okx():
+    # DAI есть в CT_VAL, но не торгуется на OKX — молча пропускаем.
+    assert compare_contract_specs([], coins=["DAI"]) == []

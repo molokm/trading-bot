@@ -1188,10 +1188,12 @@ async def startup():
         """
         await asyncio.sleep(120)
         _flattened: dict = {}
+        _bleed_since: dict = {}   # coin -> first moment upl went negative
         _pending: dict = {}
         _log_seen: set = set()
         _had_issues = False
         _last_digest = 0.0
+        _boot_ts = _time.time()   # guard boot grace origin
 
         def _flag(name: str, default: str) -> float:
             try:
@@ -1203,6 +1205,12 @@ async def startup():
         _manage_max = _flag("AI_GUARD_MANAGE_SEC", "300")
         _tick_max = _flag("AI_GUARD_TICK_SEC", "180")
         _flatten_after = _flag("AI_GUARD_FLATTEN_SEC", "1200")
+        # A restart / brief stall must not market-close a healthy position. A
+        # position also needs to be bleeding for a while before we give up on
+        # the engine, and it must be old enough to have been managed at all.
+        _confirm_sec = _flag("AI_GUARD_CONFIRM_SEC", "300")
+        _boot_grace = _flag("AI_GUARD_BOOT_GRACE_SEC", "180")
+        _min_pos_age = _flag("AI_GUARD_MIN_POS_AGE_SEC", "1200")
         _notify_gap = _flag("AI_GUARD_NOTIFY_SEC", "3600")
 
         def _alert(text: str) -> None:
@@ -1212,6 +1220,25 @@ async def startup():
             except Exception as e:
                 print(f"[AI-GUARD] notify failed: {e}", flush=True)
 
+        def _pos_age(p) -> float | None:
+            """Position age in seconds from its opened_at stamp (None if unknown)."""
+            raw = getattr(p, "opened_at", None)
+            if not raw:
+                return None
+            try:
+                if isinstance(raw, (int, float)):
+                    ts = float(raw)
+                    if ts > 1e12:
+                        ts /= 1000.0
+                    return max(0.0, _time.time() - ts)
+                _s = str(raw).strip().replace("Z", "+00:00")
+                _dt = datetime.fromisoformat(_s)
+                if _dt.tzinfo is None:
+                    _dt = _dt.replace(tzinfo=timezone.utc)
+                return max(0.0, _time.time() - _dt.timestamp())
+            except Exception:
+                return None
+
         while True:
             try:
                 await asyncio.sleep(60)
@@ -1219,11 +1246,14 @@ async def startup():
                 if not bot:
                     continue
                 positions = list((getattr(bot, "_positions", {}) or {}).values())
-                if _flattened:
+                if _flattened or _bleed_since:
                     _live_coins = {getattr(p, "coin", "") for p in positions}
                     for _c in list(_flattened):
                         if _c not in _live_coins:
                             _flattened.pop(_c, None)
+                    for _c in list(_bleed_since):
+                        if _c not in _live_coins:
+                            _bleed_since.pop(_c, None)
                 tick_age = hg.beat_age_sec("ai_tick")
                 manage_age = hg.beat_age_sec("ai_manage")
                 try:
@@ -1332,7 +1362,14 @@ async def startup():
 
                 # Act: the engine is unmanaged for too long AND the trade is
                 # bleeding → close it, do not wait for a recovery that may not come.
-                if _enabled and positions and manage_age is not None and manage_age > _flatten_after:
+                # Hardened after 28.10: a stale *shared* manage beat used to
+                # market-close every losing position at once (NEAR, 9 min old,
+                # -557.72). Now a flatten also needs boot grace, a minimum
+                # position age and a continuous-bleed confirmation window.
+                _now_act = _time.time()
+                if (_enabled and positions and manage_age is not None
+                        and manage_age > _flatten_after
+                        and (_now_act - _boot_ts) >= _boot_grace):
                     for p in positions:
                         coin = getattr(p, "coin", "")
                         if coin in _flattened:
@@ -1342,6 +1379,23 @@ async def startup():
                         except Exception:
                             upl = 0.0
                         if upl >= 0:
+                            _bleed_since.pop(coin, None)
+                            continue
+                        _bleed_since.setdefault(coin, _now_act)
+                        _should, _why = hg.flatten_decision(
+                            upl=upl,
+                            pos_age_sec=_pos_age(p),
+                            manage_age_sec=manage_age,
+                            flatten_after_sec=_flatten_after,
+                            min_pos_age_sec=_min_pos_age,
+                            confirm_sec=_confirm_sec,
+                            bleeding_since=_bleed_since.get(coin),
+                            now=_now_act,
+                        )
+                        if not _should:
+                            print(f"[AI-GUARD] HOLD {coin}: {_why} "
+                                  f"upl={upl:.2f} manage_age={manage_age:.0f}s",
+                                  flush=True)
                             continue
                         _flattened[coin] = _time.time()
                         _alert(
@@ -4656,7 +4710,13 @@ async def health(request: Request):
     except Exception:
         pass
     _lm_perms_ok = bool((_live_key_perms or {}).get('ok'))
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_read': (bool(_live_key_perms.get('has_read')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'key_perm_err': (str(_live_key_perms.get('error') or '')[:160] if not _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
+    _specs = []
+    try:
+        if ai_bot is not None:
+            _specs = list(getattr(ai_bot, '_contract_specs', []) or [])
+    except Exception:
+        _specs = []
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'contract_specs': _specs, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_read': (bool(_live_key_perms.get('has_read')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'key_perm_err': (str(_live_key_perms.get('error') or '')[:160] if not _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)

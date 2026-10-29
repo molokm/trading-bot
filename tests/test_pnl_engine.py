@@ -23,10 +23,14 @@ import pytest
 
 from app.services.pnl_engine import (
     AI_ONLY_LABELS,
+    BUG_EXCLUDED_ORD_IDS,
     PNL_EPOCH_ISO,
     aggregate_rows,
     epoch_ms,
+    filter_pnl_rows,
+    is_bug_excluded,
     label_from_clord,
+    pnl_eligible,
     resolve_bot,
 )
 
@@ -165,3 +169,36 @@ def test_aggregate_accepts_empty_rows():
     r = aggregate_rows([], ai_only=True)
     assert r["total"] == pytest.approx(0)
     assert r["per_bot"][AI_LABEL] == pytest.approx(0)
+
+
+# ── 5. defect-driven closes are excluded from set T (by ord_id) ───────────
+NEAR_BUG_OID = "4050574887064129536"
+
+
+def test_bug_close_is_not_eligible():
+    row = {"pnl": -557.72, "close_ts": TS_OK, "cl_ord_id": "ai1",
+           "ord_id": NEAR_BUG_OID, "fee": 0}
+    ok, reason = pnl_eligible(row, mode="demo", ai_only=True, require_ts=False)
+    assert not ok
+    assert reason == "excluded:ctval_10x"
+
+
+def test_bug_close_skipped_by_filter_but_row_survives():
+    """Excluded from statistics, not deleted from the audit trail."""
+    rows = [
+        {"pnl": -557.72, "close_ts": TS_OK, "cl_ord_id": "ai1",
+         "ord_id": NEAR_BUG_OID, "fee": 0},
+        {"pnl": 12.5, "close_ts": TS_OK, "cl_ord_id": "ai2", "fee": 0},
+    ]
+    out, diag = filter_pnl_rows(rows, mode="demo", ai_only=True)
+    assert [r["pnl"] for r in out] == [pytest.approx(12.5)]
+    assert diag["exclude_reasons"].get("excluded:ctval_10x") == 1
+    # the input is untouched — nothing is deleted from history
+    assert rows[0]["ord_id"] == NEAR_BUG_OID
+
+
+def test_bug_excluded_ids_cover_near_and_flat_artifacts():
+    assert is_bug_excluded(NEAR_BUG_OID)
+    assert len(BUG_EXCLUDED_ORD_IDS) >= 8
+    assert not is_bug_excluded("")
+    assert not is_bug_excluded("some-unrelated-ord-id")

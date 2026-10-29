@@ -76,6 +76,44 @@ def _pos_get(pos: Any, key: str, default: Any = None) -> Any:
     return getattr(pos, key, default)
 
 
+def flatten_decision(
+    *,
+    upl: float,
+    pos_age_sec: Optional[float],
+    manage_age_sec: Optional[float],
+    flatten_after_sec: float,
+    min_pos_age_sec: float,
+    confirm_sec: float,
+    bleeding_since: Optional[float],
+    now: float,
+) -> tuple[bool, str]:
+    """Decide whether the in-trade guard may market-close ONE position.
+
+    History: the guard used to flatten *every* losing position the moment the
+    global manage-heartbeat was stale. On 28 Oct that market-closed NEAR (only
+    9 minutes old, -557.72) together with ADA/BTC because the *shared* manage
+    beat was old — not because those trades were unmanageable.
+
+    A restart or a brief stall is not a reason to dump a healthy position, so
+    flattening now requires all of:
+      * the engine is unmanaged past ``flatten_after_sec``;
+      * the position is older than ``min_pos_age_sec`` (a fresh entry has not
+        had a chance to be managed yet);
+      * the position has been bleeding (upl < 0) continuously for
+        ``confirm_sec``.
+    Returns (should_flatten, reason) where reason explains a hold.
+    """
+    if manage_age_sec is None or manage_age_sec <= flatten_after_sec:
+        return False, "managed"
+    if upl >= 0:
+        return False, "not_losing"
+    if pos_age_sec is not None and pos_age_sec < min_pos_age_sec:
+        return False, "young"
+    if bleeding_since is None or (now - bleeding_since) < confirm_sec:
+        return False, "confirm"
+    return True, "flatten"
+
+
 def evaluate(
     *,
     positions: Iterable[Any],

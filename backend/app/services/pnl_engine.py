@@ -229,6 +229,33 @@ def normalize_close_row(r: dict) -> Optional[dict]:
     }
 
 
+# ── Known defective closes — excluded from every statistic ────────────────
+# These are REAL exchange closes (the PnL is real and the raw rows stay in
+# `trades` for the audit trail), but they were produced by a defect rather than
+# by the strategy. Counting them lets one bug dominate the card, the win-rate
+# and the adaptive layer, so set T excludes them by ord_id.
+BUG_EXCLUDED_ORD_IDS: dict[str, str] = {
+    # NEAR 28.10 20:22:18 — ctVal table said 1 where OKX has 10, so the bot
+    # ordered 810 contracts instead of ~81 and lost 10x the risk budget.
+    "4050574887064129536": "ctval_10x",
+    # ADA 28.10 (x6) — `_record_flat_close` booked exit==entry fee-only
+    # artefacts, not trades (see _recover_close_fill).
+    "f9ac102c-8c55-4e83-8f0d-634cefb8cc29": "flat_close_artifact",
+    "f8c834b4-1fc2-4049-9a26-e8ebc21c352f": "flat_close_artifact",
+    "fe9cced4-cc61-4b37-bf2e-14467cb5f3be": "flat_close_artifact",
+    "36d1d211-240c-44f0-9d3e-dc689d3107c6": "flat_close_artifact",
+    "b20d88ba-fd88-48c1-9eea-53072e0b8b50": "flat_close_artifact",
+    "0993c2ec-13ac-4058-aed4-d2c44f9ae5e0": "flat_close_artifact",
+    # XRP 28.10 11:01:43 — same flat-close artefact.
+    "33b0d995-7c9f-48a6-913e-4ade3f2c307c": "flat_close_artifact",
+}
+
+
+def is_bug_excluded(ord_id: str) -> bool:
+    """True when this close is a known defect artefact (never counted)."""
+    return str(ord_id or "").strip() in BUG_EXCLUDED_ORD_IDS
+
+
 def pnl_eligible(
     row: dict,
     *,
@@ -246,6 +273,9 @@ def pnl_eligible(
         # Defence in depth: an entry row must never reach the eligible set even
         # if a caller passes raw `trades` rows straight here.
         return False, "not_closed"
+    _oid = str(row.get("ord_id") or row.get("ordId") or "").strip()
+    if _oid and _oid in BUG_EXCLUDED_ORD_IDS:
+        return False, f"excluded:{BUG_EXCLUDED_ORD_IDS[_oid]}"
     try:
         pnl = float(row.get("pnl") or 0)
     except (TypeError, ValueError):
