@@ -4135,12 +4135,12 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         try:
             ai_bot.live_client_manager = live_manager
             ai_bot._live_capital = float(capital)
-            # The user just reconnected: if the key is verified for trading, drop
-            # the sticky "LIVE key cannot trade" flag. Otherwise a fixed key stays
-            # silently blocked (the flag only cleared on a successful order, which
-            # can never happen while it is set) — the mirror was dead for days.
+            # The user just reconnected: drop the sticky "LIVE key cannot trade"
+            # flag unless OKX explicitly confirmed the key is read-only. It only
+            # cleared on a successful order before, which can never happen while
+            # it is set — the mirror stayed dead even after the key was fixed.
             try:
-                if _live_key_perms.get('has_trade'):
+                if not (_live_key_perms.get('ok') and not _live_key_perms.get('has_trade')):
                     if getattr(ai_bot, "_live_trade_blocked_reason", ""):
                         print('[LIVE] clearing sticky trade-blocked flag after reconnect', flush=True)
                     ai_bot._live_trade_blocked_reason = ""
@@ -4656,7 +4656,7 @@ async def health(request: Request):
     except Exception:
         pass
     _lm_perms_ok = bool((_live_key_perms or {}).get('ok'))
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_read': (bool(_live_key_perms.get('has_read')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'key_perm_err': (str(_live_key_perms.get('error') or '')[:160] if not _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)
@@ -4860,10 +4860,10 @@ async def _ensure_live_mirror_client() -> bool:
     if ai_bot is not None:
         try:
             ai_bot.live_client_manager = live_manager
-            # Verified Trade right → clear any sticky "cannot trade" flag so a
+            # Verified not-read-only → clear any sticky "cannot trade" flag so a
             # reconnect/restart with a fixed key is not silently blocked.
             try:
-                if _live_key_perms.get('has_trade'):
+                if not (_live_key_perms.get('ok') and not _live_key_perms.get('has_trade')):
                     ai_bot._live_trade_blocked_reason = ""
             except Exception:
                 pass

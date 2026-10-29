@@ -120,3 +120,55 @@ async def test_ensure_keeps_the_flag_when_key_still_cannot_trade(monkeypatch):
 
     # Read-only key → keep the guard, do not pretend it is fixed.
     assert bot._live_trade_blocked_reason == "stuck"
+
+
+@pytest.mark.asyncio
+async def test_ensure_clears_the_flag_when_probe_is_inconclusive(monkeypatch):
+    """Probe failure (ok=False) is 'unknown', not 'read-only'.
+
+    A Trade-only key (no Read) makes `/api/v5/account/api-key` fail, yet it can
+    place orders. Keeping the sticky guard here would resurrect the deadlock.
+    """
+    import app.main as m
+
+    class _DB:
+        async def get_setting(self, name):
+            return {"live_mirror_enabled": "1"}.get(name)
+
+        async def set_setting(self, name, value):
+            return True
+
+    class _Client:
+        demo = False
+
+        def has_credentials(self):
+            return True
+
+    class _Mgr:
+        async def init_client(self, *a, **k):
+            return True
+
+        def get_client(self):
+            return _Client()
+
+    class _Bot:
+        live_client_manager = None
+        _live_capital = 0.0
+        _live_trade_blocked_reason = "stuck"
+
+    async def _creds():
+        m._live_key, m._live_secret, m._live_pass = "k", "s", "p"
+
+    async def _perms(client, label=""):
+        return {"ok": False, "error": "50111 permission"}
+
+    monkeypatch.setattr(m, "db", _DB())
+    monkeypatch.setattr(m, "live_manager", _Mgr())
+    monkeypatch.setattr(m, "_load_live_creds_from_db", _creds)
+    monkeypatch.setattr(m, "_verify_key_perms", _perms)
+    bot = _Bot()
+    monkeypatch.setattr(m, "ai_bot", bot)
+
+    await m._ensure_live_mirror_client()
+
+    assert bot._live_trade_blocked_reason == ""
