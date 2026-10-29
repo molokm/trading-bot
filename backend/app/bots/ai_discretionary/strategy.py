@@ -3676,6 +3676,39 @@ class AIStrategy:
         account_mode: str = "demo",
         bot_name_suffix: str = "",
     ) -> None:
+        """Schedule close TG off the trading tick so timeouts cannot cancel it."""
+        try:
+            asyncio.create_task(
+                self._notify_close_tg_run(
+                    pos, coin, reason, fill_px, pnl,
+                    account_mode=account_mode,
+                    bot_name_suffix=bot_name_suffix,
+                ),
+                name=f"tg-close-{coin}",
+            )
+        except Exception as e:
+            print(f"[AI] TG close schedule: {e}", flush=True)
+            # Fallback: run inline if create_task fails
+            try:
+                await self._notify_close_tg_run(
+                    pos, coin, reason, fill_px, pnl,
+                    account_mode=account_mode,
+                    bot_name_suffix=bot_name_suffix,
+                )
+            except Exception as e2:
+                print(f"[AI] TG close inline: {e2}", flush=True)
+
+    async def _notify_close_tg_run(
+        self,
+        pos: "AIPosition",
+        coin: str,
+        reason: str,
+        fill_px: float,
+        pnl: float,
+        *,
+        account_mode: str = "demo",
+        bot_name_suffix: str = "",
+    ) -> None:
         """Always try to send close notification (reply to open if possible).
 
         Primary engine is DEMO-only: unless explicitly LIVE (mirror suffix),
@@ -3777,22 +3810,26 @@ class AIStrategy:
                     and "LIVE" in str(bot_name_suffix or "").upper()
                 ) else "demo"
             )
+            # Plain first (most reliable), then optional reply thread
             mid = await self.notifier.send_trade(
-                _txt,
-                reply_to_message_id=_reply or None,
-                account_mode=_tg_close_mode,
+                _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
             )
+            if mid and _reply:
+                # Best-effort: also post as reply (may fail if mid is other chat)
+                try:
+                    await self.notifier.send_trade(
+                        _txt, reply_to_message_id=_reply, account_mode=_tg_close_mode,
+                    )
+                except Exception:
+                    pass
             if not mid:
-                await asyncio.sleep(1.5)
+                await asyncio.sleep(2.0)
                 mid = await self.notifier.send_trade(
-                    _txt,
-                    reply_to_message_id=None,
-                    account_mode=_tg_close_mode,
+                    _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
                 )
                 print(f"[AI] TG close RETRY plain mid={mid} {coin}", flush=True)
             if not mid:
-                # Last resort: longer delay (rate-limit / network)
-                await asyncio.sleep(3.0)
+                await asyncio.sleep(5.0)
                 mid = await self.notifier.send_trade(
                     _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
                 )
