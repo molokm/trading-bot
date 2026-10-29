@@ -2356,7 +2356,7 @@ async def me_pnl(request: Request):
 
 _ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
 _AI_STATUS_CACHE: dict = {"ts": 0.0, "diag": False, "data": None}
-_AI_STATUS_TTL = 5.0
+_AI_STATUS_TTL = 8.0
 
 _ME_DASH_TTL = 45.0  # fresh window
 _ME_DASH_STALE_TTL = 180.0  # serve stale immediately, rebuild in background
@@ -3251,12 +3251,13 @@ async def ai_status(request: Request):
     internal = status.get('lifetime_pnl', status.get('total_pnl'))
     status['total_pnl_internal'] = internal
     status['lifetime_pnl_internal'] = internal
-    try:
-        status['engine_stats'] = dict(getattr(ai_bot, '_engine_stats', None) or {})
-        status['engine_diag'] = dict(getattr(ai_bot, '_engine_diag', None) or {})
-        status['engine_rows'] = len(getattr(ai_bot, '_engine_rows', None) or [])
-    except Exception:
-        pass
+    if diag:
+        try:
+            status['engine_stats'] = dict(getattr(ai_bot, '_engine_stats', None) or {})
+            status['engine_diag'] = dict(getattr(ai_bot, '_engine_diag', None) or {})
+            status['engine_rows'] = len(getattr(ai_bot, '_engine_rows', None) or [])
+        except Exception:
+            pass
     # KPI overlay: hard timeout so a cold PnL rebuild cannot freeze the UI.
     # Full numbers still come from /api/me/dashboard (cached).
     try:

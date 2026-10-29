@@ -586,16 +586,19 @@ export default function BotsPage({ connected, isGuest }) {
   const [confirmStopAll, setConfirmStopAll] = useState(false)
 
   const refreshStatus = useCallback(async () => {
-    const [a, ls, pnl] = await Promise.all([
+    // One public payload + status (client-cached) instead of separate heavy /api/pnl
+    const [a, ls, dash] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
-      // Same engine as dashboard Sum PnL (DEMO since 2026-09-01)
-      api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
+      api.meDashboard().catch(() => null),
     ])
     if (a) setAiStatus(a)
     if (ls) setLiveStatus(ls)
+    const pnl = dash?.pnl
     if (pnl && !pnl.detail && (pnl.total != null || pnl.per_bot)) {
       setDemoPnl(pnl)
+    } else if (a && a.lifetime_pnl != null) {
+      setDemoPnl({ total: a.lifetime_pnl, per_bot: { 'AI Discretionary 1H': a.lifetime_pnl } })
     }
     setApiAlive(!!a)
   }, [])

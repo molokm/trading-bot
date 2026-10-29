@@ -138,7 +138,7 @@ function AppLayout() {
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       check()
-    }, 30000)
+    }, 45000)
     return () => clearInterval(interval)
   }, [])
 

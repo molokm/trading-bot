@@ -75,7 +75,25 @@ async function request(path, options = {}) {
   return resp.json();
 }
 
+
+/** Short client cache — avoids refetch storms on route switches */
+const _memCache = new Map()
+function _cached(key, ttlMs, fn) {
+  const hit = _memCache.get(key)
+  const now = Date.now()
+  if (hit && now - hit.ts < ttlMs) return Promise.resolve(hit.data)
+  return Promise.resolve(fn()).then((data) => {
+    if (data != null) _memCache.set(key, { ts: Date.now(), data })
+    return data
+  }).catch((e) => {
+    // serve stale on error if any
+    if (hit) return hit.data
+    throw e
+  })
+}
+
 export const api = {
+
   // ── Auth ──
   login: (password) =>
     request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
@@ -234,7 +252,7 @@ export const api = {
     request(`/validation/trades?limit=${limit}`),
 
   // ── AI Discretionary ──
-  aiStatus: () => request('/ai/status'),
+  aiStatus: () => _cached('ai/status', 8000, () => request('/ai/status')),
   aiScaleStatus: () => request('/ai-scale/status'),
   aiScaleStart: (config = {}) =>
     request('/ai-scale/start', { method: 'POST', body: JSON.stringify(config || {}) }),
@@ -404,7 +422,7 @@ export const api = {
   telegramAuth: (initData) =>
     request('/auth/telegram', { method: 'POST', body: JSON.stringify({ initData }) }),
 
-  meDashboard: () => request('/me/dashboard'),
+  meDashboard: () => _cached('me/dashboard', 20000, () => request('/me/dashboard')),
 
   debugMiniLog: (logs) =>
     request('/debug/mini-log', { method: 'POST', body: JSON.stringify({ logs }) }),

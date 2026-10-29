@@ -1,3 +1,15 @@
+
+// Load Telegram WebApp SDK only inside Mini App routes (saves main-site TTFB)
+try {
+  const p = String(window.location?.pathname || '')
+  if (p === '/mini' || p.startsWith('/mini/')) {
+    const s = document.createElement('script')
+    s.src = 'https://telegram.org/js/telegram-web-app.js'
+    s.async = true
+    document.head.appendChild(s)
+  }
+} catch { /* ignore */ }
+
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
