@@ -3130,6 +3130,13 @@ async def ai_status(request: Request):
     except Exception:
         pass
     status = await _apply_history_kpi(status, 'AI Discretionary 1H')
+    if not diag:
+        # Remove heavy per-decision logs from the lean UI response.
+        # They are not consumed by the frontend and cut ~24KB off the payload.
+        status.pop('recent_decisions', None)
+        status.pop('recent_exec', None)
+        status.pop('adapt_log', None)
+
     if diag:
         # ── LIVE mirror audit (read-only diagnostics) ──────────────────────
         # Answers "why 30/49 LIVE closes have no DEMO twin": every LIVE close is
