@@ -429,14 +429,17 @@ class OKXClient:
         return result
 
     async def check_key_permissions(self) -> dict:
-        """GET /api/v5/account/api-key — verify the API key's rights.
+        """GET /api/v5/account/config — verify the API key's rights.
 
         Returns {"ok": True, "label": ..., "perm": ...} or {"ok": False, "error": ...}.
+        OKX exposes the key's `perm` ("read_only" | "read,trade" | "trade" …) on
+        the account config. The old `/api/v5/account/api-key` path 404'd ("Not
+        Found"), so the Trade check silently always failed — read-only keys were
+        then able to "connect" and every mirrored order was rejected later.
         Note: if the endpoint is unavailable the error is returned gracefully —
         callers must treat a failed check as 'unknown', not 'allowed'.
         """
-        result = await self._request("GET", "/api/v5/account/api-key",
-                                     params={"apiKey": self.api_key})
+        result = await self._request("GET", "/api/v5/account/config")
         if result.get("error"):
             return {"ok": False, "error": result.get("message", "unknown"),
                     "label": None, "perm": None}
@@ -444,6 +447,12 @@ class OKXClient:
         if not data:
             return {"ok": False, "error": "empty response", "label": None, "perm": None}
         info = data[0] if isinstance(data, list) else data
+        # Same payload carries posMode — cache it so close-position posSide is right.
+        try:
+            raw = str(info.get("posMode", "net_mode") or "net_mode")
+            self.pos_mode = "net" if raw == "net_mode" else ("hedge" if raw == "long_short_mode" else raw)
+        except Exception:
+            pass
         perm = str(info.get("perm", "") or "")
         label = str(info.get("label", "") or "")
         return {
@@ -452,7 +461,7 @@ class OKXClient:
             "perm": perm,
             "has_trade": "trade" in perm.lower(),
             "has_read": "read" in perm.lower(),
-            "has_withdraw": "withdrawal" in perm.lower(),
+            "has_withdraw": "withdraw" in perm.lower(),
         }
 
     async def close_position(self, inst_id: str, mgn_mode: str = "cross",
