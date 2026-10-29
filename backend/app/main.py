@@ -3976,9 +3976,11 @@ async def live_status():
         'enabled': True,
         # Whether the connected LIVE key may actually place orders. A read-only
         # key looks "connected" but every mirrored order is rejected by OKX.
-        'key_trade': (None if not _live_key_perms
-                      else bool(_live_key_perms.get('has_trade'))),
-        'key_perm': (_live_key_perms.get('perm') if _live_key_perms else None),
+        # None = the permission probe itself failed (unknown), not "no trade".
+        'key_trade': (bool(_live_key_perms.get('has_trade'))
+                      if (_live_key_perms or {}).get('ok') else None),
+        'key_perm': (_live_key_perms.get('perm')
+                     if (_live_key_perms or {}).get('ok') else None),
         'debug': debug if not connected else {k: debug[k] for k in debug if debug.get(k) not in (None, 0, '')},
     }
     _live_status_cache['ts'] = _time.time()
@@ -4653,7 +4655,8 @@ async def health(request: Request):
             _live_en = await db.get_setting('live_mirror_enabled')
     except Exception:
         pass
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (None if not _live_key_perms else bool(_live_key_perms.get('has_trade'))), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
+    _lm_perms_ok = bool((_live_key_perms or {}).get('ok'))
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)
