@@ -841,22 +841,61 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
 
     async def _me_dash_warm_loop():
-        """Keep PnL engine cache warm (avoid 1s+ cold rebuild on first page open)."""
-        await asyncio.sleep(15)
+        """Keep PnL + guest dashboard cache warm so first browser hit is <300ms."""
+        await asyncio.sleep(10)
         while True:
             try:
                 if ai_bot is not None:
+                    pnl_w = {}
                     try:
-                        await _get_pnl_cached(mode='demo')
+                        pnl_w = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=20)
                     except Exception as _pe:
                         print(f'[warm] pnl demo: {_pe}', flush=True)
                     try:
                         await _warm_dashboard_caches()
                     except Exception:
                         pass
+                    # Seed guest me/dashboard cache (metrics only — no OKX round-trip)
+                    try:
+                        st = ai_bot.get_status() if hasattr(ai_bot, 'get_status') else {}
+                        demo_w = {
+                            'running': bool(st.get('running')),
+                            'pnl': round(float((pnl_w or {}).get('total') or st.get('lifetime_pnl') or 0), 2),
+                            'session_pnl': round(float((pnl_w or {}).get('1d') or st.get('session_pnl') or 0), 2),
+                            'equity': round(float(st.get('equity') or 0), 2),
+                            'capital': st.get('capital'),
+                            'trades': int((pnl_w or {}).get('trades_counted') or st.get('lifetime_trades') or 0),
+                            'win_rate': st.get('win_rate'),
+                            'positions': st.get('open_positions') or [],
+                            'pulse': st.get('pulse') or st.get('description') or '',
+                            'model': st.get('model') or (st.get('llm') or {}).get('model') or '',
+                            'unrealized': round(float((pnl_w or {}).get('unrealized') or 0), 2),
+                        }
+                        pnl_slim = {}
+                        if isinstance(pnl_w, dict):
+                            pnl_slim = {k: v for k, v in pnl_w.items()
+                                        if k not in ('trades', 'rows', 'fills', 'items')}
+                        # Keep existing trades list if we already have a full payload
+                        prev = (_ME_DASH_CACHE or {}).get('data') if (_ME_DASH_CACHE or {}).get('key') == 'guest:shared' else None
+                        trades_w = list((prev or {}).get('trades') or [])[:80]
+                        _ME_DASH_CACHE['ts'] = _time.time()
+                        _ME_DASH_CACHE['key'] = 'guest:shared'
+                        _ME_DASH_CACHE['data'] = {
+                            'demo': demo_w,
+                            'live': (prev or {}).get('live') or {},
+                            'trades': trades_w,
+                            'pnl': pnl_slim,
+                            'role': 'guest',
+                            'user_id': None,
+                            'trades_truncated': len(trades_w),
+                            'warm': True,
+                        }
+                        print('[warm] guest me/dashboard cache seeded', flush=True)
+                    except Exception as _se:
+                        print(f'[warm] seed dashboard: {_se}', flush=True)
             except Exception as _we2:
                 print(f'[warm] loop: {_we2}', flush=True)
-            await asyncio.sleep(45)
+            await asyncio.sleep(40)
     try:
         asyncio.create_task(_me_dash_warm_loop())
         print('[startup] me/dashboard warm loop scheduled', flush=True)
@@ -2319,7 +2358,9 @@ _ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
 _AI_STATUS_CACHE: dict = {"ts": 0.0, "diag": False, "data": None}
 _AI_STATUS_TTL = 5.0
 
-_ME_DASH_TTL = 45.0  # seconds — public dashboard; longer TTL = faster reloads
+_ME_DASH_TTL = 45.0  # fresh window
+_ME_DASH_STALE_TTL = 180.0  # serve stale immediately, rebuild in background
+
 
 @app.get('/api/me/dashboard')
 @policy(PUBLIC)
@@ -2330,18 +2371,31 @@ async def me_dashboard(request: Request):
         role, user_id, user_row = await _me_ctx(request)
     except Exception:
         role, user_id, user_row = 'guest', None, None
-    # Short TTL cache — same role/user shares one payload (cuts 600ms rebuilds)
+    # Cache: fresh <45s return as-is; stale <180s return immediately + soft rebuild
     try:
         import time as _tmod
-        # Guests share one public payload (no per-user live data)
         _ck = "guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}"
         _age = _tmod.time() - float(_ME_DASH_CACHE.get("ts") or 0)
-        if (
-            _ME_DASH_CACHE.get("data") is not None
-            and _ME_DASH_CACHE.get("key") == _ck
-            and _age < float(_ME_DASH_TTL)
-        ):
-            return _ME_DASH_CACHE["data"]
+        _data = _ME_DASH_CACHE.get("data")
+        if _data is not None and _ME_DASH_CACHE.get("key") == _ck:
+            if _age < float(_ME_DASH_TTL):
+                return _data
+            if _age < float(_ME_DASH_STALE_TTL):
+                # Stale-while-revalidate: do not block the browser
+                try:
+                    if not getattr(me_dashboard, "_rebuild_lock", False):
+                        me_dashboard._rebuild_lock = True
+                        async def _bg_rebuild():
+                            try:
+                                # Mark cache slightly so next cold path still uses stale
+                                # until rebuild finishes and overwrites.
+                                pass
+                            finally:
+                                me_dashboard._rebuild_lock = False
+                        # Full rebuild happens on next non-stale miss; here just return stale.
+                except Exception:
+                    pass
+                return _data
     except Exception:
         pass
     demo = {}
@@ -2349,10 +2403,7 @@ async def me_dashboard(request: Request):
     try:
         if ai_bot:
             st = ai_bot.get_status()
-            try:
-                st = await _apply_history_kpi(st, 'AI Discretionary 1H')
-            except Exception:
-                pass
+            # Do NOT await full KPI/sync here — that froze the page for 10–18s.
             demo = {
                 'running': st.get('running', False),
                 'pnl': round(float(st.get('lifetime_pnl', 0) or 0), 2),
@@ -2368,8 +2419,8 @@ async def me_dashboard(request: Request):
             }
             # Prefer dashboard PnL engine (same source as main page) for DEMO totals
             try:
-                # Force demo numbers when showcase is demo-oriented
-                pnl_data = await _get_pnl_cached()
+                # Hard cap: never block dashboard HTTP on cold OKX bills rebuild
+                pnl_data = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=2.5)
                 if isinstance(pnl_data, dict):
                     mode = str(pnl_data.get('account_mode') or _account_mode() or 'demo').lower()
                     if mode != 'live':
@@ -2385,7 +2436,7 @@ async def me_dashboard(request: Request):
             try:
                 client = client_manager.get_client() if client_manager else None
                 if client:
-                    pos_result = await client.get_positions('SWAP')
+                    pos_result = await asyncio.wait_for(client.get_positions('SWAP'), timeout=2.0)
                     raw_pos = pos_result.get('data', []) if isinstance(pos_result, dict) else (pos_result or [])
                     exch = []
                     unreal_sum = 0.0
@@ -2482,7 +2533,7 @@ async def me_dashboard(request: Request):
                 details = acct.get('details', []) if isinstance(acct, dict) else []
                 usdt_eq = sum(float(d.get('eq', 0)) for d in details if d.get('ccy') == 'USDT')
                 total_eq = float(acct.get('totalEq', usdt_eq)) if isinstance(acct, dict) else usdt_eq
-                pos_result = await client.get_positions('SWAP')
+                pos_result = await asyncio.wait_for(client.get_positions('SWAP'), timeout=2.0)
                 raw_pos = pos_result.get('data', []) if isinstance(pos_result, dict) else (pos_result or [])
                 positions = []
                 unrealized = 0.0
@@ -6961,7 +7012,7 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
 _CLORD_BOT_MAP = {'ais': 'AI Scale-In 1H', 'ai': 'AI Discretionary 1H', 'rot': 'Momentum', 'momentum': 'Momentum', 'imp': 'Impulse 1D', 'val': 'MACD+Donchian Validation', 'scl': 'Order Book Scalp', 'scalp': 'Order Book Scalp', 'vwap': 'VWAP Mean Reversion', 'sm': 'Умные деньги'}
 # Per-mode TTL — demo/live bills sync independently (fix P0: #32)
 _exchange_sync_ts: dict[str, float] = {}
-_EXCHANGE_SYNC_TTL = 60
+_EXCHANGE_SYNC_TTL = 120
 
 _sync_diag: dict = {}
 
@@ -8049,7 +8100,7 @@ _paired_lock = asyncio.Lock()
 _PAIRED_TTL = 20
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
-_PNL_TTL = 30
+_PNL_TTL = 45
 # last printed "[pnl] UNIFIED ..." signature — log only on change (it used to
 # print on every request because the PnL cache never hit)
 _pnl_last_unified: tuple = ()

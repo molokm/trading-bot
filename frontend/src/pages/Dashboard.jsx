@@ -394,7 +394,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     const slowTimer = setTimeout(() => {
       slowRef.current = Date.now()
       loadData({ fastOnly: false })
-    }, 150)
+    }, 50)
     const fastId = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       const now = Date.now()
@@ -466,7 +466,7 @@ export default function Dashboard({ health, connected, isGuest }) {
 
     // Slow tier: single public payload (20s server cache) — PnL + trades + demo/live cards.
     try {
-      const dash = await safeCall(api.meDashboard(), 15000)
+      const dash = await safeCall(api.meDashboard(), 6000)
       let pnlData = null
       let livePnlData = null
       if (dash) {
