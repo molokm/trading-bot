@@ -4133,6 +4133,17 @@ async def live_connect(request: Request, data: dict = Body(default=None)):
         try:
             ai_bot.live_client_manager = live_manager
             ai_bot._live_capital = float(capital)
+            # The user just reconnected: if the key is verified for trading, drop
+            # the sticky "LIVE key cannot trade" flag. Otherwise a fixed key stays
+            # silently blocked (the flag only cleared on a successful order, which
+            # can never happen while it is set) — the mirror was dead for days.
+            try:
+                if _live_key_perms.get('has_trade'):
+                    if getattr(ai_bot, "_live_trade_blocked_reason", ""):
+                        print('[LIVE] clearing sticky trade-blocked flag after reconnect', flush=True)
+                    ai_bot._live_trade_blocked_reason = ""
+            except Exception:
+                pass
             if total_eq > 0:
                 ai_bot._live_equity = float(total_eq)
                 import time as _t
@@ -4642,7 +4653,7 @@ async def health(request: Request):
             _live_en = await db.get_setting('live_mirror_enabled')
     except Exception:
         pass
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off'))}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False))}, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (None if not _live_key_perms else bool(_live_key_perms.get('has_trade'))), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)
@@ -4846,6 +4857,13 @@ async def _ensure_live_mirror_client() -> bool:
     if ai_bot is not None:
         try:
             ai_bot.live_client_manager = live_manager
+            # Verified Trade right → clear any sticky "cannot trade" flag so a
+            # reconnect/restart with a fixed key is not silently blocked.
+            try:
+                if _live_key_perms.get('has_trade'):
+                    ai_bot._live_trade_blocked_reason = ""
+            except Exception:
+                pass
             try:
                 cap = await db.get_setting('live_mirror_capital')
                 if cap and float(cap) > 0:
