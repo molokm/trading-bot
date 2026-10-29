@@ -2316,6 +2316,9 @@ async def me_pnl(request: Request):
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': source}
 
 _ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
+_AI_STATUS_CACHE: dict = {"ts": 0.0, "diag": False, "data": None}
+_AI_STATUS_TTL = 5.0
+
 _ME_DASH_TTL = 45.0  # seconds — public dashboard; longer TTL = faster reloads
 
 @app.get('/api/me/dashboard')
@@ -3177,22 +3180,16 @@ async def ai_status(request: Request):
         diag = False
     if not ai_bot:
         return {'running': False, 'strategy': 'AI Discretionary 1H', 'total_pnl': 0, 'lifetime_pnl': 0, 'open_positions': []}
-    # Lightweight reconcile: drop positions that are flat on exchange (at most once per 30s)
-    try:
-        if ai_bot._positions and ai_bot._running:
-            now_ts = _time.time()
-            last = getattr(ai_bot, '_last_status_reconcile_ts', 0)
-            if now_ts - last > 30:
-                ai_bot._last_status_reconcile_ts = now_ts
-                client = None
-                try:
-                    client = await ai_bot._client()
-                except Exception:
-                    pass
-                if client:
-                    await ai_bot._reconcile_positions_with_exchange(client)
-    except Exception as _re:
-        pass
+    # 5s response cache (lean only) — stops status storms from freezing uvicorn
+    if not diag:
+        try:
+            age = _time.time() - float(_AI_STATUS_CACHE.get('ts') or 0)
+            if _AI_STATUS_CACHE.get('data') is not None and age < float(_AI_STATUS_TTL):
+                return _AI_STATUS_CACHE['data']
+        except Exception:
+            pass
+    # NEVER reconcile OKX on the status request path — it blocked HTTP 2–12s
+    # and made the whole site look "down". Reconcile runs in the bot tick loop.
     try:
         status = ai_bot.get_status()
     except Exception as e:
@@ -3204,14 +3201,21 @@ async def ai_status(request: Request):
     status['total_pnl_internal'] = internal
     status['lifetime_pnl_internal'] = internal
     try:
-        # Accounting diagnostics: what set the bot's own counters came from.
-        # Lets us diff internal vs card without reading Render logs.
         status['engine_stats'] = dict(getattr(ai_bot, '_engine_stats', None) or {})
         status['engine_diag'] = dict(getattr(ai_bot, '_engine_diag', None) or {})
         status['engine_rows'] = len(getattr(ai_bot, '_engine_rows', None) or [])
     except Exception:
         pass
-    status = await _apply_history_kpi(status, 'AI Discretionary 1H')
+    # KPI overlay: hard timeout so a cold PnL rebuild cannot freeze the UI.
+    # Full numbers still come from /api/me/dashboard (cached).
+    try:
+        status = await asyncio.wait_for(
+            _apply_history_kpi(status, 'AI Discretionary 1H'),
+            timeout=1.5,
+        )
+    except Exception as _kpi_e:
+        status['kpi_from_history'] = False
+        status['kpi_timeout'] = str(_kpi_e)[:80]
     if not diag:
         # Remove heavy per-decision logs from the lean UI response.
         # They are not consumed by the frontend and cut ~24KB off the payload.
@@ -3366,6 +3370,13 @@ async def ai_status(request: Request):
             )
     except Exception as _te:
         print(f'[ai/status] turnover: {_te}', flush=True)
+    if not diag:
+        try:
+            _AI_STATUS_CACHE['ts'] = _time.time()
+            _AI_STATUS_CACHE['data'] = status
+        except Exception:
+            pass
+
     return status
 
 @app.get('/api/startup-log')

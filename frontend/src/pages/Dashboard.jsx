@@ -431,7 +431,7 @@ export default function Dashboard({ health, connected, isGuest }) {
     try {
       // Fast tier: lean AI status + public tickers. Auth-only endpoints only when logged in.
       const tasks = [
-        safeCall(api.aiStatus()),
+        safeCall(api.aiStatus(), 4000),
         safeCall(api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`))),
       ]
       if (hasAuth) {
