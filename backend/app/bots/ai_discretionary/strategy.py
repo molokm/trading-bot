@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.40.0-p2"
+STRATEGY_VERSION = "v1.41.0-profit"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -317,6 +317,27 @@ def compute_close_metrics(pos, coin: str, exit_px: float, fee=0, fills=None):
     ct = float(CT_VAL.get(coin, 0.01) or 0.01)
     pnl = close_pnl(side, sz, entry, exit_px, fee, ct)
     return entry, exit_px, round(float(pnl), 2), float(fee_cost(fee))
+
+
+def _winsorize(values: list, k: float = 1.5) -> list:
+    """Clip extreme tails at Tukey's k×IQR fence (robust to single outliers).
+
+    Used by the adaptive layer so one catastrophic stop-out cannot, by itself,
+    set the rolling average and pin the preset to "defensive". Returns the list
+    unchanged when there are too few samples to estimate a spread.
+    """
+    vals = [float(v) for v in values]
+    n = len(vals)
+    if n < 4:
+        return vals
+    s = sorted(vals)
+    q1 = s[n // 4]
+    q3 = s[(3 * n) // 4]
+    iqr = q3 - q1
+    if iqr <= 0:
+        return vals
+    lo, hi = q1 - k * iqr, q3 + k * iqr
+    return [min(max(v, lo), hi) for v in vals]
 
 
 @dataclass
@@ -418,7 +439,18 @@ class AIConfig:
     giveback_retain_frac: float = 0.40   # exit-v2: keep 40% of peak min
     hard_profit_lock_enable: bool = True
     hard_profit_lock_peak: float = 2.60  # exit-v2: was 1.80 — ignore sub-partial peaks
-    hard_profit_lock_floor: float = 0.30
+    hard_profit_lock_floor: float = 0.30   # absolute floor (legacy / fallback)
+    # v1.41: the absolute 0.30 floor above was DEAD — giveback (peak≥1.80, retain
+    # 40%) always fires at a higher upl, so this rule never triggered. Make it a
+    # fraction of the peak so both rules are live: giveback covers 1.8–2.6 peaks,
+    # hard-lock covers ≥2.6 peaks (keeps 55% of a big peak instead of 40%).
+    hard_profit_lock_retain: float = 0.55
+    # v1.41 soft-lock: park the stop under the peak once the trade was meaningfully
+    # green. Before this there was a dead-zone between the BE arm (~+1%) and the
+    # giveback arm (+1.8%) where a +1.7% runner could round-trip to +0.2% (BE) with
+    # nothing banked — the classic "was green, closed flat" churn.
+    soft_lock_peak_pct: float = 1.50
+    soft_lock_atr_mult: float = 0.80
     soft_profit_take_pct: float = 5.00     # exit-v2: was 2.80 — it pre-empted the
                                            # ≥3.8% hard TP, capping every winner
     partial_take_enable: bool = True
@@ -469,7 +501,9 @@ class AIConfig:
     conf_ceil: float = 0.78
     align_floor: float = 0.55
     align_ceil: float = 0.70
-    size_cap_floor: float = 0.08
+    size_cap_floor: float = 0.06           # must stay <= the conservative preset's
+                                           # 0.06 cap, otherwise the clamp below
+                                           # silently undoes defensive sizing
     size_cap_ceil: float = 0.18
     provider: str = None
     execute: bool = None
@@ -2050,10 +2084,17 @@ class AIStrategy:
                 streak += 1
             else:
                 break
+        # Robust central tendency (v1.41): a single catastrophic stop-out must not
+        # decide the preset. Winsorize at 1.5×IQR; the raw avg is kept for display.
+        _srt = sorted(pnls)
+        avg_trim = round(sum(_winsorize(pnls)) / len(pnls), 4)
+        median = round(_srt[len(_srt) // 2], 4)
         return {
             "n": len(closed),
             "win_rate": round(100.0 * wins / len(closed), 1),
             "avg_pnl": round(sum(pnls) / len(pnls), 4),
+            "avg_pnl_trim": avg_trim,
+            "median_pnl": median,
             "sum_pnl": round(sum(pnls), 4),
             "streak": streak,
             "streak_kind": kind,
@@ -2477,27 +2518,31 @@ class AIStrategy:
         else:
             wr = float(stats.get("win_rate") or 50)
             avg = float(stats.get("avg_pnl") or 0)
+            # Decision uses the winsorized mean so one tail loss cannot pin us
+            # defensive on its own; the raw avg is still shown for transparency.
+            avg_rob = float(stats.get("avg_pnl_trim", avg) or 0)
             sk = stats.get("streak_kind")
             stn = int(stats.get("streak") or 0)
 
-            if wr < 35 or (sk == "loss" and stn >= 3) or avg < -15:
+            if wr < 35 or (sk == "loss" and stn >= 3) or avg_rob < -15:
                 preset = "conservative"
                 conf = max(base_conf, 0.82)
                 align = max(base_align, 0.65)
                 size_cap = 0.06
-                reasons.append(f"defensive:wr={wr},streak={sk}{stn},avg={avg:.1f}")
-            elif wr >= 55 and avg > 5 and not (sk == "loss" and stn >= 2):
+                reasons.append(
+                    f"defensive:wr={wr},streak={sk}{stn},avg={avg:.1f}/trim={avg_rob:.1f}")
+            elif wr >= 55 and avg_rob > 5 and not (sk == "loss" and stn >= 2):
                 preset = "aggressive"
                 conf = min(base_conf, 0.72)
                 align = min(base_align, 0.52)
                 size_cap = 0.12
-                reasons.append(f"edge:wr={wr},avg={avg:.1f}")
+                reasons.append(f"edge:wr={wr},avg={avg:.1f}/trim={avg_rob:.1f}")
             else:
                 preset = "normal"
                 conf = base_conf
                 align = base_align
                 size_cap = 0.10
-                reasons.append(f"steady:wr={wr},avg={avg:.1f}")
+                reasons.append(f"steady:wr={wr},avg={avg:.1f}/trim={avg_rob:.1f}")
 
             # mild nudge from lifetime if available
             if self._lifetime_trades >= 8:
@@ -5804,14 +5849,19 @@ class AIStrategy:
                     )
                     await self._close(client, coin, f"soft_take_{upl:.1f}")
                     continue
-                # 2) Hard lock: was clearly green, now almost flat/red → leave
+                # 2) Hard lock: was clearly green, now gave back a lot of a BIG
+                # peak → leave. Threshold is the larger of the absolute floor and
+                # `retain × peak`, so this rule stays reachable alongside giveback
+                # (an absolute-only floor was subsumed and never fired).
                 if self._cfg_b("hard_profit_lock_enable", True):
-                    lock_peak = self._cfg_f("hard_profit_lock_peak", 1.50)
+                    lock_peak = self._cfg_f("hard_profit_lock_peak", 2.60)
                     lock_floor = self._cfg_f("hard_profit_lock_floor", 0.40)
-                    if peak_u >= lock_peak and upl < lock_floor:
+                    lock_ret = self._cfg_f("hard_profit_lock_retain", 0.55)
+                    lock_thr = max(lock_floor, peak_u * lock_ret) if lock_ret > 0 else lock_floor
+                    if peak_u >= lock_peak and upl < lock_thr:
                         print(
                             f"[AI] hard_profit_lock {coin} {pos.side}: peak={peak_u:+.2f}% "
-                            f"now={upl:+.2f}% < floor {lock_floor:.2f}%",
+                            f"now={upl:+.2f}% < floor {lock_thr:.2f}%",
                             flush=True,
                         )
                         await self._close(client, coin, f"profit_lock_peak_{peak_u:.1f}")
@@ -5857,6 +5907,7 @@ class AIStrategy:
             be_need = self._cfg_f("breakeven_atr_mult", 0.90)
             be_min_pct = self._cfg_f("breakeven_min_pct", 1.00)
             be_lock = self._cfg_f("breakeven_lock_pct", 0.20) / 100.0
+            _stop_before = float(pos.stop_price or 0)
             if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
                 if pos.side == "long":
                     be = float(pos.entry_price) * (1.0 + be_lock)
@@ -5866,15 +5917,40 @@ class AIStrategy:
                     be = float(pos.entry_price) * (1.0 - be_lock)
                     if not pos.stop_price or be < float(pos.stop_price):
                         pos.stop_price = be
+            # Soft-lock (v1.41): once the trade was meaningfully green (peak ≥
+            # soft_lock_peak_pct) never hand the whole move back to breakeven —
+            # park the stop soft_lock_atr_mult × ATR under the peak. This fills the
+            # dead-zone between the BE arm (~+1%) and the giveback arm (+1.8%),
+            # where a +1.7% runner used to round-trip to +0.2% with nothing banked.
+            try:
+                sl_peak = self._cfg_f("soft_lock_peak_pct", 1.50)
+                sl_mult = self._cfg_f("soft_lock_atr_mult", 0.80)
+                if sl_peak > 0 and peak_u >= sl_peak and pos.entry_price and pos.peak_price:
+                    if atr_p > 0 and sl_mult > 0:
+                        _dist = sl_mult * atr_p * float(pos.entry_price)
+                    else:
+                        _dist = float(pos.entry_price) * (sl_peak / 100.0) * 0.5
+                    if pos.side == "long":
+                        _cand = float(pos.peak_price) - _dist
+                        _floor = float(pos.entry_price) * (1.0 + be_lock)
+                        _new = max(_floor, _cand)
+                        if _new > float(pos.stop_price or 0):
+                            pos.stop_price = _new
+                    else:
+                        _cand = float(pos.peak_price) + _dist
+                        _ceil = float(pos.entry_price) * (1.0 - be_lock)
+                        _new = min(_ceil, _cand) if pos.stop_price else _cand
+                        if not pos.stop_price or _new < float(pos.stop_price):
+                            pos.stop_price = _new
+            except Exception as e:
+                print(f"[AI] soft-lock check: {e}", flush=True)
             # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
             act_atr = float(getattr(self.config, "trail_activate_atr_mult", 1.50) or 1.50)
             trail_m = float(getattr(self.config, "trail_atr_mult", 1.10) or 1.10)
             act_pct = float(getattr(self.config, "trail_activate_pct", 2.00) or 0)
             lock = float(getattr(self.config, "trail_lock_pct", 0.22) or 0)
-            be_lock = self._cfg_f("breakeven_lock_pct", 0.20) / 100.0
             trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
             if trail_on and pos.entry_price:
-                old_stop = pos.stop_price
                 if atr_p > 0 and trail_m > 0:
                     # Distance from peak in price units
                     dist = trail_m * atr_p * float(pos.entry_price)
@@ -5903,13 +5979,13 @@ class AIStrategy:
                         new_stop = min(be, trail)
                         if new_stop < pos.stop_price:
                             pos.stop_price = new_stop
-                # Amend exchange SL order if stop moved
-                if pos.stop_price != old_stop:
-                    try:
-                        await self._amend_exchange_sl(client, pos, pos.stop_price)
-                        await self._sync_live_stop(coin, float(pos.stop_price))
-                    except Exception as e:
-                        print(f"[AI] trail amend SL: {e}", flush=True)
+            # Amend exchange SL once if the stop moved (BE / soft-lock / trail)
+            if float(pos.stop_price or 0) != _stop_before:
+                try:
+                    await self._amend_exchange_sl(client, pos, pos.stop_price)
+                    await self._sync_live_stop(coin, float(pos.stop_price))
+                except Exception as e:
+                    print(f"[AI] trail amend SL: {e}", flush=True)
 
             # Hard stop / take first (skip levels that were never set)
             sp = float(pos.stop_price or 0)
