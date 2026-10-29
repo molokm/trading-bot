@@ -82,16 +82,9 @@ class TelegramNotifier:
         """Send a message. Returns True on success. Never raises."""
         if not self.configured:
             return False
-        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": text}
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, json=payload)
-                return bool(resp.json().get("ok"))
-        except Exception:
-            return False
+        target = self.chat_id or self.channel_id
+        mid = await self._send_to(target, text, parse_mode)
+        return bool(mid)
 
     def remember_open(self, signal_id, message_id, pos_key: str = "", coin: str = "") -> None:
         try:
@@ -235,13 +228,25 @@ class TelegramNotifier:
             except (TypeError, ValueError):
                 reply_id = None
 
-        async def _post(payload: dict) -> tuple:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+        async def _post(payload: dict) -> dict:
+            async with httpx.AsyncClient(timeout=20.0) as client:
                 resp = await client.post(url, json=payload)
                 try:
                     data = resp.json()
                 except Exception:
-                    data = {"ok": False, "description": resp.text[:200]}
+                    data = {"ok": False, "description": (resp.text or "")[:200]}
+                # Surface HTTP 429 for retry logic
+                if resp.status_code == 429 and isinstance(data, dict):
+                    data.setdefault("description", "Too Many Requests")
+                    data["_http_status"] = 429
+                    try:
+                        data["_retry_after"] = float(
+                            (data.get("parameters") or {}).get("retry_after")
+                            or resp.headers.get("Retry-After")
+                            or 3
+                        )
+                    except Exception:
+                        data["_retry_after"] = 3.0
                 return data
 
         base = {"chat_id": chat_id, "text": text}
@@ -292,6 +297,13 @@ class TelegramNotifier:
                 low = desc.lower()
                 if "parse" in low or "entity" in low or "can't parse" in low:
                     base.pop("parse_mode", None)
+                # Rate limit: honour Retry-After (Telegram flood control)
+                if data.get("_http_status") == 429 or "too many" in low or "retry after" in low:
+                    ra = float(data.get("_retry_after") or 3)
+                    ra = max(2.0, min(ra, 30.0))
+                    print(f"[TG] rate-limited, sleep {ra:.1f}s", flush=True)
+                    await asyncio.sleep(ra)
+                    continue
                 if attempt < 2:
                     await asyncio.sleep(1 + attempt)
             except Exception as e:
@@ -350,7 +362,11 @@ class TelegramNotifier:
         if self.channel_id and str(self.channel_id) != str(self.chat_id):
             print(f"[TG] send_trade DEMO: chat={self.chat_id!r} channel={self.channel_id!r} — trying channel", flush=True)
             try:
-                ch_mid = await self._send_to(self.channel_id, text, parse_mode)
+                # Prefer reply on channel too when open mid is known (same chat thread)
+                ch_mid = await self._send_to(
+                    self.channel_id, text, parse_mode,
+                    reply_to_message_id=reply_to_message_id,
+                )
                 print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)
                 if not mid:
                     mid = ch_mid

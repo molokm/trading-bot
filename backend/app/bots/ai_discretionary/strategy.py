@@ -3592,16 +3592,17 @@ class AIStrategy:
                 print(f"[AI] db open: {e}", flush=True)
         if self.notifier and getattr(self.notifier, 'configured', True):
             try:
-                _tg_mode = self._account_mode_tag()[0]
+                # Always DEMO for primary engine opens → owner chat + public channel.
+                # If mode flips to live, send_trade skips the free channel.
                 _tg_mid = await self.notifier.send_trade(
                     self.notifier.open_msg(
                         coin=coin, side=side, price=round(fill_px, 4),
                         stop=round(stop, 4), size=sz, leverage=lev,
                         bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                        account_mode=_tg_mode,
-                        account_key=self._account_mode_tag()[1],
+                        account_mode="demo",
+                        account_key="showcase",
                     ),
-                    account_mode=_tg_mode if _tg_mode in ("demo", "live") else "demo",
+                    account_mode="demo",
                 )
                 if _tg_mid:
                     pos.tg_message_id = int(_tg_mid)
@@ -3610,6 +3611,8 @@ class AIStrategy:
                         bot_id=self.BOT_ID, coin=coin,
                     )
                     print(f"[AI] TG open msg_id={_tg_mid} signal={pos.signal_id}", flush=True)
+                else:
+                    print(f"[AI] TG open FAILED mid=0 {coin} — will not block trade", flush=True)
             except Exception as e:
                 print(f"[AI] TG open: {e}", flush=True)
         self._record_exec(
@@ -3767,21 +3770,34 @@ class AIStrategy:
                 f"pnl_caller={caller_pnl:.4f} pnl_ct={pnl_m:.4f} use={use_pnl:.4f}",
                 flush=True,
             )
+            # Primary closes → DEMO channel+chat; LIVE only when suffix marks mirror
+            _tg_close_mode = (
+                "live" if (
+                    str(account_mode).lower() == "live"
+                    and "LIVE" in str(bot_name_suffix or "").upper()
+                ) else "demo"
+            )
             mid = await self.notifier.send_trade(
                 _txt,
                 reply_to_message_id=_reply or None,
-                account_mode=account_mode if account_mode in ("demo", "live") else "demo",
+                account_mode=_tg_close_mode,
             )
             if not mid:
-                # Retry plain (no reply) — open message may be gone or channel-only
-                await asyncio.sleep(0.8)
+                await asyncio.sleep(1.5)
                 mid = await self.notifier.send_trade(
                     _txt,
                     reply_to_message_id=None,
-                    account_mode=account_mode if account_mode in ("demo", "live") else "demo",
+                    account_mode=_tg_close_mode,
                 )
                 print(f"[AI] TG close RETRY plain mid={mid} {coin}", flush=True)
-            print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} mode={account_mode} ({reason})", flush=True)
+            if not mid:
+                # Last resort: longer delay (rate-limit / network)
+                await asyncio.sleep(3.0)
+                mid = await self.notifier.send_trade(
+                    _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
+                )
+                print(f"[AI] TG close RETRY2 mid={mid} {coin}", flush=True)
+            print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} mode={_tg_close_mode} ({reason})", flush=True)
             if not mid:
                 print(f"[AI] TG close FAILED still 0 for {coin} — check TELEGRAM_TOKEN/CHAT/CHANNEL", flush=True)
         except Exception as e:
