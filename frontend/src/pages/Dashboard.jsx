@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import {
   Wallet, TrendingUp, TrendingDown, Activity, XCircle, Loader2, Zap,
   ArrowUpRight, ArrowDownRight, BarChart3, Play, Square, ChevronDown, Filter, ScrollText,
@@ -18,8 +18,20 @@ const PRICE_COINS = ['BTC', 'ETH', 'BNB', 'XRP', 'SOL', 'DOGE', 'ADA', 'TRX', 'A
 const AI_ONLY_MODE = true
 
 
-/** Safe chronological compare for trade timestamps (ms number, ISO string, or empty). */
-function cmpTimeDesc(a, b) {
+/** Bound a network call so one stuck endpoint cannot freeze the whole page. */
+function withTimeout(promise, ms = 12000) {
+  return new Promise((resolve, reject) => {
+    const id = setTimeout(() => reject(new Error('timeout')), ms)
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(id); resolve(v) },
+      (e) => { clearTimeout(id); reject(e) },
+    )
+  })
+}
+const safeCall = (p, ms = 12000) => withTimeout(p, ms).catch(() => null)
+
+
+/** Safe chronological compare for trade timestamps (ms number, ISO string, or empty). */function cmpTimeDesc(a, b) {
   const toMs = (v) => {
     if (v == null || v === '') return 0
     if (typeof v === 'number' && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v
@@ -356,10 +368,6 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [filterResult, setFilterResult] = useState('all') // all | win | loss
   const [filterReason, setFilterReason] = useState('all')
 
-  // Persisted uptime - calculated from server-side started_at
-  const [uptimeSec, setUptimeSec] = useState(0)
-  const uptimeRef = useRef(null)
-
   const { t, locale } = useTranslation()
 
   const REASON_MAP = {
@@ -377,17 +385,6 @@ export default function Dashboard({ health, connected, isGuest }) {
     breakeven:  { label: 'BE',     color: 'text-[var(--warn)]' },
     trailing:   { label: 'Trail',  color: 'text-[var(--info)]' },
   }
-
-  useEffect(() => {
-    const started = momentumStatus?.started_at
-    if (!started) { setUptimeSec(0); return }
-    const startedMs = new Date(started).getTime()
-    if (isNaN(startedMs)) { setUptimeSec(0); return }
-    const tick = () => setUptimeSec(Math.max(0, Math.floor((Date.now() - startedMs) / 1000)))
-    tick()
-    uptimeRef.current = setInterval(tick, 1000)
-    return () => { if (uptimeRef.current) clearInterval(uptimeRef.current) }
-  }, [momentumStatus?.started_at])
 
   useEffect(() => {
     loadData({ fastOnly: false })
@@ -413,57 +410,31 @@ export default function Dashboard({ health, connected, isGuest }) {
     if (!connected) { setLoading(false); return }
     if (document.hidden && !opts.force) return
     
-    const isLive = !demoMode
     try {
-      if (isLive) {
-        const [pf, pos, aiSt] = await Promise.all([
-          api.getPortfolio().catch(() => null),
-          api.getPositions('SWAP').catch(() => null),
-          api.aiStatus().catch(() => null),
-        ])
-        if (pf) setPortfolio(pf)
-        if (pos) setPositions(pos.positions || [])
-        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-        setLoading(false)
-
-        // Background: tickers + live status
-        const [priceTickers, liveSt] = await Promise.all([
-          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
-          api.liveStatus().catch(() => null),
-        ])
-        if (liveSt) setLiveStatus(liveSt)
-        if (priceTickers?.tickers) {
-          const byCoin = {}
-          priceTickers.tickers.forEach(tp => {
-            const id = (tp.instId || '').replace('-USDT-SWAP', '')
-            if (id) byCoin[id] = tp
-          })
-          setTickers(byCoin)
-        }
-      } else {
-        const [pf, pos, tk, aiSt, priceTickers, liveSt] = await Promise.all([
-          api.getPortfolio().catch(() => null),
-          api.getPositions('SWAP').catch(() => null),
-          api.getTicker('BTC-USDT-SWAP').catch(() => null),
-          api.aiStatus().catch(() => null),
-          api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`)).catch(() => null),
-          api.liveStatus().catch(() => null),
-        ])
-        if (pf) setPortfolio(pf)
-        if (pos) setPositions(pos.positions || [])
-        if (aiSt && !aiSt.detail) setAiStatus(aiSt)
-        if (tk) setTicker(tk)
-        if (liveSt) setLiveStatus(liveSt)
-        if (priceTickers?.tickers) {
-          const byCoin = {}
-          priceTickers.tickers.forEach(tp => {
-            const id = (tp.instId || '').replace('-USDT-SWAP', '')
-            if (id) byCoin[id] = tp
-          })
-          setTickers(byCoin)
-        }
-        setLoading(false)
+      // One round of parallel calls. `safeCall` bounds each request so a single
+      // stuck endpoint cannot hold the whole dashboard hostage. BTC is taken
+      // from the tickers response instead of a second /market/ticker request.
+      const [pf, pos, aiSt, priceTickers, liveSt] = await Promise.all([
+        safeCall(api.getPortfolio()),
+        safeCall(api.getPositions('SWAP')),
+        safeCall(api.aiStatus()),
+        safeCall(api.getTickers(PRICE_COINS.map(c => `${c}-USDT-SWAP`))),
+        safeCall(api.liveStatus()),
+      ])
+      if (pf) setPortfolio(pf)
+      if (pos) setPositions(pos.positions || [])
+      if (aiSt && !aiSt.detail) setAiStatus(aiSt)
+      if (liveSt) setLiveStatus(liveSt)
+      if (priceTickers?.tickers) {
+        const byCoin = {}
+        priceTickers.tickers.forEach(tp => {
+          const id = (tp.instId || '').replace('-USDT-SWAP', '')
+          if (id) byCoin[id] = tp
+        })
+        setTickers(byCoin)
+        if (byCoin.BTC) setTicker(byCoin.BTC)
       }
+      setLoading(false)
     } catch { setLoading(false) }
     if (opts.fastOnly) return
 
@@ -474,7 +445,7 @@ export default function Dashboard({ health, connected, isGuest }) {
       // /api/pnl, /api/trades/paired and /api/live/trades are AUTH_NO_GUEST /
       // ADMIN - without a token they answer 403 and the whole «Сделки» panel
       // plus Sum PnL used to silently go blank (every .catch(() => null)).
-      const dash = await api.meDashboard().catch(() => null)
+      const dash = await safeCall(api.meDashboard(), 15000)
       let pnlData = null
       let livePnlData = null
       if (dash) {
@@ -506,10 +477,10 @@ export default function Dashboard({ health, connected, isGuest }) {
         }
       } else {
         const [trades, liveTr, _pnlData, _livePnlData] = await Promise.all([
-          api.getPairedTrades(500).catch(() => null),
-          api.liveTrades().catch(() => null),
-          api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })).catch(() => null),
-          api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })).catch(() => null),
+          safeCall(api.getPairedTrades(500), 15000),
+          safeCall(api.liveTrades(), 15000),
+          safeCall(api.getPnlSummary({ mode: 'demo' }).catch(() => api.getPnl({ mode: 'demo' })), 15000),
+          safeCall(api.getPnlSummary({ mode: 'live' }).catch(() => api.getPnl({ mode: 'live' })), 15000),
         ])
         livePnlData = _livePnlData
         if (livePnlData && !livePnlData.detail && livePnlData.total != null) {
