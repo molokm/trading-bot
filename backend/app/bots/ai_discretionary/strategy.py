@@ -2405,6 +2405,33 @@ class AIStrategy:
                 f"last_closes:{self.BOT_ID}", json.dumps(self._last_closes))
         except Exception as e:
             print(f"[AI] persist last_closes: {e}", flush=True)
+        await self._remember_close_reason(coin, pnl, reason, mode="demo")
+
+    async def _remember_close_reason(self, coin: str, pnl: float,
+                                     reason: str, mode: str = "demo") -> None:
+        """Persist a rolling list of close reasons (the dashboard reads it).
+
+        `trades` has no reason column and `_trade_log` dies with the process,
+        so after a redeploy the «Сделки» panel could only say "ЗАКРЫТА".
+        """
+        if not self.db:
+            return
+        key = f"close_reasons:{self.BOT_ID}"
+        try:
+            blob = await self.db.get_setting(key)
+            rows = json.loads(blob) if blob else []
+            if not isinstance(rows, list):
+                rows = []
+            rows.append({
+                "coin": str(coin or "").upper(),
+                "ts": int(time.time() * 1000),
+                "pnl": round(float(pnl or 0), 6),
+                "reason": str(reason or "").strip().lower()[:120],
+                "mode": "live" if str(mode).lower() == "live" else "demo",
+            })
+            await self.db.set_setting(key, json.dumps(rows[-150:]))
+        except Exception as e:
+            print(f"[AI] persist close_reasons: {e}", flush=True)
 
     async def _restore_last_closes(self) -> None:
         """Load the persisted anti-churn cooldown (survives redeploys)."""
@@ -4567,6 +4594,10 @@ class AIStrategy:
             pos, "close", fill_px, pos.size, pnl,
             extra={"exit_price": fill_px, "fee": round(fee_c, 6)},
         )
+        try:
+            await self._remember_close_reason(coin, pnl, reason, mode="live")
+        except Exception:
+            pass
         if self.db:
             try:
                 await self.db.save_trade(

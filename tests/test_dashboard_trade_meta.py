@@ -208,3 +208,96 @@ def test_live_close_without_ids_matches_by_pnl_and_time(monkeypatch):
     assert len(live) == 1, trades
     assert live[0]["side"] == "short"
     assert live[0]["entry_px"] == 2000.0
+
+
+def test_exchange_stop_close_uses_last_open_row(monkeypatch):
+    """An exchange SL/TP close has no close fill row — take direction/entry
+    from the position's own open row instead."""
+    import app.main as mm
+
+    class _DB3:
+        async def get_exchange_close_trades_detail(self, **kw):
+            return []
+
+        async def get_trades_multi_bot(self, *a, **k):
+            return [{
+                "bot_id": "ai_strategy", "signal_id": 21, "ord_id": "",
+                "inst_id": "SOL-USDT-SWAP", "side": "buy", "sz": "10",
+                "px": "150.0", "state": "filled", "account_mode": "demo",
+                "timestamp": _iso(NOW_MS - 7_200_000),
+            }]
+
+        async def get_trades(self, **kw):
+            return []
+
+        async def get_setting(self, key):
+            return None
+
+    class _Bot3:
+        _trade_log = []
+
+        def get_status(self):
+            return {"running": True, "open_positions": [], "capital": 10000}
+
+    async def _ctx(request):
+        return "guest", None, None
+
+    async def _pnl(mode="demo"):
+        base = {"total": -12.0, "1d": -12.0, "7d": -12.0, "30d": -12.0,
+                "week": -12.0, "unrealized": 0.0, "fees": 0.0,
+                "trades_counted": 1, "per_bot": {}, "source": "test"}
+        if mode == "demo":
+            base["trades"] = [{
+                "time": NOW_MS, "inst": "SOL-USDT-SWAP", "side": "",
+                "pnl": -12.0, "account_mode": "demo",
+                "bot": "AI Discretionary 1H", "ord_id": "X9",
+                "reason": "closed", "entry_px": None, "exit_px": 148.0,
+            }]
+        return base
+
+    monkeypatch.setattr(mm, "_me_ctx", _ctx)
+    monkeypatch.setattr(mm, "_get_pnl_cached", _pnl)
+    monkeypatch.setattr(mm, "db", _DB3())
+    monkeypatch.setattr(mm, "ai_bot", _Bot3())
+    monkeypatch.setattr(mm, "client_manager", None)
+    mm._ME_DASH_CACHE.clear()
+
+    resp = TestClient(mm.app, raise_server_exceptions=False).get("/api/me/dashboard")
+    trades = resp.json().get("trades") or []
+    assert len(trades) == 1, trades
+    assert trades[0]["side"] == "long"       # buy = long open
+    assert trades[0]["entry_px"] == 150.0
+
+
+def test_close_reason_is_persisted_for_the_panel():
+    """`trades` has no reason column — keep a rolling list in settings."""
+    import asyncio
+    import json
+
+    from app.bots.ai_discretionary.strategy import AIStrategy
+
+    class _S:
+        def __init__(self):
+            self.settings = {}
+
+        async def get_setting(self, key):
+            return self.settings.get(key)
+
+        async def set_setting(self, key, value):
+            self.settings[key] = value
+
+    store = _S()
+    bot = object.__new__(AIStrategy)
+    bot.db = store
+    bot.BOT_ID = "ai_strategy"
+
+    async def scenario():
+        await bot._remember_close_reason("btc", -3.5, "Ind_Exit:Adverse", mode="demo")
+        await bot._remember_close_reason("ETH", 4.0, "stop", mode="live")
+        rows = json.loads(store.settings["close_reasons:ai_strategy"])
+        assert [(r["coin"], r["mode"]) for r in rows] == [("BTC", "demo"),
+                                                          ("ETH", "live")]
+        assert rows[0]["reason"] == "ind_exit:adverse"
+        assert rows[0]["pnl"] == -3.5
+
+    asyncio.run(scenario())

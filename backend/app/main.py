@@ -480,6 +480,17 @@ async def startup():
     # global MUST be the first statement (Python forbids prior use of these names)
     global _STARTED_AT, _env_demo, ai_bot, ai_scale_bot, _positions_cache, _pnl_cache, live_manager
     _STARTED_AT = _time.time()
+    # Diagnostics sink — must be defined before its first use below: a later
+    # definition made the boot flow raise UnboundLocalError at the DB-backend
+    # line and silently skip the whole 2/7…7/7 startup block.
+    _startup_log = []
+    def _slog(msg):
+        # Keep the public startup log bounded — a restart that never fails
+        # would otherwise grow without limit.
+        _startup_log.append(msg)
+        if len(_startup_log) > 1000:
+            del _startup_log[: len(_startup_log) - 1000]
+        print(f'[startup-diag] {msg}', flush=True)
     try:
         print('[startup] 0/7 auth secrets ...', flush=True)
         ensure_auth_secrets()
@@ -920,14 +931,6 @@ async def startup():
         print('[startup] Orphan sweeper scheduled (+120s)', flush=True)
     except Exception as e:
         print(f'[startup] Exchange/orphan schedule error: {e}', flush=True)
-    _startup_log = []
-    def _slog(msg):
-        # Keep the public startup log bounded — a restart that never fails
-        # would otherwise grow without limit.
-        _startup_log.append(msg)
-        if len(_startup_log) > 1000:
-            del _startup_log[: len(_startup_log) - 1000]
-        print(f'[startup-diag] {msg}', flush=True)
     try:
         _slog('AI auto-start entry point reached')
         print('[startup] AI Discretionary auto-start ...', flush=True)
@@ -2792,7 +2795,37 @@ async def me_dashboard(request: Request):
         _meta_sig: dict = {}
         _open_sig: dict = {}
         _close_by_inst: dict = {}   # fallback when the close row has no ord id
+        _open_list: dict = {}       # open fills per instrument, for stop/take closes
         _reason_by_coin: dict = {}  # persisted last-close reason (survives restarts)
+        _reason_hist: dict = {}     # rolling persisted close reasons per mode+coin
+
+        def _reason_for(mode: str, coin: str, ts, pnl) -> str:
+            """Human close reason from the persisted history (nearest match)."""
+            try:
+                _t = int(ts or 0)
+            except (TypeError, ValueError):
+                _t = 0
+            try:
+                _p = float(pnl or 0)
+            except (TypeError, ValueError):
+                _p = 0.0
+            best = None
+            best_score = None
+            for _r in _reason_hist.get(f'{mode}|{coin}', ()):
+                _dt = abs(int(_r.get('ts') or 0) - _t) if _t else 0
+                _dp = abs(float(_r.get('pnl') or 0) - _p)
+                _score = _dt / 60000.0 + _dp
+                if best_score is None or _score < best_score:
+                    best_score = _score
+                    best = (_r, _dt, _dp)
+            if best is not None:
+                _r, _dt, _dp = best
+                if _dt <= 1_800_000 and _dp <= max(1.0, abs(_p) * 0.25):
+                    return str(_r.get('reason') or '')
+            _lc = _reason_by_coin.get(coin)
+            if _lc and _t and abs(_t - int(_lc.get('ts') or 0)) <= 1_800_000:
+                return str(_lc.get('reason') or '')
+            return ''
 
         def _trade_meta(mode: str, oid: str, inst: str, sig: int = 0,
                         pnl=None, ts=None) -> dict:
@@ -2838,6 +2871,27 @@ async def me_dashboard(request: Request):
                         out['entry_px'] = om['entry_px']
                     if out.get('side') not in ('long', 'short') and om.get('side'):
                         out['side'] = om['side']
+            if inst and (out.get('side') not in ('long', 'short')
+                         or out.get('entry_px') is None):
+                # Exchange-side stop/take closes never produce a close fill row
+                # of their own, so fall back to the last open before the close:
+                # one position per instrument at a time makes this unambiguous.
+                try:
+                    _ts = int(ts or 0)
+                except (TypeError, ValueError):
+                    _ts = 0
+                cand = None
+                for _o in _open_list.get(f'{mode}|{inst}', ()):
+                    if _ts and int(_o.get('ts') or 0) > _ts + 300_000:
+                        continue
+                    if cand is None or int(_o.get('ts') or 0) >= int(cand.get('ts') or 0):
+                        cand = _o
+                if cand is not None:
+                    if out.get('entry_px') is None and cand.get('entry_px'):
+                        out['entry_px'] = cand['entry_px']
+                    if (out.get('side') not in ('long', 'short')
+                            and cand.get('side') in ('long', 'short')):
+                        out['side'] = cand['side']
             return out
 
         try:
@@ -2874,6 +2928,14 @@ async def me_dashboard(request: Request):
                             'side': ('long' if _sraw == 'buy'
                                      else ('short' if _sraw == 'sell' else '')),
                         }
+                    if _inst and _pxv > 0:
+                        _open_list.setdefault(f'{_m}|{_inst}', []).append({
+                            'ts': _norm_ts(_r.get('timestamp')),
+                            'entry_px': _pxv,
+                            'side': ('long' if _sraw == 'buy'
+                                     else ('short' if _sraw == 'sell' else '')),
+                            'signal_id': _sig,
+                        })
                     continue
                 # Close fill: sell closes a long, buy closes a short.
                 _dir = ('long' if _sraw == 'sell'
@@ -2928,8 +2990,8 @@ async def me_dashboard(request: Request):
                     _meta_oid[f'{_m}|{_oid}'] = _meta
                 if _inst and _sig:
                     _meta_sig[f'{_m}|{_inst}|{_sig}'] = _meta
-            # Close reasons survive restarts only in `last_closes` (the bot
-            # keeps the last close per coin for the anti-churn cooldown).
+            # Close reasons survive restarts only in settings: `last_closes`
+            # (one per coin, anti-churn) and the rolling `close_reasons` list.
             try:
                 _lc_blob = await db.get_setting(f'last_closes:{AI_BOT_ID}')
                 _lc = json.loads(_lc_blob) if _lc_blob else {}
@@ -2947,6 +3009,27 @@ async def me_dashboard(request: Request):
                         }
             except Exception as _lce:
                 print(f'[me/dashboard] meta last_closes: {_lce}', flush=True)
+            try:
+                _cr_blob = await db.get_setting(f'close_reasons:{AI_BOT_ID}')
+                _cr = json.loads(_cr_blob) if _cr_blob else []
+                if isinstance(_cr, list):
+                    for _v in _cr:
+                        if not isinstance(_v, dict):
+                            continue
+                        _rsn = str(_v.get('reason') or '').strip().lower()
+                        if not _rsn:
+                            continue
+                        _m = str(_v.get('mode') or 'demo').lower()
+                        if _m not in ('demo', 'live'):
+                            _m = 'demo'
+                        _reason_hist.setdefault(
+                            f"{_m}|{_norm_coin(_v.get('coin'))}", []).append({
+                                'reason': _rsn,
+                                'ts': int(float(_v.get('ts') or 0)),
+                                'pnl': float(_v.get('pnl') or 0),
+                            })
+            except Exception as _cre:
+                print(f'[me/dashboard] meta close_reasons: {_cre}', flush=True)
         except Exception as _me:
             print(f'[me/dashboard] meta index: {_me}', flush=True)
 
@@ -3018,14 +3101,12 @@ async def me_dashboard(request: Request):
                     if _mr and str(entry.get('reason') or '').lower() in (
                             'closed', 'close', '', 'closing'):
                         entry['reason'] = _mr
-                # Last resort for the reason: the persisted per-coin last close.
+                # Last resort for the reason: persisted close history.
                 if str(entry.get('reason') or '').lower() in (
                         'closed', 'close', '', 'closing'):
-                    _lc = _reason_by_coin.get(coin)
-                    if _lc and entry.get('time'):
-                        _dt = abs(int(entry['time']) - int(_lc.get('ts') or 0))
-                        if _dt <= 1_800_000:
-                            entry['reason'] = _lc['reason']
+                    _rr = _reason_for(mode, coin, entry.get('time'), entry.get('pnl'))
+                    if _rr:
+                        entry['reason'] = _rr
             except Exception:
                 pass
             # Unified PnL filter: only AI Discretionary closes in set T
@@ -3397,10 +3478,9 @@ async def me_dashboard(request: Request):
                            or str(_emeta.get('reason') or '').strip()
                            or str(_r.get('reason') or 'closed'))
                 if _reason.lower() in ('closed', 'close', '', 'closing'):
-                    _lc = _reason_by_coin.get(_coin)
-                    _ets = _norm_ts(_r.get('time'))
-                    if _lc and _ets and abs(_ets - int(_lc.get('ts') or 0)) <= 1_800_000:
-                        _reason = _lc['reason']
+                    _rr = _reason_for(_mode, _coin, _norm_ts(_r.get('time')), _r.get('pnl'))
+                    if _rr:
+                        _reason = _rr
                 _eng_list.append({
                     'time': _norm_ts(_r.get('time')),
                     'inst': _coin,
