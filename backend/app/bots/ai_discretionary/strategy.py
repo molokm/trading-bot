@@ -619,6 +619,12 @@ class AIStrategy:
         self.analysis = analysis or get_logger()
         self._last_exec = None  # last open/close attempt result
         self._exec_log = []  # recent execution attempts
+        # Strong refs to fire-and-forget Telegram tasks: asyncio keeps only a
+        # weak reference, so an unreferenced close-notify task could be
+        # garbage-collected mid-send (that is how closes went missing while
+        # opens, awaited inline, always arrived).
+        self._tg_tasks: set = set()
+        self._tg_pending: list = []  # close texts Telegram refused; retried later
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -1265,6 +1271,10 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] hydrate: {e}", flush=True)
         try:
+            await self._load_tg_pending()
+        except Exception as e:
+            print(f"[AI] TG pending restore: {e}", flush=True)
+        try:
             if self.db:
                 await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
                                          name=STRATEGY_NAME)
@@ -1299,6 +1309,11 @@ class AIStrategy:
                     await self.stop()
                     break
             self._tick_count += 1
+            # Retry any close notification Telegram refused earlier.
+            try:
+                await self._flush_tg_pending()
+            except Exception as e:
+                print(f"[AI] TG pending flush: {e}", flush=True)
             # Refresh live equity every few ticks so UI is not stuck at $0
             if self._live_client() and (self._tick_count % 3 == 1):
                 try:
@@ -3678,7 +3693,7 @@ class AIStrategy:
     ) -> None:
         """Schedule close TG off the trading tick so timeouts cannot cancel it."""
         try:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 self._notify_close_tg_run(
                     pos, coin, reason, fill_px, pnl,
                     account_mode=account_mode,
@@ -3686,6 +3701,10 @@ class AIStrategy:
                 ),
                 name=f"tg-close-{coin}",
             )
+            # Keep a strong reference until the task finishes — a bare
+            # create_task() may be collected by the GC before it sends.
+            self._tg_tasks.add(task)
+            task.add_done_callback(self._tg_task_done)
         except Exception as e:
             print(f"[AI] TG close schedule: {e}", flush=True)
             # Fallback: run inline if create_task fails
@@ -3697,6 +3716,105 @@ class AIStrategy:
                 )
             except Exception as e2:
                 print(f"[AI] TG close inline: {e2}", flush=True)
+
+    def _tg_task_done(self, task) -> None:
+        """Drop the finished task and surface swallowed exceptions."""
+        self._tg_tasks.discard(task)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            print(f"[AI] TG close task cancelled: {task.get_name()}", flush=True)
+            return
+        except Exception:
+            return
+        if exc is not None:
+            print(
+                f"[AI] TG close task failed: {task.get_name()} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    # ── Persistent retry queue for close notifications ─────────────────────
+    # Telegram can refuse a send (rate limit, network, bad entity). Closes are
+    # the messages users care about most, so a failed text is parked in the
+    # settings table and retried from the main loop until it lands.
+    def _tg_pending_key(self) -> str:
+        return f"tg_pending_close:{self.BOT_ID}"
+
+    async def _load_tg_pending(self) -> None:
+        if not self.db:
+            return
+        try:
+            blob = await self.db.get_setting(self._tg_pending_key())
+            rows = json.loads(blob) if blob else []
+            if not isinstance(rows, list):
+                return
+            now = datetime.now(timezone.utc)
+            clean = []
+            for r in rows:
+                if not isinstance(r, dict) or not r.get("text"):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(r.get("ts") or "").replace("Z", "+00:00"))
+                    if (now - ts).total_seconds() > 86400:
+                        continue
+                except Exception:
+                    pass
+                clean.append(r)
+            self._tg_pending = clean[-20:]
+            if self._tg_pending:
+                print(f"[AI] TG pending close restored: {len(self._tg_pending)}", flush=True)
+        except Exception as e:
+            print(f"[AI] TG pending load: {e}", flush=True)
+
+    async def _save_tg_pending(self) -> None:
+        if not self.db:
+            return
+        try:
+            await self.db.set_setting(
+                self._tg_pending_key(), json.dumps(self._tg_pending[-20:]),
+            )
+        except Exception as e:
+            print(f"[AI] TG pending save: {e}", flush=True)
+
+    async def _queue_tg_close(self, text: str, mode: str, coin: str) -> None:
+        try:
+            self._tg_pending.append({
+                "text": text,
+                "mode": mode,
+                "coin": coin,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            self._tg_pending = self._tg_pending[-20:]
+            await self._save_tg_pending()
+            print(
+                f"[AI] TG close queued for retry ({coin}) pending={len(self._tg_pending)}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[AI] TG close queue: {e}", flush=True)
+
+    async def _flush_tg_pending(self) -> None:
+        """Retry failed close notifications (called from the main loop)."""
+        if not self._tg_pending or not self.notifier:
+            return
+        remaining = []
+        for item in list(self._tg_pending):
+            try:
+                mid = await self.notifier.send_trade(
+                    str(item.get("text") or ""),
+                    account_mode=str(item.get("mode") or "demo"),
+                )
+            except Exception as e:
+                print(f"[AI] TG pending send error: {e}", flush=True)
+                mid = 0
+            if mid:
+                print(f"[AI] TG pending delivered ({item.get('coin')}) mid={mid}", flush=True)
+            else:
+                remaining.append(item)
+        if len(remaining) != len(self._tg_pending):
+            self._tg_pending = remaining
+            await self._save_tg_pending()
 
     async def _notify_close_tg_run(
         self,
@@ -3810,18 +3928,13 @@ class AIStrategy:
                     and "LIVE" in str(bot_name_suffix or "").upper()
                 ) else "demo"
             )
-            # Plain first (most reliable), then optional reply thread
+            # One send only: `_send_to` already falls back to a plain message
+            # when the reply target is gone, so posting the same text twice
+            # (plain + reply) just duplicated every close in the chat.
             mid = await self.notifier.send_trade(
-                _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
+                _txt, reply_to_message_id=_reply or None,
+                account_mode=_tg_close_mode,
             )
-            if mid and _reply:
-                # Best-effort: also post as reply (may fail if mid is other chat)
-                try:
-                    await self.notifier.send_trade(
-                        _txt, reply_to_message_id=_reply, account_mode=_tg_close_mode,
-                    )
-                except Exception:
-                    pass
             if not mid:
                 await asyncio.sleep(2.0)
                 mid = await self.notifier.send_trade(
@@ -3836,7 +3949,8 @@ class AIStrategy:
                 print(f"[AI] TG close RETRY2 mid={mid} {coin}", flush=True)
             print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} mode={_tg_close_mode} ({reason})", flush=True)
             if not mid:
-                print(f"[AI] TG close FAILED still 0 for {coin} — check TELEGRAM_TOKEN/CHAT/CHANNEL", flush=True)
+                print(f"[AI] TG close FAILED still 0 for {coin} — queued for retry", flush=True)
+                await self._queue_tg_close(_txt, _tg_close_mode, coin)
         except Exception as e:
             print(f"[AI] TG close error {coin}: {e}", flush=True)
 

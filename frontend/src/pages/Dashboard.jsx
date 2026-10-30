@@ -1681,10 +1681,24 @@ export default function Dashboard({ health, connected, isGuest }) {
                   {closedTradesForTable.slice(0, 200).map((tr, i) => {
                     const pnlVal = parseFloat(tr.pnl || 0)
                     const sideRaw = String(tr.pos_side || tr.side || '').toLowerCase()
+                    const sideKnown = ['long', 'short', 'buy', 'sell'].includes(sideRaw)
                     const isLong = sideRaw === 'long' || sideRaw === 'buy'
                     const pair = String(tr.symbol || tr.inst || tr.inst_id || tr.coin || '')
                       .replace(/-USDT-SWAP$/i, '').replace(/-USDT$/i, '').replace(/-SWAP$/i, '')
                     const reason = (tr.reason || tr.state || 'closed').toLowerCase()
+                    const reasonLabel = (() => {
+                      if (reason.startsWith('ind_exit')) return 'СИГНАЛ'
+                      if (reason.includes('stop') || reason === 'sl') return 'SL'
+                      if (reason.includes('trail')) return 'TRAIL'
+                      if (reason.includes('take') || reason === 'tp' || reason === 'tp1' || reason === 'tp2') return 'TP'
+                      if (reason === 'partial' || reason === 'partial_tp') return 'TP1'
+                      if (reason === 'manual' || reason === 'manual_close') return 'ВРУЧНУЮ'
+                      if (reason === 'liq' || reason.includes('liquid')) return 'ЛИКВИДАЦИЯ'
+                      if (reason === 'disaster_stop') return 'DISASTER'
+                      if (reason.includes('guard')) return 'GUARD'
+                      if (reason === 'closed' || reason === 'close' || reason === '') return 'ЗАКРЫТА'
+                      return reason.toUpperCase()
+                    })()
                     const mode = String(tr.account_mode || 'demo').toLowerCase() === 'live' ? 'live' : 'demo'
                     return (
                       <tr key={`${mode}_${tr.ord_id || i}_${tr.time || i}`} className={i >= 3 ? 'row-hide-mobile' : undefined}>
@@ -1699,9 +1713,13 @@ export default function Dashboard({ health, connected, isGuest }) {
                           )}
                         </td>
                         <td>
-                          <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
-                            {isLong ? 'LONG' : 'SHORT'}
-                          </span>
+                          {sideKnown ? (
+                            <span className={`badge ${isLong ? 'badge-long' : 'badge-short'}`}>
+                              {isLong ? 'LONG' : 'SHORT'}
+                            </span>
+                          ) : (
+                            <span className="text-2xs text-[var(--txt-muted)]">—</span>
+                          )}
                         </td>
                         <td className="text-right mono text-2xs col-hide-mobile">
                           {(() => {
@@ -1728,7 +1746,7 @@ export default function Dashboard({ health, connected, isGuest }) {
                         </td>
                         <td className="col-hide-mobile">
                           <span className={`text-2xs font-bold px-1.5 py-0.5 rounded ${pnlVal >= 0 ? 'bg-[var(--profit)]/10 text-[var(--profit)] border border-[var(--profit)]/30' : 'bg-[var(--loss)]/10 text-[var(--loss)] border border-[var(--loss)]/30'}`}>
-                            {reason === 'open' ? 'ОТКРЫТА' : reason}
+                            {reason === 'open' ? 'ОТКРЫТА' : reasonLabel}
                           </span>
                         </td>
                       </tr>

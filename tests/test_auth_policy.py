@@ -93,6 +93,10 @@ TIGHTENED_IN_3B = {
 
 def _legacy_allows(path: str, role: str | None) -> bool:
     """Old effective behaviour (middleware + require_admin dependency)."""
+    # Deliberate loosening: public market data powers the first paint of the
+    # dashboard, so it must answer without a token (see commit 0cfede0a).
+    if path in ('/api/market/ticker', '/api/market/tickers'):
+        return True
     if path in LEGACY_PUBLIC:
         return True
     if role is None:

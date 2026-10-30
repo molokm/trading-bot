@@ -352,23 +352,10 @@ class TelegramNotifier:
         if not self.chat_id and not self.channel_id:
             print("[TG] send_trade DEMO skipped: no chat_id and no channel_id", flush=True)
             return 0
-        # Channel first (public signals), then owner chat
-        if self.channel_id:
-            try:
-                # Reply only when no separate owner chat (same destination)
-                ch_reply = reply_to_message_id if (
-                    not self.chat_id or str(self.channel_id) == str(self.chat_id)
-                ) else None
-                ch_mid = await self._send_to(
-                    self.channel_id, text, parse_mode,
-                    reply_to_message_id=ch_reply,
-                )
-                print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)
-                if ch_mid:
-                    mid = ch_mid
-            except Exception as e:
-                print(f"[TG] send_trade DEMO channel error: {e}", flush=True)
-        if self.chat_id and str(self.chat_id) != str(self.channel_id or ""):
+        # Owner chat first (fast, reliable — this is the DM the user reads),
+        # then the public channel. Channel problems must never delay or block
+        # the private notification.
+        if self.chat_id:
             try:
                 own_mid = await self._send_to(
                     self.chat_id, text, parse_mode,
@@ -378,10 +365,22 @@ class TelegramNotifier:
                     print(f"[TG] send_trade DEMO owner returned 0 chat_id={self.chat_id}", flush=True)
                 else:
                     print(f"[TG] send_trade DEMO owner mid={own_mid} chat_id={self.chat_id}", flush=True)
-                    if not mid:
-                        mid = own_mid
+                    mid = own_mid
             except Exception as e:
                 print(f"[TG] send_trade DEMO owner error: {e}", flush=True)
+        if self.channel_id and str(self.channel_id) != str(self.chat_id):
+            try:
+                # Reply only when no separate owner chat (same destination)
+                ch_reply = reply_to_message_id if not self.chat_id else None
+                ch_mid = await self._send_to(
+                    self.channel_id, text, parse_mode,
+                    reply_to_message_id=ch_reply,
+                )
+                print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)
+                if ch_mid and not mid:
+                    mid = ch_mid
+            except Exception as e:
+                print(f"[TG] send_trade DEMO channel error: {e}", flush=True)
         return mid
 
     # ─── Mini App helpers ───

@@ -2762,7 +2762,7 @@ async def me_dashboard(request: Request):
                 pnl_r = 0.0
             return f"fb:{bucket}|{_norm_coin(t.get('inst'))}|{pnl_r}|{t.get('account_mode') or 'demo'}"
 
-        seen_keys = set()
+        seen_map: dict = {}
         def _norm_side(row: dict) -> str:
             """Position direction long/short — never leave raw buy/sell on closes."""
             ps = str(row.get('pos_side') or row.get('posSide') or row.get('pos_side') or '').lower()
@@ -2781,6 +2781,121 @@ async def me_dashboard(request: Request):
                     return 'long' if s == 'sell' else ('short' if s == 'buy' else s)
                 return 'short'
             return s
+
+        # ── Trade metadata index (entry px / direction / close reason) ──
+        # exchange_close_trades stores only the exit price and net PnL, so the
+        # «Сделки» panel used to show "—" in the Entry column and every close
+        # defaulted to SHORT. `trades` pairs the open row (px = entry price)
+        # with the close row through signal_id, and the in-memory close log
+        # adds the human reason (stop / take / ind_exit …).
+        _meta_oid: dict = {}
+        _meta_sig: dict = {}
+        _open_sig: dict = {}
+
+        def _trade_meta(mode: str, oid: str, inst: str, sig: int = 0) -> dict:
+            out: dict = {}
+            m = _meta_oid.get(f'{mode}|{oid}') if oid else None
+            if not m and sig and inst:
+                m = _meta_sig.get(f'{mode}|{inst}|{sig}')
+            if m:
+                out.update({k: v for k, v in m.items() if v not in (None, '')})
+                if not sig:
+                    try:
+                        sig = int(m.get('signal_id') or 0)
+                    except (TypeError, ValueError):
+                        sig = 0
+            if inst and sig:
+                om = _open_sig.get(f'{mode}|{inst}|{sig}')
+                if om:
+                    if out.get('entry_px') is None and om.get('entry_px'):
+                        out['entry_px'] = om['entry_px']
+                    if out.get('side') not in ('long', 'short') and om.get('side'):
+                        out['side'] = om['side']
+            return out
+
+        try:
+            _hist = []
+            try:
+                _hist = await db.get_trades_multi_bot(
+                    ['ai_strategy', 'ai_discretionary',
+                     'ai_strategy_live', 'ai_discretionary_live'],
+                    limit=800,
+                ) or []
+            except Exception as _he:
+                print(f'[me/dashboard] meta trades: {_he}', flush=True)
+            for _r in _hist:
+                _m = str(_r.get('account_mode') or 'demo').lower()
+                if _m not in ('demo', 'live'):
+                    _m = 'demo'
+                _inst = str(_r.get('inst_id') or '')
+                try:
+                    _sig = int(_r.get('signal_id') or 0)
+                except (TypeError, ValueError):
+                    _sig = 0
+                _oid = str(_r.get('ord_id') or '').strip()
+                _sraw = str(_r.get('side') or '').lower()
+                _st = str(_r.get('state') or '').strip().lower()
+                try:
+                    _pxv = float(_r.get('px') or 0)
+                except (TypeError, ValueError):
+                    _pxv = 0.0
+                if _st in ('', 'filled', 'new', 'pending'):
+                    # Entry fill: px is the average entry price.
+                    if _inst and _sig and _pxv > 0:
+                        _open_sig[f'{_m}|{_inst}|{_sig}'] = {
+                            'entry_px': _pxv,
+                            'side': ('long' if _sraw == 'buy'
+                                     else ('short' if _sraw == 'sell' else '')),
+                        }
+                    continue
+                # Close fill: sell closes a long, buy closes a short.
+                _dir = ('long' if _sraw == 'sell'
+                        else ('short' if _sraw == 'buy' else ''))
+                _meta = {'side': _dir, 'signal_id': _sig, 'inst': _inst,
+                         'reason': ''}
+                if _oid:
+                    _meta_oid[f'{_m}|{_oid}'] = _meta
+                if _inst and _sig:
+                    _meta_sig[f'{_m}|{_inst}|{_sig}'] = _meta
+            # In-memory log is the richest source: entry price + close reason.
+            try:
+                _log_rows = (list(getattr(ai_bot, '_trade_log', None) or [])[-300:]
+                             if ai_bot else [])
+            except Exception:
+                _log_rows = []
+            for _t in _log_rows:
+                _m = str(_t.get('account_mode') or 'demo').lower()
+                if _m not in ('demo', 'live'):
+                    _m = 'demo'
+                _rsn = str(_t.get('reason') or '').strip().lower()
+                if _rsn in ('open', 'add', 'opening', 'tp1', 'partial_tp'):
+                    continue
+                _inst = str(_t.get('inst_id') or _t.get('symbol') or '')
+                if not _inst:
+                    _coin = _norm_coin(_t.get('coin'))
+                    _inst = f'{_coin}-USDT-SWAP' if _coin else ''
+                try:
+                    _sig = int(_t.get('signal_id') or 0)
+                except (TypeError, ValueError):
+                    _sig = 0
+                _oid = str(_t.get('ord_id') or '').strip()
+                _ps = str(_t.get('pos_side') or '').strip().lower()
+                if _ps not in ('long', 'short'):
+                    _s = str(_t.get('side') or '').lower()
+                    _ps = ('long' if _s == 'sell'
+                           else ('short' if _s == 'buy' else ''))
+                try:
+                    _epx = float(_t.get('entry_price') or _t.get('entry') or 0)
+                except (TypeError, ValueError):
+                    _epx = 0.0
+                _meta = {'side': _ps, 'signal_id': _sig, 'inst': _inst,
+                         'reason': _rsn, 'entry_px': _epx or None}
+                if _oid:
+                    _meta_oid[f'{_m}|{_oid}'] = _meta
+                if _inst and _sig:
+                    _meta_sig[f'{_m}|{_inst}|{_sig}'] = _meta
+        except Exception as _me:
+            print(f'[me/dashboard] meta index: {_me}', flush=True)
 
         def _push_trade(row: dict):
             try:
@@ -2827,6 +2942,30 @@ async def me_dashboard(request: Request):
                 'entry_price': entry_px,
                 'exit_price': exit_px,
             }
+            # Fill entry / direction / close reason from the bot's own trade
+            # rows — exchange_close_trades carries none of them.
+            try:
+                try:
+                    _sig = int(row.get('signal_id') or 0)
+                except (TypeError, ValueError):
+                    _sig = 0
+                _meta = _trade_meta(
+                    mode, entry.get('ord_id') or '',
+                    str(row.get('inst_id') or entry.get('inst_id') or ''), _sig,
+                )
+                if _meta:
+                    if entry.get('entry_px') is None and _meta.get('entry_px'):
+                        entry['entry_px'] = round(float(_meta['entry_px']), 8)
+                        entry['entry_price'] = entry['entry_px']
+                    if (entry.get('side') not in ('long', 'short')
+                            and _meta.get('side') in ('long', 'short')):
+                        entry['side'] = _meta['side']
+                    _mr = str(_meta.get('reason') or '').strip().lower()
+                    if _mr and str(entry.get('reason') or '').lower() in (
+                            'closed', 'close', '', 'closing'):
+                        entry['reason'] = _mr
+            except Exception:
+                pass
             # Unified PnL filter: only AI Discretionary closes in set T
             try:
                 from app.services.pnl_engine import pnl_eligible
@@ -2848,9 +2987,26 @@ async def me_dashboard(request: Request):
             except Exception:
                 pass
             k = _dedupe_key(entry)
-            if k in seen_keys:
+            _prev = seen_map.get(k)
+            if _prev is not None:
+                # Same close from another source — merge the richer metadata
+                # instead of dropping the duplicate outright.
+                for _f in ('entry_px', 'entry_price'):
+                    if _prev.get(_f) is None and entry.get(_f) is not None:
+                        _prev[_f] = entry[_f]
+                if _prev.get('exit_px') is None and entry.get('exit_px') is not None:
+                    _prev['exit_px'] = entry['exit_px']
+                    _prev['exit_price'] = entry['exit_px']
+                if (str(_prev.get('side') or '') not in ('long', 'short')
+                        and entry.get('side') in ('long', 'short')):
+                    _prev['side'] = entry['side']
+                _pr = str(_prev.get('reason') or '').lower()
+                _er = str(entry.get('reason') or '').lower()
+                if _pr in ('closed', 'close', '', 'closing') and _er not in (
+                        'closed', 'close', '', 'closing'):
+                    _prev['reason'] = entry['reason']
                 return
-            seen_keys.add(k)
+            seen_map[k] = entry
             trades.append(entry)
 
         # ── DEMO: prefer exchange_close_trades (authoritative closes) ──
@@ -3015,11 +3171,10 @@ async def me_dashboard(request: Request):
                             by_ord[oid]['side'] = ps
                     # replace any partial live fills already appended with grouped ones
                     trades = [x for x in trades if x.get('account_mode') != 'live']
-                    seen_keys = {k for k in seen_keys if not k.endswith('|live') and not k.startswith('ord:') or '|demo' in k}
-                    # rebuild seen from remaining demo trades
-                    seen_keys = set()
+                    # rebuild seen from remaining (demo) trades
+                    seen_map = {}
                     for x in trades:
-                        seen_keys.add(_dedupe_key(x))
+                        seen_map[_dedupe_key(x)] = x
                     for oid, g in by_ord.items():
                         _push_trade({
                             'time': g['ts'],
@@ -3127,6 +3282,8 @@ async def me_dashboard(request: Request):
             _price_by_ord[(_oid, str(_t.get('account_mode') or 'demo'))] = {
                 'entry_px': _t.get('entry_px'),
                 'exit_px': _t.get('exit_px'),
+                'side': _t.get('side'),
+                'reason': _t.get('reason'),
             }
 
         def _eng_coin(v) -> str:
@@ -3149,16 +3306,30 @@ async def me_dashboard(request: Request):
                 _coin = _eng_coin(_r.get('inst'))
                 _entry_px = _r.get('entry_px') if _r.get('entry_px') is not None else _px.get('entry_px')
                 _exit_px = _r.get('exit_px') if _r.get('exit_px') is not None else _px.get('exit_px')
+                # Engine `side` is the raw order side of the close (buy/sell) or
+                # empty for exchange rows; the metadata map carries the real
+                # position direction. Never let a close-side 'buy' become LONG.
+                _side = str(_px.get('side') or '').lower()
+                if _side not in ('long', 'short'):
+                    _side = str(_r.get('side') or '').lower()
+                    if _side == 'sell':
+                        _side = 'long'
+                    elif _side == 'buy':
+                        _side = 'short'
+                    elif _side not in ('long', 'short'):
+                        _side = ''
+                _reason = str(_px.get('reason') or '').strip() or str(
+                    _r.get('reason') or 'closed')
                 _eng_list.append({
                     'time': _norm_ts(_r.get('time')),
                     'inst': _coin,
                     'symbol': _coin,
                     'coin': _coin,
                     'inst_id': (_coin + '-USDT-SWAP') if _coin else '',
-                    'side': _r.get('side') or '',
+                    'side': _side,
                     'pnl': round(float(_r.get('pnl') or 0), 4),
                     'account_mode': _mode,
-                    'reason': _r.get('reason') or 'closed',
+                    'reason': _reason,
                     'ord_id': _oid,
                     'bot': _r.get('bot') or 'AI Discretionary 1H',
                     'entry_px': _entry_px,
