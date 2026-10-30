@@ -2791,12 +2791,39 @@ async def me_dashboard(request: Request):
         _meta_oid: dict = {}
         _meta_sig: dict = {}
         _open_sig: dict = {}
+        _close_by_inst: dict = {}   # fallback when the close row has no ord id
+        _reason_by_coin: dict = {}  # persisted last-close reason (survives restarts)
 
-        def _trade_meta(mode: str, oid: str, inst: str, sig: int = 0) -> dict:
+        def _trade_meta(mode: str, oid: str, inst: str, sig: int = 0,
+                        pnl=None, ts=None) -> dict:
             out: dict = {}
             m = _meta_oid.get(f'{mode}|{oid}') if oid else None
             if not m and sig and inst:
                 m = _meta_sig.get(f'{mode}|{inst}|{sig}')
+            if not m and inst and pnl is not None:
+                # No id link (exchange-only closings, mirrored LIVE rows): match
+                # the bot's close fill by instrument + PnL + time proximity.
+                try:
+                    _p = float(pnl)
+                    _t = int(ts or 0)
+                except (TypeError, ValueError):
+                    _p, _t = 0.0, 0
+                best = None
+                worst = None
+                for _c in _close_by_inst.get(f'{mode}|{inst}', ()):
+                    _dp = abs(float(_c.get('pnl') or 0) - _p)
+                    _dt = abs(int(_c.get('ts') or 0) - _t) if _t else 0
+                    score = _dp + (_dt / 60000.0) * 0.5
+                    if worst is None or score < worst:
+                        worst = score
+                        best = _c
+                if best is not None:
+                    _dp = abs(float(best.get('pnl') or 0) - _p)
+                    _dt = abs(int(best.get('ts') or 0) - _t) if _t else 0
+                    # Tight enough to be the same trade, loose enough for fee
+                    # rounding; 15 min covers restaurant-grade clock drift.
+                    if _dp <= max(0.5, abs(_p) * 0.15) and (not _t or _dt <= 900_000):
+                        m = best
             if m:
                 out.update({k: v for k, v in m.items() if v not in (None, '')})
                 if not sig:
@@ -2853,10 +2880,17 @@ async def me_dashboard(request: Request):
                         else ('short' if _sraw == 'buy' else ''))
                 _meta = {'side': _dir, 'signal_id': _sig, 'inst': _inst,
                          'reason': ''}
+                try:
+                    _meta['pnl'] = float(_r.get('pnl') or 0)
+                except (TypeError, ValueError):
+                    _meta['pnl'] = 0.0
+                _meta['ts'] = _norm_ts(_r.get('timestamp'))
                 if _oid:
                     _meta_oid[f'{_m}|{_oid}'] = _meta
                 if _inst and _sig:
                     _meta_sig[f'{_m}|{_inst}|{_sig}'] = _meta
+                if _inst:
+                    _close_by_inst.setdefault(f'{_m}|{_inst}', []).append(_meta)
             # In-memory log is the richest source: entry price + close reason.
             try:
                 _log_rows = (list(getattr(ai_bot, '_trade_log', None) or [])[-300:]
@@ -2894,6 +2928,25 @@ async def me_dashboard(request: Request):
                     _meta_oid[f'{_m}|{_oid}'] = _meta
                 if _inst and _sig:
                     _meta_sig[f'{_m}|{_inst}|{_sig}'] = _meta
+            # Close reasons survive restarts only in `last_closes` (the bot
+            # keeps the last close per coin for the anti-churn cooldown).
+            try:
+                _lc_blob = await db.get_setting(f'last_closes:{AI_BOT_ID}')
+                _lc = json.loads(_lc_blob) if _lc_blob else {}
+                if isinstance(_lc, dict):
+                    for _c, _v in _lc.items():
+                        if not isinstance(_v, dict):
+                            continue
+                        _rsn = str(_v.get('reason') or '').strip().lower()
+                        if not _rsn:
+                            continue
+                        _reason_by_coin[_norm_coin(_c)] = {
+                            'reason': _rsn,
+                            'ts': int(float(_v.get('ts') or 0) * 1000),
+                            'pnl': float(_v.get('pnl') or 0),
+                        }
+            except Exception as _lce:
+                print(f'[me/dashboard] meta last_closes: {_lce}', flush=True)
         except Exception as _me:
             print(f'[me/dashboard] meta index: {_me}', flush=True)
 
@@ -2952,6 +3005,7 @@ async def me_dashboard(request: Request):
                 _meta = _trade_meta(
                     mode, entry.get('ord_id') or '',
                     str(row.get('inst_id') or entry.get('inst_id') or ''), _sig,
+                    pnl=entry.get('pnl'), ts=entry.get('time'),
                 )
                 if _meta:
                     if entry.get('entry_px') is None and _meta.get('entry_px'):
@@ -2964,6 +3018,14 @@ async def me_dashboard(request: Request):
                     if _mr and str(entry.get('reason') or '').lower() in (
                             'closed', 'close', '', 'closing'):
                         entry['reason'] = _mr
+                # Last resort for the reason: the persisted per-coin last close.
+                if str(entry.get('reason') or '').lower() in (
+                        'closed', 'close', '', 'closing'):
+                    _lc = _reason_by_coin.get(coin)
+                    if _lc and entry.get('time'):
+                        _dt = abs(int(entry['time']) - int(_lc.get('ts') or 0))
+                        if _dt <= 1_800_000:
+                            entry['reason'] = _lc['reason']
             except Exception:
                 pass
             # Unified PnL filter: only AI Discretionary closes in set T
@@ -3304,12 +3366,25 @@ async def me_dashboard(request: Request):
                 _oid = str(_r.get('ord_id') or '').strip()
                 _px = _price_by_ord.get((_oid, _mode)) or {}
                 _coin = _eng_coin(_r.get('inst'))
+                # The engine list is authoritative and may include rows that
+                # never went through _push_trade (guest view, LIVE-only bills),
+                # so resolve their metadata here as well.
+                try:
+                    _esig = int(_r.get('signal_id') or 0)
+                except (TypeError, ValueError):
+                    _esig = 0
+                _emeta = _trade_meta(
+                    _mode, _oid, f'{_coin}-USDT-SWAP' if _coin else '', _esig,
+                    pnl=_r.get('pnl'), ts=_r.get('time'),
+                )
                 _entry_px = _r.get('entry_px') if _r.get('entry_px') is not None else _px.get('entry_px')
+                if _entry_px is None:
+                    _entry_px = _emeta.get('entry_px')
                 _exit_px = _r.get('exit_px') if _r.get('exit_px') is not None else _px.get('exit_px')
                 # Engine `side` is the raw order side of the close (buy/sell) or
                 # empty for exchange rows; the metadata map carries the real
                 # position direction. Never let a close-side 'buy' become LONG.
-                _side = str(_px.get('side') or '').lower()
+                _side = str(_px.get('side') or _emeta.get('side') or '').lower()
                 if _side not in ('long', 'short'):
                     _side = str(_r.get('side') or '').lower()
                     if _side == 'sell':
@@ -3318,8 +3393,14 @@ async def me_dashboard(request: Request):
                         _side = 'short'
                     elif _side not in ('long', 'short'):
                         _side = ''
-                _reason = str(_px.get('reason') or '').strip() or str(
-                    _r.get('reason') or 'closed')
+                _reason = (str(_px.get('reason') or '').strip()
+                           or str(_emeta.get('reason') or '').strip()
+                           or str(_r.get('reason') or 'closed'))
+                if _reason.lower() in ('closed', 'close', '', 'closing'):
+                    _lc = _reason_by_coin.get(_coin)
+                    _ets = _norm_ts(_r.get('time'))
+                    if _lc and _ets and abs(_ets - int(_lc.get('ts') or 0)) <= 1_800_000:
+                        _reason = _lc['reason']
                 _eng_list.append({
                     'time': _norm_ts(_r.get('time')),
                     'inst': _coin,

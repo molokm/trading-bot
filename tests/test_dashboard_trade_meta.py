@@ -15,6 +15,11 @@ from app.services import pnl_engine as pe
 NOW_MS = pe.epoch_ms() + 3 * 86400_000
 
 
+def _iso(ms):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ms / 1000.0, timezone.utc).isoformat()
+
+
 def _exchange_row():
     return {
         "ord_id": "X1",
@@ -37,13 +42,13 @@ def _trade_rows():
             "bot_id": "ai_strategy", "signal_id": 7, "ord_id": "",
             "inst_id": "BTC-USDT-SWAP", "side": "sell", "sz": "1",
             "px": "100.0", "state": "filled", "account_mode": "demo",
-            "timestamp": "2026-10-30T01:00:00+00:00",
+            "timestamp": _iso(NOW_MS - 3_600_000),
         },
         {   # close fill: buy closes a short
             "bot_id": "ai_strategy", "signal_id": 7, "ord_id": "X1",
             "inst_id": "BTC-USDT-SWAP", "side": "buy", "sz": "1",
             "px": "90.0", "state": "closed", "account_mode": "demo",
-            "timestamp": "2026-10-30T02:00:00+00:00",
+            "timestamp": _iso(NOW_MS),
         },
     ]
 
@@ -132,3 +137,74 @@ def test_entry_survives_restart_without_in_memory_log(client):
     row = trades[0]
     assert row["entry_px"] == 100.0
     assert row["side"] == "short"
+
+
+def test_live_close_without_ids_matches_by_pnl_and_time(monkeypatch):
+    """LIVE mirror rows often lose ord_id/signal_id — match by PnL + time."""
+    import app.main as mm
+
+    class _DB2:
+        async def get_exchange_close_trades_detail(self, **kw):
+            return []
+
+        async def get_trades_multi_bot(self, *a, **k):
+            return [
+                {   # open fill, no live ord id
+                    "bot_id": "ai_strategy_live", "signal_id": 11,
+                    "ord_id": "", "inst_id": "ETH-USDT-SWAP", "side": "sell",
+                    "sz": "1", "px": "2000.0", "state": "filled",
+                    "account_mode": "live",
+                    "timestamp": _iso(NOW_MS - 3_600_000),
+                },
+                {   # close fill: buy closes the short, bot PnL ~ +20
+                    "bot_id": "ai_strategy_live", "signal_id": 11,
+                    "ord_id": "", "inst_id": "ETH-USDT-SWAP", "side": "buy",
+                    "sz": "1", "px": "1980.0", "pnl": 20.0, "state": "closed",
+                    "account_mode": "live",
+                    "timestamp": _iso(NOW_MS),
+                },
+            ]
+
+        async def get_trades(self, **kw):
+            return []
+
+        async def get_setting(self, key):
+            return None
+
+    class _Bot2:
+        _trade_log = []
+
+        def get_status(self):
+            return {"running": True, "open_positions": [], "capital": 10000}
+
+    pnl_ms = NOW_MS
+
+    async def _ctx(request):
+        return "guest", None, None
+
+    async def _pnl(mode="demo"):
+        base = {"total": 20.0, "1d": 20.0, "7d": 20.0, "30d": 20.0,
+                "week": 20.0, "unrealized": 0.0, "fees": 0.0,
+                "trades_counted": 1, "per_bot": {}, "source": "test"}
+        if mode == "live":
+            base["trades"] = [{
+                "time": pnl_ms, "inst": "ETH-USDT-SWAP", "side": "",
+                "pnl": 19.5, "account_mode": "live",
+                "bot": "AI Discretionary 1H", "ord_id": "BILL1",
+                "reason": "closed", "entry_px": None, "exit_px": 1980.0,
+            }]
+        return base
+
+    monkeypatch.setattr(mm, "_me_ctx", _ctx)
+    monkeypatch.setattr(mm, "_get_pnl_cached", _pnl)
+    monkeypatch.setattr(mm, "db", _DB2())
+    monkeypatch.setattr(mm, "ai_bot", _Bot2())
+    monkeypatch.setattr(mm, "client_manager", None)
+    mm._ME_DASH_CACHE.clear()
+
+    resp = TestClient(mm.app, raise_server_exceptions=False).get("/api/me/dashboard")
+    trades = resp.json().get("trades") or []
+    live = [t for t in trades if t.get("account_mode") == "live"]
+    assert len(live) == 1, trades
+    assert live[0]["side"] == "short"
+    assert live[0]["entry_px"] == 2000.0
