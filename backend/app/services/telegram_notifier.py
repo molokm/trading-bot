@@ -344,43 +344,41 @@ class TelegramNotifier:
                 print(f"[TG] send_trade LIVE ok chat_id={target} (private, no channel)", flush=True)
             return mid
 
-        # DEMO (and default): shared free signals — try BOTH targets independently
+        # DEMO: both destinations in parallel — one slow target must not block the other
         if not self.token:
             print("[TG] send_trade DEMO skipped: no token", flush=True)
             return 0
-        mid = 0
         if not self.chat_id and not self.channel_id:
             print("[TG] send_trade DEMO skipped: no chat_id and no channel_id", flush=True)
             return 0
-        # Owner chat first (fast, reliable — this is the DM the user reads),
-        # then the public channel. Channel problems must never delay or block
-        # the private notification.
+
+        async def _one(cid: str, reply):
+            try:
+                return await self._send_to(cid, text, parse_mode, reply_to_message_id=reply)
+            except Exception as e:
+                print(f"[TG] send_trade DEMO target={cid} error: {e}", flush=True)
+                return 0
+
+        jobs = []
         if self.chat_id:
-            try:
-                own_mid = await self._send_to(
-                    self.chat_id, text, parse_mode,
-                    reply_to_message_id=reply_to_message_id,
-                )
-                if not own_mid:
-                    print(f"[TG] send_trade DEMO owner returned 0 chat_id={self.chat_id}", flush=True)
-                else:
-                    print(f"[TG] send_trade DEMO owner mid={own_mid} chat_id={self.chat_id}", flush=True)
-                    mid = own_mid
-            except Exception as e:
-                print(f"[TG] send_trade DEMO owner error: {e}", flush=True)
-        if self.channel_id and str(self.channel_id) != str(self.chat_id):
-            try:
-                # Reply only when no separate owner chat (same destination)
-                ch_reply = reply_to_message_id if not self.chat_id else None
-                ch_mid = await self._send_to(
-                    self.channel_id, text, parse_mode,
-                    reply_to_message_id=ch_reply,
-                )
-                print(f"[TG] send_trade DEMO channel={self.channel_id} mid={ch_mid}", flush=True)
-                if ch_mid and not mid:
-                    mid = ch_mid
-            except Exception as e:
-                print(f"[TG] send_trade DEMO channel error: {e}", flush=True)
+            jobs.append(("owner", self.chat_id, reply_to_message_id))
+        if self.channel_id and str(self.channel_id) != str(self.chat_id or ""):
+            # Never reply-to owner mid inside the channel (wrong chat → fail)
+            jobs.append(("channel", self.channel_id, None))
+
+        results = await asyncio.gather(
+            *[_one(cid, rep) for _, cid, rep in jobs],
+            return_exceptions=True,
+        )
+        mid = 0
+        for (label, cid, _), res in zip(jobs, results):
+            if isinstance(res, Exception):
+                print(f"[TG] send_trade DEMO {label}={cid} exc: {res}", flush=True)
+                continue
+            m = int(res or 0)
+            print(f"[TG] send_trade DEMO {label}={cid} mid={m}", flush=True)
+            if m and not mid:
+                mid = m
         return mid
 
     # ─── Mini App helpers ───

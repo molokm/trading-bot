@@ -3632,31 +3632,57 @@ class AIStrategy:
                 )
             except Exception as e:
                 print(f"[AI] db open: {e}", flush=True)
-        if self.notifier and getattr(self.notifier, 'configured', True):
+        if self.notifier and getattr(self.notifier, "configured", True):
+            # Fire-and-forget: awaited open was cancelled with the trading tick
+            # the same way closes used to vanish.
             try:
-                # Always DEMO for primary engine opens → owner chat + public channel.
-                # If mode flips to live, send_trade skips the free channel.
-                _tg_mid = await self.notifier.send_trade(
-                    self.notifier.open_msg(
-                        coin=coin, side=side, price=round(fill_px, 4),
-                        stop=round(stop, 4), size=sz, leverage=lev,
-                        bot_name=self.BOT_NAME, signal_id=pos.signal_id,
-                        account_mode="demo",
-                        account_key="showcase",
-                    ),
+                _open_txt = self.notifier.open_msg(
+                    coin=coin, side=side, price=round(fill_px, 4),
+                    stop=round(stop, 4), size=sz, leverage=lev,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
                     account_mode="demo",
+                    account_key="showcase",
                 )
-                if _tg_mid:
-                    pos.tg_message_id = int(_tg_mid)
-                    await self.notifier.remember_open_db(
-                        self.db, pos.signal_id, _tg_mid,
-                        bot_id=self.BOT_ID, coin=coin,
-                    )
-                    print(f"[AI] TG open msg_id={_tg_mid} signal={pos.signal_id}", flush=True)
-                else:
-                    print(f"[AI] TG open FAILED mid=0 {coin} — will not block trade", flush=True)
+                _sid = int(getattr(pos, "signal_id", 0) or 0)
+                _coin = coin
+
+                async def _tg_open_job(txt=_open_txt, p=pos, sid=_sid, c=_coin):
+                    try:
+                        mid = await self.notifier.send_trade(txt, account_mode="demo")
+                        if not mid:
+                            await asyncio.sleep(2.0)
+                            mid = await self.notifier.send_trade(txt, account_mode="demo")
+                        if mid:
+                            try:
+                                p.tg_message_id = int(mid)
+                            except Exception:
+                                pass
+                            try:
+                                await self.notifier.remember_open_db(
+                                    self.db, sid, mid, bot_id=self.BOT_ID, coin=c,
+                                )
+                            except Exception as e:
+                                print(f"[AI] TG open remember: {e}", flush=True)
+                            print(f"[AI] TG open msg_id={mid} signal={sid} {c}", flush=True)
+                        else:
+                            print(f"[AI] TG open FAILED mid=0 {c}", flush=True)
+                            # Queue same text as a "pending open" via close-queue shape
+                            try:
+                                await self._queue_tg_close(txt, "demo", c)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        print(f"[AI] TG open job: {e}", flush=True)
+                        try:
+                            await self._queue_tg_close(txt, "demo", c)
+                        except Exception:
+                            pass
+
+                task = asyncio.create_task(_tg_open_job(), name=f"tg-open-{coin}")
+                self._tg_tasks.add(task)
+                task.add_done_callback(self._tg_task_done)
             except Exception as e:
-                print(f"[AI] TG open: {e}", flush=True)
+                print(f"[AI] TG open schedule: {e}", flush=True)
         self._record_exec(
             "open_ok", coin=coin, side=side, entry=fill_px,
             stop=stop, take=take, size=sz, leverage=lev, reason=reason,
@@ -3913,10 +3939,12 @@ class AIStrategy:
             except (TypeError, ValueError):
                 caller_pnl = 0.0
             use_pnl = caller_pnl
+            pnl_m = 0.0  # must exist even if metrics fail (was NameError → silent drop)
             try:
                 entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
                     pos, coin, fill_px, fee=0, fills=None,
                 )
+                pnl_m = float(pnl_m or 0)
                 if abs(pnl_m) > 1e-9:
                     if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
                         use_pnl = pnl_m
@@ -3930,9 +3958,11 @@ class AIStrategy:
                     exit_show = exit_m
             except Exception as e:
                 print(f"[AI] TG close metrics fallback {coin}: {e}", flush=True)
+            side_s = str(getattr(pos, "side", "long") or "long")
+            size_f = float(getattr(pos, "size", 0) or 0)
             _txt = self.notifier.close_msg(
                 coin=coin,
-                side=getattr(pos, "side", "long"),
+                side=side_s,
                 entry=_fmt_px(entry_show, coin),
                 exit_px=_fmt_px(exit_show, coin),
                 pnl=round(float(use_pnl), 2),
@@ -3941,7 +3971,7 @@ class AIStrategy:
                 signal_id=signal_id,
                 account_mode=account_mode,
                 account_key=account_mode,
-                size=float(getattr(pos, "size", 0) or 0),
+                size=size_f,
             )
             print(
                 f"[AI] TG close metrics {coin}: entry={entry_show} exit={exit_show} "
