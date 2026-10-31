@@ -168,6 +168,9 @@ async def test_recent_pass_skips_orders_at_the_window_edge(monkeypatch):
     monkeypatch.setattr(m, "_exchange_sync_ts", {})
     monkeypatch.setattr(m, "_exchange_close_seen", {})
     monkeypatch.setattr(m, "_exchange_sync_inflight", {})
+    # The fetch stopped on a full 5th page → older bills exist but were not read.
+    monkeypatch.setattr(m, "_bills_diag",
+                        {"demo": {"endpoints": {"bills": {"truncated": True}}}})
 
     async def _bills(limit_per_page=100, mode=None, recent_only=False):
         edge = _bill("ord-edge", pnl="0.10")
@@ -180,6 +183,26 @@ async def test_recent_pass_skips_orders_at_the_window_edge(monkeypatch):
 
     assert await m.sync_exchange_close_trades(mode="demo", force=True, recent_only=True) == 1
     assert [r["ord_id"] for r in db.rows[0]] == ["ord-inner"]
+
+
+@pytest.mark.asyncio
+async def test_complete_recent_pass_keeps_every_order(monkeypatch):
+    """If the whole window was read (no truncation) nothing needs dropping."""
+    db = _DB()
+    monkeypatch.setattr(m, "db", db)
+    monkeypatch.setattr(m, "_exchange_sync_ts", {})
+    monkeypatch.setattr(m, "_exchange_close_seen", {})
+    monkeypatch.setattr(m, "_exchange_sync_inflight", {})
+    monkeypatch.setattr(m, "_bills_diag",
+                        {"demo": {"endpoints": {"bills": {"truncated": False}}}})
+
+    async def _bills(limit_per_page=100, mode=None, recent_only=False):
+        return [_bill("ord-only")]
+
+    monkeypatch.setattr(m, "_fetch_all_trade_bills", _bills)
+
+    assert await m.sync_exchange_close_trades(mode="demo", force=True, recent_only=True) == 1
+    assert db.rows[0][0]["ord_id"] == "ord-only"
 
 
 @pytest.mark.asyncio

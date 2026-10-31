@@ -7383,6 +7383,9 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None,
             _ep = _bd['endpoints'].setdefault(endpoint, {'pages': 0, 'rows': 0, 'error': ''})
             _ep['pages'] = pages
             _ep['rows'] = int(_ep.get('rows') or 0) + len(data)
+            # Stopped at max_pages with a full page: older bills exist but were
+            # not fetched, so orders at the window edge may be incomplete.
+            _ep['truncated'] = bool(pages >= max_pages and len(data) >= limit_per_page)
             added = 0
             for b in data:
                 bid = str(b.get('billId', '') or '')
@@ -7451,7 +7454,9 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None,
 _CLORD_BOT_MAP = {'ais': 'AI Scale-In 1H', 'ai': 'AI Discretionary 1H', 'rot': 'Momentum', 'momentum': 'Momentum', 'imp': 'Impulse 1D', 'val': 'MACD+Donchian Validation', 'scl': 'Order Book Scalp', 'scalp': 'Order Book Scalp', 'vwap': 'VWAP Mean Reversion', 'sm': 'Умные деньги'}
 # Per-mode TTL — demo/live bills sync independently (fix P0: #32)
 _exchange_sync_ts: dict[str, float] = {}
-_EXCHANGE_SYNC_TTL = 30
+# 60 s: the periodic loop (45 s) already stamps each mode, so page-triggered
+# syncs almost always hit the TTL and skip the OKX round-trip.
+_EXCHANGE_SYNC_TTL = 60
 # Modes currently being paginated (single-flight) and the newest close_ts (ms)
 # seen per mode: a newer close means a trade landed → the dashboard cache must
 # drop so the card matches the «Сделки» list immediately. Tracking the newest
@@ -7485,11 +7490,13 @@ def _invalidate_dashboard_after_close() -> None:
 
 
 async def sync_exchange_close_trades(mode: str = None, *, force: bool = False,
-                                     recent_only: bool = False) -> int:
+                                     recent_only: bool = True) -> int:
     """Rate-limited, single-flight entry point for the exchange close sync.
 
-    `force` bypasses the per-mode TTL (used by the periodic freshness loop);
-    `recent_only` skips the archive pagination. A second caller for a mode
+    `force` bypasses the per-mode TTL (used by the periodic freshness loop).
+    `recent_only` (default) skips the archive pagination: callers only need the
+    DB table up to date and the loop owns the once-per-30-min history pass, so
+    a page view must not re-page the whole history. A second caller for a mode
     that is already syncing returns 0 instead of fetching the same bills again
     (dashboard + PnL + warm loop used to race and fetch all pages three times).
     """
@@ -7537,12 +7544,18 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
             return 0
     # An order whose fills straddle the oldest fetched page would be upserted
     # with a PARTIAL pnl (this silently moved a stored close by a few dollars).
-    # Orders touching the window edge are already stored correctly — skip them.
+    # Only a truncated fetch has such an edge; a complete one has no cutoff.
     _edge_cutoff = 0
     if recent_only:
-        _ts_all = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
-        if _ts_all and _ts_all[0] > 0:
-            _edge_cutoff = _ts_all[0] + 60_000
+        try:
+            _eps = ((_bills_diag.get(_mode) or {}).get('endpoints') or {})
+            _truncated = any(bool(e.get('truncated')) for e in _eps.values())
+        except Exception:
+            _truncated = False
+        if _truncated:
+            _ts_all = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
+            if _ts_all and _ts_all[0] > 0:
+                _edge_cutoff = _ts_all[0] + 60_000
     close_by_ord: dict = {}
     _bills_with_pnl = 0
     _sub_types_seen = set()
@@ -7701,7 +7714,7 @@ async def pnl_rebuild_exchange():
         _exchange_sync_ts.clear()
     except AttributeError:
         _exchange_sync_ts = {}
-    n = await sync_exchange_close_trades()
+    n = await sync_exchange_close_trades(force=True, recent_only=False)
     epoch = await get_pnl_epoch()
     epoch_ms = 0
     if epoch:
