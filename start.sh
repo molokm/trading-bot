@@ -7,7 +7,12 @@ FRONTEND_DIR="$(cd "$(dirname "$0")" && pwd)/frontend"
 # Start backend
 echo "[Backend] Starting on http://localhost:8000 ..."
 cd "$BACKEND_DIR"
-source venv/bin/activate 2>/dev/null
+# Canonical venv is .venv (has pytest); fall back to the legacy venv/ if present.
+if [ -x "$BACKEND_DIR/.venv/bin/activate" ]; then
+  source "$BACKEND_DIR/.venv/bin/activate"
+elif [ -x "$BACKEND_DIR/venv/bin/activate" ]; then
+  source "$BACKEND_DIR/venv/bin/activate"
+fi
 PYTHONPATH="$BACKEND_DIR" uvicorn app.main:app --host 0.0.0.0 --port 8000 &
 BACKEND_PID=$!
 

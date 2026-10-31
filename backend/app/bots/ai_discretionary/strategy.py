@@ -1,0 +1,9137 @@
+"""AI Discretionary Strategy — 1H majors (BTC ETH SOL XRP) with LLM decisions.
+
+====================================================================
+ARCHITECTURAL CONTRACT: LIVE MIRROR (CRITICAL — DO NOT REMOVE)
+====================================================================
+This strategy runs in DEMO mode only. LIVE trading is NOT autonomous.
+LIVE account is a STRICT MIRROR of DEMO positions — mechanical copy only.
+
+INVARIANTS (enforced at runtime, tested in tests/test_mirror_strict.py):
+1. LIVE OPEN is allowed ONLY if DEMO holds same coin+side (size>0).
+   Guard: _require_demo_twin_open() called from _live_market_order().
+2. LIVE CLOSE is allowed ONLY when DEMO is flat (or paired-close marker).
+   Guard: _require_demo_flat_for_close() called from _live_market_order().
+3. ALL LIVE market orders go through SINGLE CHOKEPOINT:
+   _live_market_order() — no other path to place live orders.
+4. Primary engine (_client()) REFUSES non-demo clients.
+   _open() blocks with "live_client_forbidden" if called with live client.
+5. Mirror enable flag is EXPLICIT opt-in (DB live_mirror_enabled='1'),
+   fail-closed on any error (_mirror_enabled()).
+6. Mirror NEVER opens on its own: opens are event-driven copies of a DEMO open
+   (or _clone_missing_to_live, gated by the "Connect LIVE" watermark). There is
+   no reconcile-based auto-open; a manual LIVE close is not "corrected".
+7. No exchange-level SL/TP on LIVE (they would close LIVE without DEMO).
+   Orphan algos are purged (_purge_live_algos); a LIVE position not opened by
+   this mirror (entry clOrdId != ai*) is never flattened by the bot.
+8. The 2nd concurrent slot (_try_second_entry) opens through _open() only, so
+   it is DEMO-first and reaches LIVE solely via the same mirror chokepoint.
+
+ANY CHANGE TO THESE GUARDS MUST:
+- Update tests/test_mirror_strict.py
+- Pass CI mirror-strict test
+- Be reviewed for mirror safety
+
+Violating these invariants allows LIVE to trade independently → LOSS OF FUNDS.
+====================================================================
+
+Safety envelope (anti-liquidation oriented):
+  - capital baseline $10_000, max leverage 3x
+  - stop distance clamped ~1.6–3.5%; size from risk budget (~1.5%)
+  - max 1 position; AI_EXECUTE=0 → decide+log only (no orders)
+  - risk_guard.assert_can_open on entries
+  - v1.10 defensive: early trail/BE, daily loss limit −2%
+"""
+
+from __future__ import annotations
+
+import logging
+
+log = logging.getLogger("ai_strategy")
+
+import asyncio
+import json
+import math
+import os
+import re
+import threading
+import time
+import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from typing import Optional
+
+from app.services.ai_agent import ALLOWED_SYMBOLS, call_llm, llm_status, mock_decide
+from app.services.analysis_logger import get_logger
+from app.services.pnl_utils import (
+    close_pnl,
+    extract_fill_avg,
+    fee_cost,
+    pnl_from_okx_fills,
+)
+from app.services.position_claim import (
+    claim_open,
+    claim_or_flatten,
+    persist_open_snapshot,
+    release_open,
+    sweep_exchange_orphans,
+)
+from app.services.risk_guard import assert_can_open, _symbol_to_group
+from app.services.risk_regime import regime_multiplier
+from app.services.telegram_notifier import TelegramNotifier
+from app.services import health_guard as hg
+from app.services.trade_memory import build_lessons, settle_trade
+
+AI_BOT_ID = "ai_strategy"
+
+def _exec_evt(kind: str, coin: str = "", side: str = "", reason: str = "", **extra) -> dict:
+    """Small structured log row for open/mirror execution trail."""
+    from datetime import datetime, timezone
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": kind,
+        "coin": coin,
+        "side": side,
+        "reason": reason,
+    }
+    if extra:
+        row.update(extra)
+    return row
+
+
+def _ai_state_path() -> str:
+    """Prefer persistent disk; /tmp is wiped on every Render deploy."""
+    candidates = [
+        os.getenv("DATA_DIR"),
+        os.getenv("RENDER_DISK_PATH"),
+        "/var/data",
+        os.path.join(os.getcwd(), "data"),
+        "/tmp",
+    ]
+    for base in candidates:
+        if not base:
+            continue
+        try:
+            os.makedirs(base, exist_ok=True)
+            # writable check
+            probe = os.path.join(base, ".wprobe")
+            with open(probe, "w") as f:
+                f.write("1")
+            os.remove(probe)
+            return os.path.join(base, "ai_discretionary_state.json")
+        except Exception:
+            continue
+    return "/tmp/ai_discretionary_state.json"
+
+
+def load_ai_state() -> dict:
+    try:
+        with open(_ai_state_path(), "r") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+
+def save_ai_state(payload: dict) -> None:
+    try:
+        path = _ai_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+    except Exception as e:
+        print(f"[AI] state save: {e}", flush=True)
+
+
+def _verify_mirror_guards() -> None:
+    """
+    Runtime check that mirror safety guard functions exist.
+    Runs at AIStrategy init. Logs CRITICAL warning if guards are missing
+    (does NOT crash — LIVE trading is blocked at runtime by the guards themselves).
+
+    Guards (must exist as methods on AIStrategy):
+      _require_demo_twin_open, _require_demo_flat_for_close,
+      _live_market_order, _client, _open, _mirror_enabled,
+      _live_clone_watermark, _purge_live_algos
+    """
+    required = ("_require_demo_twin_open", "_require_demo_flat_for_close",
+                "_live_market_order", "_client", "_open", "_mirror_enabled",
+                "_live_clone_watermark", "_purge_live_algos")
+    missing = [g for g in required if not hasattr(AIStrategy, g)]
+
+    if missing:
+        print(f"[AI] MIRROR GUARDS MISSING: {', '.join(missing)} — "
+              f"LIVE mirror unsafe. Fix before re-enabling mirror.", flush=True)
+        log.critical("[AI] MIRROR GUARDS MISSING: %s — LIVE mirror unsafe", ', '.join(missing))
+    else:
+        print(f"[AI] MIRROR GUARDS: all {len(required)} verified", flush=True)
+
+def _parse_iso_ts(value) -> float:
+    """Return unix seconds for an ISO timestamp, or 0 on failure."""
+    if not value:
+        return 0.0
+    try:
+        s = str(value).replace("Z", "+00:00")
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
+async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None = None) -> str:
+    """Prefer the real entry time from signal/trade history over 'now'.
+
+    After redeploy, restore used to stamp opened_at=now(), which reset
+    max_hold / time_stop and let winners bleed for days.
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+    candidates = []
+    if fallback:
+        candidates.append(str(fallback))
+    if db is not None:
+        try:
+            open_side = "buy" if side == "long" else "sell"
+            sid = await db.find_signal_id(inst_id, open_side)
+            if sid:
+                # signals table may expose created_at via get or raw
+                row = None
+                if hasattr(db, "get_signal"):
+                    row = await db.get_signal(sid)
+                if isinstance(row, dict):
+                    for k in ("created_at", "opened_at", "ts", "time"):
+                        if row.get(k):
+                            candidates.append(str(row[k]))
+                            break
+        except Exception:
+            pass
+        try:
+            if hasattr(db, "get_trades"):
+                trades = await db.get_trades(bot_id=AI_BOT_ID, limit=80)
+                for t in trades or []:
+                    if not isinstance(t, dict):
+                        continue
+                    t_inst = str(t.get("symbol") or t.get("inst_id") or "")
+                    if inst_id not in t_inst and inst_id.replace("-USDT-SWAP", "") not in t_inst:
+                        continue
+                    # open-ish rows
+                    reason = str(t.get("reason") or "").lower()
+                    if reason in ("closed", "stop", "take", "max_hold", "time_stop_stale"):
+                        continue
+                    for k in ("opened_at", "created_at", "time", "ts"):
+                        if t.get(k):
+                            candidates.append(str(t[k]))
+                            break
+                    break
+        except Exception:
+            pass
+    # Pick the oldest plausible timestamp (real open), ignore future noise
+    now_ts = datetime.now(timezone.utc).timestamp()
+    best = None
+    best_ts = None
+    for c in candidates:
+        ts = _parse_iso_ts(c)
+        if ts <= 0 or ts > now_ts + 60:
+            continue
+        if best_ts is None or ts < best_ts:
+            best_ts = ts
+            best = c
+    return best or now_iso
+
+STRATEGY_NAME = "AI Discretionary 1H"
+STRATEGY_VERSION = "v1.43.0-guard-specs"
+
+STRATEGY_DESC = (
+    "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "ADX≥20, align≥0.62, conf≥0.68. Cost-edge: ожидаемое движение (ATR 1H) "
+    "должно превышать round-trip издержки минимум в 3×, иначе вход вето. "
+    "Chop-вето по режиму самой монеты; глобальный chop больше не блокирует "
+    "монету в собственном тренде. Дебаты bull/bear на втором проходе LLM "
+    "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
+    "soft take +5.0%, partial 30%@+2.6%. Второй слот: при открытой и уже "
+    "зелёной позиции бот может взять ещё одну — но только сильный (align≥0.85, "
+    "ADX≥25, conf≥0.80) и НЕкоррелированный актив, с половинным риском и "
+    "маржой ≤30%. Ограничение концентрации: не более 1 позиции на "
+    "корреляционную группу; при доле BTC ≥50% в последних 10 сделках вход по "
+    "BTC требует conf≥0.85. Partial-закрытие учитывается как реализованный "
+    "результат в сделках/equity/дневном лимите; scale-in вызывается и по "
+    "open, и по явному action=add; риск-гейт получает notional и leverage. "
+    "Размер: заявленный LLM size_pct_equity масштабирует риск и не превышает "
+    "adaptive size_cap. Издержки явные: LLM видит round-trip fee+slippage, "
+    "статус показывает долю брутто-PnL, съеденную комиссиями. LIVE-зеркало "
+    "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
+    "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
+    "стоит широкий reduce-only disaster stop за стратегическим стопом: "
+    "обычное управление его не задевает, но падение процесса не оставит "
+    "позицию без защиты. Каждый закрытый трейд оценивается по alpha vs BTC "
+    "и R-multiple — уроки идут обратно в промпт."
+)
+
+# Contract value (in coins per contract) and lot size for the USDT-M SWAPs the
+# bot trades. These MUST match /api/v5/public/instruments — a wrong `ctVal`
+# scales every position by the error factor, because `_size_order` converts a
+# target notional into contracts as ``notional / (entry * ctVal)``.
+#
+# 28 Oct incident: NEAR was 1.0 here but OKX ctVal is 10 (1 contract = 10 NEAR).
+# The bot therefore ordered 10x the intended contracts — a $3.9k position became
+# $38.6k (810 contracts instead of ~81) and lost -557.72 instead of ~-56, i.e.
+# ~10x the 1.2% risk budget. `tests/test_contract_specs.py` locks this table to
+# the exchange truth so it can never drift silently again.
+CT_VAL = {
+    "BTC": 0.01, "ETH": 0.1, "SOL": 1.0, "XRP": 100.0,
+    "OKB": 0.01, "DOGE": 1000.0, "BCH": 0.1, "DAI": 10.0,
+    "LINK": 1.0, "AVAX": 1.0, "ADA": 100.0,
+    "LTC": 1.0, "DOT": 1.0, "UNI": 1.0, "NEAR": 10.0,
+}
+LOT_SZ = {
+    "BTC": 0.01, "ETH": 0.01, "SOL": 0.01, "XRP": 0.01,
+    "OKB": 1.0, "DOGE": 0.01, "BCH": 0.1, "DAI": 1.0,
+    "LINK": 0.1, "AVAX": 0.1, "ADA": 0.1,
+    "LTC": 0.1, "DOT": 1.0, "UNI": 1.0, "NEAR": 0.1,
+}
+
+
+def compare_contract_specs(rows, coins=None) -> list:
+    """Compare CT_VAL/LOT_SZ with OKX `/api/v5/public/instruments` rows.
+
+    A wrong `ctVal` multiplies every position by the error factor (NEAR was
+    ordered 10x too big on 28 Oct), so any ctVal drift is a hard anomaly.
+    For `lotSz` only a step finer than the exchange is reported: a coarser one
+    is a valid subset and is what LIVE requires anyway. Empty list == all good.
+    """
+    by_inst = {}
+    for r in (rows or []):
+        if isinstance(r, dict) and r.get("instId"):
+            by_inst[str(r["instId"])] = r
+    out = []
+    for coin in (coins if coins is not None else list(CT_VAL.keys())):
+        if coin not in CT_VAL:
+            continue
+        d = by_inst.get(f"{coin}-USDT-SWAP")
+        if not d:
+            continue
+        try:
+            okx_ct = float(d.get("ctVal") or 0)
+            okx_lot = float(d.get("lotSz") or 0)
+        except (TypeError, ValueError):
+            continue
+        if okx_ct > 0 and abs(okx_ct - float(CT_VAL.get(coin, 0))) > 1e-12:
+            out.append({"coin": coin, "field": "ctVal",
+                        "code": float(CT_VAL.get(coin, 0)), "okx": okx_ct})
+        # Only a FINER step than the exchange is dangerous (orders get rejected).
+        # A coarser one is always a valid subset — e.g. OKX demo allows 0.01 for
+        # BCH/ADA/LINK and 0.1 for DOT while LIVE requires 0.1 / 1.0, and our
+        # table follows LIVE. Reporting that as drift would be pure noise.
+        code_lot = float(LOT_SZ.get(coin, 0))
+        if okx_lot > 0 and 0 < code_lot < (okx_lot - 1e-12):
+            out.append({"coin": coin, "field": "lotSz",
+                        "code": code_lot, "okx": okx_lot})
+    return out
+
+
+def _fmt_px(px: float, coin: str = "") -> str:
+    """Human price for TG — more digits for BTC-like, fewer for cheap alts."""
+    try:
+        p = float(px or 0)
+    except (TypeError, ValueError):
+        return "0"
+    if p <= 0:
+        return "0"
+    if p >= 1000:
+        return f"{p:,.2f}"
+    if p >= 10:
+        return f"{p:.4f}".rstrip("0").rstrip(".")
+    if p >= 1:
+        return f"{p:.5f}".rstrip("0").rstrip(".")
+    return f"{p:.6f}".rstrip("0").rstrip(".")
+
+
+def compute_close_metrics(pos, coin: str, exit_px: float, fee=0, fills=None):
+    """Entry / exit / net PnL for Telegram and books — always contract-aware.
+
+    Prefer OKX fillPnl when fill rows exist; else size * ctVal * price delta − fee.
+    """
+    entry = float(getattr(pos, "entry_price", 0) or 0)
+    sz = float(getattr(pos, "size", 0) or 0)
+    side = getattr(pos, "side", "long")
+    try:
+        exit_px = float(exit_px or 0)
+    except (TypeError, ValueError):
+        exit_px = 0.0
+    if fills:
+        try:
+            net, avg, fee_c, _filled = pnl_from_okx_fills(fills, exit_px)
+            if net is not None:
+                return entry, float(avg or exit_px), round(float(net), 2), float(fee_c)
+        except Exception:
+            pass
+    ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+    pnl = close_pnl(side, sz, entry, exit_px, fee, ct)
+    return entry, exit_px, round(float(pnl), 2), float(fee_cost(fee))
+
+
+def _winsorize(values: list, k: float = 1.5) -> list:
+    """Clip extreme tails at Tukey's k×IQR fence (robust to single outliers).
+
+    Used by the adaptive layer so one catastrophic stop-out cannot, by itself,
+    set the rolling average and pin the preset to "defensive". Returns the list
+    unchanged when there are too few samples to estimate a spread.
+    """
+    vals = [float(v) for v in values]
+    n = len(vals)
+    if n < 4:
+        return vals
+    s = sorted(vals)
+    q1 = s[n // 4]
+    q3 = s[(3 * n) // 4]
+    iqr = q3 - q1
+    if iqr <= 0:
+        return vals
+    lo, hi = q1 - k * iqr, q3 + k * iqr
+    return [min(max(v, lo), hi) for v in vals]
+
+
+@dataclass
+class AIConfig:
+    symbols: list = None
+    capital: float = 10000.0
+    max_leverage: float = 3.0
+    max_positions: int = 2                 # v1.29: allow 2 concurrent trends
+    # exit-v2 concentration limits: 62% of all trades were BTC yet BTC lost
+    # money, so a single coin/group must not dominate the book.
+    max_positions_per_group: int = 1       # at most 1 open per correlation group
+    btc_max_recent_share: float = 0.50     # >50% of last 10 closes => BTC needs more
+    btc_min_confidence: float = 0.85       # ...this confidence when that share holds
+    risk_per_trade: float = 0.015          # ~1.5% equity at stop (medium-aggressive)
+    allocation_pct: float = 0.40           # max margin / equity per pos (medium-aggressive)
+    # v1.32 cost model: what one open->close round trip actually costs us.
+    # Market orders on both legs -> taker on both sides, plus slippage.
+    fee_taker_pct: float = 0.0005          # OKX USDT-M taker, per side
+    slippage_pct: float = 0.0002           # market-order slippage estimate, per side
+    cost_min_edge_mult: float = 3.0        # expected move should clear cost by >=3x
+    # LIVE disaster stop: a wide reduce-only exchange STOP that only fires if the
+    # bot process dies. Set beyond the strategy stop so normal management never
+    # reaches it (v1.19 removed tighter algos because they closed LIVE alone).
+    live_disaster_stop: bool = True
+    live_disaster_stop_mult: float = 1.8   # × strategic stop distance
+    live_disaster_stop_extra: float = 0.01 # at least this much wider (fraction)
+    live_disaster_stop_max: float = 0.15   # hard ceiling so it stays a guard, not a trap
+    # v1.33: opportunistic second slot. Only when the first trade already works.
+    second_entry_enabled: bool = True
+    second_entry_margin_pct: float = 0.30  # max margin for the 2nd pos (1st stays 40%)
+    second_entry_risk_pct: float = 0.006   # half the normal risk budget
+    second_entry_min_align: float = 0.85
+    second_entry_min_adx: float = 25.0
+    second_entry_min_conf: float = 0.80
+    bar: str = "1H"
+    candle_limit: int = 120
+    poll_interval_sec: int = 60            # monitor loop; LLM only on 1H close by default
+    # Phase-1 efficiency: decide on closed 1H bar, not every poll
+    decide_on_bar_close: bool = True
+    bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
+    llm_min_interval_sec: int = 180        # hard floor between LLM calls (entry)
+    llm_manage_interval_sec: int = 90       # v1.15: more frequent LLM while in a position
+
+    daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
+    weekly_loss_limit_pct: float = 0.06    # ...and after -6% week (MSK ISO week)
+    # Phase-3: funding + BTC leadership filter
+    funding_filter_enabled: bool = True
+    funding_fail_closed: bool = True       # P2.2: unknown funding rate → block open (no data = no trade)
+    funding_block_abs: float = 0.0008      # |funding| >= 0.08% against side → block open
+    btc_filter_enabled: bool = True
+    btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
+    btc_roc_veto: float = 0.20             # BTC ROC% against side → block open (short blocked if btc_roc >= this)
+    min_confidence: float = 0.68           # fewer marginal opens
+    min_adx: float = 20.0                  # stronger trend required
+    # Soft ADX: if align is strong, allow down to adx_soft_floor
+    adx_soft_floor: float = 16.0
+    adx_align_bypass: float = 0.78         # only very strong align softens ADX
+    min_roc_abs: float = 0.15
+    min_stop_pct: float = 0.016
+    max_stop_pct: float = 0.035            # cut max pain per trade
+    min_take_pct: float = 0.038            # v1.16: widened back — v1.10 cut this to 0.028
+                                            # while *also* diagnosing "wins too small vs
+                                            # losses"; that shrank wins further. Restored
+                                            # above the pre-v1.10 0.035 baseline.
+    max_hold_hours: float = 18.0            # v1.30: allow multi-session trends
+    time_stop_stale_hours: float = 10.0     # v1.30: give trend more room
+    time_stop_min_progress_pct: float = 0.20
+    time_stop_require_dead_trend: bool = True  # P2.3: only exit a stalled trade when trend is dead
+    time_stop_dead_adx: float = 18.0           # P2.3: ADX at/above this in-direction = trend alive
+    block_llm_error_opens: bool = True
+    # Indicator-based exit (do not wait for distant TP)
+    indicator_exit: bool = True
+    min_hold_minutes: float = 90.0         # v1.30: hold through 1H noise
+    exit_min_profit_pct: float = 0.60      # exit-v2: 0.20→0.60 — a "lock" below
+                                           # 3× round-trip (~0.42%) is just fees
+    ind_exit_soft_hold_pct: float = 2.00   # exit-v2: let a trending winner run to
+                                           # +2% before a soft EMA/ROC flip exits
+    exit_on_ema_cross: bool = True
+    exit_on_price_vs_ema: bool = True
+    exit_on_roc_flip: bool = True
+    exit_weak_adx: float = 12.0
+    trail_activate_pct: float = 2.00       # exit-v2: % fallback, kept ABOVE the
+                                            # ATR trigger so ATR governs arming
+    trail_lock_pct: float = 0.22           # v1.30: wider trail — less noise stops
+    # Anti-churn: close→same-side reopen wastes fees when trend continues
+    reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
+    reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
+    # Do not indicator-exit at a loss if same-side trend still confirmed
+    hold_loss_if_align: float = 0.60       # align >= this → skip soft/hard ind exit while red
+    hold_loss_min_adx: float = 22.0        # v1.14: no hold-in-loss in weak trend
+    hold_loss_block_chop: bool = True      # v1.14: never hold red in chop regime
+    force_exit_adverse_atr: float = 0.60   # v1.14: if loss >0.6×ATR allow ind_exit despite align
+    # Peak giveback: if trade was +X% and gave back most of it → lock remainder.
+    # Armed a bit earlier than v1.24 (0.80 → 0.65) but we KEEP more of the peak
+    # (35% → 50%). Cuts the round-trip "was green, closed red" without the
+    # v1.10 mistake of trailing winners from the first tick.
+    giveback_enable: bool = True
+    giveback_min_peak_pct: float = 1.80   # exit-v2: was 1.20 — don't cut a runner
+    giveback_retain_frac: float = 0.40   # exit-v2: keep 40% of peak min
+    hard_profit_lock_enable: bool = True
+    hard_profit_lock_peak: float = 2.60  # exit-v2: was 1.80 — ignore sub-partial peaks
+    hard_profit_lock_floor: float = 0.30   # absolute floor (legacy / fallback)
+    # v1.41: the absolute 0.30 floor above was DEAD — giveback (peak≥1.80, retain
+    # 40%) always fires at a higher upl, so this rule never triggered. Make it a
+    # fraction of the peak so both rules are live: giveback covers 1.8–2.6 peaks,
+    # hard-lock covers ≥2.6 peaks (keeps 55% of a big peak instead of 40%).
+    hard_profit_lock_retain: float = 0.55
+    # v1.41 soft-lock: park the stop under the peak once the trade was meaningfully
+    # green. Before this there was a dead-zone between the BE arm (~+1%) and the
+    # giveback arm (+1.8%) where a +1.7% runner could round-trip to +0.2% (BE) with
+    # nothing banked — the classic "was green, closed flat" churn.
+    soft_lock_peak_pct: float = 1.50
+    soft_lock_atr_mult: float = 0.80
+    soft_profit_take_pct: float = 5.00     # exit-v2: was 2.80 — it pre-empted the
+                                           # ≥3.8% hard TP, capping every winner
+    partial_take_enable: bool = True
+    partial_take_pct: float = 2.60       # exit-v2: was 1.80 — bank after a real leg
+    partial_take_frac: float = 0.30      # bank 30%, ride 70%
+    # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
+    momentum_entry_filter: bool = True
+    # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
+    thesis_break_exit: bool = True
+    # SOL was the drag (reflection: about −127 over 9 trades). Higher bar, not a ban.
+    sol_min_adx: float = 28.0
+    sol_min_align: float = 0.88
+    # Same-coin reopen after a loss — 75m was too short (XRP triple on 14 Oct).
+    loss_reopen_cooldown_min: float = 180.0
+    # Scale-in on continuation instead of close+reopen
+    scale_in_enabled: bool = True
+    scale_in_min_align: float = 0.70
+    scale_in_max_adds: int = 1
+    scale_in_frac: float = 0.45            # add ~45% of current size
+    scale_in_min_hold_min: float = 30.0    # only after position seasoned
+    # ATR framework (1H crypto) — stops/trail/scale relative to volatility
+    atr_period: int = 14
+    atr_stop_mult: float = 1.15            # stop ≈ 1.15×ATR (clamped to min/max_stop_pct)
+    atr_take_mult: float = 2.30            # v1.16: 1.9→2.3×ATR → RR ~2.0 before clamp
+                                            # (was cut to 1.90 under v1.10's "closer TP"
+                                            # fix, which worked against its own diagnosis)
+    scale_in_max_adverse_atr: float = 0.35 # tighter: no add past 0.35×ATR against entry
+    breakeven_atr_mult: float = 0.90       # exit-v2: was 0.55 — BE only after a real move
+    breakeven_min_pct: float = 1.00        # exit-v2: was 0.70 — need real green before BE
+    breakeven_lock_pct: float = 0.20       # exit-v2: BE stop sits this % above entry
+                                           # (round-trip cost is ~0.14%, so 0.20 nets green)
+    trail_atr_mult: float = 1.10           # exit-v2: was 0.75 — 1.0–1.2×ATR room
+    trail_activate_atr_mult: float = 1.50  # exit-v2: was 0.90 — trail only after a real leg
+    time_stop_hold_align: float = 0.85     # skip time_stop_stale if same-side align still strong
+    ema_fast: int = 21
+    ema_slow: int = 50
+    ema_trend: int = 200
+    adx_period: int = 14
+    roc_period: int = 12
+    rsi_period: int = 14
+    quant_min_align: float = 0.62
+    block_chop_opens: bool = True
+    # v1.1 self-adapt (bounded) — slightly wider for aggressive
+    adapt_enabled: bool = True
+    adapt_window: int = 12
+    adapt_min_trades: int = 4
+    conf_floor: float = 0.64               # adapt cannot loosen below this
+    conf_ceil: float = 0.78
+    align_floor: float = 0.55
+    align_ceil: float = 0.70
+    size_cap_floor: float = 0.06           # must stay <= the conservative preset's
+                                           # 0.06 cap, otherwise the clamp below
+                                           # silently undoes defensive sizing
+    size_cap_ceil: float = 0.18
+    provider: str = None
+    execute: bool = None
+
+    def __post_init__(self):
+        if self.symbols is None:
+            # Majors first — fewer noisy alts (DOGE/BCH/DAI) after drawdown period
+            order = (
+                "BTC", "ETH", "SOL", "XRP", "DOGE", "BCH", "OKB",
+                "LINK", "AVAX", "ADA", "LTC", "DOT", "UNI", "NEAR",
+            )
+            majors = [s for s in order if s in set(ALLOWED_SYMBOLS)]
+            self.symbols = majors or list(ALLOWED_SYMBOLS)
+
+
+@dataclass
+class AIPosition:
+    coin: str
+    inst_id: str
+    side: str
+    size: float
+    entry_price: float
+    stop_price: float
+    take_price: float
+    leverage: float
+    opened_at: str
+    signal_id: int = 0
+    tg_message_id: int = 0
+    peak_price: float = 0.0
+    peak_upl_pct: float = 0.0            # best unrealized % seen while open
+    partial_taken: bool = False          # v1.28 one-shot scale-out done
+    signal_close_notified: str = ""       # signal-only mode: last exit already alerted
+    unrealized_pnl: float = 0.0
+    mark_px: float = 0.0          # last mark from guard/tick (UI + breach checks)
+    sl_algo_id: str = ""
+    disaster_algo_id: str = ""     # wide reduce-only STOP (LIVE only, process-death guard)
+    disaster_stop_px: float = 0.0
+    scale_adds: int = 0
+    tp_algo_id: str = ""
+    owner_checked: bool = False   # cache _entry_fill_owner — historical fact
+    owner_prefix: str = ""
+    demo_trade_id: str = ""       # shared id: DEMO clOrdId=aid{id}, LIVE=ail{id}
+    # ── settlement memory (P2): context captured at entry ──
+    risk_usd: float = 0.0         # planned risk in USDT (size * stop distance)
+    btc_ref: float = 0.0          # BTC price at entry — benchmark anchor
+    entry_confidence: float = 0.0
+    entry_thesis: str = ""
+
+
+class AIStrategy:
+    BOT_ID = AI_BOT_ID
+    BOT_NAME = STRATEGY_NAME
+    STRATEGY_NAME = STRATEGY_NAME
+    STRATEGY_VERSION = STRATEGY_VERSION
+    STRATEGY_DESC = STRATEGY_DESC
+
+    def __init__(self, config: AIConfig = None, client_manager=None, db=None,
+                 notifier: Optional[TelegramNotifier] = None,
+                 analysis=None, live_client_manager=None):
+        self.config = config or AIConfig()
+        self.client_manager = client_manager
+        self.live_client_manager = live_client_manager
+        self.db = db
+        self.notifier = notifier
+        self.analysis = analysis or get_logger()
+        self._last_exec = None  # last open/close attempt result
+        self._exec_log = []  # recent execution attempts
+        # Strong refs to fire-and-forget Telegram tasks: asyncio keeps only a
+        # weak reference, so an unreferenced close-notify task could be
+        # garbage-collected mid-send (that is how closes went missing while
+        # opens, awaited inline, always arrived).
+        self._tg_tasks: set = set()
+        self._tg_pending: list = []  # close texts Telegram refused; retried later
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._positions: dict[str, AIPosition] = {}
+        self._last_closes: dict = {}  # coin -> {side,ts,pnl,reason}
+        # ── LIVE mirror state (separate from the demo/primary account) ──
+        # The live account mirrors every primary open/close. It uses its own
+        # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
+        # and account_mode="live" for full DB isolation.
+        self._live_positions: dict[str, AIPosition] = {}
+        self._live_audit: list = []   # every LIVE order attempt (why/who)
+        self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
+        self._second_entry_bar: str | None = None  # v1.33: bar already asked for a 2nd slot
+        self._live_equity = 0.0
+        self._live_capital = 0.0
+        self._live_session_pnl = 0.0
+        self._live_lifetime_pnl = 0.0
+        self._live_lifetime_trades = 0
+        self._live_lifetime_wins = 0
+        self._live_lifetime_fees = 0.0
+        self._live_equity_ts = 0.0
+        self._trade_log: list = []
+        self._decision_log: list = []
+        st = load_ai_state()
+        self._capital = float(self.config.capital)
+        self._session_pnl = 0.0
+        self._lifetime_pnl = float(st.get("lifetime_pnl") or 0.0)
+        self._lifetime_trades = int(st.get("lifetime_trades") or 0)
+        self._lifetime_wins = int(st.get("lifetime_wins") or 0)
+        self._lifetime_fees = float(st.get("lifetime_fees") or 0.0)
+        self._equity = self._capital + self._session_pnl
+        # Real account equity reported by OKX (0 = unknown yet). Config
+        # capital may be a nominal number, so risk limits must not use it alone.
+        self._account_equity = 0.0
+        self._account_equity_ts = 0.0
+        # Runtime contract-spec validation (ctVal/lotSz vs OKX). A wrong ctVal
+        # scaled NEAR 10x on 28.10 and lost 557 USDT, so anomalies are surfaced.
+        self._contract_specs: list = []
+        self._contract_specs_ts = 0.0
+        self._last_activity = None
+        self._trace = {}
+        self._next_tick_at = None
+        self._last_tick_error = None
+        self._started_at = None
+        self._tick_count = 0
+        self._last_closed_bar_ts = {}  # coin -> ms of last CLOSED 1H bar we already decided on
+        self._last_llm_ts = 0.0
+        # Daily/weekly risk counters survive restarts (same MSK period only).
+        self._daily_realized = 0.0
+        self._daily_realized_day = ""
+        self._weekly_realized = 0.0
+        self._weekly_realized_week = ""
+        try:
+            from app.services.pnl_engine import PNL_TZ
+            _now = datetime.now(timezone.utc).astimezone(PNL_TZ)
+            _d = _now.strftime("%Y-%m-%d")
+            _w = _now.strftime("%G-W%V")
+            if str(st.get("daily_realized_day") or "") == _d:
+                self._daily_realized = float(st.get("daily_realized") or 0.0)
+                self._daily_realized_day = _d
+            if str(st.get("weekly_realized_week") or "") == _w:
+                self._weekly_realized = float(st.get("weekly_realized") or 0.0)
+                self._weekly_realized_week = _w
+        except Exception:
+            pass
+        self._funding_cache = {}  # coin -> {rate, ts}
+        self._funding_cache_ts = 0.0
+        self._tick_fail_count = 0
+        self._consecutive_fails = 0
+        self._llm_error_count = 0
+        self._last_llm_error = None
+        self._llm_rate_limited = False
+        self._llm_rate_limit_until = 0.0
+        self._last_provider_used = None
+        self._latest_indicators: dict = {}
+        self._indicators_stale_flag = False
+        self._last_decision: dict = {}
+        # v1.1 adaptive layer
+        self._adapt = {
+            "min_confidence": float(self.config.min_confidence),
+            "quant_min_align": float(self.config.quant_min_align),
+            "size_cap": 0.10,
+            "preset": "normal",
+            "reason": "init",
+            "updated_at": None,
+        }
+        if isinstance(st.get("adapt"), dict):
+            for k in ("min_confidence", "quant_min_align", "size_cap", "preset", "reason"):
+                if k in st["adapt"]:
+                    self._adapt[k] = st["adapt"][k]
+        self._reflection = str(st.get("reflection") or "")
+        self._journal = list(st.get("journal") or [])[-100:]
+        self._daily_lessons = list(st.get("daily_lessons") or [])[-10:]
+        self._last_lesson_day = str(st.get("last_lesson_day") or "")
+        self._adapt_log: list = list(st.get("adapt_log") or [])[-30:]
+
+        # Mirror guard verification — logs warning if guards missing, does NOT crash
+        try:
+            _verify_mirror_guards()
+        except Exception as e:
+            log.warning("[AI] mirror guard check failed: %s", e)
+
+    # ── lifecycle ──────────────────────────────────────────────
+    def _clord_prefix(self) -> str:
+        """OKX clOrdId prefix for this bot's orders (must not be a prefix of another bot)."""
+        return "ai"
+
+    @staticmethod
+    def _new_demo_trade_id() -> str:
+        """12 hex chars — fits OKX clOrdId max 32 with aid/ail prefix."""
+        return uuid.uuid4().hex[:12]
+
+    @staticmethod
+    def _clord_demo(trade_id: str) -> str:
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"aid{tid}"[:32]
+
+    @staticmethod
+    def _clord_live(trade_id: str) -> str:
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"ail{tid}"[:32]
+
+    @staticmethod
+    def _clord_demo_close(trade_id: str) -> str:
+        """DEMO close shares the open's trade_id (aid{tid}c) — enables pairing.
+
+        Returns "" when the id is unknown so `_place` keeps its ai{ms} fallback
+        rather than fabricating a link to a trade that never existed.
+        """
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"aid{tid}c"[:32] if tid else ""
+
+    @staticmethod
+    def _clord_live_close(trade_id: str) -> str:
+        """LIVE close tagged ``ail{tid}c`` so mirror closes are attributable.
+
+        Before this, `_close_live` passed cl_ord_id=None and `_place` generated
+        `ai{ms}` — every LIVE close looked like an untagged AI order
+        (audit mix: mirror=0, ai_other=N) and could not be paired with its DEMO
+        twin. The suffix keeps it distinct from the still-recent open order
+        (OKX only requires clOrdId uniqueness among pending orders).
+        """
+        tid = re.sub(r"[^a-zA-Z0-9]", "", str(trade_id or ""))[:12]
+        return f"ail{tid}c"[:32] if tid else ""
+
+    @staticmethod
+    def _trade_id_from_clord(cl_ord_id: str) -> str:
+        """Extract shared demo_trade_id from aid*/ail* clOrdId."""
+        s = re.sub(r"[^a-zA-Z0-9]", "", str(cl_ord_id or ""))
+        low = s.lower()
+        if low.startswith("aid") or low.startswith("ail"):
+            return s[3:15]
+        return ""
+
+    async def _live_close_tag_for_inst(self, client, inst_id: str) -> str:
+        """Recover the slot's close tag from the entry fill's clOrdId.
+
+        Used when memory has no AIPosition (restart/manual desync) but the
+        position is still ours: keeps the cleanup attributable and pairable
+        instead of emitting an untagged ``ai{ms}`` order.
+        """
+        if client is None or not inst_id:
+            return ""
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        best, best_ts = "", 0
+        for f in data:
+            tid = self._trade_id_from_clord(str(f.get("clOrdId") or ""))
+            if not tid:
+                continue
+            try:
+                ts = int(f.get("fillTime") or f.get("ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if not best or ts >= best_ts:
+                best, best_ts = tid, ts
+        return self._clord_live_close(best) if best else ""
+
+    def start(self):
+        if self._running:
+            return
+        self._running = True
+        self._started_at = datetime.now(timezone.utc).isoformat()
+        self._thread = threading.Thread(target=self._thread_main, daemon=True)
+        self._thread.start()
+        print(f"[AI {STRATEGY_VERSION}] Started execute={self._execute_enabled()} "
+              f"provider={self._provider()} capital={self._capital}", flush=True)
+
+    def stop(self):
+        self._running = False
+        if self._loop and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread:
+            self._thread.join(timeout=5)
+            self._thread = None
+        print(f"[AI {STRATEGY_VERSION}] Stopped", flush=True)
+
+    def _thread_main(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._run())
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+
+    def _provider(self) -> str:
+        """Pick the best available LLM provider with rotation.
+
+        Rotation order: groq → openrouter → openai
+        When the current provider is rate-limited, automatically falls through
+        to the next one that has an API key and is not on cooldown.
+        """
+        from app.services.ai_agent import (
+            is_provider_available,
+            next_available_provider,
+        )
+        # Preferred: config/env → groq → openrouter → openai (BAI removed)
+        if self.config.provider and is_provider_available(str(self.config.provider).strip().lower()):
+            preferred = str(self.config.provider).strip().lower()
+        else:
+            env = (os.getenv("AI_LLM_PROVIDER") or "").strip().lower()
+            if env and is_provider_available(env):
+                preferred = env
+            elif os.getenv("GROQ_API_KEY", "").strip() and is_provider_available("groq"):
+                preferred = "groq"
+            elif os.getenv("OPENROUTER_API_KEY", "").strip() and is_provider_available("openrouter"):
+                preferred = "openrouter"
+            elif os.getenv("OPENAI_API_KEY", "").strip() and is_provider_available("openai"):
+                preferred = "openai"
+            else:
+                preferred = env or "mock"
+        # If preferred is available, use it
+        if preferred != "mock" and is_provider_available(preferred):
+            return preferred
+        # Otherwise pick next available in rotation
+        nxt = next_available_provider()
+        if nxt:
+            return nxt
+        # Fallback: preferred even if on cooldown (will retry)
+        return preferred
+
+    def _execute_enabled(self) -> bool:
+        if self.config.execute is not None:
+            return bool(self.config.execute)
+        env = os.getenv("AI_EXECUTE", "").strip().lower()
+        if env in ("1", "true", "yes", "on"):
+            return True
+        if env in ("0", "false", "no", "off"):
+            return False
+        # No explicit AI_EXECUTE: allow orders only on OKX demo
+        return self._is_demo()
+
+    def set_execute(self, enabled: bool) -> None:
+        """Runtime toggle for auto-trading. Persists the flag in config so it
+        survives until the bot is recreated (deploy restart)."""
+        self.config.execute = bool(enabled)
+        print(f"[AI] execute -> {bool(enabled)} (auto-trade {'ON' if enabled else 'OFF'})", flush=True)
+
+    def reset_lifetime_pnl(self) -> None:
+        """Reset lifetime PnL to zero (stale data from previous sessions)."""
+        self._lifetime_pnl = 0.0
+        self._lifetime_trades = 0
+        self._lifetime_wins = 0
+        self._lifetime_fees = 0.0
+        self._session_pnl = 0.0
+        self._equity = self._capital
+        print("[AI] lifetime_pnl reset to 0 (stale data cleared)", flush=True)
+
+    def _get_provider_status(self) -> dict:
+        """Return cooldown/availability status of all LLM providers."""
+        from app.services.ai_agent import _last_provider_used, get_provider_status
+        return {
+            "active": _last_provider_used or self._provider(),
+            "providers": get_provider_status(),
+        }
+
+    def _is_demo(self) -> bool:
+        """Detect demo mode from the actual OKX client, not from env var.
+
+        The OKX_DEMO env var is always "true" on Render (render.yaml), even after
+        the user switches to LIVE via /api/mode. The client's .demo attribute is
+        the authoritative source — it is set by OKXClientManager.init_client().
+        """
+        try:
+            c = self.client_manager.get_client() if self.client_manager else None
+            if c is not None:
+                return bool(getattr(c, "demo", True))
+        except Exception:
+            pass
+        # Fallback: if no client yet, check env (first tick before mode switch)
+        if os.getenv("OKX_DEMO", "true").lower() in ("1", "true", "yes", "on"):
+            return True
+        return False
+
+
+    def _account_mode_tag(self) -> tuple:
+        """(account_mode, account_key) for DB isolation."""
+        c = None
+        try:
+            c = self.client_manager.get_client() if self.client_manager else None
+        except Exception:
+            c = None
+        if c is not None and not getattr(c, "demo", True):
+            return "live", "live"
+        return "demo", "showcase"
+
+    async def _client(self):
+        """Primary engine is DEMO only — never route strategy decisions to LIVE."""
+        if not self.client_manager:
+            return None
+        c = self.client_manager.get_client()
+        if c is not None and not getattr(c, "demo", True):
+            if not getattr(self, "_refused_live_logged", False):
+                self._refused_live_logged = True
+                print(
+                    "[AI] REFUSED live client as primary (DEMO-only engine) — "
+                    "trading is IDLE until a demo client is available",
+                    flush=True,
+                )
+            return None
+        if c is None and not getattr(self, "_no_client_logged", False):
+            self._no_client_logged = True
+            print("[AI] no OKX demo client — engine idle (check DEMO keys)", flush=True)
+        return c
+
+    def _require_demo_twin_open(self, coin: str, side: str) -> tuple:
+        """LIVE may open ONLY if DEMO already holds same coin+side. No AI gates."""
+        side = (side or "").lower()
+        pos = (self._positions or {}).get(coin)
+        if not pos:
+            return False, "no_demo_position"
+        if str(getattr(pos, "side", "") or "").lower() != side:
+            return False, "demo_side_mismatch"
+        try:
+            if float(getattr(pos, "size", 0) or 0) <= 0:
+                return False, "demo_size_zero"
+        except (TypeError, ValueError):
+            return False, "demo_size_bad"
+        return True, "ok"
+
+    def _require_demo_flat_for_close(self, coin: str) -> tuple:
+        """LIVE close only when DEMO flat or explicit paired-close marker."""
+        if getattr(self, "_demo_closing_coin", None) == coin:
+            return True, "paired_close"
+        if coin not in (self._positions or {}):
+            return True, "demo_flat"
+        return False, "demo_still_open"
+
+    async def _live_market_order(
+        self, lc, *, inst, order_side, sz, pos_side, cl_ord_id, coin, is_close, reason,
+    ) -> dict:
+        """Single chokepoint for every LIVE market order."""
+        side = (pos_side or "long").lower()
+        if side not in ("long", "short"):
+            side = "long"
+        if is_close:
+            ok, why = self._require_demo_flat_for_close(coin)
+            if not ok:
+                # Paired close from _close: allow even if DEMO still in memory
+                if getattr(self, "_demo_closing_coin", None) == coin:
+                    ok, why = True, "paired_close"
+            if not ok:
+                print(f"[AI-LIVE] BLOCK close {coin}: {why}", flush=True)
+                self._record_exec("live_block_close", coin=coin, side=side, reason=why)
+                return {"error": True, "message": f"blocked:{why}"}
+        else:
+            ok, why = self._require_demo_twin_open(coin, side)
+            if not ok:
+                print(f"[AI-LIVE] BLOCK open {coin}: {why} ({reason})", flush=True)
+                self._record_exec("live_block_open", coin=coin, side=side, reason=why)
+                return {"error": True, "message": f"blocked:{why}"}
+        self._mirror_call_active = True
+        try:
+            return await self._place(
+                lc, inst, order_side, sz, side,
+                is_close=is_close, cl_ord_id=cl_ord_id,
+            ) or {}
+        except Exception as e:
+            return {"error": True, "message": str(e)[:200]}
+        finally:
+            self._mirror_call_active = False
+
+    def _live_bot_id(self) -> str:
+        """Distinct bot_id for live mirror records (positions table has no account_mode)."""
+        return f"{self.BOT_ID}_live"
+
+    def _live_trade_blocked(self) -> bool:
+        """True when OKX rejected the LIVE key for trading (no Trade permission).
+
+        Sticky until a LIVE order actually goes through or the user reconnects;
+        otherwise every open triggers an 8-second "pending mirror" tick and a
+        retry storm against an account that cannot trade.
+        """
+        return bool(str(getattr(self, "_live_trade_blocked_reason", "") or ""))
+
+    def _live_client(self):
+        """Live OKXClient when connected, else None. Never the demo client."""
+        if not self.live_client_manager:
+            return None
+        try:
+            c = self.live_client_manager.get_client()
+        except Exception:
+            return None
+        if c is None:
+            return None
+        # Defensive: if the live client was ever mis-initialized as demo, ignore it.
+        if getattr(c, "demo", False):
+            return None
+        if not getattr(c, "has_credentials", lambda: False)():
+            return None
+        return c
+
+    def _live_ready(self) -> bool:
+        r = self._live_client() is not None
+        if not r:
+            lcm = self.live_client_manager
+            c = None
+            reason = "no_live_client_manager"
+            if not lcm:
+                reason = "live_client_manager=None"
+            else:
+                try:
+                    c = lcm.get_client()
+                except Exception as e:
+                    reason = f"get_client_exc:{e}"
+                if c is None and reason == "no_live_client_manager":
+                    reason = "client=None"
+                elif c is not None:
+                    if getattr(c, "demo", False):
+                        reason = "client.demo=True"
+                    elif not getattr(c, "has_credentials", lambda: False)():
+                        reason = "no_credentials"
+                    else:
+                        reason = "ok"  # shouldn't reach here if r is False
+            # Throttle logs: every ~10 checks
+            n = int(getattr(self, "_live_ready_log_n", 0) or 0) + 1
+            self._live_ready_log_n = n
+            if n <= 3 or n % 10 == 0:
+                print(f"[AI-LIVE] _live_ready=False reason={reason}", flush=True)
+        return r
+
+    async def _mirror_enabled(self) -> bool:
+        """
+        Жесткое правило: лайв торгует ТОЛЬКО при explicit connect пользователя.
+        Любая ошибка/отсутствие флага → mirror OFF (fail-closed).
+        """
+        if not self.db:
+            return False
+        try:
+            en = await self.db.get_setting("live_mirror_enabled")
+            val = str(en or "").strip().lower()
+            # СТРОГО: только explicit '1'/'true'/'yes'/'on' = enabled
+            # Любые другие значения ('0', 'false', 'no', 'off', '', None, ошибка) = disabled
+            return val in ("1", "true", "yes", "on")
+        except Exception:
+            # Fail-closed: любая ошибка чтения = mirror OFF
+            return False
+
+    async def _live_clone_watermark(self) -> int:
+        """Explicit "Connect LIVE" timestamp (unix secs); 0 = unknown.
+
+        Fail-closed: without a watermark we cannot tell whether a DEMO position
+        was opened while mirroring was on, so cloning is refused. This is what
+        keeps LIVE from opening trades that the bot did not copy live.
+        """
+        if not self.db:
+            return 0
+        try:
+            raw = await self.db.get_setting("live_mirror_connected_at")
+            return int(float(raw)) if raw else 0
+        except Exception:
+            return 0
+
+    async def _purge_live_algos(self, lc) -> int:
+        """Cancel exchange-level TP/SL on LIVE (orphans from older builds).
+
+        This build deliberately places NO SL/TP on the mirror account: an algo
+        order there can close LIVE without DEMO, which is exactly how the mirror
+        ended up trading by itself. Anything left behind must be removed.
+        """
+        if not lc:
+            return 0
+        cancelled = 0
+        for kind in ("conditional", "move_order_stop", "oco"):
+            try:
+                resp = await lc.get_algo_orders(
+                    ord_type=kind, inst_type="SWAP", state="live", limit=100)
+            except Exception as e:
+                print(f"[AI-LIVE] purge algos {kind}: {e}", flush=True)
+                continue
+            for row in ((resp or {}).get("data") or []):
+                try:
+                    inst = str(row.get("instId") or "")
+                    algo = str(row.get("algoId") or "")
+                    cid = str(row.get("clOrdId") or "").lower()
+                    if not algo or not inst.endswith("-USDT-SWAP"):
+                        continue
+                    # Never cancel a user's own protective orders: only algos
+                    # this bot created (ai* clOrdId) are ours to remove. Older
+                    # builds cancelled every algo on a mirrored instrument,
+                    # stripping manual LIVE positions of their SL/TP.
+                    if not cid.startswith("ai"):
+                        continue
+                    r = await lc.cancel_algo_order(inst, algo)
+                    if not (r or {}).get("error"):
+                        cancelled += 1
+                except Exception:
+                    continue
+        if cancelled:
+            print(f"[AI-LIVE] purged {cancelled} exchange algo order(s) — "
+                  f"mirror exits are bot-side only", flush=True)
+            self._exec_log.append(_exec_evt(
+                "mirror_purge_algos", "ALL", "-", reason=f"cancelled={cancelled}"))
+            self._audit_live("purge_algos", "ALL", "-", 0, f"cancelled={cancelled}", ok=True)
+        return cancelled
+
+    async def _try_refresh_live_client(self) -> bool:
+        """Call main's ensure callback if wired; return whether live client is ready."""
+        if self._live_client():
+            return True
+        if not await self._mirror_enabled():
+            return False
+        cb = getattr(self, "_live_ensure_cb", None)
+        if cb is None:
+            return False
+        try:
+            ok = await cb()
+            return bool(ok) and self._live_client() is not None
+        except Exception as e:
+            print(f"[AI-LIVE] ensure_cb: {e}", flush=True)
+            return False
+
+    async def _ensure_live_equity(self) -> float:
+        """Best-effort live account equity (USDT totalEq). Cached ~30s."""
+        import time as _t
+        now = _t.time()
+        if (now - float(self._live_equity_ts or 0)) < 30 and self._live_equity_ts:
+            return self._live_equity
+        c = self._live_client()
+        if not c:
+            if self._tick_count % 5 == 0:
+                print("[AI-LIVE] equity: no live client", flush=True)
+            return self._live_equity
+        try:
+            r = await c.get_balance()
+            if (r or {}).get("error") or str((r or {}).get("code") or "0") not in ("0", "0.0", ""):
+                print(f"[AI-LIVE] equity OKX error: {r}", flush=True)
+                return self._live_equity
+            data = (r or {}).get("data") or []
+            total = 0.0
+            if data:
+                acct = data[0] if isinstance(data[0], dict) else {}
+                for k in ("totalEq", "adjEq", "isoEq"):
+                    try:
+                        v = float(acct.get(k) or 0)
+                        if v > total:
+                            total = v
+                    except (TypeError, ValueError):
+                        pass
+                if total <= 0:
+                    for d in (acct.get("details") or []):
+                        ccy = str(d.get("ccy") or "").upper()
+                        if ccy not in ("USDT", "USD", "USDC"):
+                            continue
+                        for k in ("eq", "cashBal", "availBal", "availEq"):
+                            try:
+                                v = float(d.get(k) or 0)
+                                if v > 0:
+                                    total += v
+                                    break
+                            except (TypeError, ValueError):
+                                pass
+            self._live_equity = float(total)
+            self._live_equity_ts = now
+            print(f"[AI-LIVE] equity refreshed: ${self._live_equity:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] equity exception: {e}", flush=True)
+        return self._live_equity
+
+    def _thread_alive(self) -> bool:
+        t = self._thread
+        try:
+            return bool(t is not None and t.is_alive())
+        except Exception:
+            return False
+
+    def is_loop_healthy(self, max_stale_sec: float | None = None) -> bool:
+        """True when the worker thread is alive and recently heartbeating."""
+        if not self._running:
+            return False
+        if not self._thread_alive():
+            return False
+        if max_stale_sec is None:
+            poll = float(getattr(self.config, "poll_interval_sec", 120) or 120)
+            # tick hard-timeout (120) + poll + LLM budget + margin
+            max_stale_sec = max(600.0, poll * 4.0 + 180.0)
+        la = self._last_activity
+        if not la:
+            # just started — allow grace period
+            try:
+                started = getattr(self, "_started_at", None)
+                if started:
+                    from datetime import datetime as _dt
+                    st = _dt.fromisoformat(str(started).replace("Z", "+00:00"))
+                    age = (datetime.now(timezone.utc) - st).total_seconds()
+                    return age < max_stale_sec
+            except Exception:
+                pass
+            return True
+        try:
+            from datetime import datetime as _dt
+            ts = _dt.fromisoformat(str(la).replace("Z", "+00:00"))
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+            return age <= float(max_stale_sec)
+        except Exception:
+            return True
+
+    def force_restart(self, reason: str = "watchdog") -> None:
+        """Stop the worker thread (if any) and start a fresh one. Keeps state."""
+        print(f"[AI {STRATEGY_VERSION}] force_restart ({reason})", flush=True)
+        try:
+            self.stop()
+        except Exception as e:
+            print(f"[AI] force_restart stop: {e}", flush=True)
+        try:
+            self.start()
+        except Exception as e:
+            print(f"[AI] force_restart start: {e}", flush=True)
+
+    async def _run(self):
+        try:
+            await self._hydrate_from_db()
+            try:
+                await self._restore_peaks()
+            except Exception as _rp:
+                print(f"[AI] restore_peaks on start: {_rp}", flush=True)
+            self._hydrated = True
+        except Exception as e:
+            print(f"[AI] hydrate: {e}", flush=True)
+        try:
+            await self._load_tg_pending()
+        except Exception as e:
+            print(f"[AI] TG pending restore: {e}", flush=True)
+        try:
+            if self.db:
+                await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                         name=STRATEGY_NAME)
+        except Exception as e:
+            print(f"[AI] ensure_bot: {e}", flush=True)
+        # Hard ceiling so a hung OKX/LLM/await cannot freeze the loop forever.
+        _TICK_HARD_TIMEOUT = float(os.getenv("AI_TICK_TIMEOUT_SEC", "120") or 120)
+        while self._running:
+            try:
+                await asyncio.wait_for(self._tick(), timeout=_TICK_HARD_TIMEOUT)
+                self._last_tick_error = None
+                self._consecutive_fails = 0
+            except asyncio.TimeoutError:
+                self._consecutive_fails += 1
+                self._tick_fail_count = int(getattr(self, "_tick_fail_count", 0) or 0) + 1
+                msg = f"tick_timeout>{_TICK_HARD_TIMEOUT:.0f}s"
+                self._last_tick_error = msg
+                print(f"[AI] {msg} — skipping to next cycle", flush=True)
+            except Exception as e:
+                self._consecutive_fails += 1
+                print(f"[AI] tick error: {e}", flush=True)
+                try:
+                    self._last_tick_error = f"{type(e).__name__}: {str(e)[:200]}"
+                except Exception:
+                    pass
+                # A loop that only ever errors never recovers — but only give up
+                # when there is nothing to protect (an open position keeps its
+                # own stops on the exchange).
+                if self._consecutive_fails >= 5 and not self._positions:
+                    print("[AI] 5 consecutive failing ticks with no open "
+                          "position — stopping the loop", flush=True)
+                    await self.stop()
+                    break
+            self._tick_count += 1
+            # Retry any close notification Telegram refused earlier.
+            try:
+                await self._flush_tg_pending()
+            except Exception as e:
+                print(f"[AI] TG pending flush: {e}", flush=True)
+            # Refresh live equity every few ticks so UI is not stuck at $0
+            if self._live_client() and (self._tick_count % 3 == 1):
+                try:
+                    await self._ensure_live_equity()
+                except Exception:
+                    pass
+
+            self._last_activity = datetime.now(timezone.utc).isoformat()
+            _sleep = max(30, int(self.config.poll_interval_sec or 180))
+            # Pending LIVE mirror gaps → poll every 8s (not 1–3 min)
+            try:
+                if (await self._mirror_enabled() and self._positions
+                        and not self._live_trade_blocked()):
+                    _miss = [c for c in self._positions if c not in self._live_positions]
+                    if _miss:
+                        _sleep = min(_sleep, 8)
+                        print(f"[AI-LIVE] pending mirror {_miss} — next tick in {_sleep}s", flush=True)
+                elif self._positions and self._live_trade_blocked():
+                    _miss = [c for c in self._positions if c not in self._live_positions]
+                    if _miss:
+                        print(f"[AI-LIVE] pending mirror {_miss} paused: LIVE key cannot trade",
+                              flush=True)
+            except Exception:
+                pass
+            import time as _t
+            _next_ts = _t.time() + _sleep
+            self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
+            self._llm_rate_limit_until = 0.0
+            self._llm_rate_limited = False
+            try:
+                from app.services.ai_agent import _rate_limit_until
+                if _t.time() < _rate_limit_until:
+                    self._llm_rate_limited = True
+                    self._llm_rate_limit_until = _rate_limit_until
+                    _sleep = max(_sleep, min(900, int(_rate_limit_until - _t.time()) + 5))
+                    _next_ts = _t.time() + _sleep
+                    self._next_tick_at = datetime.fromtimestamp(_next_ts, tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+            # Chunked sleep keeps last_activity fresh so the watchdog does not
+            # false-positive during long LLM rate-limit cooldowns.
+            _remaining = float(_sleep)
+            while _remaining > 0 and self._running:
+                _chunk = min(30.0, _remaining)
+                await asyncio.sleep(_chunk)
+                _remaining -= _chunk
+                self._last_activity = datetime.now(timezone.utc).isoformat()
+
+    # ── indicators ─────────────────────────────────────────────
+    @staticmethod
+    def _ema(values, period):
+        if not values or len(values) < period:
+            return [None] * len(values)
+        k = 2 / (period + 1)
+        out = [None] * len(values)
+        s = sum(values[:period]) / period
+        out[period - 1] = s
+        for i in range(period, len(values)):
+            s = values[i] * k + s * (1 - k)
+            out[i] = s
+        return out
+
+    @staticmethod
+    def _rsi(values, period=14):
+        n = len(values)
+        out = [None] * n
+        if n < period + 1:
+            return out
+        gains, losses = [], []
+        for i in range(1, period + 1):
+            d = values[i] - values[i - 1]
+            gains.append(max(d, 0.0))
+            losses.append(max(-d, 0.0))
+        avg_g = sum(gains) / period
+        avg_l = sum(losses) / period
+        out[period] = 100 - 100 / (1 + (avg_g / avg_l if avg_l else 1e9))
+        for i in range(period + 1, n):
+            d = values[i] - values[i - 1]
+            avg_g = (avg_g * (period - 1) + max(d, 0.0)) / period
+            avg_l = (avg_l * (period - 1) + max(-d, 0.0)) / period
+            out[i] = 100 - 100 / (1 + (avg_g / avg_l if avg_l else 1e9))
+        return out
+
+    @staticmethod
+    def _macd(values, fast=12, slow=26, signal=9):
+        ef = AIStrategy._ema(values, fast)
+        es = AIStrategy._ema(values, slow)
+        n = len(values)
+        line = [None] * n
+        for i in range(n):
+            if ef[i] is not None and es[i] is not None:
+                line[i] = ef[i] - es[i]
+        # signal on macd line values (skip Nones)
+        vals = [(i, line[i]) for i in range(n) if line[i] is not None]
+        sig = [None] * n
+        if len(vals) >= signal:
+            series = [v for _, v in vals]
+            ema_s = AIStrategy._ema(series, signal)
+            for (i, _), s in zip(vals, ema_s):
+                sig[i] = s
+        hist = [None] * n
+        for i in range(n):
+            if line[i] is not None and sig[i] is not None:
+                hist[i] = line[i] - sig[i]
+        return line, sig, hist
+
+    @staticmethod
+    def _atr(highs, lows, closes, period=14):
+        n = len(closes)
+        tr = [0.0] * n
+        for i in range(1, n):
+            tr[i] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+        out = [None] * n
+        if n <= period:
+            return out
+        s = sum(tr[1:period + 1])
+        out[period] = s / period
+        for i in range(period + 1, n):
+            out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+        return out
+
+    @staticmethod
+    def _bb(values, period=20, mult=2.0):
+        n = len(values)
+        mid = [None] * n
+        upper = [None] * n
+        lower = [None] * n
+        for i in range(period - 1, n):
+            window = values[i - period + 1:i + 1]
+            m = sum(window) / period
+            var = sum((x - m) ** 2 for x in window) / period
+            sd = var ** 0.5
+            mid[i] = m
+            upper[i] = m + mult * sd
+            lower[i] = m - mult * sd
+        return mid, upper, lower
+
+    @staticmethod
+    def _roc(values, period):
+        out = [None] * len(values)
+        for i in range(period, len(values)):
+            prev = values[i - period]
+            if prev:
+                out[i] = (values[i] / prev - 1.0) * 100.0
+        return out
+
+    @staticmethod
+    def _adx(highs, lows, closes, period=14):
+        n = len(closes)
+        if n < period + 2:
+            return [None] * n
+        tr = [0.0] * n
+        plus_dm = [0.0] * n
+        minus_dm = [0.0] * n
+        for i in range(1, n):
+            up = highs[i] - highs[i - 1]
+            down = lows[i - 1] - lows[i]
+            plus_dm[i] = up if up > down and up > 0 else 0.0
+            minus_dm[i] = down if down > up and down > 0 else 0.0
+            tr[i] = max(highs[i] - lows[i],
+                        abs(highs[i] - closes[i - 1]),
+                        abs(lows[i] - closes[i - 1]))
+        def wild(arr):
+            out = [None] * n
+            s = sum(arr[1:period + 1])
+            out[period] = s
+            for i in range(period + 1, n):
+                s = s - s / period + arr[i]
+                out[i] = s
+            return out
+        atr = wild(tr)
+        p_dm = wild(plus_dm)
+        m_dm = wild(minus_dm)
+        dx = [None] * n
+        for i in range(period, n):
+            if not atr[i]:
+                continue
+            pdi = 100 * (p_dm[i] / atr[i]) if atr[i] else 0
+            mdi = 100 * (m_dm[i] / atr[i]) if atr[i] else 0
+            denom = pdi + mdi
+            dx[i] = 100 * abs(pdi - mdi) / denom if denom else 0
+        adx = [None] * n
+        vals = [d for d in dx[period:period * 2] if d is not None]
+        if len(vals) < period:
+            return adx
+        s = sum(vals[:period]) / period
+        idx = period * 2 - 1
+        if idx < n:
+            adx[idx] = s
+            for i in range(idx + 1, n):
+                if dx[i] is None:
+                    continue
+                s = (s * (period - 1) + dx[i]) / period
+                adx[i] = s
+        return adx
+
+    async def _fetch_indicators(self, client) -> dict:
+        """Multi-indicator 1H snapshot + 4H trend context (quant layer for LLM)."""
+        out = {}
+        cfg = self.config
+        for coin in cfg.symbols:
+            inst = f"{coin}-USDT-SWAP"
+            try:
+                resp = await client.get_candles(inst, bar=cfg.bar, limit=max(cfg.candle_limit, 220))
+                rows = list(reversed(resp.get("data") or []))
+                if len(rows) < 60:
+                    continue
+                # OKX candle[0] = ts ms; [-1] is the FORMING bar.
+                # P2.1: every indicator is computed on CLOSED bars only, so a
+                # decision can never repaint when the live bar rolls over.
+                bars = rows[:-1] if len(rows) >= 2 else rows
+                try:
+                    closed_bar_ts = int(float(bars[-1][0]))
+                except Exception:
+                    closed_bar_ts = 0
+                closes = [float(r[4]) for r in bars]
+                highs = [float(r[2]) for r in bars]
+                lows = [float(r[3]) for r in bars]
+                vols = [float(r[5]) if len(r) > 5 else 0.0 for r in bars]
+                # Latest traded price (forming bar close) — kept as "close" for
+                # every price consumer; "last_closed" is the bar we decide on.
+                last_closed = closes[-1]
+                try:
+                    live_px = float(rows[-1][4]) if len(rows) >= 2 else last_closed
+                except Exception:
+                    live_px = last_closed
+
+                ema21 = self._ema(closes, getattr(cfg, "ema_fast", 21))
+                ema50 = self._ema(closes, getattr(cfg, "ema_slow", 50))
+                ema200 = self._ema(closes, getattr(cfg, "ema_trend", 200))
+                roc = self._roc(closes, getattr(cfg, "roc_period", 12))
+                adx = self._adx(highs, lows, closes, cfg.adx_period)
+                rsi = self._rsi(closes, getattr(cfg, "rsi_period", 14))
+                macd_l, macd_s, macd_h = self._macd(closes)
+                atr = self._atr(highs, lows, closes, int(getattr(cfg, "atr_period", 14) or 14))
+                bb_m, bb_u, bb_l = self._bb(closes, 20, 2.0)
+
+                # volume ratio vs 20-bar avg
+                vol_ratio = None
+                if len(vols) >= 20 and sum(vols[-20:]) > 0:
+                    vol_ratio = vols[-1] / (sum(vols[-20:]) / 20.0)
+
+                c = closes[-1]
+                e21, e50, e200 = ema21[-1], ema50[-1], ema200[-1]
+                # Regime heuristic
+                regime = "unknown"
+                if e50 and e200 and c:
+                    if c > e200 and e21 and e21 > e50:
+                        regime = "bull"
+                    elif c < e200 and e21 and e21 < e50:
+                        regime = "bear"
+                    else:
+                        regime = "chop"
+
+                # Align scores for long/short (0..1)
+                adx_v = float(adx[-1] or 0)
+                rsi_v = float(rsi[-1] or 50)
+                macd_hv = float(macd_h[-1] or 0) if macd_h[-1] is not None else 0.0
+                long_pts = 0.0
+                short_pts = 0.0
+                if e21 and e50 and e21 > e50:
+                    long_pts += 0.2
+                if e21 and e50 and e21 < e50:
+                    short_pts += 0.2
+                if e200 and c > e200:
+                    long_pts += 0.25
+                if e200 and c < e200:
+                    short_pts += 0.25
+                if adx_v >= float(cfg.min_adx or 22):
+                    # ADX is strength, not direction — only the EMA-stack side gets it.
+                    # Giving it to both sides inflated short-align to 0.95 on a bounce.
+                    if e21 and e50 and e21 > e50:
+                        long_pts += 0.15
+                    elif e21 and e50 and e21 < e50:
+                        short_pts += 0.15
+                if macd_hv > 0:
+                    long_pts += 0.15
+                elif macd_hv < 0:
+                    short_pts += 0.15
+                # RSI: no overlap that scores both sides on a 55–60 bounce.
+                if 45 <= rsi_v <= 68:
+                    long_pts += 0.10
+                if 32 <= rsi_v <= 55:
+                    short_pts += 0.10
+                if rsi_v >= 64:
+                    short_pts -= 0.10
+                if rsi_v <= 36:
+                    long_pts -= 0.10
+                roc_v = float(roc[-1] or 0) if roc[-1] is not None else 0.0
+                if vol_ratio and vol_ratio >= 1.1:
+                    if roc_v > 0:
+                        long_pts += 0.10
+                    elif roc_v < 0:
+                        short_pts += 0.10
+                # Price vs fast EMA: a bear regime with price back above EMA21 is a bounce.
+                if e21 and c > e21:
+                    long_pts += 0.10
+                    short_pts -= 0.15
+                elif e21 and c < e21:
+                    short_pts += 0.10
+                    long_pts -= 0.15
+
+                # 4H context
+                tf4 = {}
+                try:
+                    r4 = await client.get_candles(inst, bar="4H", limit=80)
+                    rows4 = list(reversed(r4.get("data") or []))
+                    if len(rows4) >= 40:
+                        # P2.1: 4H context also from closed bars only.
+                        bars4 = rows4[:-1] if len(rows4) >= 2 else rows4
+                        c4 = [float(r[4]) for r in bars4]
+                        e4f = self._ema(c4, 21)
+                        e4s = self._ema(c4, 50)
+                        tf4 = {
+                            "close": c4[-1],
+                            "last_closed": c4[-1],
+                            "ema21": e4f[-1],
+                            "ema50": e4s[-1],
+                            "trend_up": bool(e4f[-1] and e4s[-1] and e4f[-1] > e4s[-1]),
+                        }
+                        if tf4["trend_up"]:
+                            long_pts += 0.15
+                        else:
+                            short_pts += 0.15
+                except Exception as e4:
+                    print(f"[AI] 4H {coin}: {e4}", flush=True)
+
+                def _r(x):
+                    try:
+                        return round(float(x), 6) if x is not None else None
+                    except Exception:
+                        return None
+
+                # Last 5 closed closes for LLM structure context
+                bar_closes = [_r(x) for x in closes[-5:]]
+                ema_slope = None
+                try:
+                    if e21 and len(ema21) >= 4 and ema21[-4]:
+                        ema_slope = round((float(e21) - float(ema21[-4])) / float(ema21[-4]) * 100.0, 4)
+                except Exception:
+                    ema_slope = None
+                out[coin] = {
+                    "close": _r(live_px),
+                    "last_closed": _r(last_closed),
+                    "closed_bar_ts": closed_bar_ts,
+                    "ema21": _r(e21),
+                    "ema50": _r(e50),
+                    "ema200": _r(e200),
+                    "ema_fast": _r(e21),  # compat exits
+                    "ema_slow": _r(e50),
+                    "ema_slope": ema_slope,
+                    "bar_closes": bar_closes,
+                    "roc_3": _r(roc[-1]),
+                    "roc": _r(roc[-1]),
+                    "adx": _r(adx[-1]),
+                    "rsi": _r(rsi[-1]),
+                    "macd": _r(macd_l[-1]),
+                    "macd_signal": _r(macd_s[-1]),
+                    "macd_hist": _r(macd_h[-1]),
+                    "atr": _r(atr[-1]),
+                    "bb_mid": _r(bb_m[-1]),
+                    "bb_upper": _r(bb_u[-1]),
+                    "bb_lower": _r(bb_l[-1]),
+                    "vol_ratio": _r(vol_ratio),
+                    "regime": regime,
+                    "align_long": round(min(1.0, max(0.0, long_pts)), 3),
+                    "align_short": round(min(1.0, max(0.0, short_pts)), 3),
+                    "tf_4h": tf4,
+                    "bar": cfg.bar,
+                }
+            except Exception as e:
+                print(f"[AI] candles {coin}: {e}", flush=True)
+        self._latest_indicators = out
+        # Attach live marks + staleness (exits must not rely on lagging candles alone)
+        try:
+            self._indicators_stale_flag = self._indicators_stale(2.5)
+            if getattr(self, "_indicators_stale_flag", False):
+                print(
+                    "[AI] indicators STALE (closed_bar older than ~2.5 bars) — exits use ticker mark",
+                    flush=True,
+                )
+            for coin in list(out.keys()):
+                last = await self._ticker_last(client, f"{coin}-USDT-SWAP")
+                if last > 0:
+                    out[coin]["mark"] = last
+                    try:
+                        c = float(out[coin].get("close") or 0)
+                        if c > 0 and abs(last - c) / c > 0.005:
+                            out[coin]["close_candle"] = c
+                            out[coin]["price_lag_pct"] = round((last - c) / c * 100, 3)
+                    except Exception:
+                        pass
+            self._latest_indicators = out
+        except Exception as e:
+            print(f"[AI] mark attach: {e}", flush=True)
+        return out
+
+
+
+    async def _refresh_funding(self, client) -> None:
+        """Cache OKX funding rates (TTL ~5 min) into indicators."""
+        import time as _time
+        now = _time.time()
+        if now - float(getattr(self, "_funding_cache_ts", 0) or 0) < 300 and self._funding_cache:
+            for coin, fr in self._funding_cache.items():
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["funding_rate"] = fr.get("rate")
+                    self._latest_indicators[coin]["funding_time"] = fr.get("time")
+            return
+        if not client or not hasattr(client, "get_funding_rate"):
+            return
+        cache = {}
+        for coin in (self.config.symbols or []):
+            inst = f"{coin}-USDT-SWAP"
+            try:
+                resp = await client.get_funding_rate(inst)
+                rows = resp.get("data") or []
+                if resp.get("error") or not rows:
+                    print(f"[AI] funding {coin}: empty/error resp={resp.get('error')}", flush=True)
+                    continue
+                row = rows[0]
+                rate = float(row.get("fundingRate") or row.get("nextFundingRate") or 0)
+                cache[coin] = {
+                    "rate": rate,
+                    "time": row.get("fundingTime") or row.get("nextFundingTime"),
+                }
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["funding_rate"] = rate
+                    self._latest_indicators[coin]["funding_time"] = cache[coin]["time"]
+            except Exception as e:
+                print(f"[AI] funding {coin}: {e}", flush=True)
+        if cache:
+            self._funding_cache = cache
+            self._funding_cache_ts = now
+
+    def _adx_blocks_open(self, adx: float, align_best: float) -> bool:
+        """True if ADX is too weak for an open.
+
+        Aggressive rule: min_adx applies normally; if align is strong
+        (>= adx_align_bypass), allow down to adx_soft_floor.
+        """
+        try:
+            adx = float(adx or 0)
+            align_best = float(align_best or 0)
+        except (TypeError, ValueError):
+            return True
+        min_adx = float(getattr(self.config, "min_adx", 15) or 15)
+        soft = float(getattr(self.config, "adx_soft_floor", 12) or 12)
+        bypass = float(getattr(self.config, "adx_align_bypass", 0.72) or 0.72)
+        if adx >= min_adx:
+            return False
+        if align_best >= bypass and adx >= soft:
+            return False
+        return True
+
+    def _momentum_against(self, side: str, ind: dict) -> str | None:
+        """Reason string if this side fights the live 1H impulse, else None.
+
+        EMA200 regime stays 'bear' through a bounce. Those shorts (price back
+        above EMA21, MACD histogram up, ROC up) were the recent losers.
+        A 12-bar ROC gate alone lags the turn — MACD hist + EMA21 catch it.
+        """
+        if not bool(getattr(self.config, "momentum_entry_filter", True)):
+            return None
+        if not ind:
+            return None
+        side = (side or "").lower()
+        try:
+            close = float(ind.get("close") or 0)
+            ema21 = float(ind.get("ema21") or ind.get("ema_fast") or 0)
+            roc = float(ind.get("roc") if ind.get("roc") is not None else ind.get("roc_3") or 0)
+            hist = float(ind.get("macd_hist") or 0)
+            rsi = float(ind.get("rsi") or 50)
+        except (TypeError, ValueError):
+            return None
+        if close <= 0:
+            return None
+        if side == "short":
+            if ema21 > 0 and close > ema21 * 1.001:
+                return "bounce_above_ema21"
+            if hist > 0 and roc > 0.05:
+                return "macd_roc_up"
+            if rsi >= 63 and roc > 0:
+                return "rsi_bounce"
+        elif side == "long":
+            if ema21 > 0 and close < ema21 * 0.999:
+                return "fade_below_ema21"
+            if hist < 0 and roc < -0.05:
+                return "macd_roc_down"
+            if rsi <= 37 and roc < 0:
+                return "rsi_fade"
+        return None
+
+    def _thesis_break_reason(self, pos, ind: dict, upl: float, held_min: float) -> str | None:
+        """Cut a flat/red trade when 2 of 3 impulse signals have flipped.
+
+        Does not touch a winner (upl ≥ 0.25%) — giveback and the trail do that.
+        One signal alone is noise; two means the entry thesis is gone.
+        """
+        if not bool(getattr(self.config, "thesis_break_exit", True)):
+            return None
+        if held_min < float(getattr(self.config, "min_hold_minutes", 90) or 0):
+            return None
+        if upl >= 0.50:  # v1.30: winners left to giveback/trail, not thesis-break
+            return None
+        try:
+            close = float(ind.get("close") or 0)
+            ema21 = float(ind.get("ema21") or ind.get("ema_fast") or 0)
+            roc = float(ind.get("roc") if ind.get("roc") is not None else ind.get("roc_3") or 0)
+            hist = float(ind.get("macd_hist") or 0)
+        except (TypeError, ValueError):
+            return None
+        if close <= 0 or ema21 <= 0:
+            return None
+        flags = []
+        side = str(getattr(pos, "side", "") or "").lower()
+        if side == "short":
+            if close > ema21 * 1.0015:
+                flags.append("above_ema21")
+            if hist > 0:
+                flags.append("macd_up")
+            if roc > 0.15:
+                flags.append("roc_up")
+        elif side == "long":
+            if close < ema21 * 0.9985:
+                flags.append("below_ema21")
+            if hist < 0:
+                flags.append("macd_down")
+            if roc < -0.15:
+                flags.append("roc_down")
+        else:
+            return None
+        if len(flags) >= 2 and upl < 0.15:
+            return "thesis_break:" + "+".join(flags)
+        return None
+
+    def _build_quant(self) -> dict:
+        """Aggregate quant layer for LLM + hard gates."""
+        inds = self._latest_indicators or {}
+        by_coin = {}
+        regimes = []
+        for coin, ind in inds.items():
+            al = float(ind.get("align_long") or 0)
+            ash = float(ind.get("align_short") or 0)
+            reg = ind.get("regime") or "unknown"
+            regimes.append(reg)
+            best_side = "long" if al >= ash else "short"
+            best = max(al, ash)
+            by_coin[coin] = {
+                "regime": reg,
+                "align_long": al,
+                "align_short": ash,
+                "best_side": best_side,
+                "align_score": best,
+                "adx": ind.get("adx"),
+                "rsi": ind.get("rsi"),
+                "funding_rate": ind.get("funding_rate"),
+                "block_open": (
+                    (reg == "chop" and (
+                        bool(getattr(self.config, "block_chop_opens", True))
+                        or best < float(getattr(self.config, "quant_min_align", 0.55) or 0.55)
+                    ))
+                    or (reg != "chop" and best < 0.50)
+                    or self._adx_blocks_open(float(ind.get("adx") or 0), best)
+                ),
+            }
+        # global regime = majority of BTC/ETH if present
+        g = "unknown"
+        for pref in ("BTC", "ETH"):
+            if pref in by_coin:
+                g = by_coin[pref]["regime"]
+                break
+        if g == "unknown" and regimes:
+            g = max(set(regimes), key=regimes.count)
+        # BTC leadership
+        btc = by_coin.get("BTC") or {}
+        btc_ind = (self._latest_indicators or {}).get("BTC") or {}
+        btc_roc = float(btc_ind.get("roc") or btc_ind.get("roc_3") or 0)
+        btc_impulse = None
+        thr = float(getattr(self.config, "btc_roc_block", 0.6) or 0.6)
+        if abs(btc_roc) >= thr:
+            btc_impulse = "up" if btc_roc > 0 else "down"
+        return {
+            "global_regime": g,
+            # Global chop no longer hard-blocks every open — per-coin
+            # block_open (align/adx gates) decides instead.
+            "block_open": bool(
+                getattr(self.config, "block_chop_opens", True) and g == "chop"
+            ),
+            "coins": by_coin,
+            "btc_roc": round(btc_roc, 4),
+            "btc_impulse": btc_impulse,
+            "btc_regime": btc.get("regime"),
+            "min_align": float(self._effective_min_align()),
+            "min_adx": float(self.config.min_adx or 22),
+            "min_confidence": float(self._effective_min_confidence()),
+            "adapt_preset": (self._adapt or {}).get("preset"),
+            "funding_filter": bool(getattr(self.config, "funding_filter_enabled", True)),
+            "btc_filter": bool(getattr(self.config, "btc_filter_enabled", True)),
+        }
+
+    def _quant_veto_open(self, decision: dict) -> str | None:
+        """Return reason string if quant layer blocks an LLM open."""
+        if (decision.get("action") or "").lower() != "open":
+            return None
+        q = self._build_quant()
+        # NOTE: no global-chop veto here. A BTC/global chop reading used to
+        # block every coin before the per-coin gate below ran, so a coin in its
+        # own trend could never trade — the opposite of the intent. Each coin's
+        # own regime decides via q['coins'][coin]['block_open'].
+        coin = (decision.get("symbol") or "").upper()
+        side = (decision.get("side") or "").lower()
+        conf = float(decision.get("confidence") or 0)
+        if conf < float(self._effective_min_confidence()):
+            return f"quant_veto:low_conf:{conf:.2f}<{self._effective_min_confidence():.2f}"
+        stop = float(decision.get("stop_pct") or 0.03)
+        take = float(decision.get("take_pct") or 0.06)
+        if stop > 0 and take / stop < 1.8:
+            return f"quant_veto:rr:{take/stop:.2f}"
+        cq = (q.get("coins") or {}).get(coin) or {}
+        if cq.get("block_open"):
+            return f"quant_veto:coin_block:{coin}"
+        # Cost-aware edge: the move this setup can realistically deliver must
+        # clear the round trip (fees + slippage) by cost_min_edge_mult. ATR is
+        # the honest 1H estimate; the LLM's take_pct is aspirational, so it is
+        # only the fallback when ATR is unavailable.
+        try:
+            ind_e = (self._latest_indicators or {}).get(coin) or {}
+            px_e = float(ind_e.get("close") or 0)
+            atr_pct = float(self._atr_pct(coin, px_e) or 0) * 100.0
+            exp_pct = atr_pct if atr_pct > 0 else take * 100.0
+            need_pct = self._round_trip_cost_pct() * float(
+                getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+            if need_pct > 0 and exp_pct < need_pct:
+                return (f"quant_veto:cost_edge:exp={exp_pct:.2f}%"
+                        f"<need={need_pct:.2f}%")
+        except Exception:
+            pass
+        if side == "long" and float(cq.get("align_long") or 0) < float(q["min_align"]) - 1e-9:
+            return f"quant_veto:weak_long_align"
+        if side == "short" and float(cq.get("align_short") or 0) < float(q["min_align"]) - 1e-9:
+            return f"quant_veto:weak_short_align"
+        # regime side match — coin AND market (BTC / global)
+        reg = str(cq.get("regime") or q.get("global_regime") or "").lower()
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
+        if reg == "bull" and side == "short":
+            return "quant_veto:short_in_bull"
+        if reg == "bear" and side == "long":
+            return "quant_veto:long_in_bear"
+        # Hard: never fight BTC / global trend (demo opened short in bull market)
+        if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+            return "quant_veto:short_vs_btc_bull"
+        if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+            return "quant_veto:long_vs_btc_bear"
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        # Mild BTC drift still blocks opposing opens
+        _raw_veto = getattr(self.config, "btc_roc_veto", None)
+        btc_roc_thr = float(_raw_veto) if _raw_veto is not None else 0.20
+        if side == "short" and btc_roc >= btc_roc_thr:
+            return f"quant_veto:short_vs_btc_roc_up:{btc_roc:.2f}"
+        if side == "long" and btc_roc <= -btc_roc_thr:
+            return f"quant_veto:long_vs_btc_roc_down:{btc_roc:.2f}"
+        # 4H alignment if present on coin indicators
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        tf4 = ind.get("tf_4h") or cq.get("tf_4h") or {}
+        try:
+            e4f = float(tf4.get("ema21") or tf4.get("ema_fast") or 0)
+            e4s = float(tf4.get("ema50") or tf4.get("ema_slow") or 0)
+            c4 = float(tf4.get("close") or 0)
+        except (TypeError, ValueError):
+            e4f = e4s = c4 = 0.0
+        if e4f and e4s and c4:
+            if side == "short" and e4f > e4s and c4 > e4s:
+                return "quant_veto:short_vs_4h_bull"
+            if side == "long" and e4f < e4s and c4 < e4s:
+                return "quant_veto:long_vs_4h_bear"
+
+        # Funding: paying high funding against the side is toxic for holds on 1H
+        if getattr(self.config, "funding_filter_enabled", True):
+            fr = cq.get("funding_rate")
+            if fr is None:
+                fr = (self._latest_indicators or {}).get(coin, {}).get("funding_rate")
+            try:
+                fr = float(fr) if fr is not None else None
+            except (TypeError, ValueError):
+                fr = None
+            lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+            if fr is None:
+                # P2.2: no funding data → fail closed. A missing rate used to
+                # silently pass the filter; on OKX a stale/empty response then
+                # let a high-funding hold through.
+                if bool(getattr(self.config, "funding_fail_closed", True)) and lim > 0:
+                    return "quant_veto:funding_unknown"
+            elif lim > 0:
+                # long pays when funding > 0; short pays when funding < 0
+                if side == "long" and fr >= lim:
+                    return f"quant_veto:funding_long:{fr:.5f}"
+                if side == "short" and fr <= -lim:
+                    return f"quant_veto:funding_short:{fr:.5f}"
+
+        # BTC impulse: don't fight BTC on alts
+        if getattr(self.config, "btc_filter_enabled", True) and coin != "BTC":
+            impulse = q.get("btc_impulse")
+            if impulse == "up" and side == "short":
+                return f"quant_veto:btc_impulse_up_no_alt_short"
+            if impulse == "down" and side == "long":
+                return f"quant_veto:btc_impulse_down_no_alt_long"
+        mom = self._momentum_against(side, ind)
+        if mom:
+            return f"quant_veto:momentum:{mom}"
+        if coin == "SOL":
+            try:
+                adx_sol = float(ind.get("adx") or 0)
+            except (TypeError, ValueError):
+                adx_sol = 0.0
+            align_sol = float(cq.get("align_short") if side == "short" else cq.get("align_long") or 0)
+            need_adx = float(getattr(self.config, "sol_min_adx", 28) or 28)
+            need_al = float(getattr(self.config, "sol_min_align", 0.88) or 0.88)
+            if adx_sol < need_adx or align_sol < need_al:
+                return f"quant_veto:sol_quality:adx={adx_sol:.0f}/align={align_sol:.2f}"
+        conc = self._concentration_veto(coin, side, conf)
+        if conc:
+            return conc
+        return None
+
+    @staticmethod
+    def _corr_group(coin: str) -> str:
+        """Correlation group for a coin (reuses risk_guard's taxonomy)."""
+        try:
+            from app.services.risk_guard import _symbol_to_group
+            return _symbol_to_group(f"{str(coin).upper()}-USDT-SWAP")
+        except Exception:
+            return "other"
+
+    def _concentration_veto(self, coin: str, side: str, conf: float = 0.0) -> str | None:
+        """Block portfolio concentration: one position per correlation group and
+        a higher bar for BTC once it already dominates the recent book."""
+        coin = str(coin or "").upper()
+        cfg = self.config
+        pos = getattr(self, "_positions", {}) or {}
+
+        def _open_coins():
+            out = []
+            for c, p in pos.items():
+                try:
+                    if abs(float(getattr(p, "size", 0) or 0)) > 1e-12:
+                        out.append(str(c).upper())
+                except (TypeError, ValueError):
+                    continue
+            return out
+
+        max_per_group = int(getattr(cfg, "max_positions_per_group", 1) or 0)
+        # Concentration governs NEW positions only: an already-open coin is a
+        # scale-in (handled later in the open path), not a second slot.
+        open_coins = _open_coins()
+        if coin in open_coins:
+            return None
+        if max_per_group > 0:
+            grp = self._corr_group(coin)
+            if grp and grp != "other":
+                same = [c for c in open_coins if self._corr_group(c) == grp]
+                if len(same) >= max_per_group:
+                    return f"concentration:group:{grp}:" + ",".join(sorted(same)[:3])
+
+        if coin == "BTC":
+            max_share = float(getattr(cfg, "btc_max_recent_share", 0.0) or 0)
+            if max_share > 0:
+                recent = self._closed_trades(demo_only=True)[-10:]
+                if recent:
+                    btc_n = sum(
+                        1 for t in recent
+                        if str(t.get("coin") or t.get("symbol") or "").upper().startswith("BTC")
+                    )
+                    share = btc_n / float(len(recent))
+                    if share >= max_share:
+                        need = float(getattr(cfg, "btc_min_confidence", 0.0) or 0)
+                        if need > 0 and float(conf or 0) < need:
+                            return (f"concentration:btc_share:{share:.0%}"
+                                    f">={max_share:.0%},conf={float(conf or 0):.2f}<{need:.2f}")
+        return None
+
+    # Reasons that describe an executed ENTRY (or an unknown/non-final state),
+    # never a realized result. `filled` is what _hydrate_from_db used to write
+    # for every open row, which made openings look like 0-PnL losses and drove
+    # the adaptive preset into a false "defensive" mode.
+    _NON_CLOSE_REASONS = frozenset({
+        "", "open", "opening", "add", "filled", "pending", "new",
+        "cancelled", "canceled", "rejected", "db",
+    })
+
+    def _closed_trades(self, demo_only: bool = False) -> list:
+        """Realized closes only — the basis for adaptive/reflection stats.
+
+        Openings carry fee-only PnL (~0) and were previously counted as losing
+        trades; zero/near-zero rows are excluded for the same reason.
+        """
+        out = []
+        for t in self._trade_log:
+            if not isinstance(t, dict):
+                continue
+            reason = str(t.get("reason") or "").strip().lower()
+            if reason in self._NON_CLOSE_REASONS:
+                continue
+            try:
+                pnl = float(t.get("pnl"))
+            except (TypeError, ValueError):
+                continue
+            if abs(pnl) < 1e-9:
+                continue  # entry fee-only row or BE noise, not a realized close
+            if demo_only and str(t.get("account_mode") or "demo").lower() == "live":
+                continue
+            out.append(t)
+        return out
+
+    def _rolling_stats(self) -> dict:
+        n = int(getattr(self.config, "adapt_window", 12) or 12)
+        closed = self._closed_trades(demo_only=True)[-n:]
+        if not closed:
+            return {"n": 0, "win_rate": None, "avg_pnl": 0.0, "sum_pnl": 0.0,
+                    "streak": 0, "streak_kind": "none"}
+        pnls = [float(t.get("pnl") or 0) for t in closed]
+        wins = sum(1 for p in pnls if p > 0)
+        # streak from end
+        streak = 0
+        kind = "none"
+        for p in reversed(pnls):
+            if streak == 0:
+                kind = "win" if p > 0 else "loss"
+                streak = 1
+            elif (kind == "win" and p > 0) or (kind == "loss" and p <= 0):
+                streak += 1
+            else:
+                break
+        # Robust central tendency (v1.41): a single catastrophic stop-out must not
+        # decide the preset. Winsorize at 1.5×IQR; the raw avg is kept for display.
+        _srt = sorted(pnls)
+        avg_trim = round(sum(_winsorize(pnls)) / len(pnls), 4)
+        median = round(_srt[len(_srt) // 2], 4)
+        return {
+            "n": len(closed),
+            "win_rate": round(100.0 * wins / len(closed), 1),
+            "avg_pnl": round(sum(pnls) / len(pnls), 4),
+            "avg_pnl_trim": avg_trim,
+            "median_pnl": median,
+            "sum_pnl": round(sum(pnls), 4),
+            "streak": streak,
+            "streak_kind": kind,
+        }
+
+    def _journal_append(self, entry: dict) -> None:
+        """Append closed-trade journal row (in-memory, persisted with lifetime)."""
+        try:
+            row = {
+                "time": entry.get("time") or datetime.now(timezone.utc).isoformat(),
+                "coin": entry.get("coin") or entry.get("symbol"),
+                "side": entry.get("side"),
+                "pnl": round(float(entry.get("pnl") or 0), 4),
+                "reason": str(entry.get("reason") or "")[:80],
+                "hold_min": entry.get("hold_min"),
+                "entry": entry.get("entry_price") or entry.get("entry"),
+                "exit": entry.get("exit_price") or entry.get("exit"),
+            }
+            for k in ("move_pct", "btc_pct", "alpha_pct", "r_mult", "verdict"):
+                if entry.get(k) is not None:
+                    row[k] = entry[k]
+            self._journal = (getattr(self, "_journal", None) or []) + [row]
+            self._journal = self._journal[-100:]
+        except Exception as e:
+            print(f"[AI] journal_append: {e}", flush=True)
+
+    def _build_daily_lessons(self) -> list:
+        """Derive up to 3 actionable rules from recent journal (phase5)."""
+        journal = list(getattr(self, "_journal", None) or self._closed_trades())[-30:]
+        if len(journal) < 3:
+            return list(getattr(self, "_daily_lessons", None) or [])[:3]
+        return build_lessons(journal)
+
+    def _maybe_refresh_daily_lessons(self) -> None:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        force = (day != getattr(self, "_last_lesson_day", ""))
+        if force or not getattr(self, "_daily_lessons", None):
+            self._daily_lessons = self._build_daily_lessons()
+            self._last_lesson_day = day
+            if self._daily_lessons:
+                print(f"[AI] daily_lessons: {self._daily_lessons}", flush=True)
+
+    def _build_reflection(self, stats: dict) -> str:
+        self._maybe_refresh_daily_lessons()
+        closed = self._closed_trades()[-8:]
+        parts = []
+        if stats.get("n"):
+            parts.append(
+                f"Last {stats['n']} trades: WR={stats.get('win_rate')}% "
+                f"sumPnL={stats.get('sum_pnl')} streak={stats.get('streak_kind')}x{stats.get('streak')}"
+            )
+        # Journal tail (compact)
+        for t in closed[-5:]:
+            coin = (t.get("coin") or t.get("symbol") or "").replace("-USDT-SWAP", "")
+            parts.append(
+                f"{coin} {t.get('side')} pnl={float(t.get('pnl') or 0):+.2f} "
+                f"exit={t.get('reason')}"
+            )
+        lessons = getattr(self, "_daily_lessons", None) or []
+        for i, L in enumerate(lessons, 1):
+            parts.append(f"RULE{i}:{L}")
+        for t in (getattr(self, "_journal", None) or [])[-3:]:
+            if t.get("alpha_pct") is None:
+                continue
+            r = t.get("r_mult")
+            r_s = f"{float(r):+.2f}" if r is not None else "n/a"
+            parts.append(
+                f"SETTLED {t.get('coin')} {t.get('side')} R={r_s} "
+                f"alpha={float(t.get('alpha_pct')):+.2f}% -> {t.get('verdict')}"
+            )
+        preset = (self._adapt or {}).get("preset")
+        if preset:
+            parts.append(
+                f"Active preset={preset}; conf>={(self._adapt or {}).get('min_confidence')}"
+            )
+        return " | ".join(parts)[:900]
+
+    def _settle_close_memory(self, pos, coin: str, exit_px: float, pnl: float,
+                             reason: str) -> dict:
+        """Score a close (alpha vs BTC, R-multiple) and refresh lessons/reflection."""
+        hold_min = None
+        try:
+            opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+            hold_min = round((datetime.now(timezone.utc) - opened).total_seconds() / 60.0, 1)
+        except Exception:
+            pass
+        entry = float(getattr(pos, "entry_price", 0) or 0)
+        risk = float(getattr(pos, "risk_usd", 0) or 0)
+        if risk <= 0 and entry > 0:
+            # Adopted positions have no planned risk — derive it from the stop.
+            try:
+                stop = float(getattr(pos, "stop_price", 0) or 0)
+                notional = abs(float(getattr(pos, "size", 0) or 0)) * \
+                    CT_VAL.get(coin, 0.01) * entry
+                risk = abs(entry - stop) / entry * notional
+            except Exception:
+                risk = 0.0
+        btc_exit = float((self._latest_indicators.get("BTC") or {}).get("close") or 0)
+        st = settle_trade(
+            side=str(getattr(pos, "side", "") or ""),
+            entry=entry,
+            exit=float(exit_px or 0),
+            pnl=float(pnl or 0),
+            risk_usd=risk,
+            btc_entry=float(getattr(pos, "btc_ref", 0) or 0),
+            btc_exit=btc_exit,
+        )
+        try:
+            self._journal_append({
+                "time": datetime.now(timezone.utc).isoformat(),
+                "coin": coin, "side": getattr(pos, "side", ""),
+                "pnl": pnl, "reason": reason,
+                "hold_min": hold_min, "entry": entry, "exit": exit_px,
+                **st,
+            })
+        except Exception as e:
+            print(f"[AI] journal on close: {e}", flush=True)
+        try:
+            self._maybe_refresh_daily_lessons()
+        except Exception as e:
+            print(f"[AI] lessons on close: {e}", flush=True)
+        try:
+            self._reflection = self._build_reflection(self._rolling_stats())
+        except Exception as e:
+            print(f"[AI] reflection on close: {e}", flush=True)
+        return st
+
+    async def _fetch_recent_fills(self, client, inst: str) -> list:
+        """Recent fills for one instrument (live fills, then 3-month history)."""
+        for call in (
+            lambda: client.get_fills(inst_id=inst, limit=50),
+            lambda: client.get_fills_history(inst_type="SWAP", instId=inst, limit=50),
+        ):
+            try:
+                resp = await call()
+            except Exception:
+                continue
+            if isinstance(resp, dict) and not resp.get("error") and resp.get("data"):
+                return list(resp.get("data") or [])
+        return []
+
+    async def _recover_close_fill(self, client, pos) -> dict:
+        """Find the real closing fill of ``pos`` on the exchange.
+
+        Returns ``{confirmed, px, gross, fees, has_pnl}``. Only a real fill may
+        be booked as a trade. Before v1.39 the exit price fell back to the entry
+        price, so a position that vanished on the exchange was booked as
+        ``exit == entry`` with ``pnl = -estimated_fee`` — the four "ADA −2.07"
+        rows on 28 Oct were exactly that artefact, not trades.
+        """
+        inst = str(getattr(pos, "inst_id", "") or "")
+        if not client or not inst:
+            return {"confirmed": False}
+        pos_side = str(getattr(pos, "side", "") or "").lower()
+        close_side = "sell" if pos_side == "long" else "buy"
+        try:
+            want_sz = abs(float(getattr(pos, "size", 0) or 0))
+        except (TypeError, ValueError):
+            want_sz = 0.0
+        try:
+            opened_ms = int(datetime.fromisoformat(
+                str(getattr(pos, "opened_at", "")).replace("Z", "+00:00")
+            ).timestamp() * 1000)
+        except Exception:
+            opened_ms = 0
+        rows: list = []
+        for _ in range(3):
+            rows = await self._fetch_recent_fills(client, inst)
+            if rows:
+                break
+            await asyncio.sleep(0.5)
+        if not rows:
+            return {"confirmed": False}
+        try:
+            rows = sorted(rows, key=lambda r: int(float((r or {}).get("ts") or 0)))
+        except Exception:
+            pass
+        picked = []
+        total_sz = 0.0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            try:
+                ts = int(float(r.get("ts") or 0))
+                if opened_ms and ts < opened_ms - 5_000:
+                    continue
+                if str(r.get("side") or "").lower() != close_side:
+                    continue
+                r_ps = str(r.get("posSide") or "").lower()
+                if r_ps in ("long", "short") and r_ps != pos_side:
+                    continue
+                sz = abs(float(r.get("fillSz") or 0))
+                px = float(r.get("fillPx") or 0)
+                if sz <= 0 or px <= 0:
+                    continue
+                gross = float(r.get("fillPnl") or 0)
+                fee = float(r.get("fee") or 0)
+                has_pnl = bool(str(r.get("fillPnl") or "").strip())
+            except (TypeError, ValueError):
+                continue
+            picked.append((sz, px, gross, fee, has_pnl))
+            total_sz += sz
+            if want_sz > 0 and total_sz >= want_sz * 1.02:
+                break
+        if not picked:
+            return {"confirmed": False}
+        tot = sum(p[0] for p in picked) or 1.0
+        return {
+            "confirmed": True,
+            "px": sum(p[0] * p[1] for p in picked) / tot,
+            "gross": sum(p[2] for p in picked),
+            "fees": sum(p[3] for p in picked),
+            "has_pnl": any(p[4] for p in picked),
+        }
+
+    async def _remember_close(self, coin: str, side: str, pnl: float,
+                              reason: str) -> None:
+        """Remember (and persist) the last close per coin for the anti-churn cooldown.
+
+        `_last_closes` used to live in memory only, so every redeploy reset the
+        loss cooldown and the same losing setup was re-opened within a minute
+        (four ADA shorts on 28 Oct, each 56 s–7 min after the previous loss).
+        """
+        rec = {"side": str(side or "").lower(), "ts": time.time(),
+               "pnl": float(pnl or 0), "reason": str(reason or "")}
+        try:
+            cutoff = time.time() - 86_400
+            live = {k: v for k, v in (self._last_closes or {}).items()
+                    if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff}
+            live[coin] = rec
+            self._last_closes = live
+        except Exception:
+            try:
+                self._last_closes[coin] = rec
+            except Exception:
+                return
+        if not self.db:
+            return
+        try:
+            await self.db.set_setting(
+                f"last_closes:{self.BOT_ID}", json.dumps(self._last_closes))
+        except Exception as e:
+            print(f"[AI] persist last_closes: {e}", flush=True)
+        await self._remember_close_reason(coin, pnl, reason, mode="demo")
+
+    async def _remember_close_reason(self, coin: str, pnl: float,
+                                     reason: str, mode: str = "demo") -> None:
+        """Persist a rolling list of close reasons (the dashboard reads it).
+
+        `trades` has no reason column and `_trade_log` dies with the process,
+        so after a redeploy the «Сделки» panel could only say "ЗАКРЫТА".
+        """
+        if not self.db:
+            return
+        key = f"close_reasons:{self.BOT_ID}"
+        try:
+            blob = await self.db.get_setting(key)
+            rows = json.loads(blob) if blob else []
+            if not isinstance(rows, list):
+                rows = []
+            rows.append({
+                "coin": str(coin or "").upper(),
+                "ts": int(time.time() * 1000),
+                "pnl": round(float(pnl or 0), 6),
+                "reason": str(reason or "").strip().lower()[:120],
+                "mode": "live" if str(mode).lower() == "live" else "demo",
+            })
+            await self.db.set_setting(key, json.dumps(rows[-150:]))
+        except Exception as e:
+            print(f"[AI] persist close_reasons: {e}", flush=True)
+
+    async def _restore_last_closes(self) -> None:
+        """Load the persisted anti-churn cooldown (survives redeploys)."""
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting(f"last_closes:{self.BOT_ID}")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            if not isinstance(data, dict):
+                return
+            cutoff = time.time() - 86_400
+            self._last_closes = {
+                str(k): v for k, v in data.items()
+                if isinstance(v, dict) and float(v.get("ts") or 0) >= cutoff
+            }
+            if self._last_closes:
+                print(f"[AI] hydrate last_closes: {len(self._last_closes)} "
+                      f"(anti-churn survives redeploy)", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate last_closes: {e}", flush=True)
+
+    async def _record_flat_close(self, client, pos, coin: str, exit_px: float,
+                                 reason: str) -> None:
+        """Book a close that already happened on the exchange (SL/TP, manual, race).
+
+        Rules:
+          * only a real exchange fill is booked (see ``_recover_close_fill``);
+          * the close is claimed once, before any await — two reconcilers (or
+            two instances during a deploy) used to book the same event twice;
+          * no ``exit = entry`` fallback, so a vanished position can no longer
+            masquerade as a trade that lost exactly the fee.
+        """
+        if not pos:
+            return
+        inst = getattr(pos, "inst_id", "") or f"{coin}-USDT-SWAP"
+        side = str(getattr(pos, "side", "") or "")
+        _key = f"{inst}|{side}|{getattr(pos, 'opened_at', '')}"
+        seen = getattr(self, "_closed_keys", None)
+        if seen is None:
+            seen = self._closed_keys = set()
+        if _key in seen:
+            return
+        seen.add(_key)
+        if len(seen) > 400:
+            self._closed_keys = set(list(seen)[-200:])
+        # Drop it from memory now: no concurrent path may close it again.
+        self._positions.pop(coin, None)
+        mode, key = self._account_mode_tag()
+
+        try:
+            info = await self._recover_close_fill(client, pos)
+        except Exception as e:
+            print(f"[AI] recover close fill {coin}: {e}", flush=True)
+            info = {"confirmed": False}
+        if not info.get("confirmed"):
+            # Reconciliation anomaly, not a trade. Do not invent PnL — the
+            # exchange-bill sync attributes the real close independently.
+            print(f"[AI] CLOSE {coin} unconfirmed (no exchange fill) — not booked", flush=True)
+            self._record_exec("flat_unconfirmed", coin=coin, side=side,
+                              reason=reason or "exchange_close")
+            if self.db:
+                try:
+                    await self.db.delete_position_inst(self.BOT_ID, inst, side)
+                except Exception:
+                    pass
+            try:
+                await release_open(self.db, self.BOT_ID, inst, side)
+            except Exception:
+                pass
+            return
+
+        exit_px = float(info.get("px") or 0)
+        fee_c = abs(float(info.get("fees") or 0))
+        if info.get("has_pnl"):
+            pnl = float(info.get("gross") or 0) + float(info.get("fees") or 0)
+            self._lifetime_fees += fee_c
+        else:
+            try:
+                _e, exit_px, pnl, fee_c = compute_close_metrics(
+                    pos, coin, exit_px, fee=fee_c)
+                self._lifetime_fees += abs(float(fee_c or 0))
+            except Exception:
+                pnl = 0.0
+        pnl = round(float(pnl or 0), 2)
+        # The engine drops zero-PnL rows; only bump the counters for rows it
+        # will actually count, otherwise internal KPI can never converge.
+        counted = abs(pnl) >= 1e-9
+
+        self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        if counted:
+            self._lifetime_trades += 1
+            if pnl > 0:
+                self._lifetime_wins += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+        self._persist()
+
+        side_order = "sell" if side == "long" else "buy"
+        self._trade_log.append({
+            "account_mode": mode,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "side": side_order, "symbol": inst,
+            "size": getattr(pos, "size", 0), "pnl": pnl,
+            "entry_price": getattr(pos, "entry_price", 0),
+            "exit_price": exit_px, "fee": round(float(fee_c or 0), 4),
+            "reason": reason, "pos_side": side, "coin": coin,
+            "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+            "confirmed": True,
+        })
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=side_order, sz=getattr(pos, "size", 0),
+                    px=exit_px, ord_id="", inst_id=inst, ord_type="market",
+                    fee=round(float(fee_c or 0), 4), fee_ccy="USDT", pnl=pnl,
+                    state="closed", signal_id=int(getattr(pos, "signal_id", 0) or 0) or None,
+                    account_mode=mode, account_key=key,
+                )
+            except Exception as e:
+                print(f"[AI] db close (flat): {e}", flush=True)
+            try:
+                await self.db.delete_position_inst(self.BOT_ID, inst, side)
+            except Exception:
+                pass
+        try:
+            await release_open(self.db, self.BOT_ID, inst, side)
+        except Exception:
+            pass
+        await self._remember_close(coin, side, pnl, reason or "exchange_stop")
+        try:
+            await self._notify_close_tg(
+                pos, coin, reason or "exchange_stop", exit_px, pnl, account_mode="demo")
+        except Exception as e:
+            print(f"[AI] TG close (flat): {e}", flush=True)
+
+        self._settle_close_memory(pos, coin, exit_px, pnl, reason or "exchange_stop")
+        print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} exit={exit_px} ({reason or 'exchange_stop'}) [flat]", flush=True)
+
+    def _refresh_adaptive(self, force_log: bool = False) -> dict:
+        """Bounded self-tune from rolling trade outcomes. Never exceeds floor/ceil."""
+        cfg = self.config
+        base_conf = float(cfg.min_confidence)
+        base_align = float(cfg.quant_min_align)
+        if not getattr(cfg, "adapt_enabled", True):
+            self._adapt = {
+                "min_confidence": base_conf,
+                "quant_min_align": base_align,
+                "size_cap": 0.10,
+                "preset": "normal",
+                "reason": "adapt_disabled",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return self._adapt
+
+        stats = self._rolling_stats()
+        min_n = int(getattr(cfg, "adapt_min_trades", 4) or 4)
+        conf = base_conf
+        align = base_align
+        size_cap = 0.10
+        preset = "normal"
+        reasons = []
+
+        if stats["n"] < min_n:
+            reasons.append(f"warmup:{stats['n']}/{min_n}")
+            preset = "warmup"
+        else:
+            wr = float(stats.get("win_rate") or 50)
+            avg = float(stats.get("avg_pnl") or 0)
+            # Decision uses the winsorized mean so one tail loss cannot pin us
+            # defensive on its own; the raw avg is still shown for transparency.
+            avg_rob = float(stats.get("avg_pnl_trim", avg) or 0)
+            sk = stats.get("streak_kind")
+            stn = int(stats.get("streak") or 0)
+
+            if wr < 35 or (sk == "loss" and stn >= 3) or avg_rob < -15:
+                preset = "conservative"
+                conf = max(base_conf, 0.82)
+                align = max(base_align, 0.65)
+                size_cap = 0.06
+                reasons.append(
+                    f"defensive:wr={wr},streak={sk}{stn},avg={avg:.1f}/trim={avg_rob:.1f}")
+            elif wr >= 55 and avg_rob > 5 and not (sk == "loss" and stn >= 2):
+                preset = "aggressive"
+                conf = min(base_conf, 0.72)
+                align = min(base_align, 0.52)
+                size_cap = 0.12
+                reasons.append(f"edge:wr={wr},avg={avg:.1f}/trim={avg_rob:.1f}")
+            else:
+                preset = "normal"
+                conf = base_conf
+                align = base_align
+                size_cap = 0.10
+                reasons.append(f"steady:wr={wr},avg={avg:.1f}/trim={avg_rob:.1f}")
+
+            # mild nudge from lifetime if available
+            if self._lifetime_trades >= 8:
+                lwr = 100.0 * self._lifetime_wins / max(1, self._lifetime_trades)
+                if lwr < 40:
+                    conf += 0.03
+                    align += 0.03
+                    size_cap = min(size_cap, 0.08)
+                    reasons.append(f"lifetime_wr={lwr:.0f}")
+
+        conf = max(float(cfg.conf_floor), min(float(cfg.conf_ceil), conf))
+        align = max(float(cfg.align_floor), min(float(cfg.align_ceil), align))
+        size_cap = max(float(cfg.size_cap_floor), min(float(cfg.size_cap_ceil), size_cap))
+
+        prev = dict(self._adapt or {})
+        reason = ";".join(reasons)[:200]
+        self._adapt = {
+            "min_confidence": round(conf, 3),
+            "quant_min_align": round(align, 3),
+            "size_cap": round(size_cap, 3),
+            "preset": preset,
+            "reason": reason,
+            "stats": stats,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self._reflection = self._build_reflection(stats)
+
+        changed = (
+            prev.get("preset") != preset
+            or abs(float(prev.get("min_confidence") or 0) - conf) > 0.019
+            or abs(float(prev.get("quant_min_align") or 0) - align) > 0.019
+        )
+        if changed or force_log:
+            rec = {
+                "time": self._adapt["updated_at"],
+                "preset": preset,
+                "min_confidence": conf,
+                "quant_min_align": align,
+                "size_cap": size_cap,
+                "reason": reason,
+                "stats": stats,
+            }
+            self._adapt_log.append(rec)
+            self._adapt_log = self._adapt_log[-40:]
+            print(f"[AI] adapt -> {preset} conf={conf:.2f} align={align:.2f} "
+                  f"size_cap={size_cap:.2f} | {reason}", flush=True)
+            try:
+                self.analysis.log("ai", "adapt", **{k: rec[k] for k in rec if k != "stats"},
+                                  **{f"stat_{k}": v for k, v in (stats or {}).items()})
+            except Exception:
+                pass
+        return self._adapt
+
+
+    def apply_config_dict(self, data: dict, *, keep_execute: bool = True) -> None:
+        """Apply persisted settings onto runtime AIConfig (admin DEMO→LIVE flow)."""
+        if not data or not isinstance(data, dict):
+            return
+        cfg = self.config
+        allowed = set(getattr(cfg, "__dataclass_fields__", {}) or {})
+        skip = {"execute"} if keep_execute else set()
+        for k, v in data.items():
+            if k in skip or k.startswith("_") or k not in allowed:
+                continue
+            try:
+                cur = getattr(cfg, k)
+                if isinstance(cur, bool):
+                    setattr(cfg, k, bool(v))
+                elif isinstance(cur, int) and not isinstance(cur, bool):
+                    setattr(cfg, k, int(v))
+                elif isinstance(cur, float):
+                    setattr(cfg, k, float(v))
+                elif isinstance(cur, list):
+                    setattr(cfg, k, list(v) if v is not None else list(cur))
+                elif isinstance(cur, str) or cur is None:
+                    setattr(cfg, k, v)
+                else:
+                    setattr(cfg, k, v)
+            except Exception:
+                continue
+
+    def export_config_dict(self) -> dict:
+        """Serializable AIConfig snapshot (everything except runtime 'execute').
+
+        The previous hand-written whitelist silently dropped new knobs, so
+        saved/promoted configs always fell back to code defaults for them.
+        """
+        cfg = self.config
+        fields = getattr(cfg, "__dataclass_fields__", {}) or {}
+        out = {}
+        for k in fields:
+            if k == "execute":
+                continue
+            if not hasattr(cfg, k):
+                continue
+            v = getattr(cfg, k)
+            out[k] = list(v) if isinstance(v, list) else v
+        return out
+
+    def _effective_min_confidence(self) -> float:
+        return float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
+
+    def _effective_min_align(self) -> float:
+        return float((self._adapt or {}).get("quant_min_align") or self.config.quant_min_align)
+
+    def _round_trip_cost_pct(self) -> float:
+        """Fees + slippage for a full open->close round trip, in % of notional.
+
+        v1.32: the LLM had no idea commissions exist, so a 0.10% gross "win"
+        looked free while it actually nets ~-0.04% after 0.05% taker on both
+        legs. Cost is now explicit in the snapshot (see Bysik & Slepaczuk 2026:
+        hourly ML forecasts die at 10 bps of costs unless execution is
+        cost-aware).
+        """
+        cfg = self.config
+        per_side = float(getattr(cfg, "fee_taker_pct", 0.0005) or 0.0) + \
+            float(getattr(cfg, "slippage_pct", 0.0002) or 0.0)
+        return round(2.0 * per_side * 100.0, 4)
+
+    def _turnover_stats(self, pnl: float, fees: float, equity: float) -> dict:
+        """Fees vs gross PnL/equity — the cost drag that "more trades" hides."""
+        net = float(pnl or 0.0)
+        fee = float(fees or 0.0)
+        gross = net + fee
+        return {
+            "round_trip_pct": self._round_trip_cost_pct(),
+            "fees_usd": round(fee, 2),
+            "gross_pnl_usd": round(gross, 2),
+            "fees_pct_of_gross": (
+                round(100.0 * fee / abs(gross), 1) if abs(gross) > 1e-9 else None
+            ),
+            "fees_pct_of_equity": (
+                round(100.0 * fee / float(equity), 2) if float(equity or 0) else None
+            ),
+        }
+
+    def _second_entry_veto(self, coin: str, side: str, conf: float,
+                           align: float = None, adx: float = None) -> str | None:
+        """v1.33: reason why a 2nd concurrent position is NOT allowed (None = allowed).
+
+        The feature exists to catch a genuinely independent strong setup while
+        trade #1 is working — not to double exposure to the same market move.
+        """
+        cfg = self.config
+        if not bool(getattr(cfg, "second_entry_enabled", True)):
+            return "disabled"
+        if len(self._positions) >= int(getattr(cfg, "max_positions", 2) or 2):
+            return "max_positions"
+        if len(self._positions) != 1:
+            return f"open_n:{len(self._positions)}"
+        if coin in self._positions:
+            return "same_coin"
+        # Trade #1 must already pay for itself (green beyond its own round trip).
+        try:
+            first_coin, first_pos = next(iter(self._positions.items()))
+            ind0 = (self._latest_indicators or {}).get(first_coin) or {}
+            px0 = float(ind0.get("close") or 0)
+            upl0 = self._unrealized_pct(first_pos, px0) if px0 else 0.0
+        except Exception:
+            upl0 = 0.0
+        if upl0 < self._round_trip_cost_pct():
+            return f"first_trade_not_green:{upl0:+.2f}"
+        if float(conf or 0) < float(getattr(cfg, "second_entry_min_conf", 0.80) or 0.80):
+            return f"low_conf:{float(conf or 0):.2f}"
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        _align = float(align if align is not None else (
+            ind.get("align_short") if side == "short" else ind.get("align_long")) or 0)
+        if _align < float(getattr(cfg, "second_entry_min_align", 0.85) or 0.85):
+            return f"weak_align:{_align:.2f}"
+        _adx = float(adx if adx is not None else (ind.get("adx") or 0))
+        if _adx < float(getattr(cfg, "second_entry_min_adx", 25.0) or 25.0):
+            return f"low_adx:{_adx:.1f}"
+        # Correlation: never stack the same group (BTC+ETH, SOL+AVAX/DOT/ADA/...).
+        new_group = _symbol_to_group(f"{coin}-USDT-SWAP")
+        for held in self._positions:
+            if _symbol_to_group(f"{held}-USDT-SWAP") == new_group:
+                return f"correlated:{new_group}"
+        return None
+
+    async def _try_second_entry(self, client, fresh: list = None) -> None:
+        """v1.33: ask the LLM for an optional 2nd slot, gated hard."""
+        cfg = self.config
+        if not bool(getattr(cfg, "second_entry_enabled", True)):
+            return
+        if len(self._positions) != 1:
+            return
+        if len(self._positions) >= int(getattr(cfg, "max_positions", 2) or 2):
+            return
+        if not fresh:
+            return   # one extra LLM call per closed bar, never per 90s manage poll
+        bar_key = ",".join(sorted(str(x) for x in (fresh or []))) or f"tick{self._tick_count}"
+        if getattr(self, "_second_entry_bar", None) == bar_key:
+            return
+        snap = self._snapshot()
+        snap["decision_mode"] = "second_entry"
+        snap["decision_trigger"] = "second_slot"
+        snap["second_slot"] = {
+            "open_n": len(self._positions),
+            "held": list(self._positions),
+            "margin_pct": float(getattr(cfg, "second_entry_margin_pct", 0.30) or 0.30),
+            "risk_pct": float(getattr(cfg, "second_entry_risk_pct", 0.006) or 0.006),
+            "min_align": float(getattr(cfg, "second_entry_min_align", 0.85) or 0.85),
+            "min_adx": float(getattr(cfg, "second_entry_min_adx", 25.0) or 25.0),
+        }
+        self._second_entry_bar = bar_key
+        try:
+            dec = await call_llm(snap, provider=self._provider())
+        except Exception as e:
+            self._record_exec("second_skip", reason=f"llm_error:{str(e)[:80]}")
+            return
+        action = str(dec.get("action") or "hold").lower()
+        coin = str(dec.get("symbol") or "").upper()
+        side = str(dec.get("side") or "").lower()
+        if action != "open" or not coin or side not in ("long", "short"):
+            self._record_exec("second_skip", reason=str(dec.get("reason") or "hold")[:80])
+            return
+        _rl = str(dec.get("reason") or "").lower()
+        if "mock:" in _rl or "via_mock" in _rl or "llm_error" in _rl or _rl.startswith("fallback"):
+            self._record_exec("second_skip", reason="mock_or_llm_error")
+            return
+        conf = float(dec.get("confidence") or 0)
+        veto = self._second_entry_veto(coin, side, conf)
+        if veto is None:
+            # Full open veto chain: regime, funding, BTC leadership, 4H, RR.
+            veto = self._quant_veto_open(dec)
+        if veto:
+            self._record_exec("second_skip", coin=coin, side=side, reason=str(veto)[:80])
+            print(f"[AI] second slot skipped {coin} {side}: {veto}", flush=True)
+            return
+        self._record_exec("second_entry", coin=coin, side=side,
+                          conf=conf, reason=str(dec.get("reason") or "")[:100])
+        print(f"[AI] SECOND SLOT {side} {coin} conf={conf:.2f} "
+              f"held={list(self._positions)} (risk=half, margin<=30%)", flush=True)
+        await self._open(client, coin, side,
+                         float(dec.get("stop_pct") or 0.03),
+                         float(dec.get("take_pct") or 0.06),
+                         str(dec.get("reason") or "second_entry")[:200],
+                         confidence=conf, second=True)
+
+    def _snapshot(self) -> dict:
+        open_list = []
+        try:
+            _c = self.client_manager.get_client() if self.client_manager else None
+            _mode = "live" if (_c is not None and not getattr(_c, "demo", True)) else "demo"
+        except Exception:
+            _mode = "demo"
+        for coin, p in self._positions.items():
+            _side = getattr(p, "side", p.get("side") if isinstance(p, dict) else "?")
+            _size = getattr(p, "size", p.get("size") if isinstance(p, dict) else 0)
+            try:
+                if abs(float(_size or 0)) <= 1e-12:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            _entry = getattr(p, "entry_price", p.get("entry_price") if isinstance(p, dict) else 0)
+            _stop = getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0)
+            _take = getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0)
+            _lev = getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0)
+            open_list.append({
+                "coin": coin, "side": _side, "size": _size,
+                "entry_price": _entry, "stop_price": _stop,
+                "take_price": _take, "leverage": _lev,
+                "account_mode": _mode,
+            })
+        quant = self._build_quant()
+        candidates = []
+        blocked = []
+        for coin, c in (quant.get("coins") or {}).items():
+            row = {
+                "coin": coin,
+                "side": c.get("best_side"),
+                "align": c.get("align_score"),
+                "adx": c.get("adx"),
+                "regime": c.get("regime"),
+            }
+            if c.get("block_open"):
+                blocked.append(row)
+            else:
+                candidates.append(row)
+        candidates.sort(key=lambda x: float(x.get("align") or 0), reverse=True)
+        # Short natural-language hints so LLM focuses on edge cases
+        hints = []
+        try:
+            g = str((quant or {}).get("global_regime") or "")
+            if g:
+                hints.append(f"global_regime={g}")
+            btc_r = (quant or {}).get("btc_roc")
+            if btc_r is not None:
+                hints.append(f"btc_roc={btc_r}")
+            for row in (candidates or [])[:3]:
+                hints.append(
+                    f"allowed:{row.get('coin')} {row.get('side')} align={row.get('align')} adx={row.get('adx')}"
+                )
+            for row in (blocked or [])[:2]:
+                hints.append(f"blocked:{row.get('coin')} {row.get('side')}")
+            for p in open_list[:2]:
+                hints.append(f"open:{p.get('coin')} {p.get('side')} entry={p.get('entry_price')}")
+        except Exception:
+            pass
+        # Settled-outcome summary: separates real edge from market beta.
+        settled = [j for j in (getattr(self, "_journal", None) or [])
+                   if j.get("verdict")][-20:]
+        verdicts = [str(j.get("verdict")) for j in settled]
+        alphas = [float(j.get("alpha_pct")) for j in settled
+                  if j.get("alpha_pct") is not None]
+        memory = {
+            "settled_n": len(settled),
+            "edge": verdicts.count("edge"),
+            "beta_win": verdicts.count("beta_win"),
+            "bad_thesis": verdicts.count("bad_thesis"),
+            "noise_loss": verdicts.count("noise_loss"),
+            "avg_alpha_pct": round(sum(alphas) / len(alphas), 2) if alphas else None,
+        }
+        rt = self._round_trip_cost_pct()
+        mult = float(getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+        turnover = self._turnover_stats(self._lifetime_pnl, self._lifetime_fees, self._equity)
+        costs = {
+            "round_trip_pct": rt,
+            "min_edge_mult": mult,
+            "min_worthwhile_move_pct": round(rt * mult, 3),
+            "fees_paid_usd": turnover["fees_usd"],
+            "fees_pct_of_gross": turnover["fees_pct_of_gross"],
+        }
+        return {
+            "equity": round(self._equity, 2),
+            "capital": self._capital,
+            "memory": memory,
+            "costs": costs,
+            "max_leverage": self.config.max_leverage,
+            "max_positions": self.config.max_positions,
+            "open_positions": open_list,
+            "quant": quant,
+            "candidates_allowed": candidates,
+            "candidates_blocked": blocked,
+            "indicators": self._latest_indicators,
+            "analysis_hints": hints,
+            "adaptive": self._adapt,
+            "reflection": self._reflection,
+            "daily_lessons": list(getattr(self, "_daily_lessons", None) or []),
+            "journal_tail": list(getattr(self, "_journal", None) or [])[-8:],
+            "server_time": datetime.now(timezone.utc).isoformat(),
+            "provider": self._provider(),
+            "llm": llm_status(),
+            "execute": self._execute_enabled(),
+            "policy_hint": (
+                "Analyze structure+momentum+risk using indicators and analysis_hints. "
+                "Prefer opens only from candidates_allowed. "
+                "Ignore candidates_blocked unless managing existing positions."
+            ),
+        }
+
+    def _fmt_sz(self, coin: str, sz: float) -> str:
+        lot = LOT_SZ.get(coin, 0.01)
+        # string without scientific notation; trim trailing zeros
+        prec = 8 if lot < 0.01 else (4 if lot < 1 else 2)
+        s = f"{float(sz):.{prec}f}".rstrip("0").rstrip(".")
+        return s or "0"
+
+    def _record_exec(self, event: str, **data):
+        rec = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "event": event,
+            **data,
+        }
+        self._last_exec = rec
+        self._exec_log.append(rec)
+        self._exec_log = self._exec_log[-50:]
+        self._decision_log.append(rec)
+        self._decision_log = self._decision_log[-200:]
+        try:
+            self.analysis.log("ai", event, **data)
+        except Exception:
+            pass
+        print(f"[AI] exec {event} {data}", flush=True)
+
+    # ── sizing (anti-liq) ──────────────────────────────────────
+    def _size_factor(self, size_pct: float) -> float:
+        """LLM `size_pct_equity` → multiplier of the base risk (0.25…1.0).
+
+        The model requests a share of the allowed size (policy `max_size_pct` =
+        adaptive size_cap). Anything above the cap is clamped to 1.0; a very
+        small request is floored at 0.25 so a valid setup still gets a position.
+        """
+        try:
+            req = float(size_pct or 0)
+        except (TypeError, ValueError):
+            req = 0.0
+        if req <= 0:
+            return 1.0
+        try:
+            cap = float((self._adapt or {}).get("size_cap") or 0.10)
+        except (TypeError, ValueError):
+            cap = 0.10
+        if cap <= 0:
+            return 1.0
+        return max(0.25, min(1.0, req / cap))
+
+    def _size_order(self, coin: str, entry: float, stop_pct: float,
+                    equity: float = None, risk_pct: float = None,
+                    margin_pct: float = None) -> tuple[float, float]:
+        """Apply regime‑adjusted sizing.
+
+        Returns (contracts_size, leverage) with risk and margin caps.
+        The risk per trade ($eq * risk_per_trade) is multiplied by a regime
+        factor obtained from recent price behavior (bull/bear/sideways).
+        The multiplier defaults to 1.0 (no change) and can be tuned via env
+        vars RISK_REGIME_MULT_BULL, RISK_REGIME_MULT_BEAR, RISK_REGIME_MULT_SIDEWAYS.
+        """
+        cfg = self.config
+        ct = CT_VAL.get(coin, 0.01)
+        lot = LOT_SZ.get(coin, 0.01)
+        stop_pct = max(0.015, min(0.05, abs(stop_pct)))
+        eq = float(equity) if equity else self._equity
+        # Apply regime multiplier if recent indicators are available
+        mult = 1.0
+        try:
+            reg = (self._latest_indicators or {}).get(coin, {}).get("regime")
+            if reg:
+                # Use already imported regime_multiplier
+                mult = regime_multiplier(reg)
+        except Exception:
+            mult = 1.0
+        # v1.14: hard cap risk at 1.2% even if env/DB still has 2%
+        _r = float(getattr(cfg, "risk_per_trade", 0.012) or 0.012)
+        if risk_pct is not None:
+            _r = float(risk_pct)
+        if _r > 0.012:
+            _r = 0.012
+        risk_usd = eq * _r * mult
+        # notional such that stop_pct * notional ≈ risk_usd
+        notional = risk_usd / stop_pct if stop_pct > 0 else 0
+        _alloc = float(getattr(cfg, "allocation_pct", 0.40) or 0.40)
+        if margin_pct is not None:
+            _alloc = min(_alloc, float(margin_pct))
+        max_margin = eq * _alloc
+        # leverage chosen ≤ max, so margin = notional/lev ≤ max_margin
+        lev = min(cfg.max_leverage, max(1.0, notional / max_margin if max_margin > 0 else 1.0))
+        # if still over margin, cut notional
+        if notional / lev > max_margin:
+            notional = max_margin * lev
+        if entry <= 0 or ct <= 0:
+            return 0.0, lev
+        raw_sz = notional / (entry * ct)
+        # round down to lot
+        steps = math.floor(raw_sz / lot)
+        sz = round(steps * lot, 8)
+        return max(0.0, sz), round(lev, 2)
+
+    # ── execution helpers ──────────────────────────────────────
+    async def _sync_equity(self, client) -> float:
+        """Refresh real account equity (used for risk limits and the KPI card)."""
+        try:
+            await self._avail_usdt(client)
+        except Exception as e:
+            print(f"[AI] equity sync: {e}", flush=True)
+        self._account_equity_ts = time.time()
+        return float(self._account_equity or 0.0)
+
+    async def _validate_contract_specs(self, client) -> list:
+        """Hourly check that CT_VAL/LOT_SZ still match OKX instrument specs.
+
+        A stale ctVal silently multiplies order size (NEAR was ordered 10x too
+        big on 28.10). Anomalies are cached on the instance so /api/health and
+        /api/ai/status can flag them, and logged once when they appear.
+        """
+        try:
+            if client is None:
+                return list(getattr(self, "_contract_specs", []) or [])
+            now = time.time()
+            if (now - float(getattr(self, "_contract_specs_ts", 0) or 0)) < 3600:
+                return list(getattr(self, "_contract_specs", []) or [])
+            r = await client.get_instruments("SWAP")
+            rows = (r or {}).get("data") if isinstance(r, dict) else None
+            if not rows:
+                return list(getattr(self, "_contract_specs", []) or [])
+            coins = list(getattr(self.config, "symbols", None) or []) or None
+            mism = compare_contract_specs(rows, coins=coins)
+            self._contract_specs_ts = now
+            prev = {
+                f"{m.get('field')}:{m.get('coin')}": m
+                for m in (getattr(self, "_contract_specs", []) or [])
+            }
+            self._contract_specs = mism
+            for m in mism:
+                key = f"{m.get('field')}:{m.get('coin')}"
+                if key not in prev:
+                    if m.get("field") == "lotSz":
+                        _detail = (f"lot step {m.get('code')} is finer than OKX "
+                                   f"{m.get('okx')} — orders may be rejected")
+                    else:
+                        _factor = (float(m.get("code") or 0) / float(m.get("okx") or 0)) if m.get("okx") else 0.0
+                        _detail = (f"code={m.get('code')} okx={m.get('okx')} "
+                                   f"(orders ~{_factor:.4f}x intended size)")
+                    print(
+                        f"[AI-SPEC] MISMATCH {m.get('coin')} {m.get('field')}: {_detail}",
+                        flush=True,
+                    )
+            if not mism and prev:
+                print("[AI-SPEC] contract specs realigned with OKX", flush=True)
+            return mism
+        except Exception as e:
+            print(f"[AI-SPEC] validate failed: {e}", flush=True)
+            return list(getattr(self, "_contract_specs", []) or [])
+
+    async def _avail_usdt(self, client, update_equity: bool = True) -> float:
+        """Real available USDT on the account backing `client` (demo or live).
+        Used to cap sizing — internal equity may drift from exchange balance
+        (e.g. 51008: insufficient loan quota on demo).
+
+        update_equity=False for the LIVE mirror client: its totalEq must not
+        overwrite the DEMO engine's `_account_equity` (KPI card showed $647
+        instead of the demo account after every mirrored close)."""
+        try:
+            r = await client.get_balance()
+            if (r or {}).get("error"):
+                return 0.0
+            data = (r or {}).get("data") or []
+            if not data or not isinstance(data[0], dict):
+                return 0.0
+            acct = data[0]
+            if update_equity:
+                try:
+                    _teq = float(acct.get("totalEq") or 0)
+                    if _teq > 0:
+                        self._account_equity = _teq
+                except (TypeError, ValueError):
+                    pass
+            best = 0.0
+            for d in (acct.get("details") or []):
+                if str(d.get("ccy") or "").upper() != "USDT":
+                    continue
+                try:
+                    v = float(d.get("availBal") or 0)
+                except (TypeError, ValueError):
+                    v = 0.0
+                if v > best:
+                    best = v
+            if best <= 0:
+                try:
+                    best = float(acct.get("totalAvailBal") or 0)
+                except (TypeError, ValueError):
+                    best = 0.0
+            return max(0.0, best)
+        except Exception:
+            return 0.0
+
+    async def _place(self, client, inst_id, side, sz, pos_side, is_close=False, cl_ord_id: str = None):
+        """
+        Strict rule: live client can ONLY be called through mirror logic (_open_live, _close_live, _mirror_fast_retry, scale-in mirror).
+        Direct calls on live client are BLOCKED unless coming from mirror logic.
+        """
+        is_live = (not getattr(client, "demo", True) and getattr(client, "has_credentials", lambda: False)())
+        if is_live and not getattr(self, "_mirror_call_active", False):
+            print(f"[AI-LIVE] BLOCKED direct _place on live client (not from mirror logic)", flush=True)
+            return {"error": "Direct live trading blocked — only mirror trades allowed"}
+
+        coin = inst_id.split("-")[0]
+        cl_id = (cl_ord_id or f"ai{int(time.time() * 1000)}")[:32]
+        return await client.place_order(
+            inst_id=inst_id, side=side, ord_type="market",
+            sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=pos_side,
+            cl_ord_id=cl_id, is_close=is_close,
+        )
+
+
+    async def _maybe_scale_in(self, client, coin: str, decision: dict) -> bool:
+        """Add to existing position when trend continues — cheaper than close+reopen."""
+        pos = self._positions.get(coin)
+        if not pos:
+            return False
+        cfg = self.config
+        side = str(decision.get("side") or pos.side).lower()
+        if side != pos.side:
+            return False
+        adds = int(getattr(pos, "scale_adds", 0) or 0)
+        if adds >= int(getattr(cfg, "scale_in_max_adds", 1) or 1):
+            self._record_exec("scale_skip", coin=coin, side=side, reason="max_adds")
+            return False
+        try:
+            opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+            held = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+        except Exception:
+            held = 999.0
+        if held < float(getattr(cfg, "scale_in_min_hold_min", 30) or 30):
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"too_early:{held:.0f}m")
+            return False
+        ind = self._latest_indicators.get(coin) or {}
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align = ash if side == "short" else al
+        min_al = float(getattr(cfg, "scale_in_min_align", 0.70) or 0.70)
+        if align < min_al:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"weak_align:{align:.2f}")
+            return False
+        mom = self._momentum_against(side, ind)
+        if mom:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"momentum:{mom}")
+            return False
+        # Add only to a trade that is already working. Averaging a loser
+        # was how Scale-In amplified drawdowns.
+        px = float(ind.get("close") or 0) or float(pos.entry_price or 0)
+        upl = self._unrealized_pct(pos, px)
+        if upl < 0.05:
+            self._record_exec("scale_skip", coin=coin, side=side, reason=f"not_in_profit:{upl:+.2f}%")
+            return False
+        frac = float(getattr(cfg, "scale_in_frac", 0.45) or 0.45)
+        add_sz = round(float(pos.size) * frac, 8)
+        lot = LOT_SZ.get(coin, 0.01)
+        if add_sz < lot:
+            add_sz = lot
+        if not self._execute_enabled():
+            print(f"[AI] SIGNAL scale_in {side} {coin} +{add_sz} align={align:.2f}", flush=True)
+            return False
+        order_side = "buy" if side == "long" else "sell"
+        try:
+            resp = await self._place(client, pos.inst_id, order_side, add_sz, side)
+        except Exception as e:
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(e)[:80])
+            return False
+        if resp.get("error"):
+            self._record_exec("scale_error", coin=coin, side=side, reason=str(resp.get("message") or "")[:80])
+            return False
+        fills = resp.get("data") or []
+        fill_px, fee, _ = extract_fill_avg(fills, px)
+        if not fill_px:
+            fill_px = px
+        # Weighted average entry
+        old_sz = float(pos.size or 0)
+        old_entry = float(pos.entry_price or 0)
+        new_sz = old_sz + add_sz
+        if new_sz > 0 and old_entry > 0 and fill_px > 0:
+            pos.entry_price = (old_entry * old_sz + fill_px * add_sz) / new_sz
+        pos.size = new_sz
+        pos.scale_adds = adds + 1
+        # Widen stop slightly from new avg (keep risk coherent)
+        stop_pct = abs(pos.stop_price - old_entry) / old_entry if old_entry and pos.stop_price else 0.02
+        if pos.side == "long":
+            pos.stop_price = pos.entry_price * (1 - stop_pct)
+        else:
+            pos.stop_price = pos.entry_price * (1 + stop_pct)
+        self._record_exec(
+            "scale_in", coin=coin, side=side, size=add_sz,
+            reason=f"align={align:.2f}_upl={upl:+.2f}%_avg={pos.entry_price:.4f}",
+        )
+        print(
+            f"[AI] SCALE-IN {side} {coin} +{add_sz} @ {fill_px} → sz={new_sz} avg={pos.entry_price:.4f} "
+            f"align={align:.2f} upl={upl:+.2f}%",
+            flush=True,
+        )
+        # Mirror scale-in on LIVE only if that coin is already mirrored
+        try:
+            if await self._mirror_enabled() and self._live_ready() and coin in (self._live_positions or {}):
+                lc = self._live_client()
+                lpos = self._live_positions[coin]
+                if lc and lpos:
+                    oside = "buy" if side == "long" else "sell"
+                    self._mirror_call_active = True
+                    try:
+                        resp_l = await self._place(lc, lpos.inst_id, oside, add_sz, side)
+                    finally:
+                        self._mirror_call_active = False
+                    if not resp_l.get("error"):
+                        fills_l = resp_l.get("data") or []
+                        fpx, _, _ = extract_fill_avg(fills_l, fill_px)
+                        fpx = fpx or fill_px
+                        osz = float(lpos.size or 0)
+                        oen = float(lpos.entry_price or 0)
+                        nsz = osz + add_sz
+                        if nsz > 0 and oen > 0:
+                            lpos.entry_price = (oen * osz + fpx * add_sz) / nsz
+                        lpos.size = nsz
+                        lpos.scale_adds = int(getattr(lpos, "scale_adds", 0) or 0) + 1
+                        print(f"[AI-LIVE] SCALE-IN {coin} +{add_sz} @ {fpx}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] scale_in mirror: {e}", flush=True)
+        return True
+
+    async def _confirm_fill(self, client, inst: str, side: str, sz: float,
+                            ord_id: str = "", cl_ord_id: str = "") -> tuple:
+        """Return (avg_px, size) for an order we believe filled, else (0, 0).
+
+        The exchange position is the ground truth (works for both net and hedge
+        accounts); the order itself is the fallback while the position is still
+        being booked.
+        """
+        if not client:
+            return 0.0, 0.0
+        want = str(side or "").lower()
+        for _ in range(5):
+            try:
+                ep = await client.get_positions(inst_id=inst)
+                for row in (ep.get("data") or []):
+                    try:
+                        psz = abs(float(row.get("pos") or 0))
+                        avg = float(row.get("avgPx") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if psz <= 0 or avg <= 0:
+                        continue
+                    ps = str(row.get("posSide") or "").lower()
+                    if ps in ("long", "short") and ps != want:
+                        continue
+                    return avg, psz
+            except Exception:
+                pass
+            if ord_id or cl_ord_id:
+                try:
+                    o = await client.get_order(
+                        inst, ord_id=ord_id or None,
+                        cl_ord_id=None if ord_id else (cl_ord_id or None),
+                    )
+                    rows = (o or {}).get("data") or []
+                    if rows:
+                        r = rows[0]
+                        try:
+                            px = float(r.get("avgPx") or 0)
+                            filled = float(r.get("accFillSz") or 0)
+                        except (TypeError, ValueError):
+                            px, filled = 0.0, 0.0
+                        if px > 0 and filled > 0:
+                            return px, filled
+                        if str(r.get("state") or "") in ("canceled", "mmp_canceled"):
+                            return 0.0, 0.0
+                except Exception:
+                    pass
+            await asyncio.sleep(0.4)
+        return 0.0, 0.0
+
+    async def _open(self, client, coin: str, side: str, stop_pct: float, take_pct: float,
+                    reason: str, confidence: float = 0.0, thesis: str = "",
+                    second: bool = False, size_pct: float = 0.0):
+        if client is not None and not getattr(client, "demo", True):
+            print(f"[AI] BLOCK open on non-demo client {coin}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side, reason="live_client_forbidden")
+            return
+        ind = self._latest_indicators.get(coin) or {}
+        entry = float(ind.get("close") or 0)
+        if entry <= 0:
+            return
+        # Sibling-bot ownership guard belongs here so EVERY entry path (main
+        # open, 2nd slot, scale-in) is covered. The 2nd slot calls _open()
+        # directly and previously skipped the check done in the dispatch.
+        try:
+            if await self._other_ai_owns(f"{coin}-USDT-SWAP", side):
+                self._record_exec("open_skip", coin=coin, side=side,
+                                  reason="sibling_bot_owns")
+                return
+        except Exception as e:
+            print(f"[AI] sibling check: {e}", flush=True)
+        # Pre-flight: never open while the engine itself is not verifiably alive.
+        _cap = int(getattr(self.config, "max_positions", 1) or 1) + (1 if second else 0)
+        _pf = hg.preflight(
+            has_demo_client=client is not None,
+            live_as_primary=bool(client is not None and not getattr(client, "demo", True)),
+            indicators_ok=bool(ind),
+            llm_rate_limited=bool(getattr(self, "_llm_rate_limited", False)),
+            llm_error=bool(getattr(self, "_last_llm_error", None)),
+            db_ok=self.db is not None,
+            tick_age_sec=hg.beat_age_sec("ai_manage"),
+            open_positions=len(getattr(self, "_positions", {}) or {}),
+            max_positions=_cap,
+        )
+        if _pf:
+            print(f"[AI] PREFLIGHT BLOCK {side} {coin}: {_pf}", flush=True)
+            self._record_exec("open_skip", coin=coin, side=side,
+                              reason="preflight:" + ",".join(_pf))
+            return
+        avail = await self._avail_usdt(client)
+        eq_cap = min(self._equity, avail) if avail > 0 else self._equity
+        _risk_pct = None
+        _margin_pct = None
+        if second:
+            _risk_pct = float(getattr(self.config, "second_entry_risk_pct", 0.006) or 0.006)
+            _margin_pct = float(getattr(self.config, "second_entry_margin_pct", 0.30) or 0.30)
+        # Honor the model's requested size share and the adaptive size_cap.
+        # `size_pct_equity` used to be dropped on the floor (only the LLM saw
+        # it), and the validator's 0.12 ceiling ignored a 0.06/0.08 preset.
+        _sf = self._size_factor(size_pct)
+        _base_risk = (_risk_pct if _risk_pct is not None
+                      else float(getattr(self.config, "risk_per_trade", 0.012) or 0.012))
+        _risk_pct = _base_risk * _sf
+        if _sf < 0.999:
+            print(f"[AI] size trim {coin}: size_pct={float(size_pct or 0):.3f} "
+                  f"factor={_sf:.2f} risk={_risk_pct:.4f}", flush=True)
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=eq_cap,
+                                   risk_pct=_risk_pct, margin_pct=_margin_pct)
+        if sz <= 0:
+            self._record_exec("open_skip", coin=coin, side=side, reason="size=0",
+                              entry=entry, stop_pct=stop_pct)
+            return
+        _ct = float(CT_VAL.get(coin, 0.01) or 0.01)
+        _notional = abs(float(sz)) * _ct * float(entry or 0)
+        try:
+            # `notional_usd`/`leverage` used to be omitted, which silently
+            # disabled RISK_MAX_POSITION_USD and RISK_MAX_LEVERAGE.
+            assert_can_open(is_reduce_only=False, ai_bot=self, symbol=coin,
+                            notional_usd=_notional, leverage=float(lev))
+        except Exception as e:
+            self._record_exec("open_skip", coin=coin, side=side, reason=f"risk:{e}")
+            return
+        inst = f"{coin}-USDT-SWAP"
+        order_side = "buy" if side == "long" else "sell"
+        if not self._execute_enabled():
+            print(f"[AI] SIGNAL open {side} {coin} sz={sz} lev={lev} (execute=0)", flush=True)
+            rec = {
+                "time": datetime.now(timezone.utc).isoformat(),
+                "event": "signal_open", "coin": coin, "side": side,
+                "size": sz, "leverage": lev, "reason": reason,
+            }
+            self._decision_log.append(rec)
+            try:
+                self.analysis.log("ai", "signal_open", **{k: rec[k] for k in rec if k != "time"})
+            except Exception:
+                pass
+            return
+        for ps in (side, "net", None):
+            try:
+                await client.set_leverage(inst, lev, mgn_mode="cross",
+                                         pos_side=ps if ps else "net")
+            except Exception:
+                pass
+        pos_side_try = side
+        trade_id = self._new_demo_trade_id()
+        cl_demo = self._clord_demo(trade_id)
+        try:
+            resp = await self._place(client, inst, order_side, sz, pos_side_try, cl_ord_id=cl_demo)
+        except Exception as e:
+            self._record_exec("open_error", coin=coin, side=side, reason=str(e),
+                              size=sz, leverage=lev)
+            return
+        if resp.get("error"):
+            msg = str(resp.get("message") or resp)
+            # Retry net-mode accounts (no hedge long/short)
+            if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
+                try:
+                    resp = await client.place_order(
+                        inst_id=inst, side=order_side, ord_type="market",
+                        sz=self._fmt_sz(coin, sz), td_mode="cross", pos_side=None,
+                        cl_ord_id=cl_demo,
+                    )
+                except Exception as e2:
+                    self._record_exec("open_error", coin=coin, side=side,
+                                      reason=str(e2), size=sz, leverage=lev)
+                    return
+            # 51008: margin/borrow quota — resize from real available balance, retry once
+            if resp.get("error") and "51008" in msg and avail > 0:
+                sz2, lev2 = self._size_order(coin, entry, stop_pct,
+                                             equity=avail * 0.9,
+                                             risk_pct=_risk_pct, margin_pct=_margin_pct)
+                if sz2 > 0 and sz2 < sz:
+                    try:
+                        await client.set_leverage(inst, lev2, mgn_mode="cross",
+                                                  pos_side=pos_side_try or "net")
+                    except Exception:
+                        pass
+                    try:
+                        resp = await self._place(client, inst, order_side, sz2,
+                                                 pos_side_try, cl_ord_id=cl_demo)
+                        if not resp.get("error"):
+                            sz, lev = sz2, lev2
+                    except Exception:
+                        pass
+            if resp.get("error"):
+                self._record_exec(
+                    "open_error", coin=coin, side=side,
+                    reason=str(resp.get("message") or resp),
+                    size=sz, leverage=lev, raw=str(resp)[:300],
+                )
+                return
+        fills = resp.get("data") or []
+        # A market ack carries no avgPx/fee, and `entry` is the last 1H candle
+        # close (up to a minute old). That must never become a position price:
+        # confirm the order with the exchange and use its avgPx. Before v1.39 an
+        # acked-but-unfilled order became a "position" that vanished seconds
+        # later and was booked as a fake −fee trade (four ADA rows on 28 Oct).
+        _ord_id = ""
+        if fills:
+            _ord_id = str(fills[0].get("ordId") or fills[0].get("ord_id") or "")
+            _scode = str(fills[0].get("sCode") or "")
+            if _scode not in ("", "0"):
+                self._record_exec(
+                    "open_error", coin=coin, side=side,
+                    reason=f"{_scode}: {fills[0].get('sMsg') or 'order rejected'}"[:200],
+                    size=sz, leverage=lev, ord_id=_ord_id,
+                )
+                return
+        # Market ack often has ordId but no avgPx — resolve via get_order
+        fill_px, fee, _ = extract_fill_avg(fills, 0.0)
+        if (not fill_px or fill_px <= 0) and _ord_id:
+            for _ in range(4):
+                await asyncio.sleep(0.35)
+                try:
+                    o = await client.get_order(inst, ord_id=_ord_id)
+                    rows = o.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, 0.0)
+                        if fill_px and fill_px > 0:
+                            break
+                except Exception:
+                    pass
+        real_px, real_sz = await self._confirm_fill(
+            client, inst, side, sz, ord_id=_ord_id, cl_ord_id=cl_demo)
+        if real_px > 0:
+            fill_px = real_px
+            if real_sz > 0:
+                sz = real_sz
+        if not fill_px or fill_px <= 0:
+            self._record_exec(
+                "open_no_fill", coin=coin, side=side,
+                reason="order acked but no fill/position on exchange",
+                size=sz, leverage=lev, ord_id=_ord_id,
+            )
+            print(f"[AI] open_no_fill {coin} {side}: no exchange fill — not booked", flush=True)
+            try:
+                if _ord_id:
+                    await client.cancel_order(inst, _ord_id)
+            except Exception:
+                pass
+            return
+        if entry > 0 and abs(fill_px - entry) / entry > 0.005:
+            print(f"[AI] fill {coin} {side} {fill_px} vs mark {entry} "
+                  f"({(fill_px - entry) / entry * 100:+.2f}%)", flush=True)
+        if side == "long":
+            stop = fill_px * (1 - stop_pct)
+            take = fill_px * (1 + take_pct)
+        else:
+            stop = fill_px * (1 + stop_pct)
+            take = fill_px * (1 - take_pct)
+        signal_id = 0
+        try:
+            if self.db:
+                signal_id = int(await self.db.save_signal(
+                    bot_id=self.BOT_ID,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    side=order_side,
+                    price=fill_px,
+                    size=sz,
+                    ord_type="market",
+                    status="filled",
+                ) or 0)
+        except Exception as e:
+            print(f"[AI] save_signal: {e}", flush=True)
+            signal_id = 0
+        if not signal_id:
+            # Local fallback number so open/close still match within process life
+            signal_id = int(time.time()) % 1_000_000_000
+        pos = AIPosition(
+            coin=coin, inst_id=inst, side=side, size=sz,
+            entry_price=fill_px, stop_price=stop, take_price=take,
+            leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
+            peak_price=fill_px, signal_id=int(signal_id or 0),
+            demo_trade_id=str(trade_id or ""),
+            risk_usd=round(
+                abs(sz) * CT_VAL.get(coin, 0.01) * fill_px * float(stop_pct or 0), 4),
+            btc_ref=float((self._latest_indicators.get("BTC") or {}).get("close") or 0),
+            entry_confidence=round(float(confidence or 0), 3),
+            entry_thesis=str(thesis or "")[:280],
+        )
+        self._positions[coin] = pos
+        self._equity -= fee_cost(fee)
+        ok_claim = await claim_or_flatten(self.db, client, self.BOT_ID, inst, side, sz, fill_px)
+        if not ok_claim:
+            print(f"[AI] CRITICAL: claim failed — flattened {coin} to avoid orphan", flush=True)
+            self._positions.pop(coin, None)
+            self._record_exec("open_claim_fail_flat", coin=coin, side=side)
+            return
+        await self._persist_open_state(force=True)
+        self._trade_log.append({
+            "account_mode": (
+                "demo"
+                if (
+                    self.client_manager
+                    and self.client_manager.get_client()
+                    and getattr(self.client_manager.get_client(), "demo", True)
+                )
+                else "live"
+            ),
+            "time": pos.opened_at, "side": order_side, "symbol": inst,
+            "size": sz, "pnl": -fee_cost(fee), "entry_price": fill_px,
+            "reason": "open", "pos_side": side, "coin": coin,
+            "signal_id": pos.signal_id,
+        })
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=order_side, sz=sz, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=inst, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
+                    state="filled", signal_id=pos.signal_id,
+                    account_mode=self._account_mode_tag()[0],
+                    account_key=self._account_mode_tag()[1],
+                )
+            except Exception as e:
+                print(f"[AI] db open: {e}", flush=True)
+        if self.notifier and getattr(self.notifier, "configured", True):
+            # Fire-and-forget: awaited open was cancelled with the trading tick
+            # the same way closes used to vanish.
+            try:
+                _open_txt = self.notifier.open_msg(
+                    coin=coin, side=side, price=round(fill_px, 4),
+                    stop=round(stop, 4), size=sz, leverage=lev,
+                    bot_name=self.BOT_NAME, signal_id=pos.signal_id,
+                    account_mode="demo",
+                    account_key="showcase",
+                )
+                _sid = int(getattr(pos, "signal_id", 0) or 0)
+                _coin = coin
+
+                async def _tg_open_job(txt=_open_txt, p=pos, sid=_sid, c=_coin):
+                    try:
+                        mid = await self.notifier.send_trade(txt, account_mode="demo")
+                        if not mid:
+                            await asyncio.sleep(2.0)
+                            mid = await self.notifier.send_trade(txt, account_mode="demo")
+                        if mid:
+                            try:
+                                p.tg_message_id = int(mid)
+                            except Exception:
+                                pass
+                            try:
+                                await self.notifier.remember_open_db(
+                                    self.db, sid, mid, bot_id=self.BOT_ID, coin=c,
+                                )
+                            except Exception as e:
+                                print(f"[AI] TG open remember: {e}", flush=True)
+                            print(f"[AI] TG open msg_id={mid} signal={sid} {c}", flush=True)
+                        else:
+                            print(f"[AI] TG open FAILED mid=0 {c}", flush=True)
+                            # Queue same text as a "pending open" via close-queue shape
+                            try:
+                                await self._queue_tg_close(txt, "demo", c)
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        print(f"[AI] TG open job: {e}", flush=True)
+                        try:
+                            await self._queue_tg_close(txt, "demo", c)
+                        except Exception:
+                            pass
+
+                task = asyncio.create_task(_tg_open_job(), name=f"tg-open-{coin}")
+                self._tg_tasks.add(task)
+                task.add_done_callback(self._tg_task_done)
+            except Exception as e:
+                print(f"[AI] TG open schedule: {e}", flush=True)
+        self._record_exec(
+            "open_ok", coin=coin, side=side, entry=fill_px,
+            stop=stop, take=take, size=sz, leverage=lev, reason=reason,
+        )
+        # Place exchange-level SL/TP algo orders (replaces software-only stop)
+        try:
+            await self._place_exchange_sl_tp(client, pos)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP placement: {e}", flush=True)
+        # Mirror to LIVE after primary fill — must be near-instant (market moves fast)
+        try:
+            if not await self._mirror_enabled():
+                _m = "disabled_by_user"
+                self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
+                print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
+            else:
+                await self._try_refresh_live_client()
+                ok = False
+                if self._live_client():
+                    ok = await self._open_live(coin, side, stop_pct, take_pct, reason)
+                    _m = "mirror_ok" if ok else "mirror_fail"
+                    _fail = str(getattr(self, "_last_mirror_fail", "") or "")
+                    self._exec_log.append(_exec_evt(
+                        _m, coin, side,
+                        reason=(_fail or reason)[:200],
+                    ))
+                    print(f"[AI-LIVE] mirror open result={ok} {side} {coin} fail={_fail or '-'}", flush=True)
+                else:
+                    _m = "live_not_ready"
+                    self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
+                    print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
+                # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
+                if not ok:
+                    try:
+                        asyncio.create_task(
+                            self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                        )
+                    except Exception as _te:
+                        print(f"[AI-LIVE] schedule fast_retry: {_te}", flush=True)
+        except Exception as e:
+            self._exec_log.append(_exec_evt("mirror_error", coin, side, reason=str(e)[:120]))
+            print(f"[AI-LIVE] open_mirror: {e}", flush=True)
+            try:
+                asyncio.create_task(
+                    self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                )
+            except Exception:
+                pass
+
+
+    async def _notify_close_tg(
+        self,
+        pos: "AIPosition",
+        coin: str,
+        reason: str,
+        fill_px: float,
+        pnl: float,
+        *,
+        account_mode: str = "demo",
+        bot_name_suffix: str = "",
+    ) -> None:
+        """Schedule close TG off the trading tick so timeouts cannot cancel it."""
+        try:
+            task = asyncio.create_task(
+                self._notify_close_tg_run(
+                    pos, coin, reason, fill_px, pnl,
+                    account_mode=account_mode,
+                    bot_name_suffix=bot_name_suffix,
+                ),
+                name=f"tg-close-{coin}",
+            )
+            # Keep a strong reference until the task finishes — a bare
+            # create_task() may be collected by the GC before it sends.
+            self._tg_tasks.add(task)
+            task.add_done_callback(self._tg_task_done)
+        except Exception as e:
+            print(f"[AI] TG close schedule: {e}", flush=True)
+            # Fallback: run inline if create_task fails
+            try:
+                await self._notify_close_tg_run(
+                    pos, coin, reason, fill_px, pnl,
+                    account_mode=account_mode,
+                    bot_name_suffix=bot_name_suffix,
+                )
+            except Exception as e2:
+                print(f"[AI] TG close inline: {e2}", flush=True)
+
+    def _tg_task_done(self, task) -> None:
+        """Drop the finished task and surface swallowed exceptions."""
+        self._tg_tasks.discard(task)
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            print(f"[AI] TG close task cancelled: {task.get_name()}", flush=True)
+            return
+        except Exception:
+            return
+        if exc is not None:
+            print(
+                f"[AI] TG close task failed: {task.get_name()} "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+
+    # ── Persistent retry queue for close notifications ─────────────────────
+    # Telegram can refuse a send (rate limit, network, bad entity). Closes are
+    # the messages users care about most, so a failed text is parked in the
+    # settings table and retried from the main loop until it lands.
+    def _tg_pending_key(self) -> str:
+        return f"tg_pending_close:{self.BOT_ID}"
+
+    async def _load_tg_pending(self) -> None:
+        if not self.db:
+            return
+        try:
+            blob = await self.db.get_setting(self._tg_pending_key())
+            rows = json.loads(blob) if blob else []
+            if not isinstance(rows, list):
+                return
+            now = datetime.now(timezone.utc)
+            clean = []
+            for r in rows:
+                if not isinstance(r, dict) or not r.get("text"):
+                    continue
+                try:
+                    ts = datetime.fromisoformat(str(r.get("ts") or "").replace("Z", "+00:00"))
+                    if (now - ts).total_seconds() > 86400:
+                        continue
+                except Exception:
+                    pass
+                clean.append(r)
+            self._tg_pending = clean[-20:]
+            if self._tg_pending:
+                print(f"[AI] TG pending close restored: {len(self._tg_pending)}", flush=True)
+        except Exception as e:
+            print(f"[AI] TG pending load: {e}", flush=True)
+
+    async def _save_tg_pending(self) -> None:
+        if not self.db:
+            return
+        try:
+            await self.db.set_setting(
+                self._tg_pending_key(), json.dumps(self._tg_pending[-20:]),
+            )
+        except Exception as e:
+            print(f"[AI] TG pending save: {e}", flush=True)
+
+    async def _queue_tg_close(self, text: str, mode: str, coin: str) -> None:
+        try:
+            self._tg_pending.append({
+                "text": text,
+                "mode": mode,
+                "coin": coin,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+            self._tg_pending = self._tg_pending[-20:]
+            await self._save_tg_pending()
+            print(
+                f"[AI] TG close queued for retry ({coin}) pending={len(self._tg_pending)}",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[AI] TG close queue: {e}", flush=True)
+
+    async def _flush_tg_pending(self) -> None:
+        """Retry failed close notifications (called from the main loop)."""
+        if not self._tg_pending or not self.notifier:
+            return
+        remaining = []
+        for item in list(self._tg_pending):
+            try:
+                mid = await self.notifier.send_trade(
+                    str(item.get("text") or ""),
+                    account_mode=str(item.get("mode") or "demo"),
+                )
+            except Exception as e:
+                print(f"[AI] TG pending send error: {e}", flush=True)
+                mid = 0
+            if mid:
+                print(f"[AI] TG pending delivered ({item.get('coin')}) mid={mid}", flush=True)
+            else:
+                remaining.append(item)
+        if len(remaining) != len(self._tg_pending):
+            self._tg_pending = remaining
+            await self._save_tg_pending()
+
+    async def _notify_close_tg_run(
+        self,
+        pos: "AIPosition",
+        coin: str,
+        reason: str,
+        fill_px: float,
+        pnl: float,
+        *,
+        account_mode: str = "demo",
+        bot_name_suffix: str = "",
+    ) -> None:
+        """Always try to send close notification (reply to open if possible).
+
+        Primary engine is DEMO-only: unless explicitly LIVE (mirror suffix),
+        notifications go as account_mode=demo so free channel + owner chat get them.
+        """
+        if not self.notifier:
+            print(f"[AI] TG close skipped: no notifier ({coin})", flush=True)
+            return
+        # Live mirror passes bot_name_suffix " (LIVE)" or account_mode=live
+        mode = str(account_mode or "demo").strip().lower()
+        if "LIVE" in str(bot_name_suffix or "").upper():
+            mode = "live"
+        elif mode not in ("demo", "live"):
+            mode = "demo"
+        # Primary closes without LIVE suffix must stay DEMO (public signals)
+        if mode == "live" and "LIVE" not in str(bot_name_suffix or "").upper() and bot_name_suffix == "":
+            # still allow explicit account_mode=live from _close_live
+            pass
+        tok = getattr(self.notifier, "token", "") or ""
+        _cid = getattr(self.notifier, "chat_id", "") or ""
+        _chid = getattr(self.notifier, "channel_id", "") or ""
+        print(
+            f"[AI] TG close: mode={mode} chat={bool(_cid)} chan={bool(_chid)} tok={bool(tok)} ({coin})",
+            flush=True,
+        )
+        has_target = bool(_cid or _chid)
+        if not tok or not has_target:
+            print(
+                f"[AI] TG close skipped: token={bool(tok)} target={has_target} ({coin})",
+                flush=True,
+            )
+            return
+        account_mode = mode
+        try:
+            signal_id = int(getattr(pos, "signal_id", 0) or 0)
+            _reply = int(getattr(pos, "tg_message_id", 0) or 0)
+            if not _reply:
+                try:
+                    _reply = int(
+                        await self.notifier.resolve_open_message_id(
+                            self.db, signal_id, bot_id=self.BOT_ID, coin=coin,
+                        )
+                        or 0
+                    )
+                except Exception:
+                    _reply = 0
+            if _reply:
+                print(f"[AI] TG close: reply_to={_reply} signal={signal_id} {coin}", flush=True)
+            else:
+                print(f"[AI] TG close: plain send (no open msg) signal={signal_id} {coin}", flush=True)
+            bot_name = self.BOT_NAME + (bot_name_suffix or "")
+            # Metrics must never block the TG send itself
+            entry_show = float(getattr(pos, "entry_price", 0) or 0)
+            exit_show = float(fill_px or 0)
+            try:
+                caller_pnl = float(pnl or 0)
+            except (TypeError, ValueError):
+                caller_pnl = 0.0
+            use_pnl = caller_pnl
+            pnl_m = 0.0  # must exist even if metrics fail (was NameError → silent drop)
+            try:
+                entry_m, exit_m, pnl_m, _fee_m = compute_close_metrics(
+                    pos, coin, fill_px, fee=0, fills=None,
+                )
+                pnl_m = float(pnl_m or 0)
+                if abs(pnl_m) > 1e-9:
+                    if abs(caller_pnl) < 1e-9 and abs(exit_m - entry_m) > 1e-9:
+                        use_pnl = pnl_m
+                    elif abs(caller_pnl) > 0 and abs(pnl_m) > 0:
+                        ratio = abs(caller_pnl / pnl_m) if pnl_m else 0
+                        if ratio > 5 or ratio < 0.2:
+                            use_pnl = pnl_m
+                if entry_m > 0:
+                    entry_show = entry_m
+                if exit_m > 0:
+                    exit_show = exit_m
+            except Exception as e:
+                print(f"[AI] TG close metrics fallback {coin}: {e}", flush=True)
+            side_s = str(getattr(pos, "side", "long") or "long")
+            size_f = float(getattr(pos, "size", 0) or 0)
+            _txt = self.notifier.close_msg(
+                coin=coin,
+                side=side_s,
+                entry=_fmt_px(entry_show, coin),
+                exit_px=_fmt_px(exit_show, coin),
+                pnl=round(float(use_pnl), 2),
+                reason=reason,
+                bot_name=bot_name,
+                signal_id=signal_id,
+                account_mode=account_mode,
+                account_key=account_mode,
+                size=size_f,
+            )
+            print(
+                f"[AI] TG close metrics {coin}: entry={entry_show} exit={exit_show} "
+                f"pnl_caller={caller_pnl:.4f} pnl_ct={pnl_m:.4f} use={use_pnl:.4f}",
+                flush=True,
+            )
+            # Primary closes → DEMO channel+chat; LIVE only when suffix marks mirror
+            _tg_close_mode = (
+                "live" if (
+                    str(account_mode).lower() == "live"
+                    and "LIVE" in str(bot_name_suffix or "").upper()
+                ) else "demo"
+            )
+            # One send only: `_send_to` already falls back to a plain message
+            # when the reply target is gone, so posting the same text twice
+            # (plain + reply) just duplicated every close in the chat.
+            mid = await self.notifier.send_trade(
+                _txt, reply_to_message_id=_reply or None,
+                account_mode=_tg_close_mode,
+            )
+            if not mid:
+                await asyncio.sleep(2.0)
+                mid = await self.notifier.send_trade(
+                    _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
+                )
+                print(f"[AI] TG close RETRY plain mid={mid} {coin}", flush=True)
+            if not mid:
+                await asyncio.sleep(5.0)
+                mid = await self.notifier.send_trade(
+                    _txt, reply_to_message_id=None, account_mode=_tg_close_mode,
+                )
+                print(f"[AI] TG close RETRY2 mid={mid} {coin}", flush=True)
+            print(f"[AI] TG close result mid={mid} {coin} pnl={pnl:+.2f} mode={_tg_close_mode} ({reason})", flush=True)
+            if not mid:
+                print(f"[AI] TG close FAILED still 0 for {coin} — queued for retry", flush=True)
+                await self._queue_tg_close(_txt, _tg_close_mode, coin)
+        except Exception as e:
+            print(f"[AI] TG close error {coin}: {e}", flush=True)
+
+    async def _close(self, client, coin: str, reason: str):
+        pos = self._positions.get(coin)
+        if not pos:
+            return
+        if not self._execute_enabled():
+            # Signal-only mode: never drop the position from memory. Dropping it
+            # made the very next tick re-adopt the still-open exchange position,
+            # so stops/TP never executed, peaks reset, and the LLM manage path
+            # was skipped (in_pos=False) — the trade silently gave back its profit.
+            if str(getattr(pos, "signal_close_notified", "") or "") == str(reason):
+                return
+            pos.signal_close_notified = str(reason or "signal_close")
+            print(
+                f"[AI] SIGNAL close {coin} ({reason}) execute=0 — position kept, alerted once",
+                flush=True,
+            )
+            mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+            _e, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+            mode, _k = self._account_mode_tag()
+            try:
+                await self._notify_close_tg(pos, coin, reason or "signal_close", mark, pnl, account_mode="demo")
+            except Exception as e:
+                print(f"[AI] TG close (execute=0): {e}", flush=True)
+            return
+        # Real close: cancel exchange SL/TP first so the algo cannot race us.
+        try:
+            await self._cancel_exchange_sl_tp(client, pos)
+        except Exception as e:
+            print(f"[AI] cancel exchange SL/TP: {e}", flush=True)
+        # Safety: verify position still exists on exchange (exchange algo may have closed it)
+        try:
+            ep = await client.get_positions(inst_id=pos.inst_id)
+            epos_list = ep.get("data") or []
+            has_pos = False
+            for ep_ in epos_list:
+                ep_sz = abs(float(ep_.get("pos") or 0))
+                if ep_sz > 0:
+                    has_pos = True
+                    break
+            if not has_pos:
+                # Exchange SL/TP (or manual) already closed — book it, don't just drop.
+                print(f"[AI] close {coin}: exchange pos already gone (algo/manual)", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+                await self._record_flat_close(
+                    client, pos, coin, mark, reason or "exchange_stop")
+                return
+        except Exception as e:
+            print(f"[AI] close exchange-check: {e}", flush=True)
+        close_side = "sell" if pos.side == "long" else "buy"
+        # Tag the close with the open's trade_id (aid{tid}c) so DEMO and LIVE
+        # closes of the same slot are recognisably a pair.
+        resp = await self._place(client, pos.inst_id, close_side, pos.size, pos.side,
+                                 is_close=True,
+                                 cl_ord_id=(self._clord_demo_close(
+                                     getattr(pos, "demo_trade_id", "")) or None))
+        if resp.get("error"):
+            print(f"[AI] close error {coin}: {resp.get('message')}", flush=True)
+            # If exchange already flat (race with algo SL), still notify + cleanup
+            try:
+                ep2 = await client.get_positions(inst_id=pos.inst_id)
+                still = False
+                for ep_ in (ep2.get("data") or []):
+                    if abs(float(ep_.get("pos") or 0)) > 0:
+                        still = True
+                        break
+                if not still:
+                    mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+                    await self._record_flat_close(
+                        client, pos, coin, mark, reason or "exchange_stop")
+                    print(f"[AI] CLOSE {coin} after err — already flat", flush=True)
+            except Exception as e2:
+                print(f"[AI] close error recovery: {e2}", flush=True)
+            return
+        fills = resp.get("data") or []
+        # Prefer last indicator/mark so PnL is not stuck at entry when fill payload is empty
+        mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or pos.entry_price
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        if not fill_px or abs(fill_px - mark) < 1e-12:
+            # poll order once for avgPx
+            try:
+                oid = (fills[0].get("ordId") if fills else None) or (resp.get("data") or [{}])[0].get("ordId")
+                if oid and hasattr(client, "get_order"):
+                    od = await client.get_order(pos.inst_id, oid)
+                    rows = od.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+            except Exception:
+                pass
+        if not fill_px:
+            fill_px = mark
+        fee_c = fee_cost(fee)
+        # Prefer exchange-reported fillPnl when present (matches OKX history)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
+        self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
+        if pnl > 0:
+            self._lifetime_wins += 1
+        self._lifetime_fees += fee_c
+        try:
+            self._refresh_adaptive()
+        except Exception as e:
+            print(f"[AI] adapt refresh: {e}", flush=True)
+        self._persist()
+        now = datetime.now(timezone.utc).isoformat()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        if not signal_id and self.db:
+            try:
+                open_side = "buy" if pos.side == "long" else "sell"
+                signal_id = int(await self.db.find_signal_id(pos.inst_id, open_side) or 0)
+                if signal_id:
+                    pos.signal_id = signal_id
+            except Exception as e:
+                print(f"[AI] find_signal_id: {e}", flush=True)
+        self._trade_log.append({
+            "account_mode": (
+                "demo"
+                if (
+                    self.client_manager
+                    and self.client_manager.get_client()
+                    and getattr(self.client_manager.get_client(), "demo", True)
+                )
+                else "live"
+            ),
+            "time": now, "side": close_side, "symbol": pos.inst_id,
+            "size": pos.size, "pnl": round(pnl, 2), "entry_price": pos.entry_price,
+            "exit_price": fill_px, "fee": round(fee_c, 6),
+            "reason": reason, "pos_side": pos.side, "coin": coin,
+            "signal_id": signal_id,
+            "ord_id": (fills[0].get("ordId") if fills else ""),
+        })
+        if self.db:
+            try:
+                _m, _k = self._account_mode_tag()
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=close_side, sz=pos.size, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=pos.inst_id, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="closed", signal_id=signal_id or None,
+                    account_mode=_m, account_key=_k,
+                )
+            except Exception as e:
+                print(f"[AI] db close: {e}", flush=True)
+            # Authoritative PnL attribution: write exchange_close row with THIS bot label
+            # so Scale-In closes never appear under Discretionary (and vice versa).
+            try:
+                if hasattr(self.db, "upsert_exchange_close_trades"):
+                    oid = ""
+                    try:
+                        oid = str((fills[0].get("ordId") if fills else "") or "")
+                    except Exception:
+                        oid = ""
+                    if not oid:
+                        # No exchange id → the bill sync will insert the real row
+                        # (attributed by clOrdId prefix). A synthetic id here
+                        # would show up as a SECOND close and double-count PnL.
+                        raise RuntimeError("no ordId; defer to bill sync")
+                    cl = str((fills[0].get("clOrdId") if fills else "") or "") or f"{self._clord_prefix()}{int(__import__('time').time()*1000)}"
+                    mode, key = self._account_mode_tag()
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid,
+                        "inst_id": pos.inst_id,
+                        "cl_ord_id": cl,
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(pos.size or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(__import__('time').time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": mode,
+                        "account_key": key,
+                    }])
+                    print(
+                        f"[{self.BOT_NAME}] exchange_close tagged pnl={pnl:+.2f} "
+                        f"label={self.BOT_NAME} cl={cl}",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[AI] exchange_close tag: {e}", flush=True)
+        # Primary engine is DEMO-only — always notify as demo (public signals)
+        await self._notify_close_tg(pos, coin, reason, fill_px, pnl, account_mode="demo")
+        await self._remember_close(coin, getattr(pos, "side", ""),
+                                   float(pnl or 0), str(reason or ""))
+        self._positions.pop(coin, None)
+        try:
+            await release_open(self.db, self.BOT_ID, pos.inst_id, pos.side)
+        except Exception as e:
+            print(f"[AI] release_open: {e}", flush=True)
+        print(f"[AI] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        self._settle_close_memory(pos, coin, fill_px, pnl, reason)
+        try:
+            self.analysis.log(
+                "ai", "close", coin=coin, side=pos.side, entry=pos.entry_price,
+                exit=fill_px, pnl=round(pnl, 2), reason=reason,
+            )
+        except Exception:
+            pass
+        try:
+            self._demo_closing_coin = coin
+            if await self._mirror_enabled():
+                await self._try_refresh_live_client()
+                if self._live_client():
+                    ok = await self._close_live(coin, reason)
+                    if not ok:
+                        print(f"[AI-LIVE] WARN: LIVE close FAILED for {coin} — next tick SYNC will force flat", flush=True)
+                else:
+                    print(f"[AI-LIVE] close skip {coin}: live not ready — SYNC next tick", flush=True)
+            else:
+                pending = getattr(self, "_pending_live_closes", None) or set()
+                pending.add(coin)
+                self._pending_live_closes = pending
+                print(f"[AI-LIVE] close deferred {coin}: mirror disabled — queued", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] close_mirror: {e}", flush=True)
+        finally:
+            try:
+                self._demo_closing_coin = None
+            except Exception:
+                pass
+
+    # ── LIVE mirror execution ──────────────────────────────────────────────────
+
+    async def _open_live(self, coin: str, side: str, stop_pct: float,
+                         take_pct: float, reason: str) -> bool:
+        """Mirror a primary (demo) open onto the connected LIVE account.
+        Called at the end of `_open` when the primary fill succeeded."""
+        self._last_mirror_fail = ""
+        def _fail(msg: str) -> bool:
+            self._last_mirror_fail = str(msg)[:200]
+            _low = str(msg).lower()
+            if "permission" in _low or "does not have trading" in _low:
+                # Sticky: the LIVE key cannot trade at all. Retrying every 8 s
+                # only spams OKX and hammers reconcile — stop until reconnect.
+                self._live_trade_blocked_reason = str(msg)[:200]
+            print(f"[AI-LIVE] open_skip: {msg}", flush=True)
+            self._audit_live("open_blocked", coin, side, 0, msg, ok=False)
+            return False
+        if not await self._mirror_enabled():
+            return _fail("mirror disabled by user")
+        # Strict mirror invariant: LIVE may only hold what DEMO already holds
+        # on the same side. No twin → no LIVE order, ever (this is what made
+        # the mirror trade on its own after a manual close).
+        demo_twin = (self._positions or {}).get(coin)
+        if demo_twin is None or str(getattr(demo_twin, "side", "")).lower() != str(side).lower():
+            return _fail(f"no DEMO twin for {coin} {side} — refusing LIVE open")
+        lc = self._live_client()
+        if not lc:
+            try:
+                if self.live_client_manager:
+                    c = self.live_client_manager.get_client()
+                    if c and not getattr(c, "demo", True) and getattr(c, "has_credentials", lambda: False)():
+                        lc = c
+            except Exception:
+                pass
+        if not lc:
+            return _fail("no live client (mirror offline)")
+        if coin in (self._live_positions or {}):
+            return _fail(f"{coin}: already mirrored on LIVE")
+        # Never stack on top of a manual/foreign LIVE position.
+        try:
+            _ep = await lc.get_positions(inst_id=f"{coin}-USDT-SWAP")
+            for _row in (_ep.get("data") or []):
+                try:
+                    if abs(float(_row.get("pos") or 0)) > 0:
+                        return _fail(f"{coin}: LIVE already has a position — not ours, refusing to add")
+                except (TypeError, ValueError):
+                    continue
+        except Exception:
+            pass
+        ind = self._latest_indicators.get(coin) or {}
+        entry = float(ind.get("close") or 0)
+        if entry <= 0:
+            return _fail("no market price")
+        live_eq = await self._ensure_live_equity()
+        alloc = float(getattr(self, "_live_capital", 0) or 0)
+        if alloc <= 0 and self.db:
+            try:
+                raw = await self.db.get_setting("live_mirror_capital")
+                if raw:
+                    alloc = float(raw)
+                    self._live_capital = alloc
+            except Exception:
+                pass
+        size_eq = alloc if alloc >= 10 else live_eq
+        if size_eq <= 0:
+            try:
+                bal = await lc.get_balance()
+                data = (bal or {}).get("data") or []
+                if data:
+                    size_eq = float((data[0] or {}).get("totalEq") or 0)
+                    live_eq = size_eq
+                    self._live_equity = size_eq
+            except Exception as e:
+                print(f"[AI-LIVE] balance retry: {e}", flush=True)
+        if size_eq <= 0:
+            return _fail("no live equity/capital")
+        if live_eq > 0 and size_eq > live_eq:
+            size_eq = live_eq
+        # NOTE: mirror uses equity-based sizing, NOT avail_usdt.
+        # In cross-margin accounts availBal can be near-zero while totalEq is healthy.
+        # _size_order already caps via allocation_pct + max_leverage.
+        avail_live = await self._avail_usdt(lc, update_equity=False)
+        print(f"[AI-LIVE] sizing equity=${size_eq:.2f} (alloc={alloc:.2f} acct={live_eq:.2f} avail={avail_live:.2f})", flush=True)
+        sz, lev = self._size_order(coin, entry, stop_pct, equity=size_eq)
+        if sz <= 0:
+            return _fail(f"{coin}: size=0 (equity=${live_eq:.2f})")
+        inst = f"{coin}-USDT-SWAP"
+        order_side = "buy" if side == "long" else "sell"
+        live_bid = self._live_bot_id()
+        demo_pos = self._positions.get(coin)
+        trade_id = str(getattr(demo_pos, "demo_trade_id", "") or "") if demo_pos else ""
+        if not trade_id:
+            trade_id = self._new_demo_trade_id()
+            if demo_pos:
+                try:
+                    demo_pos.demo_trade_id = trade_id
+                except Exception:
+                    pass
+        cl_live = self._clord_live(trade_id)
+        for ps in (side, "net", None):
+            try:
+                await lc.set_leverage(inst, lev, mgn_mode="cross",
+                                      pos_side=ps if ps else "net")
+            except Exception:
+                pass
+        # Strict chokepoint: blocks if no DEMO twin position
+        resp = await self._live_market_order(
+            lc, inst=inst, order_side=order_side, sz=sz, pos_side=side,
+            cl_ord_id=cl_live, coin=coin, is_close=False, reason=reason,
+        )
+        if resp.get("error"):
+            return _fail(f"order blocked: {resp.get('message')}")
+        # A real order got through: the key is allowed to trade again.
+        self._live_trade_blocked_reason = ""
+        fills = resp.get("data") or []
+        fill_px, fee, _ = extract_fill_avg(fills, entry)
+        if (not fill_px or fill_px <= 0) and fills:
+            ord_id = fills[0].get("ordId") or fills[0].get("ord_id")
+            if ord_id:
+                for _ in range(4):
+                    await asyncio.sleep(0.35)
+                    try:
+                        o = await lc.get_order(inst, ord_id=ord_id)
+                        rows = o.get("data") or []
+                        if rows:
+                            fill_px, fee, _ = extract_fill_avg(rows, entry)
+                            if fill_px and fill_px > 0:
+                                break
+                    except Exception:
+                        pass
+        if not fill_px or fill_px <= 0:
+            fill_px = entry
+        if side == "long":
+            stop = fill_px * (1 - stop_pct)
+            take = fill_px * (1 + take_pct)
+        else:
+            stop = fill_px * (1 + stop_pct)
+            take = fill_px * (1 - take_pct)
+        signal_id = 0
+        try:
+            if self.db:
+                signal_id = int(await self.db.save_signal(
+                    bot_id=live_bid,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                    side=order_side, price=fill_px, size=sz,
+                    ord_type="market", status="filled",
+                ) or 0)
+        except Exception:
+            signal_id = 0
+        if not signal_id:
+            signal_id = int(time.time()) % 1_000_000_000
+        pos = AIPosition(
+            coin=coin, inst_id=inst, side=side, size=sz,
+            entry_price=fill_px, stop_price=stop, take_price=take,
+            leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
+            peak_price=fill_px, signal_id=int(signal_id or 0),
+            demo_trade_id=str(trade_id or ""),
+        )
+        ok_claim = await claim_open(self.db, live_bid, inst, side, sz, fill_px)
+        if not ok_claim:
+            # Exchange already filled — do NOT flatten. Snapshot best-effort and keep
+            # the live position so DEMO/LIVE stay paired (claim is bookkeeping only).
+            print(f"[AI-LIVE] claim failed after LIVE fill {coin} — keep position, snapshot only", flush=True)
+            try:
+                from app.services.position_claim import upsert_snapshot_position
+                await upsert_snapshot_position(self.db, live_bid, inst, side, sz, fill_px)
+            except Exception as e:
+                print(f"[AI-LIVE] snapshot on claim-fail: {e}", flush=True)
+            self._last_mirror_fail = f"claim_failed_but_kept:{coin}"
+        self._live_positions[coin] = pos
+        self._live_equity -= fee_cost(fee)
+        self._live_equity_ts = 0.0
+        self._live_trade_log_append(pos, "open", fill_px, sz, -fee_cost(fee))
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=live_bid, side=order_side, sz=sz, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=inst, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
+                    state="filled", signal_id=pos.signal_id,
+                    account_mode="live", account_key="live",
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] db open: {e}", flush=True)
+        if self.notifier and getattr(self.notifier, 'configured', True):
+            try:
+                _tg_mid = await self.notifier.send_trade(
+                    self.notifier.open_msg(
+                        coin=coin, side=side, price=round(fill_px, 4),
+                        stop=round(stop, 4), size=sz, leverage=lev,
+                        bot_name=self.BOT_NAME + " (LIVE)",
+                        signal_id=pos.signal_id,
+                        account_mode="live", account_key="live",
+                    ),
+                    account_mode="live",
+                )
+                if _tg_mid:
+                    pos.tg_message_id = int(_tg_mid)
+            except Exception as e:
+                print(f"[AI-LIVE] TG open: {e}", flush=True)
+        print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
+              f"lev={lev} (mirror)", flush=True)
+        self._audit_live(
+            "open", coin, side, sz, reason,
+            ord_id=str((fills[0].get("ordId") if fills else "") or ""), ok=True)
+        # v1.19 removed *tight* exchange SL/TP on LIVE because an independent
+        # algo could close LIVE while DEMO stayed open. v1.38 keeps that intent
+        # but adds a wide reduce-only disaster stop: it sits beyond the strategy
+        # stop, so normal management never reaches it, and it only fires if the
+        # bot process dies with a position open. It is cancelled on our close.
+        try:
+            await self._place_live_disaster_stop(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop wire: {e}", flush=True)
+        self._persist_live()
+        return True
+
+    async def _close_live(self, coin: str, reason: str) -> bool:
+        """Mirror a primary (demo) close onto the connected LIVE account."""
+        if not await self._mirror_enabled():
+            print("[AI-LIVE] close_skip: mirror disabled by user", flush=True)
+            # Queue for when user re-enables
+            try:
+                pending = getattr(self, "_pending_live_closes", None) or set()
+                pending.add(coin)
+                self._pending_live_closes = pending
+            except Exception:
+                pass
+            return False
+        lc = self._live_client()
+        if not lc:
+            await self._try_refresh_live_client()
+            lc = self._live_client()
+        pos = self._live_positions.get(coin)
+        # Memory miss: still try exchange flatten for this coin
+        if not pos and lc:
+            try:
+                inst = f"{coin}-USDT-SWAP"
+                resp = await lc.get_positions(inst_id=inst)
+                for row in (resp.get("data") or []):
+                    try:
+                        sz = abs(float(row.get("pos") or 0))
+                    except (TypeError, ValueError):
+                        sz = 0.0
+                    if sz <= 0:
+                        continue
+                    ps = str(row.get("posSide") or "").lower()
+                    raw = float(row.get("pos") or 0)
+                    side = ps if ps in ("long", "short") else ("long" if raw > 0 else "short")
+                    own = await self._live_ownership(lc, inst)
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        return False
+                    print(f"[AI-LIVE] close {coin}: no memory — flatten exchange {side} sz={sz}", flush=True)
+                    from app.services.position_claim import flatten_position
+                    await flatten_position(lc, inst, side, sz)
+                    self._exec_log.append(_exec_evt("mirror_close_exch", coin, side, reason=reason or "demo_close"))
+                    self._audit_live("close_exch", coin, side, sz, reason or "demo_close", ok=True)
+                    return True
+            except Exception as e:
+                print(f"[AI-LIVE] close exchange fallback {coin}: {e}", flush=True)
+        if not lc or not pos:
+            self._live_positions.pop(coin, None)
+            return False
+        # Cancel exchange SL/TP algo orders first
+        try:
+            await self._cancel_exchange_sl_tp(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] cancel exchange SL/TP: {e}", flush=True)
+        # Cancel the disaster guard too, so it cannot fire mid-close.
+        try:
+            await self._cancel_live_disaster_stop(lc, pos)
+        except Exception as e:
+            print(f"[AI-LIVE] cancel disaster stop: {e}", flush=True)
+        # Safety: verify position still exists on exchange
+        try:
+            ep = await lc.get_positions(inst_id=pos.inst_id)
+            if ep.get("error"):
+                print(f"[AI-LIVE] close {coin}: get_positions error — retry later: {ep.get('message')}", flush=True)
+                return False
+            epos_list = ep.get("data") or []
+            has_pos = False
+            for ep_ in epos_list:
+                ep_sz = abs(float(ep_.get("pos") or 0))
+                if ep_sz > 0:
+                    has_pos = True
+                    break
+            if not has_pos:
+                print(f"[AI-LIVE] close {coin}: exchange pos already gone — notify TG", flush=True)
+                mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) or float(pos.entry_price or 0)
+                try:
+                    ticker = await lc.get_ticker(pos.inst_id)
+                    _td = ticker.get("data") or ticker if isinstance(ticker, dict) else []
+                    if isinstance(_td, list) and _td:
+                        mark = float(_td[0].get("last") or mark) or mark
+                except Exception:
+                    pass
+                entry_m, mark, pnl, _f = compute_close_metrics(pos, coin, mark, fee=0)
+                await self._notify_close_tg(
+                    pos, coin, reason or "exchange_stop", mark, pnl,
+                    account_mode="live", bot_name_suffix=" (LIVE)",
+                )
+                self._live_positions.pop(coin, None)
+                self._persist_live()
+                return True
+        except Exception as e:
+            print(f"[AI-LIVE] close exchange-check: {e}", flush=True)
+            return False
+        if not getattr(pos, "demo_trade_id", ""):
+            own = await self._live_ownership(lc, pos.inst_id)
+            if own != "ai":
+                self._warn_foreign_live(coin, own)
+                return False
+        live_bid = self._live_bot_id()
+        close_side = "sell" if pos.side == "long" else "buy"
+        # Tag the close with the position's own trade_id (ail{tid}c) so the
+        # exchange bill is recognisable as a mirror close and pairs with the
+        # DEMO close (aid{tid}c). Empty id → keep the ai{ms} fallback.
+        _cl_close = self._clord_live_close(getattr(pos, "demo_trade_id", ""))
+        # Strict chokepoint: blocks if DEMO still open (not paired close)
+        self._demo_closing_coin = coin  # marker for paired close
+        resp = await self._live_market_order(
+            lc, inst=pos.inst_id, order_side=close_side, sz=pos.size, pos_side=pos.side,
+            cl_ord_id=(_cl_close or None), coin=coin, is_close=True, reason=reason,
+        )
+        self._demo_closing_coin = None
+        if resp.get("error"):
+            print(f"[AI-LIVE] close blocked: {resp.get('message')}", flush=True)
+            self._audit_live("close_blocked", coin, pos.side, pos.size,
+                             str(resp.get("message") or "")[:120], ok=False)
+            return False
+        fills = resp.get("data") or []
+        mark = float(
+            (self._latest_indicators.get(coin) or {}).get("close") or 0
+        ) or pos.entry_price
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        if not fill_px or abs(fill_px - mark) < 1e-12:
+            try:
+                oid = ((fills[0].get("ordId") if fills else None)
+                       or (resp.get("data") or [{}])[0].get("ordId"))
+                if oid and hasattr(lc, "get_order"):
+                    od = await lc.get_order(pos.inst_id, oid)
+                    rows = od.get("data") or []
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+            except Exception:
+                pass
+        if not fill_px:
+            fill_px = mark
+        fee_c = fee_cost(fee)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
+                             CT_VAL.get(coin, 0.01))
+        self._audit_live("close", coin, pos.side, pos.size, reason or "demo_close", ok=True)
+        self._live_equity += pnl
+        self._live_session_pnl += pnl
+        self._live_lifetime_pnl += pnl
+        self._live_lifetime_trades += 1
+        if pnl > 0:
+            self._live_lifetime_wins += 1
+        self._live_lifetime_fees += fee_c
+        self._live_equity_ts = 0.0
+        datetime.now(timezone.utc).isoformat()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        self._live_trade_log_append(
+            pos, "close", fill_px, pos.size, pnl,
+            extra={"exit_price": fill_px, "fee": round(fee_c, 6)},
+        )
+        try:
+            await self._remember_close_reason(coin, pnl, reason, mode="live")
+        except Exception:
+            pass
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=live_bid, side=close_side, sz=pos.size, px=fill_px,
+                    ord_id=(fills[0].get("ordId") if fills else ""),
+                    inst_id=pos.inst_id, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="closed", signal_id=signal_id or None,
+                    account_mode="live", account_key="live",
+                )
+            except Exception as e:
+                print(f"[AI-LIVE] db close: {e}", flush=True)
+            try:
+                if hasattr(self.db, "upsert_exchange_close_trades"):
+                    oid = str((fills[0].get("ordId") if fills else "") or "")
+                    if not oid:
+                        oid = f"ai{int(time.time() * 1000)}"
+                    # Store the SAME clOrdId the order was sent with, so this
+                    # row matches the exchange bill (previously hardcoded ai{ms}
+                    # → looked like a non-mirror AI close in the audit).
+                    cl = _cl_close or f"ai{int(time.time() * 1000)}"
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid, "inst_id": pos.inst_id, "cl_ord_id": cl,
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(pos.size or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(time.time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": "live", "account_key": "live",
+                    }])
+            except Exception as e:
+                print(f"[AI-LIVE] exchange_close tag: {e}", flush=True)
+        try:
+            await release_open(self.db, live_bid, pos.inst_id, pos.side)
+        except Exception:
+            pass
+        await self._notify_close_tg(
+            pos, coin, reason, fill_px, pnl,
+            account_mode="live", bot_name_suffix=" (LIVE)",
+        )
+        self._live_positions.pop(coin, None)
+        self._persist_live()
+        print(f"[AI-LIVE] CLOSE {coin} pnl={pnl:+.2f} ({reason})", flush=True)
+        return True
+
+    def _live_trade_log_append(self, pos: AIPosition, action: str,
+                               px: float, sz: float, pnl: float,
+                               extra: dict = None):
+        """Append a live mirror entry to the unified _trade_log."""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "account_mode": "live",
+            "time": now_iso,
+            "side": "buy" if (action == "open" and pos.side == "long")
+                    or (action == "close" and pos.side == "short") else "sell",
+            "symbol": pos.inst_id,
+            "size": sz,
+            "pnl": round(pnl, 2),
+            "entry_price": pos.entry_price,
+            "reason": action,
+            "pos_side": pos.side,
+            "coin": pos.coin,
+            "signal_id": int(getattr(pos, "signal_id", 0) or 0),
+        }
+        if extra:
+            entry.update(extra)
+        self._trade_log.append(entry)
+
+    async def _manage_live_orphans(self, client):
+        """Keep LIVE a SUBSET of DEMO — closes only, never opens.
+
+        Cases fixed:
+        - DEMO closed + reversed, LIVE still holds old side/coin → close LIVE
+        - _live_positions memory empty but exchange still has size → adopt/close
+        - orphan exchange SL/TP on the mirror account → cancelled
+
+        Opens are NOT healed here. LIVE opens only when a DEMO open event is
+        copied, or via the watermark-gated _clone_missing_to_live. Auto-opening
+        made LIVE trade on its own after a manual close or exchange stop.
+        """
+        if not await self._mirror_enabled():
+            return
+        lc = self._live_client()
+        if not lc:
+            await self._try_refresh_live_client()
+            lc = self._live_client()
+        if not lc:
+            return
+        if not getattr(self, "_hydrated", False):
+            return
+        # 0) Orphan exchange TP/SL on the mirror account → cancel (throttled).
+        #    Older builds (and manual orders) left algos that could close LIVE
+        #    without DEMO — the mirror then "traded on its own".
+        try:
+            _now = time.time()
+            if _now - float(getattr(self, "_live_algo_purge_ts", 0) or 0) > 60:
+                self._live_algo_purge_ts = _now
+                await self._purge_live_algos(lc)
+        except Exception as e:
+            print(f"[AI-LIVE] purge algos: {e}", flush=True)
+        # Short boot grace only (30s) — 120s was too long for reverse-flip sync
+        try:
+            started = getattr(self, "_started_at", None)
+            if started:
+                started_dt = datetime.fromisoformat(str(started).replace("Z", "+00:00"))
+                if getattr(started_dt, "tzinfo", None) is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc) - started_dt).total_seconds() < 30:
+                    return
+        except Exception:
+            pass
+
+        # 1) Exchange snapshot
+        exch: dict = {}
+        try:
+            resp = await lc.get_positions(inst_type="SWAP")
+            for row in (resp.get("data") or []):
+                try:
+                    sz = abs(float(row.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
+                    continue
+                inst = str(row.get("instId") or "")
+                if not inst.endswith("-USDT-SWAP"):
+                    continue
+                coin = inst.split("-")[0]
+                if coin not in set(getattr(self.config, "symbols", None) or ALLOWED_SYMBOLS):
+                    continue
+                ps = str(row.get("posSide") or "").lower()
+                raw = float(row.get("pos") or 0)
+                if ps in ("long", "short"):
+                    side = ps
+                else:
+                    side = "long" if raw > 0 else "short"
+                try:
+                    entry = float(row.get("avgPx") or row.get("openAvgPx") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                exch[coin] = {"side": side, "size": sz, "entry": entry, "inst_id": inst}
+        except Exception as e:
+            print(f"[AI-LIVE] sync exchange positions: {e}", flush=True)
+            return
+
+        # 2) Close LIVE that DEMO does not hold (same coin+side)
+        for coin, info in list(exch.items()):
+            demo = (self._positions or {}).get(coin)
+            need_flat = (
+                demo is None
+                or float(getattr(demo, "size", 0) or 0) <= 0
+                or str(getattr(demo, "side", "")).lower() != info["side"]
+            )
+            if not need_flat:
+                # keep memory in sync — but only for positions this mirror
+                # opened. A manual LIVE trade that happens to match DEMO must
+                # stay outside the bot's book.
+                mem = (self._live_positions or {}).get(coin)
+                if mem is None:
+                    try:
+                        own = await self._live_ownership(lc, info["inst_id"])
+                    except Exception:
+                        own = "unknown"
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        continue
+                    try:
+                        self._live_positions[coin] = AIPosition(
+                            coin=coin, inst_id=info["inst_id"], side=info["side"],
+                            size=info["size"], entry_price=info["entry"] or 0,
+                            stop_price=0, take_price=0, leverage=1.0,
+                            opened_at=datetime.now(timezone.utc).isoformat(),
+                            peak_price=info["entry"] or 0,
+                        )
+                        self._ensure_default_stops(self._live_positions[coin])
+                    except Exception:
+                        pass
+                continue
+            # Ownership: never flatten a position this mirror did not open.
+            # A manual LIVE trade must not be closed by the bot on its own.
+            try:
+                owner = await self._entry_fill_owner(lc, info["inst_id"])
+            except Exception:
+                owner = ""
+            # Fail-closed: only a position this mirror clearly opened (ai*)
+            # may be flattened. Empty owner = manual/unknown → leave untouched.
+            if owner != "ai":
+                print(
+                    f"[AI-LIVE] SYNC skip {coin}: LIVE position is not ours "
+                    f"(owner={owner or 'manual/unknown'!r}) — leaving untouched",
+                    flush=True,
+                )
+                continue
+            print(
+                f"[AI-LIVE] SYNC close {coin} {info['side']} sz={info['size']} "
+                f"(demo={'none' if not demo else demo.side}) — book mismatch",
+                flush=True,
+            )
+            try:
+                from app.services.position_claim import flatten_position
+                # Tag the cleanup with the slot's trade_id so it pairs with the
+                # DEMO close instead of looking like an untagged AI order.
+                _old_live = self._live_positions.get(coin)
+                _cl_close = self._clord_live_close(
+                    getattr(_old_live, "demo_trade_id", "")) or None
+                if _old_live is not None:
+                    try:
+                        await self._cancel_live_disaster_stop(lc, _old_live)
+                    except Exception:
+                        pass
+                await flatten_position(lc, info["inst_id"], info["side"], info["size"],
+                                       cl_ord_id=_cl_close)
+                self._exec_log.append(_exec_evt(
+                    "mirror_sync_close", coin, info["side"],
+                    reason="demo_flat_or_side_mismatch",
+                ))
+                self._audit_live("orphan_close", coin, info["side"], info["size"],
+                                 "demo_flat_or_side_mismatch", ok=True)
+            except Exception as e:
+                print(f"[AI-LIVE] SYNC flatten {coin}: {e}", flush=True)
+                # Fallback market close via _place
+                try:
+                    self._mirror_call_active = True
+                    close_side = "sell" if info["side"] == "long" else "buy"
+                    await self._place(
+                        lc, info["inst_id"], close_side, info["size"], info["side"],
+                        is_close=True, cl_ord_id=_cl_close,
+                    )
+                except Exception as e2:
+                    print(f"[AI-LIVE] SYNC place-close {coin}: {e2}", flush=True)
+                finally:
+                    self._mirror_call_active = False
+            self._live_positions.pop(coin, None)
+            try:
+                await release_open(self.db, self._live_bot_id(), info["inst_id"], info["side"])
+            except Exception:
+                pass
+
+        # 3) NEVER open LIVE here. Opens must be event-driven copies of a DEMO
+        # open (or the explicit, watermark-gated gap-fill in
+        # _clone_missing_to_live). Re-opening here made LIVE trade on its own:
+        # a manual LIVE close or an exchange SL/TP was instantly "corrected".
+        for coin, demo in list((self._positions or {}).items()):
+            side = str(getattr(demo, "side", "") or "").lower()
+            if not side:
+                continue
+            cur = exch.get(coin)
+            if cur and cur["side"] == side and float(cur.get("size") or 0) > 0:
+                self._live_drift_warned.discard(coin)
+                continue
+            if coin in self._live_drift_warned:
+                continue
+            self._live_drift_warned.add(coin)
+            print(
+                f"[AI-LIVE] DRIFT {coin}: DEMO {side} is not on LIVE — "
+                f"not auto-opening (copy only)",
+                flush=True,
+            )
+            self._exec_log.append(_exec_evt(
+                "mirror_drift", coin, side, reason="demo_open_not_mirrored",
+            ))
+
+        try:
+            self._persist_live()
+        except Exception:
+            pass
+
+
+    async def _reconcile_live_from_exchange(self) -> None:
+        """Adopt open LIVE SWAP positions from the mirror account into memory.
+
+        The live account is dedicated to mirroring — any non-zero position on an
+        allowed symbol is treated as a mirror position (rehydrate after redeploy).
+        """
+        if not self._live_ready():
+            return
+        lc = self._live_client()
+        if not lc:
+            return
+        try:
+            resp = await lc.get_positions("SWAP")
+            if (resp or {}).get("error"):
+                print(f"[AI-LIVE] reconcile get_positions error: {resp}", flush=True)
+                return
+            data = (resp or {}).get("data") or []
+            seen: set[str] = set()
+            allowed = set(self.config.symbols or []) or {
+                "BTC", "ETH", "SOL", "XRP",
+            }
+            for ep in data:
+                inst = ep.get("instId") or ""
+                coin = inst.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if not coin or (allowed and coin not in allowed):
+                    continue
+                try:
+                    sz = abs(float(ep.get("pos") or 0))
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if sz <= 0:
+                    continue
+                pos_side = (ep.get("posSide") or "net").lower()
+                # net mode: sign of pos
+                raw_pos = float(ep.get("pos") or 0)
+                if pos_side == "short" or (pos_side == "net" and raw_pos < 0):
+                    side = "short"
+                else:
+                    side = "long"
+                try:
+                    entry = float(ep.get("avgPx") or 0)
+                except (TypeError, ValueError):
+                    entry = 0.0
+                try:
+                    unc = float(ep.get("upl") or 0)
+                except (TypeError, ValueError):
+                    unc = 0.0
+                try:
+                    lev = float(ep.get("lever") or 0)
+                except (TypeError, ValueError):
+                    lev = 0.0
+                seen.add(coin)
+                old = self._live_positions.get(coin)
+                if old and abs(float(old.size or 0) - sz) < 1e-9 and old.side == side:
+                    # refresh mark fields only
+                    old.unrealized_pnl = unc
+                    if entry > 0:
+                        old.entry_price = entry
+                    continue
+
+                # v1.20: adopt ONLY if linked to a DEMO trade
+                # 1) DEMO holds same coin+side (rehydrate after redeploy)
+                # 2) OR already tracked in memory with demo_trade_id
+                # 3) OR live fills show clOrdId ail{id} matching DEMO aid{id}
+                demo_pos = self._positions.get(coin)
+                demo_ok = (
+                    demo_pos is not None
+                    and str(getattr(demo_pos, "side", "") or "").lower() == side
+                )
+                linked_id = ""
+                if old and getattr(old, "demo_trade_id", ""):
+                    linked_id = str(old.demo_trade_id)
+                if demo_ok and getattr(demo_pos, "demo_trade_id", ""):
+                    linked_id = linked_id or str(demo_pos.demo_trade_id)
+
+                if not demo_ok and not linked_id:
+                    # Try resolve via recent fills clOrdId (ail…)
+                    try:
+                        fills_resp = await lc.get_fills(inst, limit=20) if hasattr(lc, "get_fills") else {}
+                        for fr in (fills_resp or {}).get("data") or []:
+                            tid = self._trade_id_from_clord(
+                                fr.get("clOrdId") or fr.get("clOrdID") or ""
+                            )
+                            if not tid:
+                                continue
+                            # Match DEMO open with same trade_id
+                            for dp in self._positions.values():
+                                if str(getattr(dp, "demo_trade_id", "") or "") == tid:
+                                    if str(getattr(dp, "coin", "")).upper() == coin and str(getattr(dp, "side", "")).lower() == side:
+                                        linked_id = tid
+                                        demo_ok = True
+                                        break
+                            if linked_id:
+                                break
+                            # Accept pure ail* fill as our mirror even if demo memory empty
+                            # only when DEMO has ANY position on same coin+side
+                            if demo_pos and str(getattr(demo_pos, "side", "")).lower() == side:
+                                linked_id = tid
+                                demo_ok = True
+                                break
+                    except Exception as fe:
+                        print(f"[AI-LIVE] reconcile fills probe {coin}: {fe}", flush=True)
+
+                if not demo_ok and not (old and linked_id):
+                    print(
+                        f"[AI-LIVE] reconcile IGNORE orphan {coin} {side} sz={sz} "
+                        f"(no DEMO twin / no demo_trade_id link)",
+                        flush=True,
+                    )
+                    continue
+                if not linked_id and not (old and getattr(old, "demo_trade_id", "")):
+                    own = await self._live_ownership(lc, inst or f"{coin}-USDT-SWAP")
+                    if own != "ai":
+                        self._warn_foreign_live(coin, own)
+                        continue
+
+                pos = AIPosition(
+                    coin=coin,
+                    inst_id=inst or f"{coin}-USDT-SWAP",
+                    side=side,
+                    size=sz,
+                    entry_price=entry or (old.entry_price if old else 0),
+                    stop_price=float(getattr(old, "stop_price", 0) or 0),
+                    take_price=float(getattr(old, "take_price", 0) or 0),
+                    leverage=lev or float(getattr(old, "leverage", 0) or 0),
+                    opened_at=getattr(old, "opened_at", None) or datetime.now(timezone.utc).isoformat(),
+                    peak_price=float(getattr(old, "peak_price", 0) or entry or 0),
+                    unrealized_pnl=unc,
+                    tg_message_id=int(getattr(old, "tg_message_id", 0) or 0),
+                    signal_id=int(getattr(old, "signal_id", 0) or 0),
+                    demo_trade_id=linked_id or (
+                        str(getattr(demo_pos, "demo_trade_id", "") or "") if demo_pos else ""
+                    ),
+                    # Keep the existing guard id so a restart does not stack a
+                    # second disaster stop on the same LIVE position.
+                    disaster_algo_id=str(getattr(old, "disaster_algo_id", "") or ""),
+                    disaster_stop_px=float(getattr(old, "disaster_stop_px", 0) or 0),
+                )
+                # Compute default stop/take from entry when adopting after restart
+                self._ensure_default_stops(pos)
+                self._live_positions[coin] = pos
+                try:
+                    await self._ensure_live_disaster_stop(self._live_client(), pos)
+                except Exception as _de:
+                    print(f"[AI-LIVE] disaster stop after adopt {coin}: {_de}", flush=True)
+                print(
+                    f"[AI-LIVE] reconcile adopt {coin} {side} sz={sz} entry={entry} "
+                    f"upl={unc:+.2f} trade_id={pos.demo_trade_id or '-'}",
+                    flush=True,
+                )
+                try:
+                    await claim_open(self.db, self._live_bot_id(), pos.inst_id, side, sz, entry)
+                except Exception as ce:
+                    print(f"[AI-LIVE] claim after adopt {coin}: {ce}", flush=True)
+            # drop memory positions that vanished on exchange
+            for coin in list(self._live_positions.keys()):
+                if coin not in seen:
+                    pos = self._live_positions.get(coin)
+                    print(f"[AI-LIVE] reconcile drop {coin} (gone on exchange)", flush=True)
+                    if pos:
+                        exit_px = float(getattr(pos, "entry_price", 0) or 0)
+                        try:
+                            ticker = await lc.get_ticker(pos.inst_id)
+                            _td = (ticker or {}).get("data") or []
+                            if _td:
+                                exit_px = float(_td[0].get("last") or exit_px) or exit_px
+                        except Exception:
+                            pass
+                        _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
+                        try:
+                            # v1.17: LIVE no longer carries its own exchange SL/TP, so
+                            # this path should now only fire on manual intervention,
+                            # liquidation, or another external event — not routine
+                            # bot-placed stop/take execution. Labelled accordingly so
+                            # it stands out if it ever happens again.
+                            await self._notify_close_tg(
+                                pos, coin, "exchange_vanished_unexpected", exit_px, pnl,
+                                account_mode="live", bot_name_suffix=" (LIVE)",
+                            )
+                        except Exception as _nte:
+                            print(f"[AI-LIVE] reconcile TG notify: {_nte}", flush=True)
+                    self._live_positions.pop(coin, None)
+            try:
+                await self._persist_live_async()
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"[AI-LIVE] reconcile: {e}", flush=True)
+
+
+    async def _revalidate_mirror_entry(self, coin: str, side: str) -> tuple[bool, str]:
+        """Gate a *delayed* LIVE mirror open (fast-retry / gap-fill) — v1.19.
+
+        Mirror is not a second opinion. The trade was decided on DEMO. Do NOT
+        re-litigate align/ADX/regime (that permanently skipped LIVE opens when
+        the gate drifted during retries). Only block if price ran away >1.2%
+        from DEMO entry so LIVE would be a different trade.
+        """
+        side = (side or "").lower()
+        if side not in ("long", "short"):
+            return False, "bad_side"
+        try:
+            client = await self._client()
+            if client:
+                await self._fetch_indicators(client)
+        except Exception as e:
+            print(f"[AI-LIVE] revalidate fetch indicators: {e}", flush=True)
+        ind = self._latest_indicators.get(coin) or {}
+        demo_pos = self._positions.get(coin)
+        try:
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0) if demo_pos else 0
+            last = float(ind.get("close") or ind.get("last") or 0)
+            if entry > 0 and last > 0:
+                move = (last - entry) / entry
+                if side == "long" and move < -0.012:
+                    return False, f"price_ran_away_long:{move:.3%}"
+                if side == "short" and move > 0.012:
+                    return False, f"price_ran_away_short:{move:.3%}"
+        except Exception:
+            pass
+        return True, "ok_mirror_no_relitigation"
+
+    async def _mirror_fast_retry(self, coin: str, side: str, stop_pct: float,
+                                  take_pct: float, reason: str) -> None:
+        """Retry LIVE mirror within seconds after a failed primary mirror.
+
+        Delays: 2s, 5s, 12s — total <20s. Aborts if demo flat or live already has coin.
+        """
+        for delay in (2.0, 5.0, 12.0):
+            try:
+                await asyncio.sleep(delay)
+            except Exception:
+                return
+            if not self._running:
+                return
+            if coin not in self._positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: demo already flat", flush=True)
+                return
+            if coin in self._live_positions:
+                print(f"[AI-LIVE] fast_retry abort {coin}: already on live", flush=True)
+                return
+            if not await self._mirror_enabled():
+                return
+            if self._live_trade_blocked():
+                print(f"[AI-LIVE] fast_retry abort {coin}: LIVE key cannot trade", flush=True)
+                return
+            try:
+                await self._try_refresh_live_client()
+                if not self._live_ready():
+                    print(f"[AI-LIVE] fast_retry {coin}: live not ready (t+{delay:.0f}s)", flush=True)
+                    continue
+                demo_pos = self._positions.get(coin)
+                if demo_pos:
+                    entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+                    stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+                    take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+                    if entry > 0 and stop_p > 0:
+                        stop_pct = abs(stop_p - entry) / entry
+                    if entry > 0 and take_p > 0:
+                        take_pct = abs(take_p - entry) / entry
+                    side = getattr(demo_pos, "side", side)
+                # Delayed entry: re-confirm with current AI/quant data
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] fast_retry SKIP {coin} t+{delay:.0f}s: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] fast_retry AI ok {coin}: {gate_reason}", flush=True)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
+                    reason=f"fast_retry_{reason}",
+                )
+                print(f"[AI-LIVE] fast_retry {coin} t+{delay:.0f}s → {ok}", flush=True)
+                if ok:
+                    return
+            except Exception as e:
+                print(f"[AI-LIVE] fast_retry {coin}: {e}", flush=True)
+
+    async def _clone_missing_to_live(self):
+        """Clone demo positions that are missing from live (hydrate + gap-fill).
+
+        Watermark (К2): only clone positions opened AFTER explicit mirror connect.
+        The watermark is stored as `live_mirror_connected_at` (Unix timestamp)
+        set when user presses "Подключить LIVE". Positions opened before that
+        timestamp are NOT cloned — user said "Лайв только вручную, без клонирования".
+        """
+        if not await self._mirror_enabled():
+            return
+        if not self._live_ready():
+            await self._try_refresh_live_client()
+        if not self._live_ready():
+            print("[AI-LIVE] clone_missing: live not ready", flush=True)
+            return
+        # Watermark: only clone positions opened AFTER explicit mirror connect.
+        # No watermark → fail-closed (do not guess): LIVE must never open a
+        # position that was not copied while the user had mirroring on.
+        watermark = await self._live_clone_watermark()
+        if watermark == 0:
+            print("[AI-LIVE] clone_missing SKIP: no live_mirror_connected_at "
+                  "watermark — reconnect LIVE to re-arm copying", flush=True)
+            return
+
+        try:
+            await self._reconcile_live_from_exchange()
+        except Exception as e:
+            print(f"[AI-LIVE] clone_missing pre-reconcile: {e}", flush=True)
+        import time as _t
+        if not hasattr(self, "_clone_attempt_ts"):
+            self._clone_attempt_ts = {}
+        now = _t.time()
+        for coin, demo_pos in list(self._positions.items()):
+            if coin in self._live_positions:
+                continue
+            if float(getattr(demo_pos, "size", 0) or 0) <= 0:
+                continue
+            # Watermark gate: only clone positions opened AFTER explicit connect
+            try:
+                opened_at = getattr(demo_pos, "opened_at", None)
+                if opened_at:
+                    opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
+                    if opened_ts < watermark:
+                        print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
+                        continue
+            except Exception as _we:
+                print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
+                continue
+            last = float(self._clone_attempt_ts.get(coin) or 0)
+            if now - last < 15:
+                continue
+            self._clone_attempt_ts[coin] = now
+            entry = float(getattr(demo_pos, "entry_price", 0) or 0)
+            stop_p = float(getattr(demo_pos, "stop_price", 0) or 0)
+            take_p = float(getattr(demo_pos, "take_price", 0) or 0)
+            stop_pct = abs(stop_p - entry) / entry if entry > 0 and stop_p > 0 else 0.03
+            take_pct = abs(take_p - entry) / entry if entry > 0 and take_p > 0 else 0.06
+            side = getattr(demo_pos, "side", "long")
+            print(f"[AI-LIVE] clone_missing {coin}: {side} demo_sz={demo_pos.size} "
+                  f"entry={entry:.4f}", flush=True)
+            try:
+                ok_gate, gate_reason = await self._revalidate_mirror_entry(coin, side)
+                if not ok_gate:
+                    print(f"[AI-LIVE] clone_missing SKIP {coin}: AI gate {gate_reason}", flush=True)
+                    self._exec_log.append(_exec_evt(
+                        "mirror_skip", coin, side, reason=f"ai_revalidate:{gate_reason}"
+                    ))
+                    continue
+                print(f"[AI-LIVE] clone_missing AI ok {coin}: {gate_reason}", flush=True)
+                ok = await self._open_live(
+                    coin, side, stop_pct, take_pct,
+                    reason="clone_missing_from_demo",
+                )
+                print(f"[AI-LIVE] clone_missing result {coin}={ok}", flush=True)
+            except Exception as e:
+                print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
+
+    def _persist_live(self):
+        """Save live open positions snapshot (separate key from primary)."""
+        if not self.db:
+            return
+        try:
+            loop = self._loop or asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(self._persist_live_async())
+        except Exception:
+            pass
+
+    async def _persist_live_async(self):
+        if not self.db:
+            return
+        try:
+            live_bid = self._live_bot_id()
+            # Separate key from open_positions:* (claim list-format snapshot)
+            key = f"live_book:{live_bid}"
+            val = json.dumps({c: asdict(p) for c, p in self._live_positions.items()})
+            await self.db.set_setting(key, val)
+            await self.db.set_setting(
+                f"live_audit:{live_bid}",
+                json.dumps(getattr(self, "_live_audit", [])[-200:], ensure_ascii=False),
+            )
+        except Exception as e:
+            print(f"[AI-LIVE] persist: {e}", flush=True)
+
+    # ── Exchange-level SL/TP algo orders ──────────────────────────────────────
+
+    def _get_algo_client(self, client):
+        """Return the OKX client that owns the position (demo primary or live)."""
+        return client
+
+    async def _place_exchange_sl_tp(self, client, pos) -> None:
+        """Place a real exchange conditional (SL+TP) algo order for a position.
+
+        OKX conditional type supports both sl and tp in one request.  When one
+        triggers, the other is auto-cancelled.  The algo ID is stored in
+        pos.sl_algo_id; if tp_px is provided it's included in the same request.
+        Falls back to software-only stop if this fails.
+        """
+        if not client or not pos:
+            return
+        inst = pos.inst_id
+        sz_str = self._fmt_sz(pos.coin, pos.size)
+        sl_side = "sell" if pos.side == "long" else "buy"
+        _long = str(pos.side).lower() == "long"
+        _sl = float(pos.stop_price or 0)
+        _tp = float(pos.take_price or 0)
+        # A trigger the market has already crossed is executed at market the
+        # instant OKX accepts the algo — the position then "vanishes" seconds
+        # after it opened and used to be booked as a fake −fee trade (ADA,
+        # 28 Oct). Rebase such a stop on the current mark and drop a TP that is
+        # already beyond the mark (software management keeps pos.take_price).
+        try:
+            mark = float(await self._ticker_last(client, inst) or 0)
+        except Exception:
+            mark = 0.0
+        if mark > 0:
+            ent = float(pos.entry_price or 0)
+            if _sl > 0 and ent > 0:
+                crossed = (mark <= _sl) if _long else (mark >= _sl)
+                if crossed:
+                    pct = min(0.15, max(0.005, abs(ent - _sl) / ent))
+                    _sl = mark * (1 - pct) if _long else mark * (1 + pct)
+                    pos.stop_price = _sl
+                    print(f"[AI] exchange SL rebased {pos.coin} -> {_sl:.4f} (mark {mark})",
+                          flush=True)
+            if _tp > 0:
+                done = (mark >= _tp) if _long else (mark <= _tp)
+                if done:
+                    print(f"[AI] exchange TP skipped {pos.coin}: mark {mark} already past {_tp}",
+                          flush=True)
+                    _tp = 0.0
+        sl_px = str(round(_sl, 4)) if _sl else None
+        tp_px = str(round(_tp, 4)) if _tp else None
+        if not sl_px and not tp_px:
+            return
+        try:
+            resp = await client.place_algo_order(
+                inst_id=inst, side=sl_side, sz=sz_str, td_mode="cross",
+                pos_side=pos.side,
+                sl_trigger_px=sl_px, sl_ord_px="-1" if sl_px else None,
+                tp_trigger_px=tp_px, tp_ord_px="-1" if tp_px else None,
+                cxl_on_close_pos=True,
+                cl_ord_id=f"ai_sltp_{pos.signal_id}",
+            )
+            if not resp.get("error"):
+                algo_data = resp.get("data") or []
+                if algo_data:
+                    algo_id = str(algo_data[0].get("algoId") or "")
+                    pos.sl_algo_id = algo_id
+                    pos.tp_algo_id = algo_id
+                    print(f"[AI] exchange SL/TP placed {pos.coin} algo={algo_id} sl={sl_px} tp={tp_px}", flush=True)
+                else:
+                    print(f"[AI] exchange SL/TP ack empty {pos.coin}", flush=True)
+            else:
+                print(f"[AI] exchange SL/TP error {pos.coin}: {resp.get('message')}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP exception {pos.coin}: {e}", flush=True)
+
+    async def _cancel_exchange_sl_tp(self, client, pos) -> None:
+        """Cancel the outstanding exchange SL/TP algo order (before close/amend)."""
+        if not client or not pos:
+            return
+        algo_id = pos.sl_algo_id or pos.tp_algo_id
+        if not algo_id:
+            return
+        try:
+            resp = await client.cancel_algo_order(pos.inst_id, algo_id)
+            if not resp.get("error"):
+                print(f"[AI] exchange SL/TP cancelled {pos.coin} algo={algo_id}", flush=True)
+            else:
+                print(f"[AI] exchange SL/TP cancel error {pos.coin}: {resp.get('message')}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL/TP cancel exception {pos.coin}: {e}", flush=True)
+        pos.sl_algo_id = ""
+        pos.tp_algo_id = ""
+
+    # ── LIVE disaster stop (process-death guard) ──────────────────────────────
+
+    def _live_disaster_px(self, side: str, entry: float, stop_pct: float) -> float:
+        """Price for the wide LIVE guard, safely beyond the strategy stop."""
+        cfg = self.config
+        try:
+            base = abs(float(stop_pct or 0))
+        except (TypeError, ValueError):
+            base = 0.0
+        if base <= 0:
+            base = float(getattr(cfg, "min_stop_pct", 0.016) or 0.016)
+        mult = float(getattr(cfg, "live_disaster_stop_mult", 1.8) or 1.8)
+        extra = float(getattr(cfg, "live_disaster_stop_extra", 0.01) or 0.0)
+        cap = float(getattr(cfg, "live_disaster_stop_max", 0.15) or 0.15)
+        pct = min(cap, max(base * mult, base + extra))
+        px = float(entry or 0)
+        if px <= 0:
+            return 0.0
+        return px * (1 - pct) if str(side).lower() == "long" else px * (1 + pct)
+
+    async def _place_live_disaster_stop(self, client, pos) -> None:
+        """Wide reduce-only STOP on LIVE: protection if the process dies.
+
+        Deliberately well beyond the strategy stop, so normal management never
+        reaches it — this does not reintroduce the v1.19 "LIVE closed alone"
+        problem. ``cxlOnClosePos`` cancels it when the position closes, and
+        ``_close_live`` also cancels it explicitly before placing our own close.
+        """
+        if not client or not pos or not getattr(self.config, "live_disaster_stop", True):
+            return
+        try:
+            entry = float(pos.entry_price or 0)
+            stop_pct = 0.0
+            if entry > 0 and float(pos.stop_price or 0) > 0:
+                if str(pos.side).lower() == "long":
+                    stop_pct = (entry - float(pos.stop_price)) / entry
+                else:
+                    stop_pct = (float(pos.stop_price) - entry) / entry
+            px = self._live_disaster_px(pos.side, entry, stop_pct)
+            if px <= 0:
+                return
+            sz_str = self._fmt_sz(pos.coin, pos.size)
+            sl_side = "sell" if str(pos.side).lower() == "long" else "buy"
+            tid = re.sub(r"[^a-zA-Z0-9]", "", str(getattr(pos, "demo_trade_id", "") or ""))[:12]
+            cl = f"ails{tid}"[:32] if tid else None
+            resp = {}
+            # Hedge accounts want posSide=long/short; net accounts want net/omit.
+            # Mirror the fallback used by market orders, otherwise the guard can
+            # be rejected on one of the two position modes.
+            for _ps in (pos.side, "net", None):
+                try:
+                    resp = await client.place_algo_order(
+                        inst_id=pos.inst_id, side=sl_side, sz=sz_str, td_mode="cross",
+                        pos_side=_ps, reduce_only=True,
+                        sl_trigger_px=str(round(px, 4)), sl_ord_px="-1",
+                        cxl_on_close_pos=True, cl_ord_id=cl,
+                    )
+                except Exception as _e:
+                    resp = {"error": True, "message": str(_e)}
+                if not resp.get("error"):
+                    break
+            if resp.get("error"):
+                msg = str(resp.get("message") or "")[:120]
+                print(f"[AI-LIVE] disaster stop error {pos.coin}: {msg}", flush=True)
+                self._audit_live("disaster_stop", pos.coin, pos.side, pos.size, msg, ok=False)
+                return
+            data = resp.get("data") or []
+            algo_id = str(data[0].get("algoId") or "") if data else ""
+            if algo_id:
+                pos.disaster_algo_id = algo_id
+                pos.disaster_stop_px = float(px)
+            print(f"[AI-LIVE] disaster stop {pos.coin} sl={px:.4f} algo={algo_id}", flush=True)
+            self._audit_live("disaster_stop", pos.coin, pos.side, pos.size,
+                             f"sl={px:.4f}", algo_id, ok=True)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop exception {pos.coin}: {e}", flush=True)
+
+    async def _cancel_live_disaster_stop(self, client, pos) -> None:
+        """Cancel the guard before we close the position ourselves."""
+        if not client or not pos or not getattr(pos, "disaster_algo_id", ""):
+            return
+        try:
+            resp = await client.cancel_algo_order(pos.inst_id, pos.disaster_algo_id)
+            if not resp.get("error"):
+                print(f"[AI-LIVE] disaster stop cancelled {pos.coin}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop cancel exception {pos.coin}: {e}", flush=True)
+        pos.disaster_algo_id = ""
+        pos.disaster_stop_px = 0.0
+
+    async def _ensure_live_disaster_stop(self, client, pos) -> None:
+        """Place the guard only if this position does not have one yet.
+
+        Before placing, look for an existing ``ails*`` conditional on the
+        exchange: a restart that died before `_persist_live` would otherwise
+        stack a second guard on the same position.
+        """
+        if not client or not pos or getattr(pos, "disaster_algo_id", ""):
+            return
+        try:
+            resp = await client.get_algo_orders(
+                ord_type="conditional", inst_type="SWAP", state="live",
+                limit=50, instId=pos.inst_id,
+            )
+            for r in (resp or {}).get("data") or []:
+                cid = str(r.get("clOrdId") or "").lower()
+                if not cid.startswith("ails"):
+                    continue
+                pos.disaster_algo_id = str(r.get("algoId") or "")
+                try:
+                    pos.disaster_stop_px = float(r.get("slTriggerPx") or 0)
+                except (TypeError, ValueError):
+                    pos.disaster_stop_px = 0.0
+                if pos.disaster_algo_id:
+                    print(f"[AI-LIVE] disaster stop adopted {pos.coin} "
+                          f"algo={pos.disaster_algo_id}", flush=True)
+                    return
+        except Exception as e:
+            print(f"[AI-LIVE] disaster stop list {pos.coin}: {e}", flush=True)
+        await self._place_live_disaster_stop(client, pos)
+
+    async def _amend_exchange_sl(self, client, pos, new_sl_px: float) -> None:
+        """Move the exchange SL order to a new price (trailing / breakeven)."""
+        if not client or not pos or not pos.sl_algo_id:
+            return
+        sl_px = str(round(new_sl_px, 4))
+        try:
+            resp = await client.amend_algo_order(
+                inst_id=pos.inst_id, algo_id=pos.sl_algo_id,
+                sl_trigger_px=sl_px, sl_ord_px="-1",
+            )
+            if not resp.get("error"):
+                pos.stop_price = new_sl_px
+                print(f"[AI] exchange SL amended {pos.coin} -> {sl_px}", flush=True)
+            else:
+                msg = resp.get("message", "")
+                if "does not exist" in str(msg).lower() or "filled" in str(msg).lower() or "cancelled" in str(msg).lower():
+                    print(f"[AI] exchange SL amend stale {pos.coin}: {msg}", flush=True)
+                    pos.sl_algo_id = ""
+                else:
+                    print(f"[AI] exchange SL amend error {pos.coin}: {msg}", flush=True)
+        except Exception as e:
+            print(f"[AI] exchange SL amend exception {pos.coin}: {e}", flush=True)
+
+    def _ensure_default_stops(self, pos) -> None:
+        """Set sane stop/take when they leaked in as 0 (adopted/hydrated position).
+
+        stop_price==0 breaks _manage_stops: long stop never fires, short stop
+        fires instantly; take_price==0 closes longs immediately as 'take'.
+        """
+        try:
+            entry = float(pos.entry_price or 0)
+            if entry <= 0:
+                return
+            max_stop = float(getattr(self.config, "max_stop_pct", 0.05) or 0.05)
+            min_take = float(getattr(self.config, "min_take_pct", 0.035) or 0.035)
+            if float(pos.stop_price or 0) <= 0:
+                pos.stop_price = (
+                    entry * (1 - max_stop) if pos.side == "long"
+                    else entry * (1 + max_stop)
+                )
+            if float(pos.take_price or 0) <= 0:
+                pos.take_price = (
+                    entry * (1 + min_take) if pos.side == "long"
+                    else entry * (1 - min_take)
+                )
+        except Exception as e:
+            print(f"[AI] ensure_default_stops {getattr(pos, 'coin', '?')}: {e}", flush=True)
+
+
+    def _atr_pct(self, coin: str, entry: float = 0.0) -> float:
+        """ATR as fraction of price (entry or last close)."""
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        try:
+            atr = float(ind.get("atr") or 0)
+            px = float(entry or ind.get("close") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if atr <= 0 or px <= 0:
+            return 0.0
+        return atr / px
+
+    def _stops_from_atr(self, coin: str, entry: float, stop_pct: float = 0.0, take_pct: float = 0.0) -> tuple[float, float]:
+        """Blend LLM/quant stop/take with ATR multiples, clamp to config bounds.
+
+        Prefer ATR when available so quiet markets get tighter stops and
+        volatile markets get room without exceeding max_stop_pct.
+        """
+        cfg = self.config
+        min_s = float(getattr(cfg, "min_stop_pct", 0.016) or 0.016)
+        max_s = float(getattr(cfg, "max_stop_pct", 0.035) or 0.035)
+        min_t = float(getattr(cfg, "min_take_pct", 0.028) or 0.028)
+        atr_p = self._atr_pct(coin, entry)
+        if atr_p > 0:
+            s_atr = atr_p * float(getattr(cfg, "atr_stop_mult", 1.15) or 1.15)
+            t_atr = atr_p * float(getattr(cfg, "atr_take_mult", 1.90) or 1.90)
+            # Blend: if LLM gave a stop, average with ATR; else pure ATR
+            try:
+                sp = float(stop_pct or 0)
+            except (TypeError, ValueError):
+                sp = 0.0
+            try:
+                tp = float(take_pct or 0)
+            except (TypeError, ValueError):
+                tp = 0.0
+            if sp > 0:
+                stop_pct = 0.5 * sp + 0.5 * s_atr
+            else:
+                stop_pct = s_atr
+            if tp > 0:
+                take_pct = 0.5 * tp + 0.5 * t_atr
+            else:
+                take_pct = t_atr
+        stop_pct = min(max_s, max(min_s, abs(float(stop_pct or min_s))))
+        take_pct = max(min_t, abs(float(take_pct or min_t)))
+        # Enforce RR ≥ 1.35 after fees buffer
+        if take_pct < stop_pct * 1.35:
+            take_pct = stop_pct * 1.5
+        return stop_pct, take_pct
+
+    def _unrealized_pct(self, pos, px: float) -> float:
+        if not px or not pos.entry_price:
+            return 0.0
+        if pos.side == "long":
+            return (px - pos.entry_price) / pos.entry_price * 100.0
+        return (pos.entry_price - px) / pos.entry_price * 100.0
+
+    def _bar_period_sec(self) -> int:
+        b = str(getattr(self.config, "bar", "1H") or "1H").strip().upper()
+        if b.endswith("M"):
+            try:
+                return max(60, int(b[:-1] or 1) * 60)
+            except ValueError:
+                return 3600
+        if b.endswith("H"):
+            try:
+                return max(3600, int(b[:-1] or 1) * 3600)
+            except ValueError:
+                return 3600
+        if b.endswith("D"):
+            return 86400
+        return 3600
+
+    def _cfg_f(self, name: str, default: float) -> float:
+        """Read float from config; fallback matches AIConfig defaults (not stale code defaults)."""
+        try:
+            v = getattr(self.config, name, default)
+            return float(v if v is not None else default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _cfg_b(self, name: str, default: bool) -> bool:
+        try:
+            return bool(getattr(self.config, name, default))
+        except Exception:
+            return bool(default)
+
+    async def _ticker_last(self, client, inst_id: str) -> float:
+        """Best-effort last trade price from OKX ticker (demo or live client)."""
+        if not client or not inst_id:
+            return 0.0
+        try:
+            tk = await client.get_ticker(inst_id)
+            rows = (tk or {}).get("data") or []
+            if rows:
+                return float(rows[0].get("last") or 0) or 0.0
+        except Exception as e:
+            print(f"[AI] ticker {inst_id}: {type(e).__name__}: {e}", flush=True)
+        return 0.0
+
+    async def _price_for_exit(self, client, coin: str, pos=None) -> float:
+        """Single source of truth for SL/TP/giveback/time-stop price.
+
+        Prefer ticker mark over 1H candle close so exits track the real market
+        even when candle feed lags (seen on demo).
+        """
+        inst = getattr(pos, "inst_id", None) if pos is not None else None
+        if not inst:
+            inst = f"{coin}-USDT-SWAP"
+        last = await self._ticker_last(client, inst)
+        ind = (self._latest_indicators or {}).get(coin) or {}
+        candle = float(ind.get("close") or ind.get("mark") or 0)
+        if last > 0:
+            if candle > 0 and abs(last - candle) / candle > 0.003:
+                print(
+                    f"[AI] exit-price {coin}: candle={candle:.4f} ticker={last:.4f}",
+                    flush=True,
+                )
+            try:
+                if coin in (self._latest_indicators or {}):
+                    self._latest_indicators[coin]["mark"] = last
+                    self._latest_indicators[coin]["mark_ts"] = datetime.now(timezone.utc).isoformat()
+            except Exception:
+                pass
+            return last
+        return candle
+
+    def _indicators_stale(self, max_bars: float = 2.5) -> bool:
+        """True if any watched coin has closed_bar older than max_bars periods."""
+        inds = self._latest_indicators or {}
+        if not inds:
+            return True
+        bar_ms = self._bar_period_sec() * 1000
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        limit = int(bar_ms * max_bars)
+        for coin, ind in inds.items():
+            try:
+                ts = int(ind.get("closed_bar_ts") or 0)
+            except (TypeError, ValueError):
+                ts = 0
+            if ts <= 0 or (now_ms - ts) > limit:
+                return True
+        return False
+
+    async def _persist_peaks(self) -> None:
+        """Survive redeploy: peak_upl_pct must not reset or hard-lock is blind."""
+        if not self.db:
+            return
+        try:
+            blob = {}
+            for coin, pos in (self._positions or {}).items():
+                blob[coin] = {
+                    "peak_upl_pct": float(getattr(pos, "peak_upl_pct", 0) or 0),
+                    "peak_price": float(getattr(pos, "peak_price", 0) or 0),
+                    "stop_price": float(getattr(pos, "stop_price", 0) or 0),
+                    "take_price": float(getattr(pos, "take_price", 0) or 0),
+                    "partial_taken": bool(getattr(pos, "partial_taken", False)),
+                    "side": getattr(pos, "side", ""),
+                    "entry_price": float(getattr(pos, "entry_price", 0) or 0),
+                }
+            await self.db.set_setting(
+                f"ai_peaks:{self.BOT_ID}",
+                json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "pos": blob}),
+            )
+        except Exception as e:
+            print(f"[AI] persist_peaks: {e}", flush=True)
+
+    async def _restore_peaks(self) -> None:
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting(f"ai_peaks:{self.BOT_ID}")
+            if not raw:
+                return
+            data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+            blob = (data.get("pos") if isinstance(data, dict) else None) or {}
+            for coin, meta in blob.items():
+                pos = (self._positions or {}).get(coin)
+                if not pos or not isinstance(meta, dict):
+                    continue
+                if str(getattr(pos, "side", "")) != str(meta.get("side") or ""):
+                    continue
+                try:
+                    peak = float(meta.get("peak_upl_pct") or 0)
+                    if peak > float(getattr(pos, "peak_upl_pct", 0) or 0):
+                        pos.peak_upl_pct = peak
+                    pp = float(meta.get("peak_price") or 0)
+                    if pp > 0:
+                        pos.peak_price = pp
+                    if meta.get("partial_taken"):
+                        pos.partial_taken = True
+                    # prefer tighter stored stop for shorts/longs
+                    sp = float(meta.get("stop_price") or 0)
+                    if sp > 0:
+                        if pos.side == "short":
+                            if not pos.stop_price or sp < float(pos.stop_price):
+                                pos.stop_price = sp
+                        else:
+                            if not pos.stop_price or sp > float(pos.stop_price):
+                                pos.stop_price = sp
+                except Exception:
+                    pass
+            if blob:
+                print(f"[AI] restore_peaks: {list(blob.keys())}", flush=True)
+        except Exception as e:
+            print(f"[AI] restore_peaks: {e}", flush=True)
+
+    async def _sync_live_stop(self, coin: str, new_sl: float) -> None:
+        """Mirror demo trail/BE stop onto live algo when possible."""
+        try:
+            lpos = (self._live_positions or {}).get(coin)
+            lc = self._live_client()
+            if not lpos or not lc or new_sl <= 0:
+                return
+            old = float(getattr(lpos, "stop_price", 0) or 0)
+            side = str(getattr(lpos, "side", "") or "")
+            tighter = False
+            if side == "short":
+                tighter = (old <= 0) or (new_sl < old)
+            else:
+                tighter = (old <= 0) or (new_sl > old)
+            if not tighter:
+                return
+            lpos.stop_price = new_sl
+            await self._amend_exchange_sl(lc, lpos, new_sl)
+        except Exception as e:
+            print(f"[AI-LIVE] sync stop {coin}: {e}", flush=True)
+
+    async def _scale_out_partial(self, client, coin: str, frac: float, reason: str) -> bool:
+        """Close a fraction of the DEMO position (and mirror) to bank profit."""
+        pos = self._positions.get(coin)
+        if not pos or frac <= 0 or frac >= 0.99:
+            return False
+        if bool(getattr(pos, "partial_taken", False)):
+            return False
+        full = float(pos.size or 0)
+        lot = float(LOT_SZ.get(coin, 0.01) or 0.01)
+        close_sz = max(lot, round(full * frac / lot) * lot)
+        if close_sz >= full * 0.95:
+            await self._close(client, coin, reason)
+            return True
+        remain = round((full - close_sz) / lot) * lot
+        if remain < lot:
+            await self._close(client, coin, reason)
+            return True
+        if not self._execute_enabled():
+            pos.size = remain
+            pos.partial_taken = True
+            print(f"[AI] SIGNAL partial {coin} close={close_sz} remain={remain} ({reason})", flush=True)
+            return True
+        close_side = "buy" if pos.side == "short" else "sell"
+        try:
+            resp = await self._place(
+                client, pos.inst_id, close_side, close_sz, pos.side, is_close=True,
+            )
+            if resp.get("error"):
+                print(f"[AI] partial fail {coin}: {resp.get('message')}", flush=True)
+                return False
+            pos.size = remain
+            pos.partial_taken = True
+            print(f"[AI] partial close {coin} sz={close_sz} remain={remain} ({reason})", flush=True)
+            # Book the realized leg. Before this the 30% that was banked only
+            # shrank pos.size: trades/equity/daily/lifetime never saw the
+            # realized PnL, so adaptive + risk limits under-counted the trade.
+            try:
+                await self._book_partial(client, coin, pos, close_sz, resp, reason)
+            except Exception as e:
+                print(f"[AI] partial book: {e}", flush=True)
+            # Mirror reduce on live
+            try:
+                if await self._mirror_enabled() and self._live_ready():
+                    lpos = (self._live_positions or {}).get(coin)
+                    lc = self._live_client()
+                    if lpos and lc:
+                        lfull = float(lpos.size or 0)
+                        lclose = max(float(LOT_SZ.get(coin, 0.01)), round(lfull * frac / lot) * lot)
+                        if 0 < lclose < lfull * 0.95:
+                            self._mirror_call_active = True
+                            try:
+                                await self._place(
+                                    lc, lpos.inst_id, close_side, lclose, lpos.side, is_close=True,
+                                )
+                            finally:
+                                self._mirror_call_active = False
+                            lpos.size = max(lot, lfull - lclose)
+                            lpos.partial_taken = True
+            except Exception as e:
+                print(f"[AI-LIVE] partial mirror: {e}", flush=True)
+            try:
+                await self._persist_peaks()
+            except Exception:
+                pass
+            return True
+        except Exception as e:
+            print(f"[AI] partial exception {coin}: {e}", flush=True)
+            return False
+
+
+    async def _book_partial(self, client, coin: str, pos, close_sz: float,
+                            resp: dict, reason: str) -> dict:
+        """Book a partial close as a realized event (books, log, DB, equity).
+
+        A partial is a real close fill on the exchange (its own OKX bill), so it
+        must hit the same books as a full close. Otherwise `_trade_log` /
+        adaptive / `_daily_realized` (risk limits) miss the banked share.
+        """
+        fills = list((resp or {}).get("data") or [])
+        mark = float((self._latest_indicators.get(coin) or {}).get("close") or 0) \
+            or float(getattr(pos, "entry_price", 0) or 0)
+        fill_px, fee, _ = extract_fill_avg(fills, mark)
+        # Market ack often carries ordId but no avgPx/fee — resolve once.
+        if fills and (not fill_px or abs(fill_px - mark) < 1e-12):
+            try:
+                oid0 = fills[0].get("ordId") or fills[0].get("ord_id")
+                if oid0 and hasattr(client, "get_order"):
+                    od = await client.get_order(pos.inst_id, oid0)
+                    rows = list(od.get("data") or [])
+                    if rows:
+                        fill_px, fee, _ = extract_fill_avg(rows, mark)
+                        fills = rows
+            except Exception:
+                pass
+        if not fill_px or fill_px <= 0:
+            fill_px = mark
+        fee_c = fee_cost(fee)
+        _net, _avg, _fc, _ = pnl_from_okx_fills(fills, fill_px)
+        if _net is not None:
+            pnl = float(_net)
+            if _avg:
+                fill_px = float(_avg)
+            if _fc:
+                fee_c = float(_fc)
+        else:
+            pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee,
+                            CT_VAL.get(coin, 0.01))
+        pnl = float(pnl or 0)
+        self._equity += pnl
+        self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + pnl
+        self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + pnl
+        self._session_pnl += pnl
+        self._lifetime_pnl += pnl
+        self._lifetime_trades += 1
+        # A close just landed: force the next engine recompute so the 5-min
+        # cache cannot overwrite these fresh counters with a stale snapshot
+        # (that made lifetime_pnl_internal drift from the card for minutes).
+        self._engine_stats_ts = 0.0
+        if pnl > 0:
+            self._lifetime_wins += 1
+        self._lifetime_fees += fee_c
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+        self._persist()
+        close_side = "buy" if pos.side == "short" else "sell"
+        oid = ""
+        try:
+            oid = str((fills[0].get("ordId") if fills else "") or "")
+        except Exception:
+            oid = ""
+        cl = ""
+        try:
+            cl = str((fills[0].get("clOrdId") if fills else "") or "")
+        except Exception:
+            cl = ""
+        mode, key = self._account_mode_tag()
+        signal_id = int(getattr(pos, "signal_id", 0) or 0)
+        self._trade_log.append({
+            "account_mode": mode,
+            "time": datetime.now(timezone.utc).isoformat(),
+            "side": close_side, "symbol": pos.inst_id,
+            "size": close_sz, "pnl": round(pnl, 2),
+            "entry_price": pos.entry_price, "exit_price": fill_px,
+            "fee": round(fee_c, 6), "reason": "partial",
+            "pos_side": pos.side, "coin": coin,
+            "signal_id": signal_id, "ord_id": oid,
+        })
+        if self.db:
+            try:
+                await self.db.save_trade(
+                    bot_id=self.BOT_ID, side=close_side, sz=close_sz, px=fill_px,
+                    ord_id=oid, inst_id=pos.inst_id, ord_type="market",
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    state="closed", signal_id=signal_id or None,
+                    account_mode=mode, account_key=key,
+                )
+            except Exception as e:
+                print(f"[AI] db partial: {e}", flush=True)
+            # Same authoritative attribution as a full close so the engine's
+            # dedupe (ord_id) sees one row, not a twin from the bill sync.
+            try:
+                if oid and hasattr(self.db, "upsert_exchange_close_trades"):
+                    await self.db.upsert_exchange_close_trades([{
+                        "ord_id": oid,
+                        "inst_id": pos.inst_id,
+                        "cl_ord_id": cl or f"{self._clord_prefix()}{int(time.time() * 1000)}",
+                        "bot_label": self.BOT_NAME,
+                        "pnl": round(float(pnl), 6),
+                        "fee": round(float(fee_c), 6),
+                        "sz": float(close_sz or 0),
+                        "avg_px": float(fill_px or 0),
+                        "close_ts": int(time.time() * 1000),
+                        "sub_type": "5",
+                        "account_mode": mode,
+                        "account_key": key,
+                    }])
+            except Exception as e:
+                print(f"[AI] exchange_close partial: {e}", flush=True)
+        print(f"[AI] PARTIAL BOOK {coin} pnl={pnl:+.2f} sz={close_sz} "
+              f"remain={float(getattr(pos, 'size', 0) or 0)} ({reason})", flush=True)
+        return {"pnl": pnl, "px": float(fill_px or 0), "fee": fee_c, "ord_id": oid}
+
+
+    def _indicator_exit_reason(self, pos, ind: dict, held_min: float) -> str | None:
+        """Exit on regime flip — lock small profit instead of giving it back to SL."""
+        cfg = self.config
+        if not getattr(cfg, "indicator_exit", True):
+            return None
+        if held_min < float(getattr(cfg, "min_hold_minutes", 90) or 0):
+            return None
+        px = float(ind.get("close") or 0)
+        ema_f = float(ind.get("ema_fast") or 0)
+        ema_s = float(ind.get("ema_slow") or 0)
+        roc = float(ind.get("roc_3") or 0)
+        adx = float(ind.get("adx") or 0)
+        if px <= 0:
+            return None
+        upl = self._unrealized_pct(pos, px)
+        min_p = float(getattr(cfg, "exit_min_profit_pct", 0.15) or 0)
+
+        # Hard regime break — exit even near flat if structure clearly against us
+        hard = False
+        soft = False  # only if in profit
+        reasons = []
+
+        if getattr(cfg, "exit_on_ema_cross", True) and ema_f and ema_s:
+            if pos.side == "long" and ema_f < ema_s:
+                reasons.append("ema_bear_cross")
+                hard = hard or (upl >= min_p * 0.5 or ema_f < ema_s * 0.998)
+                soft = True
+            if pos.side == "short" and ema_f > ema_s:
+                reasons.append("ema_bull_cross")
+                hard = hard or (upl >= min_p * 0.5 or ema_f > ema_s * 1.002)
+                soft = True
+
+        if getattr(cfg, "exit_on_price_vs_ema", True) and ema_s:
+            if pos.side == "long" and px < ema_s:
+                reasons.append("price_below_ema_slow")
+                soft = True
+                if upl >= min_p or px < ema_s * 0.997:
+                    hard = True
+            if pos.side == "short" and px > ema_s:
+                reasons.append("price_above_ema_slow")
+                soft = True
+                if upl >= min_p or px > ema_s * 1.003:
+                    hard = True
+
+        if getattr(cfg, "exit_on_roc_flip", True):
+            if pos.side == "long" and roc < -abs(float(cfg.min_roc_abs or 0.35)):
+                reasons.append(f"roc_down:{roc:.2f}")
+                soft = True
+                if upl >= min_p * 0.5:
+                    hard = True
+            if pos.side == "short" and roc > abs(float(cfg.min_roc_abs or 0.35)):
+                reasons.append(f"roc_up:{roc:.2f}")
+                soft = True
+                if upl >= min_p * 0.5:
+                    hard = True
+
+        weak_adx = float(getattr(cfg, "exit_weak_adx", 14) or 0)
+        if weak_adx and adx and adx < weak_adx and upl >= min_p:
+            reasons.append(f"adx_fade:{adx:.1f}")
+            soft = True
+            hard = True
+
+        # Same-side trend still strong? Do not exit at a loss on indicator noise —
+        # that causes close→reopen churn and double fees when short/long continues.
+        # v1.14: hold-in-loss ONLY outside chop and with ADX>=min; force exit if adverse >0.6×ATR.
+        al = float(ind.get("align_long") or 0)
+        ash = float(ind.get("align_short") or 0)
+        align_side = ash if pos.side == "short" else al
+        hold_al = float(getattr(cfg, "hold_loss_if_align", 0.60) or 0)
+        reg = str(ind.get("regime") or "").lower()
+        min_adx_hold = float(getattr(cfg, "hold_loss_min_adx", 22.0) or 0)
+        block_chop = bool(getattr(cfg, "hold_loss_block_chop", True))
+        # Adverse move in ATR units while red
+        adverse_atr = 0.0
+        try:
+            atr = float(ind.get("atr") or 0)
+            entry = float(pos.entry_price or 0)
+            if atr > 0 and entry > 0 and upl < 0:
+                adverse = (entry - px) if pos.side == "long" else (px - entry)
+                if adverse > 0:
+                    adverse_atr = adverse / atr
+        except Exception:
+            adverse_atr = 0.0
+        force_adv = float(getattr(cfg, "force_exit_adverse_atr", 0.60) or 0.60)
+        too_deep = force_adv > 0 and adverse_atr >= force_adv
+        trend_still_ok = (
+            hold_al > 0
+            and align_side >= hold_al
+            and (not block_chop or reg not in ("chop", "unknown", ""))
+            and (min_adx_hold <= 0 or adx >= min_adx_hold)
+            and not too_deep
+        )
+
+        # In profit + soft signal: only if align already faded OR move is real (≥1.2%).
+        # v1.30: soft EMA/ROC flips alone were cutting trend legs in 20–40m.
+        if soft and upl >= min_p:
+            soft_hold = float(getattr(cfg, "ind_exit_soft_hold_pct", 2.00) or 0)
+            if align_side >= hold_al and upl < soft_hold and not too_deep:
+                print(
+                    f"[AI] hold soft-ind noise {pos.coin} {pos.side}: "
+                    f"upl={upl:+.2f}% align={align_side:.2f} reasons={reasons[:3]}",
+                    flush=True,
+                )
+                return None
+            return "ind_exit:" + "+".join(reasons[:3])
+        # Deep adverse in ATR terms → cut even on single hard signal / soft cluster
+        if too_deep and (hard or (soft and len(reasons) >= 1)) and upl < 0:
+            print(
+                f"[AI] force ind_exit {pos.coin} {pos.side}: adverse_atr={adverse_atr:.2f} "
+                f">={force_adv} upl={upl:+.2f}% reg={reg} adx={adx:.1f}",
+                flush=True,
+            )
+            return "ind_exit:adverse_atr+" + "+".join(reasons[:2] or ["deep"])
+        # Slightly red: do NOT flatten on indicator noise. That path closed
+        # XRP shorts in ~20 minutes for a fee. Thesis-break (2 confirms) and
+        # the hard stop handle real failures; a winner still exits above.
+        if upl < 0:
+            return None
+        # Strong multi-signal against even if flat — cut before full SL
+        if hard and len(reasons) >= 2 and upl > -float(getattr(cfg, "min_stop_pct", 0.02)) * 100 * 0.6:
+            if upl < 0 and trend_still_ok:
+                print(
+                    f"[AI] hold through ind noise {pos.coin} {pos.side}: "
+                    f"upl={upl:+.2f}% align={align_side:.2f} reg={reg} adx={adx:.1f} "
+                    f"adv_atr={adverse_atr:.2f} reasons={reasons[:3]}",
+                    flush=True,
+                )
+                return None
+            return "ind_exit:" + "+".join(reasons[:3])
+        return None
+
+    async def _manage_stops(self, client):
+        """Hard SL/TP + indicator regime exit + light trailing."""
+        for coin, pos in list(self._positions.items()):
+            held_min = 0.0
+            try:
+                opened = datetime.fromisoformat(pos.opened_at.replace("Z", "+00:00"))
+                held_sec = (datetime.now(timezone.utc) - opened).total_seconds()
+                held_min = held_sec / 60.0
+                held_h = held_sec / 3600.0
+                if held_h >= float(self.config.max_hold_hours or 12):
+                    await self._close(client, coin, "max_hold")
+                    continue
+            except Exception:
+                held_h = 0.0
+            ind = self._latest_indicators.get(coin) or {}
+            px = await self._price_for_exit(client, coin, pos)
+            if px <= 0:
+                continue
+            # Phase4 time-stop: no progress after N hours → exit (don't bleed to SL)
+            try:
+                stale_h = self._cfg_f("time_stop_stale_hours", 6.0)
+                min_prog = self._cfg_f("time_stop_min_progress_pct", 0.20)
+                if stale_h > 0 and held_h >= stale_h:
+                    upl0 = self._unrealized_pct(pos, px)
+                    if upl0 < min_prog:
+                        # Symmetric to hold-in-loss: if trend still aligned, don't time-stop
+                        al = float(ind.get("align_long") or 0)
+                        ash = float(ind.get("align_short") or 0)
+                        align_side = ash if pos.side == "short" else al
+                        hold_al = self._cfg_f("time_stop_hold_align", 0.85)
+                        trend_alive = bool(hold_al > 0 and align_side >= hold_al)
+                        # P2.3: only time-stop a DEAD trend. A live trend with
+                        # decent ADX in the position's own direction gets room,
+                        # even below the strong-align bypass.
+                        if bool(self._cfg_b("time_stop_require_dead_trend", True)):
+                            try:
+                                adx_v = float(ind.get("adx") or 0)
+                            except (TypeError, ValueError):
+                                adx_v = 0.0
+                            reg_v = str(ind.get("regime") or "unknown")
+                            dir_trend = (reg_v == "bull") if pos.side == "long" else (reg_v == "bear")
+                            dead_adx = self._cfg_f("time_stop_dead_adx", 18.0)
+                            if adx_v >= dead_adx and dir_trend:
+                                trend_alive = True
+                        if trend_alive:
+                            print(
+                                f"[AI] time_stop HOLD {coin} {pos.side}: held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}>={hold_al} "
+                                f"adx={float(ind.get('adx') or 0):.0f} reg={ind.get('regime')}",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                f"[AI] time_stop_stale {coin} held={held_h:.1f}h "
+                                f"upl={upl0:+.2f}% align={align_side:.2f}",
+                                flush=True,
+                            )
+                            await self._close(client, coin, "time_stop_stale")
+                            continue
+            except Exception as e:
+                print(f"[AI] time_stop check: {e}", flush=True)
+
+            # Peak / trail: move stop to lock part of profit
+            if pos.side == "long":
+                pos.peak_price = max(pos.peak_price or px, px)
+            else:
+                pos.peak_price = min(pos.peak_price or px, px) if pos.peak_price else px
+
+            upl = self._unrealized_pct(pos, px)
+            # Track peak unrealized % so we can detect giveback
+            try:
+                prev_peak = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                if upl > prev_peak:
+                    pos.peak_upl_pct = upl
+                    # persist every new peak: a redeploy must not blind profit-lock
+                    try:
+                        await self._persist_peaks()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # --- Profit protection (v1.27): soft take → hard lock → giveback ---
+            try:
+                peak_u = float(getattr(pos, "peak_upl_pct", 0) or 0)
+                # 0) Partial scale-out once — bank half, trail the rest
+                if self._cfg_b("partial_take_enable", True) and not bool(getattr(pos, "partial_taken", False)):
+                    part_lvl = self._cfg_f("partial_take_pct", 2.60)
+                    part_frac = self._cfg_f("partial_take_frac", 0.25)
+                    if part_lvl > 0 and upl >= part_lvl:
+                        ok = await self._scale_out_partial(
+                            client, coin, part_frac, f"partial_{upl:.1f}"
+                        )
+                        if ok:
+                            continue
+                # 1) Soft profit take: bank a clean green without waiting for far TP
+                soft_take = self._cfg_f("soft_profit_take_pct", 5.00)
+                if soft_take > 0 and upl >= soft_take:
+                    print(
+                        f"[AI] soft_profit_take {coin} {pos.side}: upl={upl:+.2f}% "
+                        f">= {soft_take:.2f}% (peak={peak_u:+.2f}%)",
+                        flush=True,
+                    )
+                    await self._close(client, coin, f"soft_take_{upl:.1f}")
+                    continue
+                # 2) Hard lock: was clearly green, now gave back a lot of a BIG
+                # peak → leave. Threshold is the larger of the absolute floor and
+                # `retain × peak`, so this rule stays reachable alongside giveback
+                # (an absolute-only floor was subsumed and never fired).
+                if self._cfg_b("hard_profit_lock_enable", True):
+                    lock_peak = self._cfg_f("hard_profit_lock_peak", 2.60)
+                    lock_floor = self._cfg_f("hard_profit_lock_floor", 0.40)
+                    lock_ret = self._cfg_f("hard_profit_lock_retain", 0.55)
+                    lock_thr = max(lock_floor, peak_u * lock_ret) if lock_ret > 0 else lock_floor
+                    if peak_u >= lock_peak and upl < lock_thr:
+                        print(
+                            f"[AI] hard_profit_lock {coin} {pos.side}: peak={peak_u:+.2f}% "
+                            f"now={upl:+.2f}% < floor {lock_thr:.2f}%",
+                            flush=True,
+                        )
+                        await self._close(client, coin, f"profit_lock_peak_{peak_u:.1f}")
+                        continue
+                # 3) Classic giveback: gave back most of the peak
+                if self._cfg_b("giveback_enable", True):
+                    min_peak = self._cfg_f("giveback_min_peak_pct", 1.20)
+                    retain = self._cfg_f("giveback_retain_frac", 0.35)
+                    if peak_u >= min_peak and upl <= peak_u * retain:
+                        print(
+                            f"[AI] giveback exit {coin} {pos.side}: peak={peak_u:+.2f}% "
+                            f"now={upl:+.2f}% retain<={retain:.0%} of peak",
+                            flush=True,
+                        )
+                        await self._close(client, coin, f"giveback_peak_{peak_u:.1f}")
+                        continue
+            except Exception as e:
+                print(f"[AI] profit-protect check: {e}", flush=True)
+            # Thesis broken (price + MACD/ROC flipped) while flat or red → leave
+            # before the full stop. Winners are left to giveback/trail.
+            try:
+                tb = self._thesis_break_reason(pos, ind, upl, held_min)
+                if tb:
+                    print(
+                        f"[AI] {tb} {coin} {pos.side} upl={upl:+.2f}% held={held_min:.0f}m",
+                        flush=True,
+                    )
+                    await self._close(client, coin, tb)
+                    continue
+            except Exception as e:
+                print(f"[AI] thesis_break check: {e}", flush=True)
+            atr_p = self._atr_pct(coin, float(pos.entry_price or px or 0))
+            # Favorable move in ATR units
+            fav_atr = 0.0
+            if atr_p > 0 and pos.entry_price and px:
+                if pos.side == "long":
+                    fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
+                else:
+                    fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
+            # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
+            # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
+            # override the other (see v1.16 notes on the config fields above).
+            be_need = self._cfg_f("breakeven_atr_mult", 0.90)
+            be_min_pct = self._cfg_f("breakeven_min_pct", 1.00)
+            be_lock = self._cfg_f("breakeven_lock_pct", 0.20) / 100.0
+            _stop_before = float(pos.stop_price or 0)
+            if pos.entry_price and ((atr_p > 0 and fav_atr >= be_need) or upl >= be_min_pct):
+                if pos.side == "long":
+                    be = float(pos.entry_price) * (1.0 + be_lock)
+                    if be > float(pos.stop_price or 0):
+                        pos.stop_price = be
+                else:
+                    be = float(pos.entry_price) * (1.0 - be_lock)
+                    if not pos.stop_price or be < float(pos.stop_price):
+                        pos.stop_price = be
+            # Soft-lock (v1.41): once the trade was meaningfully green (peak ≥
+            # soft_lock_peak_pct) never hand the whole move back to breakeven —
+            # park the stop soft_lock_atr_mult × ATR under the peak. This fills the
+            # dead-zone between the BE arm (~+1%) and the giveback arm (+1.8%),
+            # where a +1.7% runner used to round-trip to +0.2% with nothing banked.
+            try:
+                sl_peak = self._cfg_f("soft_lock_peak_pct", 1.50)
+                sl_mult = self._cfg_f("soft_lock_atr_mult", 0.80)
+                if sl_peak > 0 and peak_u >= sl_peak and pos.entry_price and pos.peak_price:
+                    if atr_p > 0 and sl_mult > 0:
+                        _dist = sl_mult * atr_p * float(pos.entry_price)
+                    else:
+                        _dist = float(pos.entry_price) * (sl_peak / 100.0) * 0.5
+                    if pos.side == "long":
+                        _cand = float(pos.peak_price) - _dist
+                        _floor = float(pos.entry_price) * (1.0 + be_lock)
+                        _new = max(_floor, _cand)
+                        if _new > float(pos.stop_price or 0):
+                            pos.stop_price = _new
+                    else:
+                        _cand = float(pos.peak_price) + _dist
+                        _ceil = float(pos.entry_price) * (1.0 - be_lock)
+                        _new = min(_ceil, _cand) if pos.stop_price else _cand
+                        if not pos.stop_price or _new < float(pos.stop_price):
+                            pos.stop_price = _new
+            except Exception as e:
+                print(f"[AI] soft-lock check: {e}", flush=True)
+            # Trail: activate after trail_activate_atr_mult × ATR (or legacy % fallback)
+            act_atr = float(getattr(self.config, "trail_activate_atr_mult", 1.50) or 1.50)
+            trail_m = float(getattr(self.config, "trail_atr_mult", 1.10) or 1.10)
+            act_pct = float(getattr(self.config, "trail_activate_pct", 2.00) or 0)
+            lock = float(getattr(self.config, "trail_lock_pct", 0.22) or 0)
+            trail_on = (atr_p > 0 and fav_atr >= act_atr) or (act_pct > 0 and upl >= act_pct)
+            if trail_on and pos.entry_price:
+                if atr_p > 0 and trail_m > 0:
+                    # Distance from peak in price units
+                    dist = trail_m * atr_p * float(pos.entry_price)
+                    if pos.side == "long":
+                        be = pos.entry_price * (1.0 + be_lock)
+                        trail = float(pos.peak_price or px) - dist
+                        new_stop = max(be, trail)
+                        if new_stop > float(pos.stop_price or 0):
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * (1.0 - be_lock)
+                        trail = float(pos.peak_price or px) + dist
+                        new_stop = min(be, trail) if pos.stop_price else trail
+                        if not pos.stop_price or new_stop < float(pos.stop_price):
+                            pos.stop_price = new_stop
+                else:
+                    if pos.side == "long":
+                        be = pos.entry_price * (1 + lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 - lock / 100.0)
+                        new_stop = max(be, trail)
+                        if new_stop > pos.stop_price:
+                            pos.stop_price = new_stop
+                    else:
+                        be = pos.entry_price * (1 - lock / 100.0)
+                        trail = (pos.peak_price or px) * (1 + lock / 100.0)
+                        new_stop = min(be, trail)
+                        if new_stop < pos.stop_price:
+                            pos.stop_price = new_stop
+            # Amend exchange SL once if the stop moved (BE / soft-lock / trail)
+            if float(pos.stop_price or 0) != _stop_before:
+                try:
+                    await self._amend_exchange_sl(client, pos, pos.stop_price)
+                    await self._sync_live_stop(coin, float(pos.stop_price))
+                except Exception as e:
+                    print(f"[AI] trail amend SL: {e}", flush=True)
+
+            # Hard stop / take first (skip levels that were never set)
+            sp = float(pos.stop_price or 0)
+            tp = float(pos.take_price or 0)
+            if pos.side == "long":
+                if sp > 0 and px <= sp:
+                    await self._close(client, coin, "stop")
+                    continue
+                if tp > 0 and px >= tp:
+                    await self._close(client, coin, "take")
+                    continue
+            else:
+                if sp > 0 and px >= sp:
+                    await self._close(client, coin, "stop")
+                    continue
+                if tp > 0 and px <= tp:
+                    await self._close(client, coin, "take")
+                    continue
+
+            # Indicator regime exit (main request)
+            reason = self._indicator_exit_reason(pos, ind, held_min)
+            if reason:
+                print(f"[AI] indicator exit {coin} upl={upl:+.2f}% {reason}", flush=True)
+                await self._close(client, coin, reason)
+
+
+
+    async def _other_ai_owns(self, inst_id: str, side: str) -> bool:
+        """True if a DIFFERENT bot (not this one, not its live-mirror twin)
+        holds a DB claim on this instrument."""
+        if not self.db:
+            return False
+        try:
+            ours = {str(self.BOT_ID), str(self._live_bot_id())}
+            sql = ("SELECT bot_id FROM positions WHERE inst_id = $1"
+                   if self.db._pg_mode else
+                   "SELECT bot_id FROM positions WHERE inst_id = ?")
+            rows = await self.db._fetchall(sql, (inst_id,))
+            return any(str(r["bot_id"]) not in ours for r in (rows or []))
+        except Exception:
+            return False
+
+    async def _owned_via_trades(self, inst_id: str, side: str) -> bool:
+        """True if latest DB trade for this inst by AI is consistent with an open."""
+        if not self.db:
+            return False
+        try:
+            rows = await self.db._fetchall(
+                (
+                    "SELECT side, pnl, state, timestamp FROM trades "
+                    "WHERE bot_id = $1 AND inst_id = $2 ORDER BY timestamp DESC LIMIT 5"
+                    if self.db._pg_mode else
+                    "SELECT side, pnl, state, timestamp FROM trades "
+                    "WHERE bot_id = ? AND inst_id = ? ORDER BY timestamp DESC LIMIT 5"
+                ),
+                (self.BOT_ID, inst_id),
+            )
+        except Exception as e:
+            print(f"[AI] trades ownership: {e}", flush=True)
+            return False
+        if not rows:
+            return False
+        # Heuristic: last fill by this bot for inst — buy implies long open, sell short open
+        last = rows[0]
+        last_side = (last.get("side") or "").lower()
+        if side == "long" and last_side == "buy":
+            return True
+        if side == "short" and last_side == "sell":
+            return True
+        # if last was closing opposite, not ours
+        return False
+
+
+
+    async def _reconcile_positions_with_exchange(self, client) -> None:
+        """Drop memory positions that are flat on OKX OR owned by another bot.
+
+        Prevents both Discretionary and Scale-In showing Pos.1 for one exchange position.
+        Sends a Telegram notification when a position is detected as manually closed.
+        """
+        if not client:
+            return
+        if not self._positions:
+            return
+        try:
+            result = await client.get_positions("SWAP")
+        except Exception as e:
+            print(f"[{self.BOT_NAME}] reconcile get_positions: {e}", flush=True)
+            return
+        # OKX may return list or {"data": [...]}
+        if isinstance(result, dict):
+            raw_list = result.get("data") or []
+        else:
+            raw_list = result or []
+        live: dict = {}
+        for raw in raw_list:
+            try:
+                if not isinstance(raw, dict):
+                    continue
+                inst = str(raw.get("instId") or "")
+                if not inst:
+                    continue
+                coin = inst.split("-")[0]
+                try:
+                    pos_raw = float(raw.get("pos") or 0)
+                except (TypeError, ValueError):
+                    pos_raw = 0.0
+                sz = abs(pos_raw)
+                if sz <= 1e-12:
+                    continue
+                side = str(raw.get("posSide") or "").lower()
+                if side in ("", "net"):
+                    side = "long" if pos_raw > 0 else "short"
+                if side in ("buy",):
+                    side = "long"
+                if side in ("sell",):
+                    side = "short"
+                live[coin] = {"side": side, "size": sz, "inst_id": inst}
+            except Exception:
+                continue
+
+        my_pfx = (self._clord_prefix() or "").lower()
+        for coin, pos in list(self._positions.items()):
+            info = live.get(coin)
+            inst = getattr(pos, "inst_id", None) or (info or {}).get("inst_id") or f"{coin}-USDT-SWAP"
+            side = getattr(pos, "side", "long")
+
+            if not info:
+                print(
+                    f"[{self.BOT_NAME}] reconcile: {coin} flat on exchange "
+                    f"(was {side} sz={getattr(pos, 'size', 0)}) — booking close",
+                    flush=True,
+                )
+                await self._record_flat_close(client, pos, coin, 0.0, "exchange_close")
+                continue
+
+            # Ownership: clOrdId prefix must match this bot (ais ≠ ai)
+            try:
+                owner = await self._entry_fill_owner(client, inst)
+            except Exception:
+                owner = ""
+            if owner and my_pfx and owner != my_pfx:
+                print(
+                    f"[{self.BOT_NAME}] reconcile: drop {coin} — fill_owner={owner!r} mine={my_pfx!r}",
+                    flush=True,
+                )
+                self._positions.pop(coin, None)
+                try:
+                    if self.db:
+                        await release_open(self.db, self.BOT_ID, inst, side)
+                except Exception:
+                    pass
+                continue
+
+            # DB claim must be this bot (or empty). If another bot_id holds claim — drop.
+            try:
+                if self.db and hasattr(self.db, "find_position_any_side"):
+                    owned = await self.db.find_position_any_side(self.BOT_ID, inst, side)
+                    if not owned and hasattr(self.db, "get_position_owner"):
+                        other = await self.db.get_position_owner(inst, side)
+                        if other and other != self.BOT_ID:
+                            print(
+                                f"[{self.BOT_NAME}] reconcile: drop {coin} — DB owner={other}",
+                                flush=True,
+                            )
+                            self._positions.pop(coin, None)
+                            continue
+            except Exception:
+                pass
+
+            try:
+                if abs(float(getattr(pos, "size", 0) or 0) - float(info["size"])) > 1e-8:
+                    pos.size = float(info["size"])
+            except Exception:
+                pass
+
+    async def _drop_foreign_positions(self, client) -> None:
+        """If memory holds a position whose entry fill belongs to another bot — release."""
+        if not self._positions or not client:
+            return
+        my = (self._clord_prefix() or "").lower()
+        for coin, pos in list(self._positions.items()):
+            try:
+                owner = await self._entry_fill_owner(client, pos.inst_id)
+            except Exception:
+                continue
+            if owner and my and owner != my:
+                print(
+                    f"[{self.BOT_NAME}] drop foreign {coin}: fill_owner={owner!r} mine={my!r}",
+                    flush=True,
+                )
+                self._positions.pop(coin, None)
+                try:
+                    await release_open(self.db, self.BOT_ID, pos.inst_id, pos.side)
+                except Exception:
+                    pass
+
+    async def _persist_open_state(self, force: bool = False) -> None:
+        """Persist stop/take/peak for open positions (throttled).
+
+        Without this the durable snapshot only got written on close/hydrate, so
+        a deploy between entry and exit restored synthetic 3% stops."""
+        if not self.db:
+            return
+        now = time.time()
+        if not force and (now - float(getattr(self, "_open_state_ts", 0) or 0)) < 30:
+            return
+        self._open_state_ts = now
+        try:
+            await persist_open_snapshot(self.db, self.BOT_ID, list(self._positions.values()))
+        except Exception as e:
+            print(f"[AI] persist open state: {e}", flush=True)
+
+    async def _snapshot_protection(self) -> dict:
+        """Load persisted stop/take/peak/opened_at per (inst_id, side)."""
+        if not self.db:
+            return {}
+        try:
+            raw = await self.db.get_setting(f"open_positions:{self.BOT_ID}")
+            data = json.loads(raw) if raw else []
+        except Exception:
+            return {}
+        out = {}
+        for row in data or []:
+            if not isinstance(row, dict):
+                continue
+            key = (str(row.get("inst_id") or ""), str(row.get("side") or "").lower())
+            if key[0]:
+                out[key] = row
+        return out
+
+    @staticmethod
+    def _apply_snapshot_protection(entry: float, side: str, prot: dict,
+                                   stop: float, take: float) -> tuple:
+        """Use persisted stop/take when they are sane for this side/entry."""
+        try:
+            s_px = float((prot or {}).get("stop_price") or 0)
+            t_px = float((prot or {}).get("take_price") or 0)
+        except (TypeError, ValueError):
+            return stop, take
+        if entry <= 0:
+            return stop, take
+        if side == "long":
+            ok = 0 < s_px < entry < t_px
+        else:
+            ok = s_px > entry > t_px > 0
+        return (s_px, t_px) if ok else (stop, take)
+
+    async def _restore_open_positions(self, client):
+        """Adopt exchange positions owned by this bot (DB) after restart."""
+        if not client:
+            return
+        await self._reconcile_positions_with_exchange(client)
+        await self._drop_foreign_positions(client)
+        if self._positions:
+            return
+        _prot_map = await self._snapshot_protection()
+        try:
+            result = await client.get_positions("SWAP")
+            if result.get("error"):
+                return
+            _rows = result.get("data")
+            if not (isinstance(_rows, list) and not _rows):
+                # Exchange is flat while memory is empty → the durable snapshot
+                # is stale (closed by SL/TP or manually during a restart). Without
+                # this cleanup the AI guard reports "positions_lost" forever and
+                # a later boot could re-adopt a phantom position.
+                try:
+                    await release_open(self.db, self.BOT_ID)
+                    print(f"[{self.BOT_NAME}] cleared stale open_positions snapshot", flush=True)
+                except Exception as e:
+                    print(f"[{self.BOT_NAME}] clear stale snapshot: {e}", flush=True)
+                return
+            for p in result.get("data") or []:
+                inst_id = p.get("instId") or ""
+                coin = inst_id.replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                if coin not in (self.config.symbols or []):
+                    continue
+                pos_side = (p.get("posSide") or "net").lower()
+                raw_pos = float(p.get("pos") or 0)
+                side = "short" if pos_side == "short" else "long"
+                sz = abs(raw_pos)
+                entry = float(p.get("avgPx") or 0)
+                if sz <= 0 or entry <= 0 or coin in self._positions:
+                    continue
+                try:
+                    if await self._other_ai_owns(inst_id, side):
+                        print(
+                            f"[{self.BOT_NAME}] skip restore {coin}: sibling owns claim",
+                            flush=True,
+                        )
+                        continue
+                except Exception:
+                    pass
+                # STRICT: only restore positions already claimed by THIS bot in DB.
+                # Never adopt orphans / Smart Money / other strategies — that falsely
+                # attaches e.g. SOL mirror/copy fills to AI after redeploy.
+                # Authoritative check first: entry fill clOrdId prefix. If the entry
+                # order carries an "ai" clOrdId, the position IS ours even if the DB
+                # claim was lost (e.g. claim write failed before this restart).
+                try:
+                    fill_owner = await self._entry_fill_owner(client, inst_id)
+                except Exception:
+                    fill_owner = ""
+                my_pfx = (self._clord_prefix() or "ai").lower()
+                # Only adopt fills that match THIS bot's prefix (ai vs ais are distinct)
+                if fill_owner == my_pfx:
+                    print(
+                        f"[{self.BOT_NAME}] restore {coin}: clOrdId prefix={my_pfx!r} — ours",
+                        flush=True,
+                    )
+                    await self._restore_adopt_position(client, inst_id, coin, side, sz, entry)
+                    continue
+                if fill_owner and fill_owner != my_pfx:
+                    print(
+                        f"[{self.BOT_NAME}] skip restore {coin}: entry owned by '{fill_owner}' "
+                        f"(need {my_pfx!r})",
+                        flush=True,
+                    )
+                    continue
+                try:
+                    if not self.db:
+                        print(f"[AI] skip restore {coin}: no db — refuse orphan adopt", flush=True)
+                        continue
+                    owned = None
+                    if hasattr(self.db, "find_position_any_side"):
+                        owned = await self.db.find_position_any_side(self.BOT_ID, inst_id, side)
+                    if not owned and hasattr(self.db, "find_position"):
+                        owned = await self.db.find_position(self.BOT_ID, inst_id, side)
+                    if not owned:
+                        # No DB claim for THIS bot. last_bot alone is not enough when
+                        # fill clOrdId is missing/unknown — refuse adopt (prevents
+                        # Scale-In stealing Discretionary / Impulse positions).
+                        print(
+                            f"[{self.BOT_NAME}] skip restore {coin}: no DB claim for "
+                            f"{self.BOT_ID} and fill_owner={fill_owner!r}",
+                            flush=True,
+                        )
+                        continue
+                except Exception as e:
+                    print(f"[AI] restore ownership: {e} — skip adopt", flush=True)
+                    continue
+                stop_pct = 0.03
+                take_pct = 0.06
+                if side == "long":
+                    stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+                else:
+                    stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+                _prot = _prot_map.get((inst_id, side), {})
+                stop, take = self._apply_snapshot_protection(entry, side, _prot, stop, take)
+                restored_sid = 0
+                if self.db:
+                    try:
+                        open_side = "buy" if side == "long" else "sell"
+                        restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
+                    except Exception as e:
+                        print(f"[AI] restore signal_id: {e}", flush=True)
+                _oa = str((_prot or {}).get("opened_at") or "") or await _resolve_opened_at(self.db, inst_id, side)
+                try:
+                    _peak = float((_prot or {}).get("peak_price") or 0) or entry
+                except (TypeError, ValueError):
+                    _peak = entry
+                self._positions[coin] = AIPosition(
+                    coin=coin, inst_id=inst_id, side=side, size=sz,
+                    entry_price=entry, stop_price=stop, take_price=take,
+                    leverage=float(self.config.max_leverage or 2),
+                    opened_at=_oa,
+                    peak_price=_peak,
+                    signal_id=restored_sid,
+                )
+                await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
+                print(f"[AI] RESTORE {side} {coin} sz={sz} @ {entry} sid={restored_sid} opened_at={_oa}", flush=True)
+        except Exception as e:
+            print(f"[AI] restore error: {e}", flush=True)
+        # Peaks were persisted by the previous process; re-attach them after adopt
+        # or giveback/hard-lock would be blind on the first ticks after a restart.
+        if self._positions:
+            try:
+                await self._restore_peaks()
+            except Exception as e:
+                print(f"[AI] restore_peaks after adopt: {e}", flush=True)
+
+    async def _restore_adopt_position(self, client, inst_id: str, coin: str, side: str,
+                                      sz: float, entry: float):
+        """Adopt an exchange position whose ENTRY fill clOrdId is 'ai' — the
+        authoritative proof it was opened by this bot, even when the DB claim
+        was lost across a restart."""
+        stop_pct = 0.03
+        take_pct = 0.06
+        if side == "long":
+            stop, take = entry * (1 - stop_pct), entry * (1 + take_pct)
+        else:
+            stop, take = entry * (1 + stop_pct), entry * (1 - take_pct)
+        try:
+            _prot = (await self._snapshot_protection()).get((inst_id, side), {})
+        except Exception:
+            _prot = {}
+        stop, take = self._apply_snapshot_protection(entry, side, _prot, stop, take)
+        restored_sid = 0
+        if self.db:
+            try:
+                open_side = "buy" if side == "long" else "sell"
+                restored_sid = int(await self.db.find_signal_id(inst_id, open_side) or 0)
+            except Exception as e:
+                print(f"[AI] restore signal_id: {e}", flush=True)
+        _oa = str((_prot or {}).get("opened_at") or "") or await _resolve_opened_at(self.db, inst_id, side)
+        try:
+            _peak = float((_prot or {}).get("peak_price") or 0) or entry
+        except (TypeError, ValueError):
+            _peak = entry
+        self._positions[coin] = AIPosition(
+            coin=coin, inst_id=inst_id, side=side, size=sz,
+            entry_price=entry, stop_price=stop, take_price=take,
+            leverage=float(self.config.max_leverage or 2),
+            opened_at=_oa,
+            peak_price=_peak,
+            signal_id=restored_sid,
+        )
+        await claim_open(self.db, self.BOT_ID, inst_id, side, sz, entry)
+        print(f"[{self.BOT_NAME}] RESTORE({side}) {coin} sz={sz} @ {entry} sid={restored_sid} pfx={self._clord_prefix()}", flush=True)
+
+    async def _entry_fill_owner(self, client, inst_id: str) -> str:
+        """Map the most recent entry fill's clOrdId prefix to a bot prefix.
+
+        Returns '' if the entry fill has no clOrdId (manual/unknown), the bot
+        prefix (e.g. 'ai'/'imp'/'val'/'scl'/'vwap'/'rot') otherwise.
+        """
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return ""
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            sub = str(f.get("subType") or "")
+            if sub not in ("3", "4"):
+                continue  # only entry fills (open) count
+            cid = str(f.get("clOrdId") or "").strip().lower()
+            if not cid:
+                return ""  # manual/unknown — let DB/log checks decide
+            # Longest prefixes first — "ais" must win over "ai"
+            for pref in ("ais", "ai", "imp", "val", "scl", "vwap", "rot", "sm"):
+                if cid.startswith(pref):
+                    return pref
+            return ""
+        return ""
+
+
+    async def _live_ownership(self, client, inst_id: str) -> str:
+        """Who opened this LIVE position: 'ai' (ours), 'manual' or 'unknown'.
+
+        Fail-closed by design: only a position whose entry fill carries one of
+        our clOrdIds (aid*/ail*/ai* or a trade id matching a stored DEMO trade)
+        may be adopted, managed or closed by the mirror. Everything else is the
+        user's own money and must be left untouched.
+        """
+        if client is None:
+            return "unknown"
+        try:
+            fills = await client.get_fills(inst_id=inst_id, limit=30)
+            data = (fills or {}).get("data") or []
+        except Exception:
+            return "unknown"
+        if not data:
+            return "unknown"
+        known_ids = {
+            str(getattr(p, "demo_trade_id", "") or "")
+            for p in list((self._positions or {}).values())
+            + list((self._live_positions or {}).values())
+            if getattr(p, "demo_trade_id", "")
+        }
+        for f in sorted(data, key=lambda x: str(x.get("fillTime") or x.get("ts") or ""), reverse=True):
+            cid = str(f.get("clOrdId") or "").strip()
+            if not cid:
+                continue
+            low = cid.lower()
+            if low.startswith(("aid", "ail", "ai")):
+                return "ai"
+            tid = self._trade_id_from_clord(cid)
+            if tid and tid in known_ids:
+                return "ai"
+            return "manual"
+        return "unknown"
+
+    def _warn_foreign_live(self, coin: str, own: str) -> None:
+        """Log (once per coin) that a LIVE position is not ours to manage."""
+        warned = getattr(self, "_live_foreign_warned", None)
+        if warned is None:
+            warned = set()
+            self._live_foreign_warned = warned
+        key = f"{coin}:{own}"
+        if key in warned:
+            return
+        warned.add(key)
+        print(
+            f"[AI-LIVE] foreign LIVE position {coin} (owner={own}) — read-only, "
+            f"mirror will not adopt, stop, or close it",
+            flush=True,
+        )
+
+    def _audit_live(self, action: str, coin: str = "", side: str = "",
+                    size: float = 0.0, reason: str = "", ord_id: str = "",
+                    ok: bool = True) -> None:
+        """Record a LIVE order attempt so "who opened/closed this?" is answerable."""
+        try:
+            rec = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "action": str(action)[:40],
+                "coin": str(coin or "")[:16],
+                "side": str(side or "")[:8],
+                "size": round(float(size or 0), 8),
+                "reason": str(reason or "")[:160],
+                "ord_id": str(ord_id or "")[:40],
+                "ok": bool(ok),
+            }
+            buf = getattr(self, "_live_audit", None)
+            if buf is None:
+                buf = []
+                self._live_audit = buf
+            buf.append(rec)
+            del buf[:-200]
+            print(f"[AI-LIVE-AUDIT] {rec['action']} {rec['coin']} {rec['side']} "
+                  f"sz={rec['size']} ok={rec['ok']} reason={rec['reason']}", flush=True)
+            if self.db:
+                try:
+                    loop = self._loop or asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.create_task(self._persist_live_async())
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _new_closed_bars(self) -> list:
+        """Coins whose last CLOSED 1H bar is newer than last LLM decision for that coin."""
+        fresh = []
+        for coin, ind in (self._latest_indicators or {}).items():
+            ts = int(ind.get("closed_bar_ts") or 0)
+            if ts <= 0:
+                continue
+            prev = int(self._last_closed_bar_ts.get(coin, 0) or 0)
+            if ts > prev:
+                fresh.append(coin)
+        return fresh
+
+    def _mark_bars_decided(self, coins: list = None):
+        for coin, ind in (self._latest_indicators or {}).items():
+            if coins is not None and coin not in coins:
+                continue
+            ts = int(ind.get("closed_bar_ts") or 0)
+            if ts > 0:
+                self._last_closed_bar_ts[coin] = ts
+
+    def daily_realized_pnl(self) -> float:
+        """Realised PnL for the current MSK day (single source for risk gates)."""
+        from datetime import datetime, timezone
+        from app.services.pnl_engine import PNL_TZ
+        # Daily accounting must use the same day boundary as the PnL
+        # dashboards (Europe/Moscow), not UTC.
+        day = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+        if day != getattr(self, "_daily_realized_day", ""):
+            self._daily_realized_day = day
+            self._daily_realized = 0.0
+        return float(getattr(self, "_daily_realized", 0.0) or 0.0)
+
+    def weekly_realized_pnl(self) -> float:
+        """Realised PnL for the current MSK ISO week (Mon 00:00 MSK)."""
+        from datetime import datetime, timezone
+        from app.services.pnl_engine import PNL_TZ
+        week = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%G-W%V")
+        if week != getattr(self, "_weekly_realized_week", ""):
+            self._weekly_realized_week = week
+            self._weekly_realized = 0.0
+        return float(getattr(self, "_weekly_realized", 0.0) or 0.0)
+
+    def _weekly_loss_blocks_open(self) -> bool:
+        try:
+            lim = float(getattr(self.config, "weekly_loss_limit_pct", 0.06) or 0)
+            if lim <= 0:
+                return False
+            eq = float(self._account_equity or 0) or float(self._capital or 10000)
+            if eq <= 0:
+                return False
+            return self.weekly_realized_pnl() <= -lim * eq
+        except Exception:
+            return False
+
+    def _daily_loss_blocks_open(self) -> bool:
+        try:
+            lim = float(getattr(self.config, "daily_loss_limit_pct", 0.02) or 0)
+            if lim <= 0:
+                return False
+            # Prefer exchange equity; nominal config capital would inflate the
+            # allowed daily loss (e.g. 2% of $10k instead of 2% of real $650).
+            eq = float(self._account_equity or 0) or float(self._capital or 10000)
+            if eq <= 0:
+                return False
+            return self.daily_realized_pnl() <= -lim * eq
+        except Exception:
+            return False
+
+    async def _tick(self):
+        # Diagnostics: last stage reached in a tick (exposed via /api/health).
+        self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "start"}
+        hg.beat("ai_tick", tick=self._tick_count)
+        client = await self._client()
+        hg.beat("ai_client", ok=bool(client), demo=(None if client is None else bool(getattr(client, "demo", False))))
+        if not client:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "no_client"}
+            if self._tick_count == 0:
+                print("[AI] tick #0: no OKX client — check if mode was switched and API keys are saved", flush=True)
+            return
+        try:
+            if time.time() - float(getattr(self, "_account_equity_ts", 0) or 0) > 300:
+                await self._sync_equity(client)
+        except Exception as _ee:
+            print(f"[AI] equity sync tick: {_ee}", flush=True)
+        # Guard against a stale ctVal/lotSz table (NEAR 28.10 = 10x size bug).
+        try:
+            await self._validate_contract_specs(client)
+        except Exception as _spe:
+            print(f"[AI] contract spec tick: {_spe}", flush=True)
+        # Keep internal lifetime counters on the SAME rows/values as the card.
+        try:
+            _es = await self._refresh_engine_stats()
+            if _es:
+                self._apply_engine_stats(_es)
+        except Exception as _se:
+            print(f"[AI] engine stats tick: {_se}", flush=True)
+        if self._tick_count == 0:
+            _demo = getattr(client, "demo", None)
+            print(f"[AI] tick #0: OKX client ready, client.demo={_demo}, execute={self._execute_enabled()}, capital=${self._capital:.2f}", flush=True)
+        await self._reconcile_positions_with_exchange(client)
+        if not self._positions:
+            await self._restore_open_positions(client)
+        # Live mirror: re-adopt exchange positions after redeploy / late connect
+        try:
+            if self._live_ready() and (self._tick_count == 0 or self._tick_count % 3 == 0):
+                await self._reconcile_live_from_exchange()
+        except Exception as _le:
+            print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
+        # Gap-fill: demo open without live twin (failed mirror / late connect)
+        try:
+            if await self._mirror_enabled():
+                await self._try_refresh_live_client()
+                if self._live_ready() and self._positions:
+                    missing = [c for c in self._positions if c not in self._live_positions]
+                    if missing:
+                        print(f"[AI-LIVE] gap-fill missing on live: {missing}", flush=True)
+                        await self._clone_missing_to_live()
+        except Exception as _ge:
+            print(f"[AI-LIVE] gap-fill: {_ge}", flush=True)
+        # Once per process-ish: sweep unclaimed exchange positions
+        try:
+            n = int(getattr(self, "_orphan_tick", 0) or 0) + 1
+            self._orphan_tick = n
+            if n == 1 or n % 10 == 0:
+                mem = {(getattr(p, "inst_id", p.get("inst_id") if isinstance(p, dict) else "?"),
+                       getattr(p, "side", p.get("side") if isinstance(p, dict) else "?"))
+                      for p in self._positions.values()}
+                closed = await sweep_exchange_orphans(client, self.db, mem)
+                if closed:
+                    print(f"[AI] orphan sweep closed {len(closed)}: {closed}", flush=True)
+        except Exception as e:
+            print(f"[AI] orphan sweep: {e}", flush=True)
+        # Refresh DB claim only for positions we still hold after ownership checks
+        for coin, pos in list(self._positions.items()):
+            _inst = getattr(pos, "inst_id", pos.get("inst_id") if isinstance(pos, dict) else "")
+            _side = getattr(pos, "side", pos.get("side") if isinstance(pos, dict) else "")
+            _sz = getattr(pos, "size", pos.get("size") if isinstance(pos, dict) else 0)
+            _entry = getattr(pos, "entry_price", pos.get("entry_price") if isinstance(pos, dict) else 0)
+            is_dc = hasattr(pos, "owner_checked")
+            already = bool(getattr(pos, "owner_checked", False)) if is_dc else (
+                bool(pos.get("owner_checked")) if isinstance(pos, dict) else False
+            )
+            if already:
+                owner = getattr(pos, "owner_prefix", "") if is_dc else (
+                    pos.get("owner_prefix", "") if isinstance(pos, dict) else ""
+                )
+            else:
+                try:
+                    owner = await self._entry_fill_owner(client, _inst) if _inst else ""
+                except Exception:
+                    owner = ""
+                # Cache only definitive non-empty answer (empty may be transient API lag)
+                if owner:
+                    if is_dc:
+                        pos.owner_checked = True
+                        pos.owner_prefix = owner
+                    elif isinstance(pos, dict):
+                        pos["owner_checked"] = True
+                        pos["owner_prefix"] = owner
+            my_pfx = (self._clord_prefix() or "").lower()
+            if owner and my_pfx and owner != my_pfx:
+                self._positions.pop(coin, None)
+                continue
+            await claim_open(self.db, self.BOT_ID, _inst, _side, _sz, _entry)
+        await self._fetch_indicators(client)
+        try:
+            await self._refresh_funding(client)
+        except Exception as e:
+            print(f"[AI] funding refresh: {e}", flush=True)
+        await self._manage_stops(client)
+        await self._persist_open_state()
+        hg.beat("ai_manage", positions=len(self._positions or {}))
+        try:
+            self._trace = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "stage": "managed",
+                "positions": [
+                    {"coin": c, "side": getattr(p, "side", ""),
+                     "peak": round(float(getattr(p, "peak_upl_pct", 0) or 0), 3)}
+                    for c, p in (self._positions or {}).items()
+                ],
+                "execute": self._execute_enabled(),
+            }
+        except Exception:
+            pass
+        if self._live_ready():
+            try:
+                await self._ensure_live_equity()
+            except Exception as e:
+                print(f"[AI-LIVE] equity refresh: {e}", flush=True)
+            try:
+                await self._manage_live_orphans(client)
+            except Exception as e:
+                print(f"[AI-LIVE] orphan_manage: {e}", flush=True)
+        try:
+            self._refresh_adaptive()
+        except Exception:
+            pass
+
+        # Phase-1: LLM only on new CLOSED 1H bar (stops still every tick)
+        decide_bar = bool(getattr(self.config, "decide_on_bar_close", True))
+        fresh = self._new_closed_bars() if decide_bar else list((self._latest_indicators or {}).keys())
+        import time as _time
+        now_ts = _time.time()
+        # v1.15: tighter LLM cadence when managing an open position
+        if self._positions:
+            min_gap = float(getattr(self.config, "llm_manage_interval_sec", 90) or 90)
+        else:
+            min_gap = float(getattr(self.config, "llm_min_interval_sec", 180) or 0)
+        gap_ok = (now_ts - float(getattr(self, "_last_llm_ts", 0) or 0)) >= min_gap
+        # While flat: only on new closed bar. While in a position: also allow
+        # manage cadence so exits are not stuck waiting for the next 1H close.
+        in_pos = bool(self._positions)
+        (bool(fresh) or in_pos) and gap_ok
+        if decide_bar and not fresh and not in_pos:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "skip_no_bar",
+                           "fresh": 0, "positions": 0}
+            if self._tick_count % 10 == 0:
+                print(f"[AI] skip LLM — waiting for next closed {getattr(self.config, 'bar', '1H')} bar", flush=True)
+            self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+            return
+        if not gap_ok:
+            self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "skip_interval",
+                           "min_gap": min_gap,
+                           "since_llm_sec": round(now_ts - float(getattr(self, "_last_llm_ts", 0) or 0), 1)}
+            if self._tick_count % 10 == 0:
+                print(f"[AI] skip LLM — min interval {min_gap:.0f}s", flush=True)
+            self._last_activity = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+            return
+
+        snap = self._snapshot()  # include fresh adaptive + reflection
+        snap["decision_trigger"] = "bar_close" if decide_bar else "poll"
+        snap["fresh_bars"] = fresh
+        snap["decision_mode"] = "manage" if self._positions else "entry"
+        try:
+            decision = await call_llm(snap, provider=self._provider())
+        except Exception as e:
+            self._llm_error_count += 1
+            self._last_llm_error = f"{type(e).__name__}: {str(e)[:200]}"
+            print(f"[AI] LLM call exception: {e}", flush=True)
+            decision = mock_decide(snap)
+            decision["reason"] = f"llm_exception: {str(e)[:200]}"
+        prov_used = decision.get("provider_used") or self._provider()
+        self._last_provider_used = prov_used
+        import time as _time
+        self._last_llm_ts = _time.time()
+        hg.beat("ai_llm", provider=str(prov_used or ""),
+                error=bool(decision.get("reason") and "llm_error" in str(decision.get("reason"))))
+        try:
+            self._mark_bars_decided(list(fresh) if fresh else None)
+        except Exception:
+            try:
+                self._mark_bars_decided(None)
+            except Exception:
+                pass
+        if "llm_error" in (decision.get("reason") or ""):
+            self._llm_error_count += 1
+            self._last_llm_error = decision["reason"][:200]
+        else:
+            self._last_llm_error = None
+        self._last_decision = self._enrich_decision(decision, snap)
+        self._decision_log.append(self._last_decision)
+        self._decision_log = self._decision_log[-200:]
+        self._trace = {"ts": datetime.now(timezone.utc).isoformat(), "stage": "decided",
+                       "action": decision.get("action"), "symbol": decision.get("symbol"),
+                       "provider": decision.get("provider_used")}
+        print(f"[AI] decision {decision} execute={self._execute_enabled()}", flush=True)
+        try:
+            self.analysis.log(
+                "ai", "decision",
+                provider=self._provider(),
+                execute=self._execute_enabled(),
+                demo=self._is_demo(),
+                **{k: decision.get(k) for k in (
+                    "action", "symbol", "side", "size_pct_equity",
+                    "stop_pct", "take_pct", "confidence", "reason")},
+                equity=snap.get("equity"),
+                open_n=len(snap.get("open_positions") or []),
+                indicators=self._last_decision.get("indicators"),
+            )
+        except Exception as e:
+            print(f"[AI] analysis log: {e}", flush=True)
+
+        # Quant auto-open: if LLM holds / fails but quant has a clear free setup
+        # (align >= effective thresholds), open without waiting forever on LLM.
+        action = decision.get("action")
+        reason_l = str(decision.get("reason") or "").lower()
+        llm_weak = (
+            (action or "hold") == "hold"
+            or "llm_error" in reason_l
+            or reason_l.startswith("fallback")
+            or "mock:" in reason_l
+            or "via_mock" in reason_l
+            or float(decision.get("confidence") or 0) < float(self._effective_min_confidence())
+        )
+        if llm_weak and not (self._positions or {}):
+            try:
+                q = self._build_quant() or {}
+                min_al = float(self._effective_min_align())
+                min_cf = float(self._effective_min_confidence())
+                best = None
+                g_reg = str(q.get("global_regime") or "").lower()
+                btc_reg = str(q.get("btc_regime") or g_reg or "").lower()
+                try:
+                    btc_roc = float(q.get("btc_roc") or 0)
+                except (TypeError, ValueError):
+                    btc_roc = 0.0
+                _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+                for coin_q, cq in (q.get("coins") or {}).items():
+                    if cq.get("block_open"):
+                        continue
+                    reg = str(cq.get("regime") or "").lower()
+                    al_l = float(cq.get("align_long") or 0)
+                    al_s = float(cq.get("align_short") or 0)
+                    # Side must agree with coin regime AND BTC/global — never fight the market
+                    if reg == "bear":
+                        side, al = "short", al_s
+                    elif reg == "bull":
+                        side, al = "long", al_l
+                    elif reg == "chop":
+                        # chop coin: only with BTC trend, never counter-trend
+                        if btc_reg == "bull" or g_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
+                            if al_l >= 0.85:
+                                side, al = "long", al_l
+                            else:
+                                continue
+                        elif btc_reg == "bear" or g_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
+                            if al_s >= 0.85:
+                                side, al = "short", al_s
+                            else:
+                                continue
+                        else:
+                            continue
+                    else:
+                        side = str(cq.get("best_side") or "")
+                        al = float(cq.get("align_score") or 0)
+                    if side not in ("long", "short"):
+                        continue
+                    if reg == "bear" and side == "long":
+                        continue
+                    if reg == "bull" and side == "short":
+                        continue
+                    if side == "short" and (g_reg == "bull" or btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr):
+                        continue
+                    if side == "long" and (g_reg == "bear" or btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr):
+                        continue
+                    ind_q = (self._latest_indicators or {}).get(coin_q) or {}
+                    if self._momentum_against(side, ind_q):
+                        continue
+                    if coin_q == "SOL":
+                        try:
+                            adx_q = float(ind_q.get("adx") or 0)
+                        except (TypeError, ValueError):
+                            adx_q = 0.0
+                        if adx_q < float(getattr(self.config, "sol_min_adx", 28) or 28):
+                            continue
+                        if al < float(getattr(self.config, "sol_min_align", 0.88) or 0.88):
+                            continue
+                    if al < max(min_al, 0.85):
+                        continue
+                    if al < min_cf and al < 0.88:
+                        continue
+                    if best is None or al > best[2]:
+                        best = (coin_q, side, al, reg)
+                if best:
+                    coin_q, side, al, reg = best
+                    decision = {
+                        "action": "open",
+                        "symbol": coin_q,
+                        "side": side,
+                        "size_pct_equity": float(getattr(self.config, "risk_per_trade", 0.02) or 0.02),
+                        "stop_pct": 0.03,
+                        "take_pct": 0.06,
+                        "confidence": round(min(0.92, max(al, min_cf)), 3),
+                        "reason": f"quant_auto: {side} {coin_q} align={al:.2f} regime={reg}",
+                        "source": "quant_auto",
+                    }
+                    self._last_decision = self._enrich_decision(decision, snap)
+                    self._decision_log.append(self._last_decision)
+                    self._decision_log = self._decision_log[-200:]
+                    print(f"[AI] quant_auto override → {decision}", flush=True)
+            except Exception as e:
+                print(f"[AI] quant_auto: {e}", flush=True)
+
+        # v1.33: opportunistic 2nd slot. Run after the manage decision is known
+        # (never when it is closing/reducing #1) — one extra LLM call per bar.
+        try:
+            _act = str(decision.get("action") or "hold").lower()
+            if len(self._positions) == 1 and _act in ("hold", "add", "reduce"):
+                await self._try_second_entry(client, fresh)
+        except Exception as e:
+            print(f"[AI] second_entry: {e}", flush=True)
+
+        action = decision.get("action")
+        coin = decision.get("symbol")
+        if action == "hold":
+            return
+        if action == "close" and coin:
+            # v1.29: block LLM noise-exits while trade is mildly green / too young
+            pos = self._positions.get(coin)
+            if pos:
+                try:
+                    held = 0.0
+                    try:
+                        opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+                        held = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+                    except Exception:
+                        held = 999.0
+                    px = await self._price_for_exit(client, coin, pos)
+                    upl = self._unrealized_pct(pos, px) if px else 0.0
+                    min_hold = self._cfg_f("min_hold_minutes", 45.0)
+                    # Allow LLM close only if: red enough, or big green, or aged + thesis weak
+                    allow = (
+                        upl <= -0.35
+                        or upl >= self._cfg_f("soft_profit_take_pct", 5.00)
+                        or (held >= max(min_hold, 90.0) and upl < 0.15)
+                    )
+                    if not allow:
+                        print(
+                            f"[AI] LLM close BLOCKED {coin}: upl={upl:+.2f}% held={held:.0f}m "
+                            f"(noise guard — let winners run)",
+                            flush=True,
+                        )
+                        self._record_exec(
+                            "llm_close_blocked", coin=coin, side=getattr(pos, "side", ""),
+                            reason=f"upl={upl:+.2f}_held={held:.0f}m",
+                        )
+                        return
+                except Exception as e:
+                    print(f"[AI] LLM close gate: {e}", flush=True)
+            await self._close(client, coin, decision.get("reason") or "ai_close")
+            return
+        if action == "reduce" and coin and coin in self._positions:
+            # Same noise guard as close — reduce was full-close in practice
+            pos = self._positions.get(coin)
+            if pos:
+                try:
+                    px = await self._price_for_exit(client, coin, pos)
+                    upl = self._unrealized_pct(pos, px) if px else 0.0
+                    if -0.20 < upl < self._cfg_f("partial_take_pct", 2.60):
+                        print(f"[AI] LLM reduce BLOCKED {coin}: upl={upl:+.2f}%", flush=True)
+                        return
+                except Exception:
+                    pass
+            await self._close(client, coin, decision.get("reason") or "ai_reduce")
+            return
+        if action == "add" and coin:
+            # Explicit LLM "add" was previously unhandled (silently dropped).
+            # Route it to the same scale-in gate as an open on an existing coin.
+            if coin in self._positions:
+                side_add = str(decision.get("side") or "").lower()
+                pos_a = self._positions.get(coin)
+                if (side_add and str(getattr(pos_a, "side", "")).lower() != side_add):
+                    self._record_exec("scale_skip", coin=coin, side=side_add,
+                                      reason="add_opposite_side")
+                elif not getattr(self.config, "scale_in_enabled", True):
+                    self._record_exec("scale_skip", coin=coin, side=side_add,
+                                      reason="scale_in_disabled")
+                else:
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in(add): {e}", flush=True)
+            else:
+                self._record_exec("scale_skip", coin=coin,
+                                  side=decision.get("side"),
+                                  reason="add_without_position")
+            return
+        if action == "open" and coin and decision.get("side"):
+            conf = float(decision.get("confidence") or 0)
+            reason = str(decision.get("reason") or "")
+            if conf < float(self.config.min_confidence or 0):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"low_conf:{conf}")
+                return
+            veto = self._quant_veto_open(decision)
+            if veto:
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                   reason=str(veto)[:80])
+                decision["veto_reason"] = str(veto)
+                self._last_decision = self._enrich_decision(decision, snap)
+                self._decision_log.append(self._last_decision)
+                self._decision_log = self._decision_log[-200:]
+                print(f"[AI] open veto {coin}: {veto}", flush=True)
+                return
+            if self.config.block_llm_error_opens and decision.get("source") != "quant_auto" and (
+                "llm_error" in reason.lower() or reason.lower().startswith("fallback")
+                or "mock:" in reason.lower()
+                or "llm_cooldown" in reason.lower()
+                or "via_mock" in reason.lower()
+            ):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="blocked_mock_or_llm_error")
+                return
+            side_dec = str(decision.get("side") or "").lower()
+            # Already in this coin: same side = scale-in, opposite = churn.
+            # This MUST run before the blanket `already_open` skip below — with
+            # the old order the early return made the scale-in branch dead code.
+            if coin in self._positions:
+                pos0 = self._positions.get(coin)
+                if (str(getattr(pos0, "side", "")).lower() == side_dec
+                        and getattr(self.config, "scale_in_enabled", True)):
+                    try:
+                        await self._maybe_scale_in(client, coin, decision)
+                    except Exception as e:
+                        print(f"[AI] scale_in: {e}", flush=True)
+                else:
+                    self._record_exec("open_skip", coin=coin, side=side_dec,
+                                      reason="already_open")
+                return
+            try:
+                inst = f"{coin}-USDT-SWAP"
+                side = str(decision.get("side") or "long")
+                if await self._other_ai_owns(inst, side):
+                    self._record_exec(
+                        "open_skip", coin=coin, side=side,
+                        reason="sibling_bot_owns",
+                    )
+                    print(
+                        f"[{self.BOT_NAME}] skip open {coin}: sibling bot already owns position",
+                        flush=True,
+                    )
+                    return
+            except Exception as e:
+                print(f"[{self.BOT_NAME}] sibling check: {e}", flush=True)
+            # Anti-churn: just closed same side → wait (unless align is exceptional)
+            try:
+                lc = (self._last_closes or {}).get(coin) or {}
+                if lc and str(lc.get("side") or "").lower() == side_dec:
+                    age_min = (time.time() - float(lc.get("ts") or 0)) / 60.0
+                    cd = float(getattr(self.config, "reopen_cooldown_min", 75) or 75)
+                    try:
+                        last_pnl = float(lc.get("pnl") or 0)
+                    except (TypeError, ValueError):
+                        last_pnl = 0.0
+                    if last_pnl < 0:
+                        cd = max(cd, float(getattr(self.config, "loss_reopen_cooldown_min", 180) or 180))
+                    ind0 = self._latest_indicators.get(coin) or {}
+                    al0 = float(ind0.get("align_long") or 0)
+                    ash0 = float(ind0.get("align_short") or 0)
+                    align0 = ash0 if side_dec == "short" else al0
+                    ov = float(getattr(self.config, "reopen_align_override", 0.82) or 0.82)
+                    # A losing close does not get the align override — that reopened
+                    # the same XRP short three times on 14 Oct.
+                    if last_pnl < 0:
+                        ov = 1.01
+                    if age_min < cd and align0 < ov:
+                        self._record_exec(
+                            "open_skip", coin=coin, side=side_dec,
+                            reason=f"reopen_cooldown:{age_min:.0f}m<{cd:.0f}m_align={align0:.2f}",
+                        )
+                        print(
+                            f"[AI] skip reopen {coin} {side_dec}: cooldown {age_min:.0f}/{cd:.0f}m "
+                            f"align={align0:.2f} last_pnl={lc.get('pnl')}",
+                            flush=True,
+                        )
+                        return
+            except Exception as e:
+                print(f"[AI] reopen cooldown check: {e}", flush=True)
+            if len(self._positions) >= self.config.max_positions:
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="max_positions")
+                return
+            if self._daily_loss_blocks_open():
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="daily_loss_limit")
+                return
+            if self._weekly_loss_blocks_open():
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason="weekly_loss_limit")
+                return
+            ind = self._latest_indicators.get(coin) or {}
+            adx = float(ind.get("adx") or 0)
+            roc = float(ind.get("roc_3") or 0)
+            ema_f = float(ind.get("ema_fast") or 0)
+            ema_s = float(ind.get("ema_slow") or 0)
+            close = float(ind.get("close") or 0)
+            side_probe = (decision.get("side") or "").lower()
+            al = float(ind.get("align_long") or 0)
+            ash = float(ind.get("align_short") or 0)
+            align_side = ash if side_probe == "short" else al
+            if self._adx_blocks_open(adx, align_side):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"low_adx:{adx:.1f}/align:{align_side:.2f}")
+                return
+            if abs(roc) < float(self.config.min_roc_abs or 0):
+                self._record_exec("open_skip", coin=coin, side=decision.get("side"),
+                                  reason=f"flat_roc:{roc:.2f}")
+                return
+            side = decision["side"]
+            # Require EMA alignment with side (incl. trend EMA200 when present)
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bullish")
+                    return
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    self._record_exec("open_skip", coin=coin, side=side, reason="ema_not_bearish")
+                    return
+                if ema200 > 0:
+                    ema200_tol = ema200 * 0.005
+                    if side == "long" and close < ema200 - ema200_tol:
+                        self._record_exec("open_skip", coin=coin, side=side, reason="below_ema200")
+                        return
+                    if side == "short" and close > ema200 + ema200_tol:
+                        self._record_exec("open_skip", coin=coin, side=side, reason="above_ema200")
+                        return
+                if side == "long" and roc < 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_long")
+                    return
+                if side == "short" and roc > 0:
+                    self._record_exec("open_skip", coin=coin, side=side, reason="roc_against_short")
+                    return
+                mom = self._momentum_against(side, ind)
+                if mom:
+                    self._record_exec("open_skip", coin=coin, side=side, reason=f"momentum:{mom}")
+                    return
+            try:
+                _entry_hint = float((self._latest_indicators.get(coin) or {}).get("close") or 0)
+            except (TypeError, ValueError):
+                _entry_hint = 0.0
+            stop_pct, take_pct = self._stops_from_atr(
+                coin,
+                _entry_hint,
+                stop_pct=float(decision.get("stop_pct") or 0),
+                take_pct=float(decision.get("take_pct") or 0),
+            )
+            print(
+                f"[AI] ATR stops {coin}: atr_pct={self._atr_pct(coin, _entry_hint):.4f} "
+                f"stop={stop_pct:.4f} take={take_pct:.4f}",
+                flush=True,
+            )
+            await self._open(
+                client, coin, side,
+                stop_pct=stop_pct, take_pct=take_pct,
+                reason=reason or "ai_open",
+                confidence=float(decision.get("confidence") or 0),
+                thesis=str(decision.get("thesis") or ""),
+                size_pct=float(decision.get("size_pct_equity") or 0),
+            )
+
+
+    async def correct_misattributed(
+        self,
+        symbol: str = "SOL",
+        to_bot: str = "impulse_strategy",
+    ) -> dict:
+        """Remove a wrongly attached instrument from AI PnL / claims.
+
+        Moves DB trades to `to_bot`, adjusts lifetime counters, drops in-memory
+        position and DB claim. Used when e.g. Impulse SOL was adopted by AI.
+        """
+        coin = (symbol or "SOL").upper().replace("-USDT-SWAP", "")
+        inst_id = f"{coin}-USDT-SWAP"
+        out = {
+            "symbol": coin,
+            "inst_id": inst_id,
+            "to_bot": to_bot,
+            "moved": 0,
+            "pnl_removed": 0.0,
+            "memory_dropped": False,
+        }
+        if not self.db:
+            out["error"] = "no db"
+            return out
+
+        try:
+            stats = await self.db.reassign_trades_instrument(
+                self.BOT_ID, to_bot, inst_id
+            )
+            out["moved"] = int(stats.get("moved") or 0)
+            out["pnl_removed"] = float(stats.get("pnl") or 0)
+            wins = int(stats.get("wins") or 0)
+        except Exception as e:
+            out["error"] = f"reassign: {e}"
+            return out
+
+        # Rebuild lifetime strictly from remaining AI trades in DB (honest)
+        try:
+            summary = await self.db.get_trades_summary(self.BOT_ID)
+            self._lifetime_trades = int(summary.get("total") or 0)
+            self._lifetime_wins = int(summary.get("wins") or 0)
+            self._lifetime_pnl = float(summary.get("total_pnl") or 0)
+            self._session_pnl = 0.0  # session resets; lifetime is source of truth
+            self._equity = self._capital + float(self._lifetime_pnl or 0)
+        except Exception as e:
+            # fallback arithmetic if summary fails
+            if out["moved"]:
+                self._lifetime_pnl = float(self._lifetime_pnl or 0) - out["pnl_removed"]
+                self._lifetime_trades = max(0, int(self._lifetime_trades or 0) - out["moved"])
+                self._lifetime_wins = max(0, int(self._lifetime_wins or 0) - wins)
+                self._session_pnl = float(getattr(self, "_session_pnl", 0) or 0) - out["pnl_removed"]
+                self._equity = self._capital + float(self._session_pnl or 0)
+            out["summary_err"] = str(e)
+
+        # drop memory position
+        if coin in self._positions:
+            del self._positions[coin]
+            out["memory_dropped"] = True
+
+        # release claim
+        try:
+            from app.services.position_claim import release_open
+            await release_open(self.db, self.BOT_ID, inst_id, "long")
+            await release_open(self.db, self.BOT_ID, inst_id, "short")
+        except Exception as e:
+            out["release_err"] = str(e)
+
+        # give claim hint to impulse if exchange still open — leave to Impulse restore
+        try:
+            await self._persist_lifetime()
+        except Exception:
+            try:
+                blob = {
+                    "lifetime_pnl": self._lifetime_pnl,
+                    "lifetime_trades": self._lifetime_trades,
+                    "lifetime_wins": self._lifetime_wins,
+                    "lifetime_fees": getattr(self, "_lifetime_fees", 0),
+                    "adapt": getattr(self, "_adapt", {}),
+                    "reflection": getattr(self, "_reflection", ""),
+                }
+                await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", json.dumps(blob))
+            except Exception as e:
+                out["persist_err"] = str(e)
+
+        # flag so we don't loop
+        try:
+            await self.db.set_setting(
+                f"ai_misattr_fixed:{self.BOT_ID}:{coin}",
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception:
+            pass
+
+        print(
+            f"[AI] corrected misattribution {coin}: moved={out['moved']} "
+            f"pnl_removed={out['pnl_removed']:.4f} -> {to_bot}",
+            flush=True,
+        )
+        return out
+
+    @staticmethod
+    def _ts_sort_key(t: dict) -> float:
+        """Comparable ms timestamp for rows that mix ISO strings and epochs."""
+        v = t.get("ts_ms")
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(t.get("time") or "").strip()
+        if not s:
+            return 0.0
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000.0
+        except Exception:
+            pass
+        try:
+            f = float(s)
+            return f if abs(f) > 1e11 else f * 1000.0
+        except Exception:
+            return 0.0
+
+    def _rebuild_trade_log(self, db_rows, eng_rows) -> tuple[list, dict | None]:
+        """Merge the `trades` table with the engine's authoritative closes.
+
+        The bot writes its own close-time estimate into `trades` (mark fallback
+        on exchange SL/TP fills), while the dashboard/PnL engine uses OKX bills
+        deduped by ord_id. Without this overlay adaptive/reflection were scored
+        on a different PnL series than the card (34.45 vs 106.07 internal).
+        Engine values win per ord_id; engine-only closes are appended so the
+        closed set matches the card exactly.
+        """
+        rebuilt = []
+        try:
+            from app.services.pnl_engine import BUG_EXCLUDED_ORD_IDS as _BUG_IDS
+        except Exception:
+            _BUG_IDS = {}
+
+        def _excluded(r: dict) -> bool:
+            if not _BUG_IDS:
+                return False
+            oid = str((r or {}).get("ord_id") or (r or {}).get("ordId") or "").strip()
+            return bool(oid) and oid in _BUG_IDS
+
+        # Defect-driven closes are never scored, so they must not reach the
+        # adaptive/reflection layer either.
+        db_rows = [r for r in (db_rows or []) if not _excluded(r)]
+        eng_rows = [r for r in (eng_rows or []) if not _excluded(r)]
+        # `trades` stores ONE price per row: an open fill keeps the entry px, a
+        # close fill keeps the CLOSE px. A close row therefore has no entry of
+        # its own — pairing it with itself made every restored close show
+        # entry == exit in the «Сделки» panel (and fed a bogus entry_price into
+        # the adaptive layer). Pair each close with the latest open fill of the
+        # same instrument that happened before it. Order-independent: the DB
+        # read may come back newest-first.
+        _open_fills: dict = {}
+
+        def _row_ts(r: dict) -> float:
+            return self._ts_sort_key(
+                {"time": r.get("timestamp") or r.get("created_at") or ""})
+
+        for r in (db_rows or []):
+            _st = str(r.get("state") or "").strip().lower()
+            if _st not in ("", "filled", "new", "pending"):
+                continue
+            try:
+                _p = float(r.get("px") or 0)
+            except (TypeError, ValueError):
+                _p = 0.0
+            if _p <= 0:
+                continue
+            _k = (str(r.get("account_mode") or "demo").lower(),
+                  str(r.get("inst_id") or ""))
+            _open_fills.setdefault(_k, []).append((_row_ts(r), _p))
+
+        def _entry_px_for(mode: str, inst: str, close_ts: float):
+            best = None
+            for _ts, _px in _open_fills.get((mode, inst), ()):
+                # 5s of write-order slack only; anything later is the NEXT trade.
+                if close_ts and _ts and _ts > close_ts + 5_000:
+                    continue
+                if best is None or _ts >= best[0]:
+                    best = (_ts, _px)
+            return best[1] if best else None
+
+        for r in reversed(db_rows or []):
+            state = str(r.get("state") or "").strip().lower()
+            _row_mode = str(r.get("account_mode") or "demo").lower()
+            _row_inst = str(r.get("inst_id") or "")
+            # `filled`/empty = an executed entry, NOT a closed trade. Map it
+            # to "open" so _closed_trades skips it; otherwise openings are
+            # scored as 0-PnL losses and corrupt adaptive + reflection.
+            reason = "open" if state in ("", "filled", "new", "pending") else state
+            try:
+                pnl = float(r.get("pnl") or 0)
+            except (TypeError, ValueError):
+                pnl = 0.0
+            try:
+                _row_px = float(r.get("px") or 0)
+            except (TypeError, ValueError):
+                _row_px = 0.0
+            rebuilt.append({
+                "account_mode": _row_mode,
+                "time": r.get("timestamp") or r.get("created_at") or "",
+                "side": r.get("side"),
+                "symbol": r.get("inst_id"),
+                "size": r.get("sz") or r.get("size"),
+                "pnl": pnl,
+                "entry_price": (None if reason == "open"
+                                else _entry_px_for(_row_mode, _row_inst, _row_ts(r))),
+                "exit_price": ((_row_px or None) if reason != "open" else None),
+                "reason": reason,
+                "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                "ord_id": str(r.get("ord_id") or r.get("ordId") or ""),
+            })
+        by_oid = {}
+        for er in (eng_rows or []):
+            oid = str(er.get("ord_id") or "")
+            if oid:
+                by_oid[oid] = er
+        seen = set()
+        for t in rebuilt:
+            oid = str(t.get("ord_id") or "")
+            if oid:
+                seen.add(oid)
+            er = by_oid.get(oid) if oid else None
+            if not er:
+                continue
+            if str(t.get("reason") or "").strip().lower() in self._NON_CLOSE_REASONS:
+                continue
+            t["pnl"] = round(float(er.get("pnl") or 0), 4)
+            if er.get("entry_px") is not None:
+                t["entry_price"] = er.get("entry_px")
+            if er.get("exit_px") is not None:
+                t["exit_price"] = er.get("exit_px")
+        for er in (eng_rows or []):
+            oid = str(er.get("ord_id") or "")
+            if not oid or oid in seen:
+                # No-ord rows come from the same `trades` table read above.
+                continue
+            seen.add(oid)
+            rebuilt.append({
+                "account_mode": str(er.get("account_mode") or "demo").lower(),
+                "time": er.get("close_ts") or er.get("ts") or "",
+                "side": er.get("side"),
+                "symbol": er.get("inst_id"),
+                "size": None,
+                "pnl": round(float(er.get("pnl") or 0), 4),
+                "entry_price": er.get("entry_px"),
+                "exit_price": er.get("exit_px"),
+                "reason": "closed",
+                "coin": str(er.get("inst_id") or "").replace("-USDT-SWAP", ""),
+                "ord_id": oid,
+            })
+        rebuilt.sort(key=self._ts_sort_key)
+        stats = None
+        if eng_rows:
+            stats = {
+                "trades": len(eng_rows),
+                "wins": sum(1 for r in eng_rows if float(r.get("pnl") or 0) > 0),
+                "pnl": round(sum(float(r.get("pnl") or 0) for r in eng_rows), 2),
+                "fees": round(sum(float(r.get("fee") or 0) for r in eng_rows), 2),
+            }
+        return rebuilt[-120:], stats
+
+    async def _refresh_engine_stats(self, force: bool = False) -> dict | None:
+        """Read the authoritative close set with the SAME args as the card.
+
+        The dashboard calls load_eligible_rows(allow_untagged_ai=AI_ONLY_MODE,
+        sync_fn=sync_exchange_close_trades). Hydrating with the defaults counted
+        one row less (46 vs 47 trades, WR 56.5 vs 55.3), so "internal" never
+        really matched the card. Cache 5 min: one DB read + a TTL-guarded sync.
+        """
+        if not self.db:
+            return None
+        now = time.time()
+        if not force and (now - float(getattr(self, "_engine_stats_ts", 0) or 0)) < 300:
+            return getattr(self, "_engine_stats", None)
+        allow_untagged = True
+        sync_fn = None
+        try:
+            import sys as _sys
+            _mp = _sys.modules.get("app.main")
+            if _mp is not None:
+                allow_untagged = bool(getattr(_mp, "AI_ONLY_MODE", True))
+                sync_fn = getattr(_mp, "sync_exchange_close_trades", None)
+        except Exception:
+            pass
+        mode, _key = self._account_mode_tag()
+        _m = "live" if mode == "live" else "demo"
+        try:
+            from app.services import pnl_engine as _pe
+            rows, _diag = await _pe.load_eligible_rows(
+                self.db, mode=_m, ai_only=True,
+                allow_untagged_ai=allow_untagged,
+                sync_fn=(lambda: sync_fn(mode=_m)) if sync_fn else None,
+            )
+        except Exception as e:
+            print(f"[AI] engine stats: {e}", flush=True)
+            return getattr(self, "_engine_stats", None)
+        self._engine_diag = dict(_diag or {})
+        self._engine_rows = rows
+        self._engine_stats_ts = now
+        if not rows:
+            return None
+        # Use aggregate_rows' membership rules — `len(rows)` counted one row
+        # the card skips (before epoch / no bot label), so WR stayed 56.5 vs 55.3.
+        try:
+            ep = _pe.epoch_ms()
+            elig = []
+            for r in rows:
+                try:
+                    p = float(r.get("pnl") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if abs(p) < 1e-12:
+                    continue
+                ts = _pe._parse_ts_ms(
+                    r.get("close_ts") or r.get("ts") or r.get("timestamp"))
+                if not ts or ts < ep:
+                    continue
+                if not _pe.resolve_bot(r, ai_only=True):
+                    continue
+                elig.append((r, p))
+        except Exception:
+            elig = [(r, float(r.get("pnl") or 0)) for r in rows]
+        self._engine_rows = [r for r, _p in elig]
+        stats = {
+            "trades": len(elig),
+            "wins": sum(1 for _r, p in elig if p > 0),
+            "pnl": round(sum(p for _r, p in elig), 2),
+            "fees": round(sum(abs(float(_r.get("fee") or 0)) for _r, _p in elig), 2),
+        }
+        self._engine_stats = stats
+        return stats
+
+    def _apply_engine_stats(self, stats, force: bool = False) -> bool:
+        """Overlay engine counters — but never move backwards on trade count.
+
+        A snapshot taken before the latest close has fewer trades and an older
+        PnL. Applying it on the next tick made `lifetime_pnl_internal` fall below
+        the card for up to five minutes after every close (58 trades in both
+        places, but PnL 94.09 vs 90.35). `force` is used on hydrate, where the
+        DB read happens after everything is persisted.
+        """
+        try:
+            n = int((stats or {}).get("trades") or 0)
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if not force and n < int(getattr(self, "_lifetime_trades", 0) or 0):
+            return False
+        self._lifetime_trades = n
+        self._lifetime_wins = int(stats.get("wins") or 0)
+        self._lifetime_pnl = float(stats.get("pnl") or 0)
+        try:
+            fees = float(stats.get("fees") or 0)
+        except (TypeError, ValueError):
+            fees = 0.0
+        if fees > 0:
+            self._lifetime_fees = fees
+        return True
+
+    async def _hydrate_from_db(self):
+        """Reload lifetime stats + open positions from Postgres after deploy.
+
+        File state under /tmp is lost on Render restart; DB is the source of truth.
+        """
+        if not self.db:
+            print("[AI] hydrate: no db", flush=True)
+            return
+        try:
+            await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                     name=STRATEGY_NAME)
+        except Exception as e:
+            print(f"[AI] hydrate ensure_bot: {e}", flush=True)
+
+        # 1) settings backup (JSON blob)
+        try:
+            raw = await self.db.get_setting(f"ai_lifetime:{self.BOT_ID}")
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if isinstance(data, dict):
+                    tr = int(data.get("lifetime_trades") or 0)
+                    if tr >= self._lifetime_trades:
+                        self._lifetime_trades = tr
+                        self._lifetime_wins = int(data.get("lifetime_wins") or self._lifetime_wins)
+                        self._lifetime_pnl = float(data.get("lifetime_pnl") or self._lifetime_pnl)
+                        self._lifetime_fees = float(data.get("lifetime_fees") or self._lifetime_fees)
+                    # Stale PnL guard: AI previously ran in signal-only mode
+                    # (execute=0) and the blob picked up misattributed OKX PnL
+                    # despite zero real trades. With no closed trades recorded,
+                    # lifetime PnL is meaningless — zero it out.
+                    # Only AI Discretionary had signal-only misattribution; never wipe Scale-In
+                    if (
+                        getattr(self, "BOT_ID", "") == "ai_strategy"
+                        and self._lifetime_trades == 0
+                        and abs(self._lifetime_pnl) > 1e-9
+                    ):
+                        print(f"[AI] hydrate: clearing stale lifetime_pnl "
+                              f"({self._lifetime_pnl:.2f}, trades=0)", flush=True)
+                        self._lifetime_pnl = 0.0
+                        self._lifetime_wins = 0
+                        self._lifetime_fees = 0.0
+                        self._equity = self._capital
+                        # Persist cleared state so the stale blob doesn't
+                        # resurface after the next deploy/restart.
+                        try:
+                            blob = {
+                                "lifetime_pnl": 0.0,
+                                "lifetime_trades": 0,
+                                "lifetime_wins": 0,
+                                "lifetime_fees": 0.0,
+                                "adapt": getattr(self, "_adapt", {}),
+                                "reflection": getattr(self, "_reflection", ""),
+                            }
+                            await self.db.set_setting(
+                                f"ai_lifetime:{self.BOT_ID}", json.dumps(blob))
+                        except Exception as e:
+                            print(f"[AI] hydrate persist clear: {e}", flush=True)
+                    if isinstance(data.get("adapt"), dict):
+                        self._adapt.update({k: data["adapt"][k] for k in data["adapt"]
+                                            if k in ("min_confidence", "quant_min_align",
+                                                     "size_cap", "preset", "reason")})
+                    if data.get("reflection"):
+                        self._reflection = str(data.get("reflection"))
+                    print(f"[AI] hydrate settings: trades={self._lifetime_trades} "
+                          f"pnl={self._lifetime_pnl:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate settings: {e}", flush=True)
+
+        # 1b) anti-churn cooldown — must survive a redeploy. It used to be
+        # in-memory only, so every deploy reset the loss cooldown and the same
+        # losing setup was re-opened within a minute (four ADA shorts on 28 Oct).
+        await self._restore_last_closes()
+
+        # 2) trades table aggregate (authoritative if more complete)
+        try:
+            summary = await self.db.get_trades_summary(self.BOT_ID)
+            total = int(summary.get("total") or 0)
+            wins = int(summary.get("wins") or 0)
+            pnl = float(summary.get("total_pnl") or 0)
+            # The summary is the authoritative closed-trade set. Adopt it even
+            # when it is SMALLER than the stored value: older builds inflated
+            # this counter with `filled` (entry) rows and persisted the inflated
+            # number, so a "only if larger" guard would keep the bad lifetime
+            # win-rate forever. A genuinely empty/failed read returns 0 and is
+            # ignored below.
+            if total > 0 and total != self._lifetime_trades:
+                prev_n = self._lifetime_trades
+                self._lifetime_trades = total
+                self._lifetime_wins = wins
+                self._lifetime_pnl = pnl
+                print(f"[AI] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}"
+                      f" (was {prev_n})", flush=True)
+            # rebuild recent trade log for UI / adapt, then overlay the engine's
+            # authoritative PnL by ord_id (same set T as the dashboard card).
+            rows = await self.db.get_trades(bot_id=self.BOT_ID, limit=200)
+            eng_stats = await self._refresh_engine_stats(force=True)
+            eng_rows = list(getattr(self, "_engine_rows", None) or [])
+            rebuilt, _stats = self._rebuild_trade_log(rows, eng_rows)
+            if rebuilt:
+                self._trade_log = rebuilt
+            if eng_stats:
+                # One source of truth: internal counters must equal the engine
+                # total, otherwise lifetime_pnl_internal drifts from the card.
+                # force=True — hydration reads after everything is persisted,
+                # so the engine may legitimately have fewer rows than a stale
+                # local counter (reset/repair).
+                self._apply_engine_stats(eng_stats, force=True)
+                print(f"[AI] hydrate engine: trades={self._lifetime_trades} "
+                      f"wins={self._lifetime_wins} pnl={self._lifetime_pnl:.2f} "
+                      f"fees={self._lifetime_fees:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate trades: {e}", flush=True)
+
+        # 3) latest metric row as fallback
+        try:
+            metrics = await self.db.get_metrics(self.BOT_ID, limit=1)
+            if metrics:
+                m = metrics[0]
+                mt = int(m.get("total_trades") or 0)
+                mp = float(m.get("total_pnl") or 0)
+                if mt > self._lifetime_trades:
+                    self._lifetime_trades = mt
+                    self._lifetime_pnl = mp
+                    wr = m.get("win_rate")
+                    if wr is not None and mt > 0:
+                        self._lifetime_wins = int(round(float(wr) / 100.0 * mt))
+                    print(f"[AI] hydrate metrics: trades={mt} pnl={mp:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI] hydrate metrics: {e}", flush=True)
+
+        # equity display baseline
+        self._equity = self._capital + float(self._session_pnl or 0)
+        # rewrite file so next boot without DB still has numbers
+        self._persist()
+
+        # Ensure SOL fills are not on AI; then rebuild AI lifetime from DB trades only
+        try:
+            flag = await self.db.get_setting(f"ai_misattr_fixed:{self.BOT_ID}:SOL")
+            if not flag:
+                await self.correct_misattributed("SOL", "impulse_strategy")
+            else:
+                # Refresh lifetime from the SAME engine as the dashboard card.
+                # Fall back to the trades table only when the engine is empty.
+                _es = getattr(self, "_engine_stats", None)
+                if _es:
+                    self._lifetime_trades = int(_es["trades"])
+                    self._lifetime_wins = int(_es["wins"])
+                    self._lifetime_pnl = float(_es["pnl"])
+                else:
+                    summary = await self.db.get_trades_summary(self.BOT_ID)
+                    self._lifetime_trades = int(summary.get("total") or 0)
+                    self._lifetime_wins = int(summary.get("wins") or 0)
+                    self._lifetime_pnl = float(summary.get("total_pnl") or 0)
+                try:
+                    await self.db.set_setting(
+                        f"ai_lifetime:{self.BOT_ID}",
+                        json.dumps({
+                            "lifetime_pnl": self._lifetime_pnl,
+                            "lifetime_trades": self._lifetime_trades,
+                            "lifetime_wins": self._lifetime_wins,
+                            "lifetime_fees": getattr(self, "_lifetime_fees", 0),
+                        }),
+                    )
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[AI] auto-correct SOL misattr: {e}", flush=True)
+
+        # ── LIVE mirror hydration ────────────────────────────────────────────
+        # Reload live lifetime stats + open positions from DB after deploy.
+        live_bid = self._live_bot_id()
+        try:
+            raw = await self.db.get_setting(f"ai_lifetime:{live_bid}")
+            if raw:
+                data = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                if isinstance(data, dict):
+                    self._live_lifetime_trades = int(data.get("lifetime_trades") or 0)
+                    self._live_lifetime_wins = int(data.get("lifetime_wins") or 0)
+                    self._live_lifetime_pnl = float(data.get("lifetime_pnl") or 0)
+                    self._live_lifetime_fees = float(data.get("lifetime_fees") or 0)
+                    print(f"[AI-LIVE] hydrate settings: trades={self._live_lifetime_trades} "
+                          f"pnl={self._live_lifetime_pnl:.2f}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate settings: {e}", flush=True)
+        # trades aggregate from DB
+        try:
+            summary = await self.db.get_trades_summary(live_bid)
+            total = int(summary.get("total") or 0)
+            wins = int(summary.get("wins") or 0)
+            pnl = float(summary.get("total_pnl") or 0)
+            if total > self._live_lifetime_trades or (
+                self._live_lifetime_trades == 0 and (total > 0 or abs(pnl) > 1e-9)
+            ):
+                self._live_lifetime_trades = total
+                self._live_lifetime_wins = wins
+                self._live_lifetime_pnl = pnl
+                print(f"[AI-LIVE] hydrate trades: trades={total} wins={wins} pnl={pnl:.2f}",
+                      flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate trades: {e}", flush=True)
+        # Live equity from exchange
+        try:
+            await self._ensure_live_equity()
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate equity: {e}", flush=True)
+        # Restore live open positions from snapshot + exchange
+        try:
+            lc = self._live_client()
+            if lc:
+                raw_pos = await self.db.get_setting(f"live_book:{live_bid}")
+                stored: dict = {}
+                if raw_pos:
+                    stored = json.loads(raw_pos) if isinstance(raw_pos, str) else (raw_pos or {})
+                if not isinstance(stored, dict) or not stored:
+                    # Legacy: open_positions:{bid} may hold an older dict-format snapshot
+                    try:
+                        legacy = await self.db.get_setting(f"open_positions:{live_bid}")
+                        if legacy:
+                            lg = json.loads(legacy) if isinstance(legacy, str) else legacy
+                            if isinstance(lg, dict):
+                                stored = lg
+                    except Exception:
+                        pass
+                all_pos = await lc.get_positions()
+                ex_pos: dict[str, dict] = {}
+                for p in ((all_pos.get("data") or []) if isinstance(all_pos, dict) else (all_pos or [])):
+                    c = (p.get("instId") or "").replace("-USDT-SWAP", "").replace("-USD-SWAP", "")
+                    try:
+                        sz = abs(float(p.get("pos") or 0))
+                    except (TypeError, ValueError):
+                        sz = 0.0
+                    if c and sz > 0:
+                        ex_pos[c] = p
+                used = set()
+                # adopt confirmed live positions from exchange
+                for coin, ex in ex_pos.items():
+                    pos_side = (ex.get("posSide") or "net").lower()
+                    side = "short" if pos_side == "short" else "long"
+                    try:
+                        raw_sz = float(ex.get("pos") or 0)
+                    except (TypeError, ValueError):
+                        raw_sz = 0.0
+                    sz = abs(raw_sz)
+                    if pos_side == "net" and raw_sz < 0:
+                        side = "short"
+                    entry = float(ex.get("avgPx") or 0)
+                    if not side or sz <= 0 or coin in self._live_positions:
+                        continue
+                    old = stored.get(coin) or {}
+                    sr = old.get("signal_id")
+                    try:
+                        sr = int(sr)
+                    except Exception:
+                        sr = 0
+                    import math as _m
+                    unc = float(ex.get("upl") or 0)
+                    peak = float(old.get("peak_price") or entry or 0)
+                    if not peak or _m.isnan(peak):
+                        peak = entry
+                    take = float(old.get("take_price") or 0)
+                    if not take or _m.isnan(take):
+                        take = 0
+                    tid = str(old.get("demo_trade_id") or "")
+                    demo_twin = self._positions.get(coin)
+                    if not tid and demo_twin:
+                        tid = str(getattr(demo_twin, "demo_trade_id", "") or "")
+                    if not tid:
+                        print(
+                            f"[AI-LIVE] hydrate SKIP {coin} {side}: no stored "
+                            f"demo_trade_id — manual/foreign LIVE position",
+                            flush=True,
+                        )
+                        continue
+                    pos = AIPosition(
+                        coin=coin, inst_id=f"{coin}-USDT-SWAP", side=side, size=sz,
+                        entry_price=entry, stop_price=float(old.get("stop_price") or 0),
+                        take_price=take, leverage=float(old.get("leverage") or 0),
+                        opened_at=old.get("opened_at") or datetime.now(timezone.utc).isoformat(),
+                        peak_price=peak, unrealized_pnl=unc,
+                        tg_message_id=int(old.get("tg_message_id") or 0),
+                        signal_id=sr or 0,
+                        demo_trade_id=tid,
+                        disaster_algo_id=str(old.get("disaster_algo_id") or ""),
+                        disaster_stop_px=float(old.get("disaster_stop_px") or 0),
+                    )
+                    self._ensure_default_stops(pos)
+                    self._live_positions[coin] = pos
+                    used.add(coin)
+                    try:
+                        await self._ensure_live_disaster_stop(lc, pos)
+                    except Exception as _de:
+                        print(f"[AI-LIVE] disaster stop after hydrate {coin}: {_de}", flush=True)
+                    print(f"[AI-LIVE] hydrate adopt {coin}: sz={sz} entry={entry} "
+                          f"pnl={unc:+.2f} trade_id={tid or '-'}", flush=True)
+                # report live exchange positions we cannot restore
+                for coin in ex_pos:
+                    if coin not in used and coin not in self._live_positions:
+                        sz = float((ex_pos[coin] or {}).get("pos") or 0)
+                        if sz > 0:
+                            print(f"[AI-LIVE] hydrate exchange孤儿 {coin}: sz={sz}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] hydrate positions: {e}", flush=True)
+        # NEVER gap-fill LIVE on boot: a redeploy (or settings change) must not
+        # open real-money positions. Gap-fill only runs from the live tick while
+        # the engine is running and only for positions opened after the user
+        # explicitly connected the mirror.
+
+        print(f"[AI] hydrate done: lifetime_trades={self._lifetime_trades} "
+              f"pnl={self._lifetime_pnl:.2f} wins={self._lifetime_wins}", flush=True)
+
+    def _persist(self):
+        payload = {
+            "lifetime_pnl": self._lifetime_pnl,
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_wins": self._lifetime_wins,
+            "lifetime_fees": self._lifetime_fees,
+            "session_pnl": self._session_pnl,
+            "daily_realized": self._daily_realized,
+            "daily_realized_day": self._daily_realized_day,
+            "weekly_realized": self._weekly_realized,
+            "weekly_realized_week": self._weekly_realized_week,
+            "adapt": {
+                "min_confidence": (self._adapt or {}).get("min_confidence"),
+                "quant_min_align": (self._adapt or {}).get("quant_min_align"),
+                "size_cap": (self._adapt or {}).get("size_cap"),
+                "preset": (self._adapt or {}).get("preset"),
+                "reason": (self._adapt or {}).get("reason"),
+            },
+            "reflection": self._reflection,
+            "journal": list(getattr(self, "_journal", None) or [])[-100:],
+            "daily_lessons": list(getattr(self, "_daily_lessons", None) or [])[:5],
+            "last_lesson_day": getattr(self, "_last_lesson_day", ""),
+            "adapt_log": self._adapt_log[-20:],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        save_ai_state(payload)
+        if self.db is not None and self._loop and not self._loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(self._db_snapshot(), self._loop)
+            except Exception:
+                pass
+
+    async def _persist_db_settings(self):
+        if not self.db:
+            return
+        try:
+            blob = json.dumps({
+                "lifetime_pnl": self._lifetime_pnl,
+                "lifetime_trades": self._lifetime_trades,
+                "lifetime_wins": self._lifetime_wins,
+                "lifetime_fees": self._lifetime_fees,
+                "adapt": {
+                    "min_confidence": (self._adapt or {}).get("min_confidence"),
+                    "quant_min_align": (self._adapt or {}).get("quant_min_align"),
+                    "size_cap": (self._adapt or {}).get("size_cap"),
+                    "preset": (self._adapt or {}).get("preset"),
+                    "reason": (self._adapt or {}).get("reason"),
+                },
+                "reflection": self._reflection,
+                "journal": list(getattr(self, "_journal", None) or [])[-50:],
+                "daily_lessons": list(getattr(self, "_daily_lessons", None) or [])[:5],
+                "last_lesson_day": getattr(self, "_last_lesson_day", ""),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await self.db.set_setting(f"ai_lifetime:{self.BOT_ID}", blob)
+        except Exception as e:
+            print(f"[AI] persist settings: {e}", flush=True)
+        # ── Open-position protection (stop/take/peak/opened_at) ───────────────
+        try:
+            await persist_open_snapshot(self.db, self.BOT_ID, list(self._positions.values()))
+        except Exception as e:
+            print(f"[AI] persist open snapshot: {e}", flush=True)
+        # ── LIVE mirror lifetime persist ─────────────────────────────────────
+        try:
+            live_bid = self._live_bot_id()
+            live_blob = json.dumps({
+                "lifetime_pnl": self._live_lifetime_pnl,
+                "lifetime_trades": self._live_lifetime_trades,
+                "lifetime_wins": self._live_lifetime_wins,
+                "lifetime_fees": self._live_lifetime_fees,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            await self.db.set_setting(f"ai_lifetime:{live_bid}", live_blob)
+        except Exception as e:
+            print(f"[AI-LIVE] persist settings: {e}", flush=True)
+
+    async def _db_snapshot(self):
+        try:
+            await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
+                                     name=STRATEGY_NAME)
+            wr = (100.0 * self._lifetime_wins / self._lifetime_trades) if self._lifetime_trades else None
+            await self.db.save_metric(
+                bot_id=self.BOT_ID,
+                equity=float(self._account_equity or (self._capital + self._lifetime_pnl)),
+                total_pnl=self._lifetime_pnl,
+                win_rate=wr,
+                total_trades=self._lifetime_trades,
+            )
+            await self._persist_db_settings()
+        except Exception as e:
+            print(f"[AI] db snapshot: {e}", flush=True)
+
+
+    def _watch_board(self) -> list:
+        """Per-symbol quant snapshot for UI status (all configured coins)."""
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        board = []
+        for coin in (self.config.symbols or list(coins.keys())):
+            c = coins.get(coin) or {}
+            board.append({
+                "coin": coin,
+                "regime": c.get("regime") or "—",
+                "align_long": c.get("align_long"),
+                "align_short": c.get("align_short"),
+                "best_side": c.get("best_side"),
+                "align_score": c.get("align_score"),
+                "adx": c.get("adx"),
+                "block_open": bool(c.get("block_open")),
+            })
+        return board
+
+    BLOCK_REASON_RU = {
+        "block_open": "Слабое совпадение / боковик — вход закрыт",
+        "short_in_bull": "Шорт против бычьего режима",
+        "long_in_bear": "Лонг против медвежьего режима",
+        "short_vs_btc_bull": "BTC в бычьем режиме — шорт альта отложен",
+        "long_vs_btc_bear": "BTC в медвежьем режиме — лонг альта отложен",
+        "short_vs_btc_roc_up": "BTC растёт (ROC↑) — шорт альта отменён",
+        "long_vs_btc_roc_down": "BTC падает (ROC↓) — лонг альта отменён",
+        "funding_toxic_long": "Funding слишком высокий для лонга",
+        "funding_toxic_short": "Funding слишком низкий для шорта",
+        "btc_impulse_up": "Импульс BTC вверх — шорт альта нельзя",
+        "btc_impulse_down": "Импульс BTC вниз — лонг альта нельзя",
+        "weak_adx": "Слабый тренд (ADX низкий)",
+        "flat_roc": "Слабый импульс цены (ROC почти 0)",
+        "ema_not_bullish": "Цена/EMA не подтверждают лонг",
+        "ema_not_bearish": "Цена/EMA не подтверждают шорт",
+        "below_ema200": "Цена ниже EMA200 — лонг рискован",
+        "above_ema200": "Цена выше EMA200 — шорт рискован",
+        "bounce_above_ema21": "Отбой выше EMA21 — шорт против импульса",
+        "fade_below_ema21": "Откат ниже EMA21 — лонг против импульса",
+        "macd_hist_against": "MACD против направления входа",
+        "sol_quality": "SOL: нужен более сильный сетап (ADX/align)",
+    }
+
+    @classmethod
+    def _block_reason_ru(cls, code: str | None) -> str | None:
+        if not code:
+            return None
+        return cls.BLOCK_REASON_RU.get(str(code), str(code).replace("_", " "))
+
+    def _top_signals(self, n: int = 3) -> list:
+
+        """Top-N coins ranked by *entry readiness* — realistic probability of
+        actually passing all trade-entry filters.
+
+        For each coin × best_side, simulate the veto pipeline:
+        block_open, regime match, BTC trend/ROC, funding, ADX, ROC, EMA.
+        Score = alignment × filter_pass_ratio × adx_factor × regime_factor.
+        Coins that fail hard filters get score=0 and blocked_reason.
+        """
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        inds = self._latest_indicators or {}
+        open_coins = {p.coin for p in self._positions.values()}
+
+        # market-level context (same as _quant_veto_open)
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        float(q.get("min_align") or self._effective_min_align())
+        min_adx_cfg = float(self.config.min_adx or 18)
+        adx_soft = float(self.config.adx_soft_floor or 14)
+        adx_bypass = float(self.config.adx_align_bypass or 0.72)
+        funding_lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+        btc_filter_on = bool(getattr(self.config, "btc_filter_enabled", True))
+        funding_filter_on = bool(getattr(self.config, "funding_filter_enabled", True))
+        _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+
+        scored = []
+        for coin, c in coins.items():
+            if coin in open_coins:
+                continue
+
+            regime = str(c.get("regime") or "unknown").lower()
+            al_l = float(c.get("align_long") or 0)
+            al_s = float(c.get("align_short") or 0)
+            adx = float(c.get("adx") or 0)
+            ind = inds.get(coin) or {}
+
+            # pick best side (same logic as quant_auto)
+            if regime == "bear":
+                side, al = "short", al_s
+            elif regime == "bull":
+                side, al = "long", al_l
+            elif regime == "chop":
+                # chop: only with BTC trend, never counter
+                if btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
+                    side, al = "long", al_l
+                elif btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
+                    side, al = "short", al_s
+                else:
+                    side, al = ("long" if al_l >= al_s else "short"), max(al_l, al_s)
+            else:
+                side = c.get("best_side") or ("long" if al_l >= al_s else "short")
+                al = max(al_l, al_s)
+
+            if side not in ("long", "short"):
+                continue
+
+            # ── simulate veto pipeline ──
+            blockers = []
+
+            # 1. block_open (align < 0.50 / chop / ADX)
+            if c.get("block_open"):
+                blockers.append("block_open")
+
+            # 2. regime side match
+            if regime == "bull" and side == "short":
+                blockers.append("short_in_bull")
+            if regime == "bear" and side == "long":
+                blockers.append("long_in_bear")
+
+            # 3. BTC/global trend fight
+            if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+                blockers.append("short_vs_btc_bull")
+            if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+                blockers.append("long_vs_btc_bear")
+
+            # 4. BTC ROC drift
+            if side == "short" and btc_roc >= _btc_roc_veto_thr:
+                blockers.append("short_vs_btc_roc_up")
+            if side == "long" and btc_roc <= -_btc_roc_veto_thr:
+                blockers.append("long_vs_btc_roc_down")
+
+            # 5. Funding filter
+            if funding_filter_on:
+                fr = ind.get("funding_rate") or c.get("funding_rate")
+                try:
+                    fr = float(fr) if fr is not None else None
+                except (TypeError, ValueError):
+                    fr = None
+                if fr is not None and funding_lim > 0:
+                    if side == "long" and fr >= funding_lim:
+                        blockers.append("funding_toxic_long")
+                    if side == "short" and fr <= -funding_lim:
+                        blockers.append("funding_toxic_short")
+
+            # 6. BTC impulse (alts only)
+            if btc_filter_on and coin != "BTC":
+                impulse = q.get("btc_impulse")
+                if impulse == "up" and side == "short":
+                    blockers.append("btc_impulse_up")
+                if impulse == "down" and side == "long":
+                    blockers.append("btc_impulse_down")
+
+            # 7. ADX strength
+            align_for_adx = al_s if side == "short" else al_l
+            adx_ok = adx >= min_adx_cfg or (align_for_adx >= adx_bypass and adx >= adx_soft)
+            if not adx_ok:
+                blockers.append(f"low_adx:{adx:.0f}")
+
+            # 8. ROC momentum
+            roc = float(ind.get("roc_3") or 0)
+            if abs(roc) < float(getattr(self.config, "min_roc_abs", 0.15) or 0.15):
+                blockers.append("flat_roc")
+
+            # 9. EMA alignment
+            ema_f = float(ind.get("ema_fast") or 0)
+            ema_s = float(ind.get("ema_slow") or 0)
+            close = float(ind.get("close") or 0)
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    blockers.append("ema_not_bullish")
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    blockers.append("ema_not_bearish")
+
+            # 10. EMA200 trend gate
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
+            if ema200 > 0 and close:
+                tol = ema200 * 0.005
+                if side == "long" and close < ema200 - tol:
+                    blockers.append("below_ema200")
+                if side == "short" and close > ema200 + tol:
+                    blockers.append("above_ema200")
+
+            # 11. v1.25 impulse / continuation (same as live entry gate)
+            try:
+                mom = self._momentum_against(side, ind)
+                if mom:
+                    blockers.append(str(mom))
+            except Exception:
+                pass
+
+            # ── composite score ──
+            hard_block = bool(c.get("block_open")) or len(blockers) >= 4
+            n_filters = 10  # total veto checks
+            pass_ratio = max(0, (n_filters - len(blockers)) / n_filters)
+            adx_f = min(adx / 40.0, 1.0)
+            regime_f = {"bull": 1.0, "bear": 0.9, "chop": 0.35, "unknown": 0.6}.get(regime, 0.6)
+            # score: high only if alignment is strong AND most filters pass
+            score = al * adx_f * regime_f * pass_ratio if not hard_block else 0.0
+            if score < 0.03:
+                continue
+
+            _br = blockers[0] if blockers else None
+            scored.append({
+                "coin": coin,
+                "side": side,
+                "score": round(score, 3),
+                "align_score": round(al, 3),
+                "adx": round(adx, 1),
+                "regime": regime,
+                "rsi": round(float(ind.get("rsi") or 0), 1),
+                "close": close,
+                "change_pct": round(float(roc) * 100, 2),
+                "filters_passed": n_filters - len(blockers),
+                "filters_total": n_filters,
+                "blocked_reason": _br,
+                "blocked_reason_ru": self._block_reason_ru(_br),
+                "blockers": list(blockers)[:5],
+                "blockers_ru": [self._block_reason_ru(b) for b in blockers[:5]],
+            })
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:n]
+
+    def _enrich_decision(self, decision: dict, snap: dict | None = None) -> dict:
+        """Attach Russian pulse + watch to a raw LLM decision (used by tick and /decide)."""
+        decision = dict(decision or {})
+        pulse = self._status_pulse(decision)
+        watch = self._watch_board()
+        act = (decision.get("action") or "hold").lower()
+        reason = str(decision.get("reason") or "")
+        # Stale-action guard: if action references a coin we no longer hold
+        _act_sym = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+        _pos_map = getattr(self, "_positions", None) or {}
+        if act in ("close", "reduce") and _act_sym and _act_sym not in _pos_map:
+            act = "hold"
+        elif act == "open" and _act_sym and _act_sym in _pos_map:
+            act = "hold"
+        # Always show human RU status as primary reason for UI
+        # Always prefer live pulse for UI (avoids stale "Открыто: BTC шорт" when flat)
+        if act == "hold" or not reason:
+            reason = pulse
+        elif reason and not reason.startswith("Бот работает"):
+            # Drop stale open-claims in reason if we have no positions
+            if not _pos_map:
+                reason = pulse
+            else:
+                reason = f"{pulse} | {reason}"
+        else:
+            reason = pulse or reason
+        snap = snap or {}
+        inds = snap.get("indicators") or self._latest_indicators or {}
+        out = {
+            **decision,
+            "reason": reason[:900],
+            "pulse": pulse[:900],
+            "watch": watch,
+            "symbols": list(self.config.symbols or []),
+            "symbols_scanned": list(self.config.symbols or []),
+            "time": datetime.now(timezone.utc).isoformat(),
+            "provider": self._provider(),
+            "execute": self._execute_enabled(),
+            "demo": self._is_demo(),
+            "healthy": True,
+            "indicators": {
+                k: {kk: vv for kk, vv in (v or {}).items() if kk in (
+                    "close", "ema_fast", "ema_slow", "roc_3", "adx",
+                    "align_long", "align_short", "regime")}
+                for k, v in inds.items()
+            },
+            "open_positions": snap.get("open_positions") or [
+                {"coin": p.coin, "side": p.side} for p in self._positions.values()
+            ],
+            "equity": snap.get("equity", self._equity),
+        }
+        return out
+
+
+    def _status_pulse(self, decision: dict) -> str:
+        """Короткий статус на русском для карточки бота (без англ. терминов)."""
+        decision = decision or {"action": "hold"}
+
+        def _prob_word(score: float | None) -> str:
+            if score is None:
+                return "неясной"
+            try:
+                s = float(score)
+            except (TypeError, ValueError):
+                return "неясной"
+            if s >= 0.75:
+                return "высокой"
+            if s >= 0.55:
+                return "средней"
+            return "низкой"
+
+        def _side_ru(side: str) -> str:
+            s = str(side or "").lower()
+            if s in ("long", "buy"):
+                return "лонг"
+            if s in ("short", "sell"):
+                return "шорт"
+            return ""
+
+        def _coin_side(obj):
+            if isinstance(obj, dict):
+                coin = obj.get("coin") or obj.get("symbol") or "?"
+                side = str(obj.get("side") or obj.get("pos_side") or "").lower()
+            else:
+                coin = getattr(obj, "coin", None) or getattr(obj, "symbol", None) or "?"
+                side = str(getattr(obj, "side", "") or "").lower()
+            coin = str(coin).replace("-USDT-SWAP", "").replace("-USD-SWAP", "").upper()
+            return coin, _side_ru(side) or "—"
+
+        try:
+            q = self._build_quant() or {}
+        except Exception as e:
+            print(f"[AI] pulse quant: {e}", flush=True)
+            q = {"global_regime": "unknown", "coins": {}}
+        try:
+            board = self._watch_board() or []
+        except Exception as e:
+            print(f"[AI] pulse board: {e}", flush=True)
+            board = []
+
+        reg = str(q.get("global_regime") or "unknown").lower()
+        reg_ru = {
+            "bull": "бычий", "bear": "медвежий", "chop": "боковик",
+            "unknown": "неясный", "неизвестно": "неясный",
+        }.get(reg, "неясный")
+
+        act = str(decision.get("action") or "hold").lower()
+        try:
+            conf_f = float(decision.get("confidence")) if decision.get("confidence") is not None else None
+        except (TypeError, ValueError):
+            conf_f = None
+
+        # Stale action → hold
+        if act in ("close", "reduce", "open"):
+            _sym = str(decision.get("symbol") or "").replace("-USDT-SWAP", "").upper()
+            _pos = getattr(self, "_positions", None) or {}
+            if act in ("close", "reduce") and _sym and _sym not in _pos:
+                act = "hold"
+            elif act == "open" and _sym and _sym in _pos:
+                act = "hold"
+
+        best_free = None
+        best_any = None
+        for b in board or []:
+            try:
+                sc = float(b.get("align_score") or 0)
+            except (TypeError, ValueError):
+                sc = 0.0
+            if best_any is None or sc > best_any[0]:
+                best_any = (sc, b)
+            if not b.get("block_open"):
+                if best_free is None or sc > best_free[0]:
+                    best_free = (sc, b)
+
+        pos_map = getattr(self, "_positions", None) or {}
+        items = list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])
+        open_list = []
+        for pos in items:
+            try:
+                sz = float(getattr(pos, "size", None) if not isinstance(pos, dict) else pos.get("size") or 0)
+            except (TypeError, ValueError):
+                sz = 0.0
+            if abs(sz) > 1e-12:
+                open_list.append(pos)
+
+        # ── Open / close actions ──
+        if act == "open":
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            side_ru = _side_ru(decision.get("side") or "")
+            prob = _prob_word(conf_f)
+            conf_txt = f"{conf_f:.0%}" if conf_f is not None else "—"
+            msg = f"Готовим вход: {sym} {side_ru}. Вероятность {prob}, оценка ИИ {conf_txt}."
+            if decision.get("veto_reason"):
+                msg += " Вход пока заблокирован фильтром."
+            return msg[:280]
+
+        if act in ("close", "reduce"):
+            sym = str(decision.get("symbol") or "?").replace("-USDT-SWAP", "").upper()
+            verb = "закрываем" if act == "close" else "сокращаем"
+            return f"Решение: {verb} {sym}."[:280]
+
+        # ── Hold ──
+        if open_list:
+            parts = [f"{_coin_side(p)[0]} {_coin_side(p)[1]}" for p in open_list]
+            msg = f"В работе: {', '.join(parts)}. Новых входов нет — жду сигнал на выход."
+            return msg[:280]
+
+        # Flat market scan
+        if best_free:
+            sc, b = best_free
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            conf_part = ""
+            if conf_f is not None:
+                conf_part = f" Оценка ИИ {conf_f:.0%}."
+            mom = None
+            try:
+                mom = self._momentum_against(
+                    b.get("best_side"),
+                    (self._latest_indicators or {}).get(coin) or {},
+                )
+            except Exception:
+                mom = None
+            # wait until next bar if useful
+            wait = ""
+            try:
+                from datetime import datetime, timedelta, timezone
+                now = datetime.now(timezone.utc)
+                bar = getattr(self.config, "bar", "1H") or "1H"
+                if str(bar).upper() in ("4H", "4h"):
+                    h = (now.hour // 4 + 1) * 4
+                    nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(hours=h)
+                    if h >= 24:
+                        nxt = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                else:
+                    nxt = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                mins = max(0, int((nxt - now).total_seconds() / 60))
+                if mins > 0:
+                    wait = f" Следующая проверка ~через {mins} мин."
+            except Exception:
+                pass
+            if mom:
+                return (
+                    f"Рынок: {reg_ru}. {coin} {side_ru} выглядит сильно "
+                    f"({sc:.0%}), но импульс против входа — сделку не берём."
+                    f"{conf_part}{wait}"
+                )[:280]
+            return (
+                f"Рынок: {reg_ru}. Ожидаем {side_ru} по {coin} с {prob} вероятностью "
+                f"(совпадение {sc:.0%}).{conf_part}{wait}"
+            )[:280]
+
+        if best_any:
+            sc, b = best_any
+            coin = str(b.get("coin") or "?").upper()
+            side_ru = _side_ru(b.get("best_side") or "")
+            prob = _prob_word(sc)
+            return (
+                f"Рынок: {reg_ru}. Кандидат {coin} {side_ru} с {prob} вероятностью "
+                f"({sc:.0%}) — проходит проверку, пока не допущен к входу."
+            )[:280]
+
+        return f"Рынок: {reg_ru}. Явных сигналов нет — наблюдаю."[:280]
+
+
+    def _safe_pulse_text(self) -> str:
+        """Always recompute live pulse for UI (do not reuse stale last_decision.pulse)."""
+        try:
+            return (self._status_pulse(self._last_decision or {"action": "hold"}) or "")[:900]
+        except Exception as e:
+            print(f"[AI] pulse text: {e}", flush=True)
+            pos_map = getattr(self, "_positions", None) or {}
+            open_list = []
+            for pos in (list(pos_map.values()) if isinstance(pos_map, dict) else list(pos_map or [])):
+                try:
+                    sz = float(pos.get("size") if isinstance(pos, dict) else getattr(pos, "size", 0) or 0)
+                except (TypeError, ValueError):
+                    sz = 0.0
+                if abs(sz) > 1e-12:
+                    open_list.append(pos)
+            if open_list:
+                parts = []
+                for pos in open_list:
+                    if isinstance(pos, dict):
+                        coin = pos.get("coin") or "?"
+                        side = str(pos.get("side") or "").lower()
+                    else:
+                        coin = getattr(pos, "coin", None) or "?"
+                        side = str(getattr(pos, "side", None) or "").lower()
+                    side_ru = "лонг" if side == "long" else ("шорт" if side == "short" else side or "—")
+                    parts.append(f"{coin} {side_ru}")
+                return (
+                    f"Рынок: данные обновляются. Мои позиции: {', '.join(parts)}."
+                )
+            return "Рынок: данные обновляются. Позиций у этого бота нет."
+
+    def get_status(self) -> dict:
+        closed = self._closed_trades()
+        return {
+            "running": self._running,
+            "strategy": STRATEGY_NAME,
+            "version": STRATEGY_VERSION,
+            # Runtime spec drift (empty = CT_VAL/LOT_SZ match OKX).
+            "contract_specs": list(getattr(self, "_contract_specs", []) or []),
+            # Card text = live market pulse (not static STRATEGY_DESC)
+            "description": self._safe_pulse_text(),
+            "strategy_blurb": STRATEGY_DESC,
+            "provider": self._provider(),
+            "model": (llm_status() or {}).get("model"),
+            "llm": llm_status(),
+            "execute": self._execute_enabled(),
+            "capital": self._capital,
+            # Real exchange equity when known — nominal capital can be 10k
+            # while the demo account holds ~650, which breaks every % metric.
+            "equity": round(float(self._account_equity or self._equity), 2),
+            "equity_source": "exchange" if self._account_equity else "nominal",
+            "total_pnl": round(self._lifetime_pnl, 2),
+            "session_pnl": round(self._session_pnl, 2),
+            "lifetime_pnl": round(self._lifetime_pnl, 2),
+            "lifetime_trades": self._lifetime_trades,
+            "lifetime_fees": round(self._lifetime_fees, 2),
+            "turnover": self._turnover_stats(
+                self._lifetime_pnl, self._lifetime_fees,
+                float(self._account_equity or self._equity)),
+            "total_trades": self._lifetime_trades,
+            "session_trades": len(closed),
+            "open_fills": len([t for t in self._trade_log if t.get("reason") == "open"]),
+            "win_rate": (
+                round(100.0 * self._lifetime_wins / self._lifetime_trades, 1)
+                if self._lifetime_trades else None
+            ),
+            "open_positions": [
+                {
+                    "coin": getattr(p, "coin", p.get("coin") if isinstance(p, dict) else "?"),
+                    "symbol": getattr(p, "inst_id", p.get("inst_id") if isinstance(p, dict) else "?"),
+                    "side": getattr(p, "side", p.get("side") if isinstance(p, dict) else "?"),
+                    "size": getattr(p, "size", p.get("size") if isinstance(p, dict) else 0),
+                    "entry_price": getattr(p, "entry_price", p.get("entry_price") if isinstance(p, dict) else 0),
+                    "stop_price": getattr(p, "stop_price", p.get("stop_price") if isinstance(p, dict) else 0),
+                    "take_price": getattr(p, "take_price", p.get("take_price") if isinstance(p, dict) else 0),
+                    "leverage": getattr(p, "leverage", p.get("leverage") if isinstance(p, dict) else 0),
+                    "peak_upl_pct": getattr(p, "peak_upl_pct", 0),
+                    "partial_taken": bool(getattr(p, "partial_taken", False)),
+                    "opened_at": getattr(p, "opened_at", ""),
+                    "account_mode": "demo",
+                }
+                for p in self._positions.values()
+            ],
+            "config": {
+                "symbols": self.config.symbols,
+                "capital": self.config.capital,
+                "max_leverage": self.config.max_leverage,
+                "max_positions": self.config.max_positions,
+                "risk_per_trade": self.config.risk_per_trade,
+                "bar": self.config.bar,
+                "poll_interval_sec": self.config.poll_interval_sec,
+                "min_confidence": self.config.min_confidence,
+                "effective_min_confidence": self._effective_min_confidence(),
+                "effective_min_align": self._effective_min_align(),
+                "adapt_preset": (self._adapt or {}).get("preset"),
+                "adapt_size_cap": (self._adapt or {}).get("size_cap"),
+                "cost_min_edge_mult": getattr(self.config, "cost_min_edge_mult", 3.0),
+                "min_edge_pct": round(
+                    self._round_trip_cost_pct() * float(
+                        getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0), 3),
+                "block_chop_opens": bool(getattr(self.config, "block_chop_opens", True)),
+                "scale_in_enabled": bool(getattr(self.config, "scale_in_enabled", True)),
+                "second_entry_enabled": bool(getattr(self.config, "second_entry_enabled", True)),
+            },
+            "indicators": self._latest_indicators,
+            "last_decision": (
+                self._enrich_decision(self._last_decision, None)
+                if self._last_decision else self._last_decision
+            ),
+            "watch": (self._last_decision or {}).get("watch") or self._watch_board(),
+            "top_signals": self._top_signals(3),
+            "pulse": self._safe_pulse_text(),
+            "symbols_scanned": list(self.config.symbols or []),
+            "adaptive": self._adapt,
+            "reflection": self._reflection,
+            "adapt_log": self._adapt_log[-10:],
+            "recent_decisions": self._decision_log[-30:],
+            "decision_count": len(self._decision_log),
+            "last_exec": self._last_exec,
+            "recent_exec": self._exec_log[-10:],
+            "recent_trades": self._trade_log[-20:],
+            "last_activity": self._last_activity,
+            "started_at": self._started_at,
+            "health": {
+                "alive": self.is_loop_healthy(),
+                "running_flag": bool(self._running),
+                "thread_alive": self._thread_alive(),
+                "stale": bool(self._running) and not self.is_loop_healthy(),
+                "indicators_stale": bool(getattr(self, "_indicators_stale_flag", False)),
+                "last_activity": self._last_activity,
+                "next_tick_at": self._next_tick_at,
+                "poll_interval_sec": self.config.poll_interval_sec,
+                "tick_count": self._tick_count,
+                "tick_fail_count": self._tick_fail_count,
+                "consecutive_fails": self._consecutive_fails,
+                "last_tick_error": self._last_tick_error,
+                "llm_error_count": self._llm_error_count,
+                "last_llm_error": self._last_llm_error,
+                "llm_rate_limited": self._llm_rate_limited,
+                "llm_rate_limit_until": self._llm_rate_limit_until,
+                "last_provider_used": self._last_provider_used,
+                "provider_status": self._get_provider_status(),
+                "trace": getattr(self, "_trace", None),
+            },
+            "live": {
+                "connected": self._live_ready(),
+                "equity": round(float(self._live_equity or 0), 2),
+                "total_pnl": round(self._live_lifetime_pnl, 2),
+                "session_pnl": round(self._live_session_pnl, 2),
+                "lifetime_trades": self._live_lifetime_trades,
+                "lifetime_fees": round(self._live_lifetime_fees, 2),
+                "turnover": self._turnover_stats(
+                    self._live_lifetime_pnl, self._live_lifetime_fees,
+                    self._live_equity),
+                "win_rate": (
+                    round(100.0 * self._live_lifetime_wins / self._live_lifetime_trades, 1)
+                    if self._live_lifetime_trades else None
+                ),
+                "disaster_stop_enabled": bool(
+                    getattr(self.config, "live_disaster_stop", True)),
+                "disaster_stop_mult": getattr(self.config, "live_disaster_stop_mult", 1.8),
+                "trade_blocked": str(getattr(self, "_live_trade_blocked_reason", "") or ""),
+                "unprotected_open": [
+                    p.coin for p in self._live_positions.values()
+                    if not getattr(p, "disaster_algo_id", "")
+                ],
+                "open_positions": [
+                    {
+                        "coin": p.coin,
+                        "symbol": p.inst_id,
+                        "side": p.side,
+                        "size": p.size,
+                        "entry_price": p.entry_price,
+                        "stop_price": p.stop_price,
+                        "take_price": p.take_price,
+                        "leverage": p.leverage,
+                        "opened_at": p.opened_at,
+                        "disaster_stop_px": getattr(p, "disaster_stop_px", 0.0),
+                        "protected": bool(getattr(p, "disaster_algo_id", "")),
+                        "account_mode": "live",
+                    }
+                    for p in self._live_positions.values()
+                ],
+            },
+        }
+
+    def _diagnose_open(self) -> dict:
+        """Per-coin veto diagnostics — run the full pipeline for each coin/side
+        and report exactly why it would or would not open a trade.
+        Returns { coin: { regime, block_open, indicators, vetoes: [...], would_open: bool } }."""
+        q = self._build_quant()
+        coins = q.get("coins") or {}
+        inds = self._latest_indicators or {}
+        open_coins = {p.coin for p in self._positions.values()}
+
+        global_reg = str(q.get("global_regime") or "").lower()
+        btc_reg = str(q.get("btc_regime") or global_reg or "").lower()
+        try:
+            btc_roc = float(q.get("btc_roc") or 0)
+        except (TypeError, ValueError):
+            btc_roc = 0.0
+        btc_impulse = q.get("btc_impulse") or "flat"
+        min_al = float(q.get("min_align") or self._effective_min_align())
+        min_conf = float(self._effective_min_confidence())
+        min_adx_cfg = float(self.config.min_adx or 18)
+        adx_soft = float(self.config.adx_soft_floor or 14)
+        adx_bypass = float(self.config.adx_align_bypass or 0.72)
+        funding_lim = float(getattr(self.config, "funding_block_abs", 0.0008) or 0.0008)
+        btc_filter_on = bool(getattr(self.config, "btc_filter_enabled", True))
+        funding_filter_on = bool(getattr(self.config, "funding_filter_enabled", True))
+        _btc_roc_veto_thr = float(getattr(self.config, "btc_roc_veto", 0.20) or 0.20)
+        min_roc = float(getattr(self.config, "min_roc_abs", 0.15) or 0.15)
+
+        result = {}
+        for coin, c in coins.items():
+            regime = str(c.get("regime") or "unknown").lower()
+            al_l = float(c.get("align_long") or 0)
+            al_s = float(c.get("align_short") or 0)
+            adx = float(c.get("adx") or 0)
+            ind = inds.get(coin) or {}
+            roc_val = float(ind.get("roc_3") or 0)
+            ema_f = float(ind.get("ema_fast") or ind.get("ema21") or 0)
+            ema_s = float(ind.get("ema_slow") or ind.get("ema50") or 0)
+            ema200 = float(ind.get("ema_trend") or ind.get("ema200") or 0)
+            close = float(ind.get("close") or 0)
+            rsi = float(ind.get("rsi") or 0)
+            macd_h = float(ind.get("macd_hist") or 0)
+            funding = ind.get("funding_rate")
+
+            # pick best side
+            if regime == "bear":
+                side, al = "short", al_s
+            elif regime == "bull":
+                side, al = "long", al_l
+            elif regime == "chop":
+                if btc_reg == "bull" or btc_roc >= _btc_roc_veto_thr:
+                    side, al = "long", al_l
+                elif btc_reg == "bear" or btc_roc <= -_btc_roc_veto_thr:
+                    side, al = "short", al_s
+                else:
+                    side, al = ("long" if al_l >= al_s else "short"), max(al_l, al_s)
+            else:
+                side = "long" if al_l >= al_s else "short"
+                al = max(al_l, al_s)
+
+            vetoes = []
+
+            # 1. block_open
+            if c.get("block_open"):
+                reason_parts = []
+                if al < 0.50:
+                    reason_parts.append(f"align={al:.3f}<0.50")
+                elif regime == "chop" and al < 0.85:
+                    reason_parts.append(f"chop+align={al:.3f}<0.85")
+                if adx < min_adx_cfg and al < adx_bypass:
+                    reason_parts.append(f"adx={adx:.0f}<{min_adx_cfg:.0f}")
+                detail = ", ".join(reason_parts) if reason_parts else "unknown"
+                vetoes.append(f"block_open({detail})")
+
+            # 2. regime side match
+            if regime == "bull" and side == "short":
+                vetoes.append("short_in_bull")
+            if regime == "bear" and side == "long":
+                vetoes.append("long_in_bear")
+
+            # 3. BTC/global trend fight
+            if side == "short" and (global_reg == "bull" or btc_reg == "bull"):
+                vetoes.append(f"short_vs_{btc_reg}_btc")
+            if side == "long" and (global_reg == "bear" or btc_reg == "bear"):
+                vetoes.append(f"long_vs_{btc_reg}_btc")
+
+            # 4. BTC ROC drift
+            if side == "short" and btc_roc >= _btc_roc_veto_thr:
+                vetoes.append(f"short_vs_btc_roc({btc_roc:.4f}>={_btc_roc_veto_thr})")
+            if side == "long" and btc_roc <= -_btc_roc_veto_thr:
+                vetoes.append(f"long_vs_btc_roc({btc_roc:.4f}<=-{_btc_roc_veto_thr})")
+
+            # 5. Funding (P2.2: unknown funding is fail-closed, mirrors the gate)
+            if funding_filter_on:
+                if funding is None:
+                    if bool(getattr(self.config, "funding_fail_closed", True)) and funding_lim > 0:
+                        vetoes.append("funding_unknown")
+                else:
+                    try:
+                        fr = float(funding)
+                        if side == "long" and fr >= funding_lim:
+                            vetoes.append(f"funding_toxic_long({fr:.6f}>={funding_lim})")
+                        if side == "short" and fr <= -funding_lim:
+                            vetoes.append(f"funding_toxic_short({fr:.6f}<=-{funding_lim})")
+                    except (TypeError, ValueError):
+                        pass
+
+            # 5b. 4H trend fight (mirrors quant_veto:short_vs_4h_bull / long_vs_4h_bear)
+            tf4 = ind.get("tf_4h") or c.get("tf_4h") or {}
+            try:
+                e4f = float(tf4.get("ema21") or tf4.get("ema_fast") or 0)
+                e4s = float(tf4.get("ema50") or tf4.get("ema_slow") or 0)
+                c4 = float(tf4.get("close") or 0)
+            except (TypeError, ValueError):
+                e4f = e4s = c4 = 0.0
+            if e4f and e4s and c4:
+                if side == "short" and e4f > e4s and c4 > e4s:
+                    vetoes.append("short_vs_4h_bull")
+                if side == "long" and e4f < e4s and c4 < e4s:
+                    vetoes.append("long_vs_4h_bear")
+
+            # 5c. Momentum filter (mirrors quant_veto:momentum)
+            mom = self._momentum_against(side, ind)
+            if mom:
+                vetoes.append(f"momentum:{mom}")
+
+            # 5d. SOL quality (mirrors quant_veto:sol_quality)
+            if coin == "SOL":
+                need_adx = float(getattr(self.config, "sol_min_adx", 28) or 28)
+                need_al = float(getattr(self.config, "sol_min_align", 0.88) or 0.88)
+                if adx < need_adx or max(al_l, al_s) < need_al:
+                    vetoes.append(f"sol_quality(adx={adx:.0f}/align={max(al_l, al_s):.2f})")
+
+            # 5e. Cost-aware edge (mirrors quant_veto:cost_edge; ATR branch only)
+            try:
+                atr_pct = float(self._atr_pct(coin, close) or 0) * 100.0
+                need_pct = self._round_trip_cost_pct() * float(
+                    getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0)
+                if need_pct > 0 and atr_pct > 0 and atr_pct < need_pct:
+                    vetoes.append(f"cost_edge(exp={atr_pct:.2f}%<need={need_pct:.2f}%)")
+            except Exception:
+                pass
+
+            # 5f. Concentration (mirrors _concentration_veto)
+            try:
+                conc = self._concentration_veto(coin, side, 0.0)
+                if conc:
+                    vetoes.append(conc)
+            except Exception:
+                pass
+
+            # 6. BTC impulse
+            if btc_filter_on and coin != "BTC":
+                if btc_impulse == "up" and side == "short":
+                    vetoes.append("btc_impulse_up")
+                if btc_impulse == "down" and side == "long":
+                    vetoes.append("btc_impulse_down")
+
+            # 7. ADX strength
+            align_for_adx = al_s if side == "short" else al_l
+            adx_ok = adx >= min_adx_cfg or (align_for_adx >= adx_bypass and adx >= adx_soft)
+            if not adx_ok:
+                vetoes.append(f"low_adx({adx:.0f}<{min_adx_cfg:.0f})")
+
+            # 8. ROC momentum
+            if abs(roc_val) < min_roc:
+                vetoes.append(f"flat_roc(|{roc_val:.4f}|<{min_roc})")
+
+            # 9. EMA alignment
+            if ema_f and ema_s and close:
+                if side == "long" and not (ema_f >= ema_s and close >= ema_s):
+                    vetoes.append("ema_not_bullish")
+                if side == "short" and not (ema_f <= ema_s and close <= ema_s):
+                    vetoes.append("ema_not_bearish")
+
+            # 10. EMA200 trend gate
+            if ema200 > 0 and close:
+                tol = ema200 * 0.005
+                if side == "long" and close < ema200 - tol:
+                    vetoes.append(f"below_ema200({close:.2f}<{ema200 - tol:.2f})")
+                if side == "short" and close > ema200 + tol:
+                    vetoes.append(f"above_ema200({close:.2f}>{ema200 + tol:.2f})")
+
+            # 11. Already open?
+            if coin in open_coins:
+                vetoes.append("already_open")
+
+            # 12. max positions?
+            if len(self._positions) >= self.config.max_positions:
+                vetoes.append("max_positions")
+
+            would_open = len(vetoes) == 0
+
+            result[coin] = {
+                "regime": regime,
+                "side": side,
+                "block_open": bool(c.get("block_open")),
+                "align_long": round(al_l, 3),
+                "align_short": round(al_s, 3),
+                "adx": round(adx, 1),
+                "rsi": round(rsi, 1),
+                "macd_hist": round(macd_h, 4),
+                "roc_3": round(roc_val, 4),
+                "ema21": round(ema_f, 4) if ema_f else None,
+                "ema50": round(ema_s, 4) if ema_s else None,
+                "ema200": round(ema200, 4) if ema200 else None,
+                "close": round(close, 4),
+                "funding_rate": funding,
+                "vetoes": vetoes,
+                "veto_count": len(vetoes),
+                "would_open": would_open,
+            }
+
+        return {
+            "global_regime": global_reg,
+            "btc_regime": btc_reg,
+            "btc_roc": round(btc_roc, 6),
+            "btc_impulse": btc_impulse,
+            "config_snapshot": {
+                "min_roc_abs": min_roc,
+                "min_adx": min_adx_cfg,
+                "min_align": min_al,
+                "min_confidence": min_conf,
+                "btc_roc_veto": _btc_roc_veto_thr,
+                "funding_block_abs": funding_lim,
+                "funding_fail_closed": bool(getattr(self.config, "funding_fail_closed", True)),
+                "cost_min_edge_mult": float(getattr(self.config, "cost_min_edge_mult", 3.0) or 3.0),
+                "btc_filter_enabled": btc_filter_on,
+                "funding_filter_enabled": funding_filter_on,
+            },
+            "open_positions": len(self._positions),
+            "max_positions": self.config.max_positions,
+            "coins": result,
+        }
