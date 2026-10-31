@@ -115,7 +115,7 @@ async def test_exchange_sync_stamp_is_per_mode_not_a_float(monkeypatch):
         async def upsert_exchange_close_trades(self, rows):
             return len(rows)
 
-    async def _bills(limit_per_page=100, mode=None):
+    async def _bills(limit_per_page=100, mode=None, recent_only=False):
         return [_bill(f"ord-{mode}", "aidabc123")]
 
     monkeypatch.setattr(m, "db", _DB())
@@ -144,7 +144,7 @@ async def test_sync_ttl_is_tracked_separately_for_demo_and_live(monkeypatch):
             _DB.calls += 1
             return len(rows)
 
-    async def _bills(limit_per_page=100, mode=None):
+    async def _bills(limit_per_page=100, mode=None, recent_only=False):
         return [_bill(f"ord-{mode}", "aidabc123")]
 
     monkeypatch.setattr(m, "db", _DB())

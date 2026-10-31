@@ -874,15 +874,52 @@ async def startup():
         print(f'[startup] me/dashboard warm loop: {_wex}', flush=True)
 
     try:
-        async def _exchange_sync_bg():
+        async def _exchange_sync_loop():
+            """Keep exchange_close_trades fresh without anyone on the dashboard.
+
+            Before this the sync ran once at startup and afterwards only when a
+            page asked for PnL, so a close made while nobody watched could stay
+            invisible for hours and DEMO/LIVE drifted apart. Every 45 s we pull
+            only the recent bills (a few pages); a full archive pass runs on
+            start and then every 30 minutes.
+            """
             await asyncio.sleep(10)
-            try:
-                n = await sync_exchange_close_trades()
-                print(f'[startup] Exchange sync done: {n} trades', flush=True)
-            except Exception as e:
-                print(f'[startup] Exchange sync error: {e}', flush=True)
-        asyncio.create_task(_exchange_sync_bg())
-        print('[startup] Exchange close trades sync scheduled (+10s)', flush=True)
+            _last_full = 0.0
+
+            def _sync_modes() -> list:
+                """Always poll the primary account; LIVE only if its client is
+                already up — a background loop must never initialise live keys
+                (that used to hijack the shared client_manager)."""
+                _modes = ['live'] if _account_mode() == 'live' else ['demo']
+                try:
+                    _lc = live_manager.get_client() if live_manager else None
+                    if _lc is not None and not getattr(_lc, 'demo', True) and 'live' not in _modes:
+                        _modes.append('live')
+                except Exception:
+                    pass
+                try:
+                    _dc = client_manager.get_client() if client_manager else None
+                    if _dc is not None and getattr(_dc, 'demo', False) and 'demo' not in _modes:
+                        _modes.append('demo')
+                except Exception:
+                    pass
+                return _modes
+
+            while True:
+                _full = (_time.time() - _last_full) > 1800
+                for _m in _sync_modes():
+                    try:
+                        n = await sync_exchange_close_trades(
+                            mode=_m, force=True, recent_only=not _full)
+                        if n:
+                            print(f'[exchange-sync] loop {_m}: {n} rows', flush=True)
+                    except Exception as e:
+                        print(f'[exchange-sync] loop {_m}: {e}', flush=True)
+                if _full:
+                    _last_full = _time.time()
+                await asyncio.sleep(45)
+        asyncio.create_task(_exchange_sync_loop())
+        print('[startup] Periodic exchange sync scheduled (+10s, 45s cadence)', flush=True)
 
         async def _delayed_orphan():
             await asyncio.sleep(120)
@@ -7269,21 +7306,33 @@ async def _get_okx_realized_pnl() -> dict:
 _bills_cache: dict = {}
 _bills_diag: dict = {}
 _BILLS_TTL = 60
+# Freshness sync polls the last-7-days endpoint only; a shorter TTL keeps every
+# periodic tick from being served a 60 s-old list (which used to delay a new
+# close by a full extra cycle).
+_BILLS_TTL_RECENT = 25
 
-async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> list:
+async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None,
+                                 recent_only: bool = False) -> list:
     """Fetch OKX trade bills (type=2) for one account mode only (demo XOR live).
 
     - /account/bills — last ~7 days (paginated)
     - /account/bills-archive — older history with begin=PNL epoch (2026-09-01)
     Up to 40 pages × 100 per endpoint so history is not truncated at ~19.09.
+
+    `recent_only` skips the archive pass — used by the periodic freshness sync,
+    where a brand-new close can only appear in the last-7-days endpoint. It is
+    cached under a separate key so a partial list can never satisfy a caller
+    that needs the full history.
     """
     global _bills_cache
     mode = (mode or _account_mode()).lower()
     if mode not in ('demo', 'live'):
         mode = 'demo'
+    _cache_key = f'{mode}:recent' if recent_only else mode
     now = _time.time()
-    cached = _bills_cache.get(mode) if isinstance(_bills_cache, dict) else None
-    if cached and now - cached.get('ts', 0) < _BILLS_TTL:
+    cached = _bills_cache.get(_cache_key) if isinstance(_bills_cache, dict) else None
+    _ttl = _BILLS_TTL_RECENT if recent_only else _BILLS_TTL
+    if cached and now - cached.get('ts', 0) < _ttl:
         return list(cached.get('data') or [])
     bills: list = []
     seen: set = set()
@@ -7368,12 +7417,13 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
             max_pages=15,
         )
         # Archive from epoch (covers 01.09 → ~20.09 gap)
-        await _pull(
-            'archive',
-            lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw),
-            use_begin=True,
-            max_pages=40,
-        )
+        if not recent_only:
+            await _pull(
+                'archive',
+                lambda c, **kw: c.get_bills_archive(inst_type='SWAP', type='2', **kw),
+                use_begin=True,
+                max_pages=40,
+            )
     except Exception as e:
         import traceback
         print(f'[bills] {mode} fetch error: {e}', flush=True)
@@ -7390,21 +7440,53 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None) -> lis
     except Exception:
         pass
     if isinstance(_bills_cache, dict):
-        _bills_cache[mode] = {'ts': _time.time(), 'data': bills}
+        _bills_cache[_cache_key] = {'ts': _time.time(), 'data': bills}
     return bills
 _CLORD_BOT_MAP = {'ais': 'AI Scale-In 1H', 'ai': 'AI Discretionary 1H', 'rot': 'Momentum', 'momentum': 'Momentum', 'imp': 'Impulse 1D', 'val': 'MACD+Donchian Validation', 'scl': 'Order Book Scalp', 'scalp': 'Order Book Scalp', 'vwap': 'VWAP Mean Reversion', 'sm': 'Умные деньги'}
 # Per-mode TTL — demo/live bills sync independently (fix P0: #32)
 _exchange_sync_ts: dict[str, float] = {}
-_EXCHANGE_SYNC_TTL = 120
+_EXCHANGE_SYNC_TTL = 30
+# Modes currently being paginated (single-flight) and the newest close_ts (ms)
+# seen per mode: a newer close means a trade landed → the dashboard cache must
+# drop so the card matches the «Сделки» list immediately. Tracking the newest
+# timestamp (not the row count) keeps the recent-only sync comparable with the
+# full-history one.
+_exchange_sync_inflight: dict[str, float] = {}
+_exchange_close_seen: dict[str, int] = {}
 
 _sync_diag: dict = {}
 
 
-async def sync_exchange_close_trades(mode: str = None) -> int:
-    """Fetch all OKX trade bills (type=2), filter close trades (non-zero pnl),
-    group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
-    mode=demo|live; when omitted uses _account_mode(). TTL is per-mode.
-    Returns number of trades synced."""
+def _invalidate_dashboard_after_close() -> None:
+    """Drop cached dashboard payloads so a fresh close reaches the card at once.
+
+    `_ME_DASH_CACHE` keeps an authenticated payload for 45 s, so right after a
+    close the card lagged behind the trades list even though the row was
+    already in `exchange_close_trades`.
+    """
+    try:
+        for _k in list(_ME_DASH_CACHE.keys()):
+            if _k == 'guest:shared':
+                # Guests keep the instant payload; the warmer rebuilds it from
+                # in-process state without an OKX round-trip.
+                _e = dict(_ME_DASH_CACHE.get(_k) or {})
+                _e['ts'] = _time.time() - _ME_DASH_TTL
+                _ME_DASH_CACHE[_k] = _e
+            else:
+                _ME_DASH_CACHE.pop(_k, None)
+    except Exception:
+        pass
+
+
+async def sync_exchange_close_trades(mode: str = None, *, force: bool = False,
+                                     recent_only: bool = False) -> int:
+    """Rate-limited, single-flight entry point for the exchange close sync.
+
+    `force` bypasses the per-mode TTL (used by the periodic freshness loop);
+    `recent_only` skips the archive pagination. A second caller for a mode
+    that is already syncing returns 0 instead of fetching the same bills again
+    (dashboard + PnL + warm loop used to race and fetch all pages three times).
+    """
     global _exchange_sync_ts
     _mode = (str(mode).strip().lower() if mode else '') or _account_mode()
     if _mode not in ('demo', 'live'):
@@ -7413,10 +7495,28 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
     if not isinstance(_exchange_sync_ts, dict):
         # Defensive: an old bug once replaced the dict with a float.
         _exchange_sync_ts = {}
-    last = _exchange_sync_ts.get(_mode, 0)
-    if last and now - last < _EXCHANGE_SYNC_TTL:
+    if not force:
+        last = _exchange_sync_ts.get(_mode, 0)
+        if last and now - last < _EXCHANGE_SYNC_TTL:
+            return 0
+    _inflight = _exchange_sync_inflight.get(_mode, 0)
+    if _inflight and now - _inflight < 180:
         return 0
-    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode)
+    _exchange_sync_inflight[_mode] = now
+    try:
+        return await _sync_exchange_close_trades_impl(_mode, recent_only=recent_only)
+    finally:
+        _exchange_sync_inflight.pop(_mode, None)
+
+
+async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = False) -> int:
+    """Fetch all OKX trade bills (type=2), filter close trades (non-zero pnl),
+    group by ordId, tag by clOrdId prefix, and upsert into exchange_close_trades.
+    Returns number of trades synced. TTL/single-flight live in the wrapper."""
+    global _exchange_sync_ts
+    _mode = mode
+    bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode,
+                                         recent_only=recent_only)
     close_by_ord: dict = {}
     _bills_with_pnl = 0
     _sub_types_seen = set()
@@ -7448,7 +7548,7 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
         clord = str(b.get('clOrdId', '') or '').strip()
         inst = b.get('instId', '')
         if oid not in close_by_ord:
-            close_by_ord[oid] = {'inst_id': inst, 'cl_ord_id': clord, 'ts': ts, 'pnl': 0.0, 'fee': 0.0, 'sz': 0.0, 'px_sum': 0.0, 'px_n': 0, 'sub_type': sub, 'account_mode': b.get('account_mode') or _account_mode()}
+            close_by_ord[oid] = {'inst_id': inst, 'cl_ord_id': clord, 'ts': ts, 'pnl': 0.0, 'fee': 0.0, 'sz': 0.0, 'px_sum': 0.0, 'px_n': 0, 'sub_type': sub, 'account_mode': b.get('account_mode') or _mode}
         # Store NET so every downstream total matches the balance change.
         close_by_ord[oid]['pnl'] += bp - bf
         close_by_ord[oid]['fee'] += bf
@@ -7504,7 +7604,7 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
                 pass
         if not bot_label and AI_ONLY_MODE:
             bot_label = ''
-        rows.append({'ord_id': oid, 'inst_id': info['inst_id'], 'cl_ord_id': info['cl_ord_id'], 'bot_label': bot_label, 'pnl': round(info['pnl'], 6), 'fee': round(info['fee'], 6), 'sz': round(info['sz'], 6), 'avg_px': round(avg_px, 6), 'close_ts': close_ts, 'sub_type': info['sub_type'], 'account_mode': info.get('account_mode') or _account_mode(), 'account_key': 'showcase' if _account_mode() == 'demo' else 'live'})
+        rows.append({'ord_id': oid, 'inst_id': info['inst_id'], 'cl_ord_id': info['cl_ord_id'], 'bot_label': bot_label, 'pnl': round(info['pnl'], 6), 'fee': round(info['fee'], 6), 'sz': round(info['sz'], 6), 'avg_px': round(avg_px, 6), 'close_ts': close_ts, 'sub_type': info['sub_type'], 'account_mode': info.get('account_mode') or _mode, 'account_key': 'showcase' if _mode == 'demo' else 'live'})
     print(f'[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}', flush=True)
     if recovered_labels:
         _rc: dict = {}
@@ -7529,11 +7629,21 @@ async def sync_exchange_close_trades(mode: str = None) -> int:
             _sd.update({'ok': True, 'stored': n, 'err': ''})
             print(f'[exchange-sync] synced {n} close trades from {len(close_by_ord)} orders', flush=True)
             # Fresh closes must hit the dashboard immediately: _PNL_TTL would
-            # otherwise serve the previous total for up to 30s while the list
+            # otherwise serve the previous total for up to 20s while the list
             # (built from the DB) already shows the new trade — an apparent
             # card-vs-list mismatch right after every sync.
             try:
                 _pnl_cache.clear()
+            except Exception:
+                pass
+            try:
+                _newest = max((int(r.get('close_ts') or 0) for r in rows), default=0)
+                _prev_newest = _exchange_close_seen.get(_mode)
+                _exchange_close_seen[_mode] = max(int(_prev_newest or 0), _newest)
+                if _prev_newest is not None and _newest > _prev_newest:
+                    # A close actually landed (not just a re-upsert of the same
+                    # rows): drop dashboard payloads cached before it.
+                    _invalidate_dashboard_after_close()
             except Exception:
                 pass
             return n
@@ -8489,7 +8599,7 @@ _paired_lock = asyncio.Lock()
 _PAIRED_TTL = 20
 _pnl_cache: dict = {}
 _pnl_lock = asyncio.Lock()
-_PNL_TTL = 45
+_PNL_TTL = 20
 # last printed "[pnl] UNIFIED ..." signature — log only on change (it used to
 # print on every request because the PnL cache never hit)
 _pnl_last_unified: tuple = ()
