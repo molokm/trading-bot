@@ -154,3 +154,47 @@ def test_startup_schedules_the_periodic_sync():
     src = inspect.getsource(m.startup)
     assert "_exchange_sync_loop" in src
     assert "recent_only=not _full" in src
+
+
+@pytest.mark.asyncio
+async def test_recent_pass_skips_orders_at_the_window_edge(monkeypatch):
+    """A close whose fills straddle the oldest page must not be upserted partial.
+
+    The freshness pass pages only the newest bills; storing a half-seen order
+    overwrote its correct PnL with a smaller one (card drifted by ~3 USDT).
+    """
+    db = _DB()
+    monkeypatch.setattr(m, "db", db)
+    monkeypatch.setattr(m, "_exchange_sync_ts", {})
+    monkeypatch.setattr(m, "_exchange_close_seen", {})
+    monkeypatch.setattr(m, "_exchange_sync_inflight", {})
+
+    async def _bills(limit_per_page=100, mode=None, recent_only=False):
+        edge = _bill("ord-edge", pnl="0.10")
+        edge["ts"] = "1793200000000"          # oldest row of the window
+        inner = _bill("ord-inner", pnl="5.0")
+        inner["ts"] = "1793203600000"         # hours newer
+        return [edge, inner]
+
+    monkeypatch.setattr(m, "_fetch_all_trade_bills", _bills)
+
+    assert await m.sync_exchange_close_trades(mode="demo", force=True, recent_only=True) == 1
+    assert [r["ord_id"] for r in db.rows[0]] == ["ord-inner"]
+
+
+@pytest.mark.asyncio
+async def test_recent_pass_aborts_when_a_bill_page_failed(monkeypatch):
+    db = _DB()
+    monkeypatch.setattr(m, "db", db)
+    monkeypatch.setattr(m, "_exchange_sync_ts", {})
+    monkeypatch.setattr(m, "_exchange_close_seen", {})
+    monkeypatch.setattr(m, "_exchange_sync_inflight", {})
+    monkeypatch.setattr(m, "_bills_diag", {"demo": {"endpoints": {"bills": {"error": "429"}}}})
+
+    async def _bills(limit_per_page=100, mode=None, recent_only=False):
+        return [_bill("ord-1")]
+
+    monkeypatch.setattr(m, "_fetch_all_trade_bills", _bills)
+
+    assert await m.sync_exchange_close_trades(mode="demo", force=True, recent_only=True) == 0
+    assert db.rows == []

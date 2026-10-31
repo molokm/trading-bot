@@ -7523,6 +7523,26 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
     _mode = mode
     bills = await _fetch_all_trade_bills(limit_per_page=100, mode=_mode,
                                          recent_only=recent_only)
+    if recent_only:
+        # A failed page in a freshness pass leaves a gap in the newest-first
+        # feed, so any order after it could be written with partial fills.
+        try:
+            _errs = [e for e in ((_bills_diag.get(_mode) or {}).get('endpoints') or {}).values()
+                     if e.get('error')]
+        except Exception:
+            _errs = []
+        if _errs:
+            print('[exchange-sync] partial bill fetch, skip upsert: '
+                  + ', '.join(str(e.get('error'))[:60] for e in _errs), flush=True)
+            return 0
+    # An order whose fills straddle the oldest fetched page would be upserted
+    # with a PARTIAL pnl (this silently moved a stored close by a few dollars).
+    # Orders touching the window edge are already stored correctly — skip them.
+    _edge_cutoff = 0
+    if recent_only:
+        _ts_all = sorted(int(b.get('ts') or 0) for b in bills if b.get('ts'))
+        if _ts_all and _ts_all[0] > 0:
+            _edge_cutoff = _ts_all[0] + 60_000
     close_by_ord: dict = {}
     _bills_with_pnl = 0
     _sub_types_seen = set()
@@ -7534,6 +7554,10 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
         oid = str(b.get('ordId', '')).strip()
         if not oid:
             continue
+        try:
+            _bts = int(b.get('ts') or 0)
+        except (TypeError, ValueError):
+            _bts = 0
         try:
             bp = float(b.get('pnl') if b.get('pnl') not in (None, '') else 0)
         except (TypeError, ValueError):
@@ -7554,7 +7578,10 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
         clord = str(b.get('clOrdId', '') or '').strip()
         inst = b.get('instId', '')
         if oid not in close_by_ord:
-            close_by_ord[oid] = {'inst_id': inst, 'cl_ord_id': clord, 'ts': ts, 'pnl': 0.0, 'fee': 0.0, 'sz': 0.0, 'px_sum': 0.0, 'px_n': 0, 'sub_type': sub, 'account_mode': b.get('account_mode') or _mode}
+            close_by_ord[oid] = {'inst_id': inst, 'cl_ord_id': clord, 'ts': ts, 'ts_min': _bts, 'pnl': 0.0, 'fee': 0.0, 'sz': 0.0, 'px_sum': 0.0, 'px_n': 0, 'sub_type': sub, 'account_mode': b.get('account_mode') or _mode}
+        elif _bts and (_bts < int(close_by_ord[oid].get('ts_min') or 0)
+                       or not close_by_ord[oid].get('ts_min')):
+            close_by_ord[oid]['ts_min'] = _bts
         # Store NET so every downstream total matches the balance change.
         close_by_ord[oid]['pnl'] += bp - bf
         close_by_ord[oid]['fee'] += bf
@@ -7569,6 +7596,9 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
     rows = []
     recovered_labels: list = []
     for oid, info in close_by_ord.items():
+        if _edge_cutoff and int(info.get('ts_min') or 0) < _edge_cutoff:
+            # Touches the unfetched edge of the window — its PnL may be partial.
+            continue
         clord = (info['cl_ord_id'] or '').lower()
         bot_label = ''
         for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
