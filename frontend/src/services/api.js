@@ -52,6 +52,7 @@ async function request(path, options = {}) {
     noteApiSuccess();
   }
   if (resp.status === 401) {
+    invalidateCache();
     localStorage.removeItem('auth_token');
     localStorage.removeItem('auth_role');
     if (!window.__MINI_APP__) {
@@ -78,12 +79,28 @@ async function request(path, options = {}) {
 
 /** Short client cache — avoids refetch storms on route switches */
 const _memCache = new Map()
+
+/** Drop cached responses — after a mutation or an auth change. */
+export function invalidateCache(prefix) {
+  if (!prefix) { _memCache.clear(); return }
+  for (const key of Array.from(_memCache.keys())) {
+    if (key.startsWith(prefix)) _memCache.delete(key)
+  }
+}
+
+// Entries are scoped by auth identity. Without this, logging out and back in as
+// another user served the previous account's /me/dashboard (incl. LIVE) for 20s.
+function _cacheScope() {
+  try { return `${getToken() ? 'u' : 'g'}|` } catch { return 'g|' }
+}
+
 function _cached(key, ttlMs, fn) {
-  const hit = _memCache.get(key)
+  const scoped = _cacheScope() + key
+  const hit = _memCache.get(scoped)
   const now = Date.now()
   if (hit && now - hit.ts < ttlMs) return Promise.resolve(hit.data)
   return Promise.resolve(fn()).then((data) => {
-    if (data != null) _memCache.set(key, { ts: Date.now(), data })
+    if (data != null) _memCache.set(scoped, { ts: Date.now(), data })
     return data
   }).catch((e) => {
     // serve stale on error if any
@@ -95,14 +112,22 @@ function _cached(key, ttlMs, fn) {
 export const api = {
 
   // ── Auth ──
-  login: (password) =>
-    request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  login: async (password) => {
+    const res = await request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) })
+    invalidateCache()
+    return res
+  },
 
-  guest: () =>
-    request('/auth/guest', { method: 'POST' }),
+  guest: async () => {
+    const res = await request('/auth/guest', { method: 'POST' })
+    invalidateCache()
+    return res
+  },
 
-  logout: () =>
-    request('/auth/logout', { method: 'POST' }),
+  logout: async () => {
+    invalidateCache()
+    return request('/auth/logout', { method: 'POST' })
+  },
 
   authStatus: () => request('/auth/status'),
 
@@ -134,29 +159,41 @@ export const api = {
   getPositions: (instType = 'SWAP') =>
     request(`/positions?inst_type=${instType}`),
 
-  closePosition: (instId, posSide, sz, mgnMode = 'cross', account = 'demo') =>
-    request('/positions/close', {
+  closePosition: async (instId, posSide, sz, mgnMode = 'cross', account = 'demo') => {
+    const res = await request('/positions/close', {
       method: 'POST',
       body: JSON.stringify({ instId, posSide, sz, mgnMode, account }),
-    }),
+    })
+    invalidateCache()
+    return res
+  },
 
-  closePositionMe: (instId, posSide, sz, mgnMode = 'cross') =>
-    request('/me/positions/close', {
+  closePositionMe: async (instId, posSide, sz, mgnMode = 'cross') => {
+    const res = await request('/me/positions/close', {
       method: 'POST',
       body: JSON.stringify({ instId, posSide, sz, mgnMode }),
-    }),
+    })
+    invalidateCache()
+    return res
+  },
 
-  closeAllPositions: (account = 'demo') =>
-    request('/positions/close-all', {
+  closeAllPositions: async (account = 'demo') => {
+    const res = await request('/positions/close-all', {
       method: 'POST',
       body: JSON.stringify({ account }),
-    }),
+    })
+    invalidateCache()
+    return res
+  },
 
-  closeAllPositionsMe: () =>
-    request('/me/positions/close-all', {
+  closeAllPositionsMe: async () => {
+    const res = await request('/me/positions/close-all', {
       method: 'POST',
       body: JSON.stringify({}),
-    }),
+    })
+    invalidateCache()
+    return res
+  },
 
   // ── Market ──
   getTicker: (instId = 'BTC-USDT') =>

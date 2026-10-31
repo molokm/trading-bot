@@ -852,58 +852,18 @@ async def startup():
         print(f'[startup] Dashboard cache warmer error: {e}', flush=True)
 
     async def _me_dash_warm_loop():
-        """Keep PnL + guest dashboard cache warm so first browser hit is <300ms."""
+        """Keep the shared guest dashboard entry warm (<300ms first hit).
+
+        NOTE: this must NOT call `_warm_dashboard_caches()` — that coroutine is an
+        infinite `while True` loop, so awaiting it here froze this task forever and
+        made all the seeding code below unreachable. The paired-trades warmer is a
+        separate task (`_delayed_bg`); this one only refreshes the guest payload.
+        """
         await asyncio.sleep(10)
         while True:
             try:
                 if ai_bot is not None:
-                    pnl_w = {}
-                    try:
-                        pnl_w = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=20)
-                    except Exception as _pe:
-                        print(f'[warm] pnl demo: {_pe}', flush=True)
-                    try:
-                        await _warm_dashboard_caches()
-                    except Exception:
-                        pass
-                    # Seed guest me/dashboard cache (metrics only — no OKX round-trip)
-                    try:
-                        st = ai_bot.get_status() if hasattr(ai_bot, 'get_status') else {}
-                        demo_w = {
-                            'running': bool(st.get('running')),
-                            'pnl': round(float((pnl_w or {}).get('total') or st.get('lifetime_pnl') or 0), 2),
-                            'session_pnl': round(float((pnl_w or {}).get('1d') or st.get('session_pnl') or 0), 2),
-                            'equity': round(float(st.get('equity') or 0), 2),
-                            'capital': st.get('capital'),
-                            'trades': int((pnl_w or {}).get('trades_counted') or st.get('lifetime_trades') or 0),
-                            'win_rate': st.get('win_rate'),
-                            'positions': st.get('open_positions') or [],
-                            'pulse': st.get('pulse') or st.get('description') or '',
-                            'model': st.get('model') or (st.get('llm') or {}).get('model') or '',
-                            'unrealized': round(float((pnl_w or {}).get('unrealized') or 0), 2),
-                        }
-                        pnl_slim = {}
-                        if isinstance(pnl_w, dict):
-                            pnl_slim = {k: v for k, v in pnl_w.items()
-                                        if k not in ('trades', 'rows', 'fills', 'items')}
-                        # Keep existing trades list if we already have a full payload
-                        prev = (_ME_DASH_CACHE or {}).get('data') if (_ME_DASH_CACHE or {}).get('key') == 'guest:shared' else None
-                        trades_w = list((prev or {}).get('trades') or [])[:80]
-                        _ME_DASH_CACHE['ts'] = _time.time()
-                        _ME_DASH_CACHE['key'] = 'guest:shared'
-                        _ME_DASH_CACHE['data'] = {
-                            'demo': demo_w,
-                            'live': (prev or {}).get('live') or {},
-                            'trades': trades_w,
-                            'pnl': pnl_slim,
-                            'role': 'guest',
-                            'user_id': None,
-                            'trades_truncated': len(trades_w),
-                            'warm': True,
-                        }
-                        print('[warm] guest me/dashboard cache seeded', flush=True)
-                    except Exception as _se:
-                        print(f'[warm] seed dashboard: {_se}', flush=True)
+                    await _seed_dashboard_cache('guest:shared')
             except Exception as _we2:
                 print(f'[warm] loop: {_we2}', flush=True)
             await asyncio.sleep(40)
@@ -1778,8 +1738,7 @@ def _invalidate_account_caches():
     global _fills_cache, _fills_cache_ts, _paired_cache, _pnl_cache, _portfolio_cache, _portfolio_cache_ts, _bills_cache
     global _positions_cache, _positions_cache_ts
     try:
-        _ME_DASH_CACHE["ts"] = 0.0
-        _ME_DASH_CACHE["data"] = None
+        _ME_DASH_CACHE.clear()
     except Exception:
         pass
     _fills_cache = None
@@ -2357,12 +2316,74 @@ async def me_pnl(request: Request):
         count += 1
     return {'total': round(total, 2), 'trades': count, 'unrealized': 0.0, 'source': source}
 
-_ME_DASH_CACHE: dict = {"ts": 0.0, "key": "", "data": None}
+# Per-key cache: {"<role:user|guest:shared>": {"ts": float, "data": dict}}.
+# A single slot used to thrash: the guest warmer rewrote the slot every 40s, so
+# an authenticated poll (different key) always missed and rebuilt from scratch.
+_ME_DASH_CACHE: dict = {}
 _AI_STATUS_CACHE: dict = {"ts": 0.0, "diag": False, "data": None}
 _AI_STATUS_TTL = 8.0
 
 _ME_DASH_TTL = 45.0  # fresh window
 _ME_DASH_STALE_TTL = 180.0  # serve stale immediately, rebuild in background
+
+
+async def _seed_dashboard_cache(key: str) -> bool:
+    """Refresh one dashboard cache entry from in-process state (no OKX paging).
+
+    Called by the 40s warmer and by stale-while-revalidate. Only the shared
+    guest entry can be refreshed this way: an authenticated payload needs the
+    per-user LIVE block, which must come from a real request.
+    """
+    if key != "guest:shared" or ai_bot is None:
+        return False
+    prev = (_ME_DASH_CACHE.get(key) or {}).get("data")
+    # Never stamp a "fresh" entry with an empty trades list — a guest would then
+    # see an empty «Сделки» panel for a whole TTL until a real request rebuilds.
+    if not prev or not prev.get("trades"):
+        return False
+    try:
+        pnl_w = {}
+        try:
+            pnl_w = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=20)
+        except Exception as _pe:
+            print(f'[warm] pnl demo: {_pe}', flush=True)
+        st = ai_bot.get_status() if hasattr(ai_bot, 'get_status') else {}
+        demo_w = {
+            'running': bool(st.get('running')),
+            'pnl': round(float((pnl_w or {}).get('total') or st.get('lifetime_pnl') or 0), 2),
+            'session_pnl': round(float((pnl_w or {}).get('1d') or st.get('session_pnl') or 0), 2),
+            'equity': round(float(st.get('equity') or 0), 2),
+            'capital': st.get('capital'),
+            'trades': int((pnl_w or {}).get('trades_counted') or st.get('lifetime_trades') or 0),
+            'win_rate': st.get('win_rate'),
+            'positions': st.get('open_positions') or [],
+            'pulse': st.get('pulse') or st.get('description') or '',
+            'model': st.get('model') or (st.get('llm') or {}).get('model') or '',
+            'unrealized': round(float((pnl_w or {}).get('unrealized') or 0), 2),
+        }
+        pnl_slim = {}
+        if isinstance(pnl_w, dict):
+            pnl_slim = {k: v for k, v in pnl_w.items()
+                        if k not in ('trades', 'rows', 'fills', 'items')}
+        trades_w = list(prev.get('trades') or [])[:80]
+        _ME_DASH_CACHE[key] = {
+            'ts': _time.time(),
+            'data': {
+                'demo': demo_w,
+                'live': prev.get('live') or {},
+                'trades': trades_w,
+                'pnl': pnl_slim,
+                'role': 'guest',
+                'user_id': None,
+                'trades_truncated': len(trades_w),
+                'warm': True,
+            },
+        }
+        print('[warm] guest me/dashboard cache seeded', flush=True)
+        return True
+    except Exception as e:
+        print(f'[warm] seed dashboard: {e}', flush=True)
+        return False
 
 
 @app.get('/api/me/dashboard')
@@ -2378,26 +2399,34 @@ async def me_dashboard(request: Request):
     try:
         import time as _tmod
         _ck = "guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}"
-        _age = _tmod.time() - float(_ME_DASH_CACHE.get("ts") or 0)
-        _data = _ME_DASH_CACHE.get("data")
-        if _data is not None and _ME_DASH_CACHE.get("key") == _ck:
+        _entry = _ME_DASH_CACHE.get(_ck) or {}
+        _age = _tmod.time() - float(_entry.get("ts") or 0)
+        _data = _entry.get("data")
+        if _data is not None:
             if _age < float(_ME_DASH_TTL):
                 return _data
-            if _age < float(_ME_DASH_STALE_TTL):
-                # Stale-while-revalidate: do not block the browser
-                try:
-                    if not getattr(me_dashboard, "_rebuild_lock", False):
-                        me_dashboard._rebuild_lock = True
-                        async def _bg_rebuild():
-                            try:
-                                # Mark cache slightly so next cold path still uses stale
-                                # until rebuild finishes and overwrites.
-                                pass
-                            finally:
-                                me_dashboard._rebuild_lock = False
-                        # Full rebuild happens on next non-stale miss; here just return stale.
-                except Exception:
-                    pass
+            # Stale-while-revalidate is only safe for the shared guest entry: it can
+            # be rebuilt in-process without an OKX round-trip. An authenticated
+            # payload needs its per-user LIVE block and must be rebuilt in-request,
+            # otherwise it would be served stale until it expired at 180s.
+            if _age < float(_ME_DASH_STALE_TTL) and _ck == "guest:shared":
+                # The refresh runs once in the background and always releases the
+                # flag in `finally` — the previous stub never rebuilt and left the
+                # lock set forever.
+                if not getattr(me_dashboard, "_rebuild_lock", False):
+                    me_dashboard._rebuild_lock = True
+
+                    async def _bg_rebuild(_k=_ck):
+                        try:
+                            await _seed_dashboard_cache(_k)
+                        except Exception as _be:
+                            print(f'[me/dashboard] bg rebuild: {_be}', flush=True)
+                        finally:
+                            me_dashboard._rebuild_lock = False
+                    try:
+                        asyncio.create_task(_bg_rebuild())
+                    except Exception:
+                        me_dashboard._rebuild_lock = False
                 return _data
     except Exception:
         pass
@@ -2423,7 +2452,21 @@ async def me_dashboard(request: Request):
             # Prefer dashboard PnL engine (same source as main page) for DEMO totals
             try:
                 # Hard cap: never block dashboard HTTP on cold OKX bills rebuild
-                pnl_data = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=2.5)
+                pnl_data = None
+                try:
+                    pnl_data = await asyncio.wait_for(_get_pnl_cached(mode='demo'), timeout=2.5)
+                except asyncio.TimeoutError:
+                    # Cold rebuild: serve the last known engine PnL rather than the
+                    # bot's internal lifetime counter (the two drift apart).
+                    try:
+                        pnl_data = (((_pnl_cache or {}).get('by_mode') or {})
+                                    .get('demo') or {}).get('data')
+                    except Exception:
+                        pnl_data = None
+                    print('[me/dashboard] demo pnl_engine: timeout, serving last cached',
+                          flush=True)
+                except Exception as _pe:
+                    print(f'[me/dashboard] demo pnl_engine: {_pe}', flush=True)
                 if isinstance(pnl_data, dict):
                     mode = str(pnl_data.get('account_mode') or _account_mode() or 'demo').lower()
                     if mode != 'live':
@@ -3540,9 +3583,13 @@ async def me_dashboard(request: Request):
     }
     try:
         import time as _tmod
-        _ME_DASH_CACHE["ts"] = _tmod.time()
-        _ME_DASH_CACHE["key"] = ("guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}")
-        _ME_DASH_CACHE["data"] = _out
+        _ck_out = ("guest:shared" if (not user_id or str(role) == "guest") else f"{role}:{user_id}")
+        _ME_DASH_CACHE[_ck_out] = {"ts": _tmod.time(), "data": _out}
+        # Bound memory: keep only the 8 most recent entries.
+        if len(_ME_DASH_CACHE) > 8:
+            for _old in sorted(_ME_DASH_CACHE,
+                               key=lambda k: _ME_DASH_CACHE[k].get("ts") or 0)[:-8]:
+                _ME_DASH_CACHE.pop(_old, None)
     except Exception:
         pass
     return _out
@@ -3594,7 +3641,7 @@ async def ai_status(request: Request):
     # Full numbers still come from /api/me/dashboard (cached).
     try:
         status = await asyncio.wait_for(
-            _apply_history_kpi(status, 'AI Discretionary 1H'),
+            _apply_history_kpi(status, 'AI Discretionary 1H', allow_sync=False),
             timeout=1.5,
         )
     except Exception as _kpi_e:
@@ -8244,7 +8291,8 @@ async def _seed_daily_realized(bot) -> None:
         print(f"[AI] daily seed: {e}", flush=True)
 
 
-async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
+async def _apply_history_kpi(status: dict, bot_label: str,
+                             allow_sync: bool = True) -> dict:
     """Overlay KPI from the SAME pnl_engine source as dashboard cards."""
     status = dict(status or {})
     try:
@@ -8263,7 +8311,7 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
         day_val = float((dash or {}).get('1d') or 0)
         status['session_pnl'] = round(day_val, 2)
         try:
-            all_stats = await _bot_history_stats()
+            all_stats = await _bot_history_stats(allow_sync=allow_sync)
             stats = all_stats.get(bot_label) or {}
             if mode == 'live':
                 tc = int((dash or {}).get('trades_counted') or 0)
@@ -8287,19 +8335,24 @@ async def _apply_history_kpi(status: dict, bot_label: str) -> dict:
         status['kpi_from_history'] = False
     return status
 
-async def _bot_history_stats() -> dict:
+async def _bot_history_stats(allow_sync: bool = True) -> dict:
     """Per-bot KPI from exchange_close_trades — deterministic, no recomputation.
 
     Always returns entries for known strategy cards (zeros after pnl_epoch reset).
+
+    ``allow_sync=False`` keeps the OKX bills paging off request paths whose
+    caller has a hard timeout: a cancelled sync never reaches the cache write,
+    so every poll would retry and get killed again.
     """
     now_s = _time.time()
     current_mode = _account_mode()
     if now_s - _bot_stats_cache['ts'] < _BOT_STATS_TTL and _bot_stats_cache.get('mode') == current_mode:
         return _bot_stats_cache['data']
-    try:
-        await sync_exchange_close_trades()
-    except Exception as e:
-        print(f'[bot_stats] sync_exchange_close_trades: {e}', flush=True)
+    if allow_sync:
+        try:
+            await sync_exchange_close_trades()
+        except Exception as e:
+            print(f'[bot_stats] sync_exchange_close_trades: {e}', flush=True)
     KNOWN = ('Momentum', 'Impulse 1D', 'MACD+Donchian Validation', 'AI Discretionary 1H', 'Order Book Scalp', 'Умные деньги')
     stats = {name: {'total_pnl': 0.0, 'total_trades': 0, 'wins': 0, 'losses': 0, 'win_rate': 0.0, 'total_pnl_source': 'exchange_close_trades'} for name in KNOWN}
     try:

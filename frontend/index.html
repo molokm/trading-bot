@@ -25,10 +25,30 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
 
     <title>COPIX — Торговый Терминал</title>
-    <!-- DNS + early hints for API host (same origin) -->
-    <link rel="dns-prefetch" href="/" />
 
-    <!-- telegram-web-app.js loaded only on /mini (see main.jsx) -->
+    <!--
+      Telegram WebApp SDK. Must be loaded SYNCHRONOUSLY and BEFORE the app bundle:
+      MiniAppPage reads window.Telegram.WebApp.initData on mount to get an auth
+      token, and App.jsx uses it to detect an in-Telegram session. A deferred or
+      dynamically injected script lost that race — the Mini App opened as a guest
+      (no LIVE data), and opening the bot at "/" rendered the full website shell.
+      Loaded only where it is needed (mini route or inside the Telegram client),
+      so the public site keeps its fast first paint.
+    -->
+    <script>
+      (function () {
+        try {
+          var path = String(location.pathname || '');
+          var isMini = path === '/mini' || path.indexOf('/mini/') === 0;
+          var inTelegram = /Telegram/i.test(String(navigator.userAgent || ''))
+            || !!window.TelegramWebviewProxy
+            || !!window.TelegramWebviewProxyProto;
+          if (isMini || inTelegram) {
+            document.write('<script src="https://telegram.org/js/telegram-web-app.js"><\/script>');
+          }
+        } catch (e) { /* ignore */ }
+      })();
+    </script>
   </head>
   <body class="bg-gray-950">
     <div id="root"></div>

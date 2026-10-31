@@ -5,7 +5,7 @@ import {
   Clock, Bot, FlaskConical, AlertTriangle, RefreshCw, ShieldAlert, Wifi, WifiOff,
   Target
 } from 'lucide-react'
-import { api } from '../services/api'
+import { api, invalidateCache } from '../services/api'
 import { MetricCard, EnhancedMetricCard, Tip, StatusBadge, Chip, PnlBar, EmptyState, Loader, Skeleton, SkeletonMetricCard } from '../components/ui'
 import { useTranslation } from '../hooks/useTranslation'
 import { fmtTs } from '../utils/time'
@@ -389,12 +389,13 @@ export default function Dashboard({ health, connected, isGuest }) {
   // Fast tier ~20s (bot pulse / prices). Slow tier ~75s (PnL + trades).
   const slowRef = useRef(0)
   useEffect(() => {
-    // First paint: only fast tier (status + prices). Heavy PnL/trades after short delay.
+    // First paint: only fast tier (status + prices). Heavy PnL/trades after a
+    // short delay — 50ms was too tight, both requests left at the same time.
     loadData({ fastOnly: true })
     const slowTimer = setTimeout(() => {
       slowRef.current = Date.now()
       loadData({ fastOnly: false })
-    }, 50)
+    }, 300)
     const fastId = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return
       const now = Date.now()
@@ -413,7 +414,11 @@ export default function Dashboard({ health, connected, isGuest }) {
 
   useEffect(() => {
     const onVis = () => { if (!document.hidden) loadData({ fastOnly: true }) }
-    const onMode = () => { slowRef.current = 0; loadData({ fastOnly: false }) }
+    const onMode = () => {
+      invalidateCache()
+      slowRef.current = 0
+      loadData({ fastOnly: false })
+    }
     document.addEventListener('visibilitychange', onVis)
     window.addEventListener('trading-mode-changed', onMode)
     return () => {
