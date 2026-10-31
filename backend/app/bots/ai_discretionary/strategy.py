@@ -7616,8 +7616,47 @@ class AIStrategy:
         # adaptive/reflection layer either.
         db_rows = [r for r in (db_rows or []) if not _excluded(r)]
         eng_rows = [r for r in (eng_rows or []) if not _excluded(r)]
+        # `trades` stores ONE price per row: an open fill keeps the entry px, a
+        # close fill keeps the CLOSE px. A close row therefore has no entry of
+        # its own — pairing it with itself made every restored close show
+        # entry == exit in the «Сделки» panel (and fed a bogus entry_price into
+        # the adaptive layer). Pair each close with the latest open fill of the
+        # same instrument that happened before it. Order-independent: the DB
+        # read may come back newest-first.
+        _open_fills: dict = {}
+
+        def _row_ts(r: dict) -> float:
+            return self._ts_sort_key(
+                {"time": r.get("timestamp") or r.get("created_at") or ""})
+
+        for r in (db_rows or []):
+            _st = str(r.get("state") or "").strip().lower()
+            if _st not in ("", "filled", "new", "pending"):
+                continue
+            try:
+                _p = float(r.get("px") or 0)
+            except (TypeError, ValueError):
+                _p = 0.0
+            if _p <= 0:
+                continue
+            _k = (str(r.get("account_mode") or "demo").lower(),
+                  str(r.get("inst_id") or ""))
+            _open_fills.setdefault(_k, []).append((_row_ts(r), _p))
+
+        def _entry_px_for(mode: str, inst: str, close_ts: float):
+            best = None
+            for _ts, _px in _open_fills.get((mode, inst), ()):
+                # 5s of write-order slack only; anything later is the NEXT trade.
+                if close_ts and _ts and _ts > close_ts + 5_000:
+                    continue
+                if best is None or _ts >= best[0]:
+                    best = (_ts, _px)
+            return best[1] if best else None
+
         for r in reversed(db_rows or []):
             state = str(r.get("state") or "").strip().lower()
+            _row_mode = str(r.get("account_mode") or "demo").lower()
+            _row_inst = str(r.get("inst_id") or "")
             # `filled`/empty = an executed entry, NOT a closed trade. Map it
             # to "open" so _closed_trades skips it; otherwise openings are
             # scored as 0-PnL losses and corrupt adaptive + reflection.
@@ -7626,15 +7665,20 @@ class AIStrategy:
                 pnl = float(r.get("pnl") or 0)
             except (TypeError, ValueError):
                 pnl = 0.0
+            try:
+                _row_px = float(r.get("px") or 0)
+            except (TypeError, ValueError):
+                _row_px = 0.0
             rebuilt.append({
-                "account_mode": str(r.get("account_mode") or "demo").lower(),
+                "account_mode": _row_mode,
                 "time": r.get("timestamp") or r.get("created_at") or "",
                 "side": r.get("side"),
                 "symbol": r.get("inst_id"),
                 "size": r.get("sz") or r.get("size"),
                 "pnl": pnl,
-                "entry_price": (r.get("px") if reason != "open" else None),
-                "exit_price": (r.get("px") if reason != "open" else None),
+                "entry_price": (None if reason == "open"
+                                else _entry_px_for(_row_mode, _row_inst, _row_ts(r))),
+                "exit_price": ((_row_px or None) if reason != "open" else None),
                 "reason": reason,
                 "coin": (r.get("inst_id") or "").replace("-USDT-SWAP", ""),
                 "ord_id": str(r.get("ord_id") or r.get("ordId") or ""),

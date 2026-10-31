@@ -2925,7 +2925,10 @@ async def me_dashboard(request: Request):
                     _ts = 0
                 cand = None
                 for _o in _open_list.get(f'{mode}|{inst}', ()):
-                    if _ts and int(_o.get('ts') or 0) > _ts + 300_000:
+                    # Only opens at or before the close can be this trade's
+                    # entry. The old +5min window let the NEXT trade on the
+                    # same instrument supply the entry price (close ≈ entry).
+                    if _ts and int(_o.get('ts') or 0) > _ts + 5_000:
                         continue
                     if cand is None or int(_o.get('ts') or 0) >= int(cand.get('ts') or 0):
                         cand = _o
