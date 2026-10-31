@@ -7336,6 +7336,10 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None,
         return list(cached.get('data') or [])
     bills: list = []
     seen: set = set()
+    try:
+        _bills_diag[mode] = {'endpoints': {}}
+    except Exception:
+        pass
     # Epoch for archive begin (ms) — product start 2026-09-01
     try:
         from app.services.pnl_engine import epoch_ms as _epoch_ms
@@ -7409,12 +7413,14 @@ async def _fetch_all_trade_bills(limit_per_page: int=100, mode: str=None,
         print(f'[bills] {mode}/{endpoint} pages={pages} total_so_far={len(bills)}', flush=True)
 
     try:
-        # Recent (≤7d)
+        # Recent (≤7d). A freshness pass only needs the newest pages: the bot
+        # makes hundreds of bills a day, so 5 pages still cover many hours and
+        # keep the 45 s loop from paging through the whole week.
         await _pull(
             'bills',
             lambda c, **kw: c.get_bills(inst_type='SWAP', type='2', **kw),
             use_begin=False,
-            max_pages=15,
+            max_pages=5 if recent_only else 15,
         )
         # Archive from epoch (covers 01.09 → ~20.09 gap)
         if not recent_only:
