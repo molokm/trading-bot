@@ -84,6 +84,68 @@ def test_bot_added_to_a_group_does_not_touch_the_channel():
     assert p.sent == []
 
 
+def test_group_added_by_the_owner_is_offered_but_not_adopted():
+    """Anyone can add a bot to a group — signals must not leak there silently."""
+    p = _poller()
+    upd = _my_chat_member("member", cid=-500, ctype="supergroup", title="My signals")
+    upd["from"] = {"id": int(OWNER)}
+    asyncio.run(p._handle_update({"my_chat_member": upd}))
+    assert p.notifier.channel_id == ""
+    assert p.sent and "Бот добавлен в группу" in p.sent[0][1]
+    assert "/connect" in p.sent[0][1]
+
+
+def test_connect_in_a_group_makes_it_the_signals_target():
+    db = _DB()
+    p = _poller(db)
+    upd = _my_chat_member("administrator", cid=-500, ctype="supergroup", title="My signals")
+    upd["from"] = {"id": int(OWNER)}
+    asyncio.run(p._handle_update({"my_chat_member": upd}))
+    p.sent.clear()
+
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": -500, "type": "supergroup", "title": "My signals"},
+                    "from": {"id": int(OWNER)},
+                    "text": "/connect@RotationTradeBot"}
+    }))
+    assert p.notifier.channel_id == "-500"
+    assert db.settings["TELEGRAM_CHANNEL_ID"] == "-500"
+    assert p.sent and "Группа подключена" in p.sent[0][1]
+    # A probe post goes into the group itself, not only to the owner DM.
+    assert any(str(c[1].get("chat_id")) == "-500"
+               for c in p.api_calls if c[0] == "sendMessage")
+
+
+def test_connect_in_a_group_is_owner_only():
+    p = _poller()
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": -500, "type": "group", "title": "strangers"},
+                    "from": {"id": 999},
+                    "text": "/connect"}
+    }))
+    assert p.notifier.channel_id == ""
+    assert p.sent and "владелец" in p.sent[0][1]
+
+
+def test_plain_group_chatter_gets_no_reply():
+    p = _poller()
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": -500, "type": "group", "title": "g"},
+                    "from": {"id": 999}, "text": "hello everyone"}
+    }))
+    assert p.sent == []
+
+
+def test_channel_migrated_to_a_supergroup_keeps_posting():
+    p = _poller()
+    p.notifier.channel_id = str(CHANNEL)
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": CHANNEL, "type": "channel"},
+                    "migrate_to_chat_id": -100777}
+    }))
+    assert p.notifier.channel_id == "-100777"
+
+
 def test_bot_kicked_from_the_channel_clears_the_setting():
     db = _DB()
     p = _poller(db)
@@ -129,6 +191,44 @@ def test_owner_can_set_the_channel_by_username():
                     "text": "/setchannel @rotation_signals"}
     }))
     assert p.notifier.channel_id == str(CHANNEL)
+
+
+def test_owner_can_send_a_channel_link_instead_of_a_command():
+    p = _poller()
+
+    async def _resolve(ref):
+        assert ref == "@rotation_signals"
+        return {"id": CHANNEL, "type": "channel", "title": "Rotation Signals"}
+
+    p.notifier.resolve_chat = _resolve
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": int(OWNER), "type": "private"},
+                    "text": "https://t.me/rotation_signals/42"}
+    }))
+    assert p.notifier.channel_id == str(CHANNEL)
+
+
+def test_channel_status_is_available_in_a_group_for_the_owner():
+    p = _poller()
+    p.notifier.channel_id = str(CHANNEL)
+
+    async def _resolve(ref):
+        return {"id": CHANNEL, "type": "channel", "title": "Rotation Signals"}
+
+    async def _get(method, **params):
+        if method == "getMe":
+            return {"ok": True, "result": {"id": 42}}
+        if method == "getChatMember":
+            return {"ok": True, "result": {"status": "administrator"}}
+        return {"ok": False, "description": "no"}
+
+    p.notifier.resolve_chat = _resolve
+    p.notifier._api_get = _get
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": -500, "type": "supergroup", "title": "g"},
+                    "from": {"id": int(OWNER)}, "text": "/channel"}
+    }))
+    assert p.sent and "публикуются" in p.sent[0][1].lower()
 
 
 def test_channel_commands_are_owner_only():
