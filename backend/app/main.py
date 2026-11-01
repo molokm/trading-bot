@@ -3781,6 +3781,30 @@ async def ai_status(request: Request):
         except Exception as e:
             print(f'[ai/status] live audit: {e}', flush=True)
         try:
+            # Mirror decision trail (persisted, survives restarts): answers
+            # «почему последняя сделка DEMO не дошла до зеркала» without logs.
+            _raw_audit = await db.get_setting(f'live_audit:{ai_bot._live_bot_id()}') if ai_bot else None
+            _log_rows = json.loads(_raw_audit) if _raw_audit else []
+            if not isinstance(_log_rows, list):
+                _log_rows = []
+            status['mirror_log'] = [
+                {k: r.get(k) for k in ('ts', 'action', 'coin', 'side', 'size', 'ok', 'reason')}
+                for r in _log_rows[-15:] if isinstance(r, dict)
+            ]
+            _mstate = {'enabled': False, 'connected_at': 0}
+            if ai_bot is not None:
+                try:
+                    _mstate['enabled'] = bool(await ai_bot._mirror_enabled())
+                except Exception:
+                    pass
+                try:
+                    _mstate['connected_at'] = int(await ai_bot._live_clone_watermark() or 0)
+                except Exception:
+                    pass
+            status['mirror_state'] = _mstate
+        except Exception as e:
+            print(f'[ai/status] mirror log: {e}', flush=True)
+        try:
             _leq = float((status.get('live') or {}).get('equity') or 0)
             _cap = 0.0
             try:
