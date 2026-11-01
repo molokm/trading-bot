@@ -28,7 +28,7 @@ from .strategy_cards import (
     telegram_profile_description,
     telegram_short_description,
 )
-from .telegram_notifier import TelegramNotifier
+from .telegram_notifier import ENV_CHANNEL, TelegramNotifier, _esc
 
 log = logging.getLogger("telegram_bot")
 
@@ -112,11 +112,23 @@ class TelegramBotPoller:
         if cq:
             await self._handle_callback(cq)
             return
+        if update.get("my_chat_member"):
+            await self._on_my_chat_member(update["my_chat_member"])
+            return
+        if update.get("channel_post"):
+            await self._on_channel_post(update["channel_post"])
+            return
         msg = update.get("message")
         if not msg:
             return
         if msg.get("successful_payment"):
             await self._on_successful_payment(msg)
+            return
+        # Owner forwarded a post from the signals channel → adopt that channel.
+        fwd = msg.get("forward_from_chat") or {}
+        if fwd.get("type") == "channel" and self._is_owner(msg["chat"]["id"]):
+            await self._set_channel(str(fwd.get("id") or ""),
+                                    title=fwd.get("title") or "", reason="forward")
             return
         text = (msg.get("text") or "").strip()
         chat_id = msg["chat"]["id"]
@@ -133,6 +145,8 @@ class TelegramBotPoller:
                 parts = text.split()
                 period = " ".join(parts[1:]).lower() if len(parts) > 1 else "all"
                 await self._cmd_stats(chat_id, period=period)
+            elif cmd in ("/channel", "/setchannel", "/unsetchannel"):
+                await self._cmd_channel(chat_id, text)
             elif cmd in ("/tracker",):
                 await self._send_info(chat_id, "results")
             elif cmd == "/about":
@@ -143,6 +157,151 @@ class TelegramBotPoller:
                 await self._send_msg(chat_id, self._menu_text())
             return
         await self._send_msg(chat_id, self._menu_text())
+
+    # ─── Signals channel setup (owner) ───
+
+    def _owner_chat_id(self) -> str:
+        return str(self.notifier.chat_id or "").strip()
+
+    def _is_owner(self, chat_id) -> bool:
+        owner = self._owner_chat_id()
+        return bool(owner) and str(chat_id) == owner
+
+    async def _set_channel(self, cid: str, title: str = "", reason: str = "") -> None:
+        """Persist the signals channel (env + DB) and tell the owner.
+
+        Called automatically when Telegram reports the bot was added to a
+        channel, when a channel post arrives, or when the owner forwards a post
+        or uses /setchannel — no manual env editing in the hosting panel.
+        """
+        cid = str(cid or "").strip()
+        before = str(self.notifier.channel_id or "").strip()
+        self.notifier.channel_id = cid
+        try:
+            os.environ[ENV_CHANNEL] = cid
+        except Exception:
+            pass
+        try:
+            if self.db:
+                await self.db.set_setting(ENV_CHANNEL, cid)
+        except Exception as e:
+            log.warning("channel setting save: %s", e)
+        try:
+            TelegramNotifier._channel_cache.clear()
+        except Exception:
+            pass
+        owner = self._owner_chat_id()
+        if not owner:
+            return
+        if not cid:
+            await self._send_msg(
+                owner,
+                "⚠️ <b>Канал отключён</b>"
+                + (f"\n{_esc(title)}" if title else "")
+                + "\nСигналы продолжат приходить в этот чат.",
+            )
+            return
+        if cid == before and reason != "manual":
+            return
+        await self._send_msg(
+            owner,
+            "✅ <b>Канал подключён</b>\n"
+            + (f"{_esc(title)}\n" if title else "")
+            + f"<code>{_esc(cid)}</code>",
+        )
+        probe = await self._api("sendMessage", chat_id=cid,
+                                text="✅ Сигналы подключены к этому каналу.")
+        if not probe.get("ok"):
+            await self._send_msg(
+                owner,
+                "⚠️ Не удалось опубликовать в канал: "
+                + _esc(probe.get("description") or "unknown error")
+                + "\nВыдайте боту права администратора с публикацией.",
+            )
+
+    async def _on_my_chat_member(self, upd: dict) -> None:
+        """Bot added to / removed from a channel → adopt or forget it."""
+        chat = upd.get("chat") or {}
+        if chat.get("type") != "channel":
+            return
+        status = str((upd.get("new_chat_member") or {}).get("status") or "").lower()
+        cid = str(chat.get("id") or "")
+        if not cid:
+            return
+        if status in ("administrator", "member", "creator"):
+            await self._set_channel(cid, title=chat.get("title") or "", reason="added")
+        elif status in ("left", "kicked"):
+            if cid == str(self.notifier.channel_id or "").strip():
+                await self._set_channel("", title=chat.get("title") or "", reason="removed")
+
+    async def _on_channel_post(self, msg: dict) -> None:
+        chat = msg.get("chat") or {}
+        if chat.get("type") != "channel":
+            return
+        cid = str(chat.get("id") or "")
+        if cid and cid != str(self.notifier.channel_id or "").strip():
+            await self._set_channel(cid, title=chat.get("title") or "", reason="post")
+
+    async def _cmd_channel(self, chat_id, text: str) -> None:
+        if not self._is_owner(chat_id):
+            await self._send_msg(chat_id, "Команда доступна только владельцу бота.")
+            return
+        parts = text.split()
+        sub = parts[0].lower().split("@")[0]
+        if sub == "/unsetchannel":
+            await self._set_channel("", reason="manual")
+            return
+        if sub == "/setchannel":
+            if len(parts) < 2:
+                await self._send_msg(
+                    chat_id,
+                    "Использование:\n<code>/setchannel @username</code>\n"
+                    "<code>/setchannel -100…</code>\n\n"
+                    "Проще: добавьте бота администратором в канал или перешлите "
+                    "сюда любой пост из канала.",
+                )
+                return
+            ref = parts[1]
+            chat = await self.notifier.resolve_chat(ref)
+            if not chat:
+                await self._send_msg(
+                    chat_id,
+                    "❌ Канал не найден.\nДобавьте @RotationTradeBot администратором "
+                    "в канал и повторите — либо перешлите сюда пост из канала.",
+                )
+                return
+            if chat.get("type") != "channel":
+                await self._send_msg(chat_id, f"Это не канал (type={_esc(chat.get('type') or '?')}).")
+                return
+            await self._set_channel(str(chat.get("id") or ref),
+                                    title=chat.get("title") or "", reason="manual")
+            return
+        info = await self.notifier.check_channel(force=True)
+        if not info.get("configured"):
+            await self._send_msg(
+                chat_id,
+                "📡 <b>Канал не настроен</b>\n\n"
+                "Добавьте @RotationTradeBot администратором в канал — бот подхватит "
+                "его автоматически.\nИли: <code>/setchannel @username</code>",
+            )
+            return
+        if info.get("ok"):
+            await self._send_msg(
+                chat_id,
+                "📡 <b>Канал подключён</b>\n"
+                f"{_esc(info.get('title') or '')}\n"
+                f"<code>{_esc(info.get('channel_id') or '')}</code>\n"
+                "Бот — администратор, публикация работает.",
+            )
+        else:
+            await self._send_msg(
+                chat_id,
+                "⚠️ <b>Канал недоступен</b>\n"
+                f"<code>{_esc(info.get('channel_id') or '')}</code>\n"
+                f"{_esc(info.get('error') or '')}\n\n"
+                "Добавьте бота администратором в канал или задайте новый: "
+                "<code>/setchannel @username</code>",
+            )
 
     def _menu_keyboard(self) -> dict:
         return {
@@ -663,7 +822,8 @@ class TelegramBotPoller:
                 res = await self._api(
                     "getUpdates",
                     offset=offset, timeout=30,
-                    allowed_updates=["message", "callback_query", "pre_checkout_query"],
+                    allowed_updates=["message", "callback_query", "pre_checkout_query",
+                                     "my_chat_member", "channel_post"],
                 )
                 if res.get("ok"):
                     for u in res.get("result", []):

@@ -24,6 +24,20 @@ ENV_CHANNEL = "TELEGRAM_CHANNEL_ID"
 
 _ESCAPE = {ord("<"): "&lt;", ord(">"): "&gt;", ord("&"): "&amp;"}
 
+# Telegram errors that will never succeed on retry. Retrying them used to burn
+# ~6 s per notification (3 attempts + backoff) on every close while the channel
+# id was wrong/unreachable.
+_PERMANENT_FAILURES = (
+    "chat not found",
+    "bot was blocked",
+    "bot was kicked",
+    "bot is not a member",
+    "not enough rights",
+    "chat_write_forbidden",
+    "have no rights to send",
+    "user is deactivated",
+)
+
 
 def _esc(value) -> str:
     """Escape a value for Telegram HTML parse mode."""
@@ -32,6 +46,9 @@ def _esc(value) -> str:
 
 class TelegramNotifier:
     _open_msg_by_signal: dict = {}
+    # (token tail, channel id) → (checked_at, result); avoids a getChat round-trip
+    # on every /api/telegram/status and /channel command.
+    _channel_cache: dict = {}
 
     def __init__(self, token: str = "", chat_id: str = "", channel_id: str = ""):
         self.token = token or os.getenv(ENV_TOKEN, "")
@@ -77,6 +94,75 @@ class TelegramNotifier:
         if not self.chat_id and not self.channel_id:
             return "no_chat"
         return "ok"
+
+    # ─── Read-only Bot API helpers (channel setup / diagnostics) ───
+
+    async def _api_get(self, method: str, **params) -> dict:
+        if not self.token:
+            return {"ok": False, "description": "no token"}
+        url = f"https://api.telegram.org/bot{self.token}/{method}"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, params=params)
+                try:
+                    return resp.json()
+                except Exception:
+                    return {"ok": False, "description": (resp.text or "")[:200]}
+        except Exception as e:
+            return {"ok": False, "description": str(e)[:200]}
+
+    async def resolve_chat(self, ref: str) -> Optional[dict]:
+        """Resolve '@name' or an id to a chat dict (None if the bot can't see it)."""
+        ref = str(ref or "").strip()
+        if not ref:
+            return None
+        if ref.startswith("https://t.me/"):
+            ref = "@" + ref.rstrip("/").rsplit("/", 1)[-1]
+        data = await self._api_get("getChat", chat_id=ref)
+        if not data.get("ok"):
+            return None
+        chat = data.get("result") or {}
+        return chat if isinstance(chat, dict) else None
+
+    async def check_channel(self, force: bool = False, cache_sec: int = 30) -> dict:
+        """Verify the bot can post to the configured channel.
+
+        `ok` means the bot is an administrator/creator there, i.e. a send will
+        actually land. Without that, `send_trade` silently falls back to the
+        owner DM and the channel stays empty.
+        """
+        cid = str(self.channel_id or "").strip()
+        key = (self.token[-8:], cid)
+        now = time.time()
+        cached = TelegramNotifier._channel_cache.get(key)
+        if not force and cached and now - cached[0] < cache_sec:
+            return dict(cached[1])
+        out = {"channel_id": cid, "configured": bool(cid), "ok": False,
+               "title": "", "chat_type": "", "bot_status": "", "error": ""}
+        if not (self.token and cid):
+            out["error"] = "channel_not_configured"
+            TelegramNotifier._channel_cache[key] = (now, out)
+            return out
+        chat = await self.resolve_chat(cid)
+        if not chat:
+            out["error"] = "chat not found — добавьте бота в канал как администратора"
+            TelegramNotifier._channel_cache[key] = (now, out)
+            return out
+        out["title"] = chat.get("title") or chat.get("username") or ""
+        out["chat_type"] = chat.get("type") or ""
+        me = await self._api_get("getMe")
+        bot_id = (me.get("result") or {}).get("id") if me.get("ok") else None
+        if bot_id:
+            mem = await self._api_get("getChatMember", chat_id=cid, user_id=bot_id)
+            st = ((mem.get("result") or {}).get("status") or "") if mem.get("ok") else ""
+            out["bot_status"] = st
+            out["ok"] = st in ("administrator", "creator")
+            if not out["ok"]:
+                out["error"] = (
+                    f"bot status: {st or 'not a member'} — нужны права администратора"
+                )
+        TelegramNotifier._channel_cache[key] = (now, out)
+        return out
 
     async def send(self, text: str, parse_mode: str = "HTML") -> bool:
         """Send a message. Returns True on success. Never raises."""
@@ -266,8 +352,10 @@ class TelegramNotifier:
                             return 0
                     desc = str(data.get("description") or data)
                     print(f"[TG] reply FAILED mid={reply_id}: {desc}", flush=True)
-                    # permanent reply errors → fall through to plain send
                     low = desc.lower()
+                    if any(_m in low for _m in _PERMANENT_FAILURES):
+                        print(f"[TG] permanent failure ({chat_id}): {desc}", flush=True)
+                        return 0
                     if "reply" in low or "message to be replied" in low or "not found" in low:
                         break
                     if attempt < 1:
@@ -295,6 +383,10 @@ class TelegramNotifier:
                 desc = str(data.get("description") or data)
                 print(f"[TG] send not ok: {desc}", flush=True)
                 low = desc.lower()
+                if any(_m in low for _m in _PERMANENT_FAILURES):
+                    # Wrong/unreachable chat: retrying only adds latency.
+                    print(f"[TG] permanent failure ({chat_id}): {desc}", flush=True)
+                    return 0
                 if "parse" in low or "entity" in low or "can't parse" in low:
                     base.pop("parse_mode", None)
                 # Rate limit: honour Retry-After (Telegram flood control)

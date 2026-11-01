@@ -3830,6 +3830,20 @@ async def ai_status(request: Request):
             }
         except Exception as e:
             print(f'[ai/status] exchange sync diag: {e}', flush=True)
+        try:
+            # Signals channel health (masked): «added as admin? can we post?».
+            _tg_ch = await telegram.check_channel()
+            status['telegram'] = {
+                'token': bool(telegram.token),
+                'owner_chat': bool(telegram.chat_id),
+                'channel_configured': bool(_tg_ch.get('configured')),
+                'channel_ok': bool(_tg_ch.get('ok')),
+                'channel_title': _tg_ch.get('title') or '',
+                'channel_id_tail': (_tg_ch.get('channel_id') or '')[-4:],
+                'channel_error': (_tg_ch.get('error') or '')[:160],
+            }
+        except Exception as e:
+            print(f'[ai/status] telegram diag: {e}', flush=True)
     # History overlay replaces lifetime_pnl, so rebuild turnover from the same
     # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
     try:
@@ -6732,7 +6746,19 @@ async def telegram_status():
     """Return Telegram notification config status (token masked)."""
     masked_token = telegram.token[:10] + '…' + telegram.token[-4:] if telegram.token else ''
     masked_chat = telegram.chat_id[:2] + '…' + telegram.chat_id[-3:] if telegram.chat_id else ''
-    return {'configured': telegram.configured, 'status': telegram.status, 'chat_id': masked_chat, 'chat_id_masked': masked_chat, 'token_masked': masked_token}
+    ch = await telegram.check_channel()
+    return {
+        'configured': telegram.configured,
+        'status': telegram.status,
+        'chat_id': masked_chat,
+        'chat_id_masked': masked_chat,
+        'token_masked': masked_token,
+        'channel_configured': bool(ch.get('configured')),
+        'channel_ok': bool(ch.get('ok')),
+        'channel_title': ch.get('title') or '',
+        'channel_id_tail': (ch.get('channel_id') or '')[-4:],
+        'channel_error': ch.get('error') or '',
+    }
 
 @app.post('/api/telegram/config')
 @policy(ADMIN)
