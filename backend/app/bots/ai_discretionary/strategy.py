@@ -3668,13 +3668,13 @@ class AIStrategy:
                             print(f"[AI] TG open FAILED mid=0 {c}", flush=True)
                             # Queue same text as a "pending open" via close-queue shape
                             try:
-                                await self._queue_tg_close(txt, "demo", c)
+                                await self._queue_tg_close(txt, "demo", c, kind="open")
                             except Exception:
                                 pass
                     except Exception as e:
                         print(f"[AI] TG open job: {e}", flush=True)
                         try:
-                            await self._queue_tg_close(txt, "demo", c)
+                            await self._queue_tg_close(txt, "demo", c, kind="open")
                         except Exception:
                             pass
 
@@ -3809,7 +3809,8 @@ class AIStrategy:
                     continue
                 try:
                     ts = datetime.fromisoformat(str(r.get("ts") or "").replace("Z", "+00:00"))
-                    if (now - ts).total_seconds() > 86400:
+                    _ttl = self.TG_OPEN_TTL_SEC if r.get("kind") == "open" else 86400
+                    if (now - ts).total_seconds() > _ttl:
                         continue
                 except Exception:
                     pass
@@ -3830,12 +3831,18 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI] TG pending save: {e}", flush=True)
 
-    async def _queue_tg_close(self, text: str, mode: str, coin: str) -> None:
+    # An entry signal is only useful while the move is live: retrying a failed
+    # open for hours would post a stale «вход» long after the fact.
+    TG_OPEN_TTL_SEC = 900
+
+    async def _queue_tg_close(self, text: str, mode: str, coin: str,
+                              kind: str = "close") -> None:
         try:
             self._tg_pending.append({
                 "text": text,
                 "mode": mode,
                 "coin": coin,
+                "kind": kind,
                 "ts": datetime.now(timezone.utc).isoformat(),
             })
             self._tg_pending = self._tg_pending[-20:]
@@ -3851,8 +3858,19 @@ class AIStrategy:
         """Retry failed close notifications (called from the main loop)."""
         if not self._tg_pending or not self.notifier:
             return
+        snapshot = list(self._tg_pending)
         remaining = []
-        for item in list(self._tg_pending):
+        _now = datetime.now(timezone.utc)
+        for item in snapshot:
+            if str(item.get("kind") or "close") == "open":
+                try:
+                    _ts = datetime.fromisoformat(str(item.get("ts") or "").replace("Z", "+00:00"))
+                    if (_now - _ts).total_seconds() > self.TG_OPEN_TTL_SEC:
+                        print(f"[AI] TG pending open expired, dropped ({item.get('coin')})",
+                              flush=True)
+                        continue
+                except Exception:
+                    pass
             try:
                 mid = await self.notifier.send_trade(
                     str(item.get("text") or ""),
@@ -3865,8 +3883,12 @@ class AIStrategy:
                 print(f"[AI] TG pending delivered ({item.get('coin')}) mid={mid}", flush=True)
             else:
                 remaining.append(item)
-        if len(remaining) != len(self._tg_pending):
-            self._tg_pending = remaining
+        # Items queued while we were sending must survive the rewrite: the old
+        # `remaining` assignment silently dropped a close that arrived mid-flush.
+        _extra = self._tg_pending[len(snapshot):]
+        _new_list = remaining + list(_extra)
+        if _new_list != self._tg_pending:
+            self._tg_pending = _new_list[-20:]
             await self._save_tg_pending()
 
     async def _notify_close_tg_run(

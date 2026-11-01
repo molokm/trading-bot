@@ -10,6 +10,7 @@ Regression guard for the "opens arrive, closes never do" incident:
 """
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -130,3 +131,65 @@ def test_live_send_never_reaches_public_channel():
 
     asyncio.run(scenario())
     assert targets == ["111"]
+
+
+# ── open signals: retry only while they are still actionable ───────────
+
+def _open_item(minutes_ago: float, coin: str = "BTC") -> dict:
+    return {
+        "text": "open signal", "mode": "demo", "coin": coin, "kind": "open",
+        "ts": (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat(),
+    }
+
+
+def test_fresh_open_is_retried_from_the_queue():
+    bot = _bare_bot(_FakeDB())
+    bot._tg_pending = [_open_item(2)]
+    sent = []
+
+    class _N:
+        async def send_trade(self, *a, **k):
+            sent.append(a[0])
+            return 11
+
+    bot.notifier = _N()
+    asyncio.run(bot._flush_tg_pending())
+    assert sent == ["open signal"]
+    assert bot._tg_pending == []
+
+
+def test_stale_open_is_dropped_instead_of_posted_late():
+    """A 3-hour-old «вход» is misinformation, not a retry."""
+    bot = _bare_bot(_FakeDB())
+    bot._tg_pending = [_open_item(180)]
+    sent = []
+
+    class _N:
+        async def send_trade(self, *a, **k):
+            sent.append(a[0])
+            return 11
+
+    bot.notifier = _N()
+    asyncio.run(bot._flush_tg_pending())
+    assert sent == []
+    assert bot._tg_pending == []
+
+
+def test_close_queued_during_a_flush_is_not_lost():
+    bot = _bare_bot(_FakeDB())
+    calls = []
+
+    class _N:
+        async def send_trade(self, text, **k):
+            calls.append(text)
+            if text == "first":
+                # A close can arrive while the previous send is in flight.
+                await bot._queue_tg_close("second", "demo", "ETH")
+                return 0
+            return 1
+
+    bot.notifier = _N()
+    asyncio.run(bot._queue_tg_close("first", "demo", "BTC"))
+    asyncio.run(bot._flush_tg_pending())
+
+    assert [i["text"] for i in bot._tg_pending] == ["first", "second"]
