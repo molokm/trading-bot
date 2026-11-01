@@ -77,8 +77,11 @@ class TelegramNotifier:
                 self.token = token
             if chat_id:
                 self.chat_id = chat_id
-            if channel_id:
-                self.channel_id = channel_id
+            # An explicitly stored empty channel means «switched off» and must
+            # beat the value left in the hosting env, otherwise /unsetchannel is
+            # undone by the next restart/deploy and the dead chat comes back.
+            if channel_id is not None:
+                self.channel_id = channel_id.strip()
         except Exception:
             pass
 

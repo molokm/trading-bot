@@ -264,8 +264,31 @@ def test_channel_status_explains_a_missing_admin_right():
     assert "администратор" in p.sent[0][1]
 
 
-# ── notifier: permanent errors must not be retried ──────────────────────
+def test_disabled_channel_beats_the_env_after_a_restart(monkeypatch):
+    """`/unsetchannel` must not be undone by a deploy re-reading the env."""
+    monkeypatch.setenv("TELEGRAM_CHANNEL_ID", str(CHANNEL))
+    db = _DB()
+    db.settings["TELEGRAM_CHANNEL_ID"] = ""
 
+    tg = TelegramNotifier(token="tok", chat_id=OWNER)
+    assert tg.channel_id == str(CHANNEL)  # boots from the hosting env
+    asyncio.run(tg.load_from_db(db))
+    assert tg.channel_id == ""  # …then the explicit «off» in the DB wins
+
+
+def test_unsetchannel_persists_an_explicit_empty_value():
+    db = _DB()
+    p = _poller(db)
+    p.notifier.channel_id = str(CHANNEL)
+
+    asyncio.run(p._handle_update({
+        "message": {"chat": {"id": int(OWNER), "type": "private"}, "text": "/unsetchannel"}
+    }))
+    assert p.notifier.channel_id == ""
+    assert db.settings["TELEGRAM_CHANNEL_ID"] == ""
+
+
+# ── notifier: permanent errors must not be retried ──────────────────────
 class _Resp:
     status_code = 400
     headers = {}
