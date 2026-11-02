@@ -625,6 +625,9 @@ class AIStrategy:
         # opens, awaited inline, always arrived).
         self._tg_tasks: set = set()
         self._tg_pending: list = []  # close texts Telegram refused; retried later
+        # DEMO opens that must be mirrored even if the first LIVE attempt failed
+        # (no GC-loss of fast_retry; watermark does not block these).
+        self._pending_mirror: dict = {}
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -3632,7 +3635,9 @@ class AIStrategy:
                     bot_id=self.BOT_ID, side=order_side, sz=sz, px=fill_px,
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=inst, ord_type="market",
-                    fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
+                    # pnl=0 on OPEN so History pairing (filled+pnl=0) finds the entry.
+                    # Fee stays in the fee column; charging fee as pnl broke the history.
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=0,
                     state="filled", signal_id=pos.signal_id,
                     account_mode=self._account_mode_tag()[0],
                     account_key=self._account_mode_tag()[1],
@@ -3707,6 +3712,15 @@ class AIStrategy:
                 self._audit_live("open_skip", coin, side, 0, _m, ok=False)
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
+                # Always mark as must-mirror so gap-fill does not depend on
+                # watermark alone (reconnect after open used to skip forever).
+                self._pending_mirror[coin] = {
+                    "side": side,
+                    "stop_pct": float(stop_pct or 0.03),
+                    "take_pct": float(take_pct or 0.06),
+                    "reason": str(reason or "demo_open")[:120],
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
                 await self._try_refresh_live_client()
                 ok = False
                 if self._live_client():
@@ -3718,17 +3732,22 @@ class AIStrategy:
                         reason=(_fail or reason)[:200],
                     ))
                     print(f"[AI-LIVE] mirror open result={ok} {side} {coin} fail={_fail or '-'}", flush=True)
+                    if ok:
+                        self._pending_mirror.pop(coin, None)
                 else:
                     _m = "live_not_ready"
                     self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
                     self._audit_live("open_skip", coin, side, 0, _m, ok=False)
                     print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
-                # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
+                # Fast retries with strong ref (bare create_task was GC-collected)
                 if not ok:
                     try:
-                        asyncio.create_task(
-                            self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason)
+                        task = asyncio.create_task(
+                            self._mirror_fast_retry(coin, side, stop_pct, take_pct, reason),
+                            name=f"mirror-retry-{coin}",
                         )
+                        self._tg_tasks.add(task)
+                        task.add_done_callback(self._tg_task_done)
                     except Exception as _te:
                         print(f"[AI-LIVE] schedule fast_retry: {_te}", flush=True)
         except Exception as e:
@@ -4512,7 +4531,7 @@ class AIStrategy:
                     bot_id=live_bid, side=order_side, sz=sz, px=fill_px,
                     ord_id=(fills[0].get("ordId") if fills else ""),
                     inst_id=inst, ord_type="market",
-                    fee=fee_cost(fee), fee_ccy="USDT", pnl=-fee_cost(fee),
+                    fee=fee_cost(fee), fee_ccy="USDT", pnl=0,
                     state="filled", signal_id=pos.signal_id,
                     account_mode="live", account_key="live",
                 )
@@ -4534,6 +4553,10 @@ class AIStrategy:
                     pos.tg_message_id = int(_tg_mid)
             except Exception as e:
                 print(f"[AI-LIVE] TG open: {e}", flush=True)
+        try:
+            (getattr(self, "_pending_mirror", None) or {}).pop(coin, None)
+        except Exception:
+            pass
         print(f"[AI-LIVE] OPEN {side} {coin} sz={sz} @ {fill_px} "
               f"lev={lev} (mirror)", flush=True)
         self._audit_live(
@@ -5277,6 +5300,21 @@ class AIStrategy:
         if not self._live_ready():
             print("[AI-LIVE] clone_missing: live not ready", flush=True)
             return
+        # Recover: any DEMO pos without LIVE twin while mirror is ON is pending.
+        # Covers process restart after a successful DEMO open + failed/missed mirror.
+        try:
+            for _c, _p in list(self._positions.items()):
+                if _c not in (self._live_positions or {}) and _c not in (self._pending_mirror or {}):
+                    self._pending_mirror[_c] = {
+                        "side": getattr(_p, "side", "long"),
+                        "stop_pct": 0.03,
+                        "take_pct": 0.06,
+                        "reason": "recover_unmirrored",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                    print(f"[AI-LIVE] pending_mirror recover {_c}", flush=True)
+        except Exception as _re:
+            print(f"[AI-LIVE] pending recover: {_re}", flush=True)
         # Watermark: only clone positions opened AFTER explicit mirror connect.
         # No watermark → fail-closed (do not guess): LIVE must never open a
         # position that was not copied while the user had mirroring on.
@@ -5299,17 +5337,22 @@ class AIStrategy:
                 continue
             if float(getattr(demo_pos, "size", 0) or 0) <= 0:
                 continue
-            # Watermark gate: only clone positions opened AFTER explicit connect
-            try:
-                opened_at = getattr(demo_pos, "opened_at", None)
-                if opened_at:
-                    opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
-                    if opened_ts < watermark:
-                        print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
-                        continue
-            except Exception as _we:
-                print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
-                continue
+            # Watermark gate: only clone positions opened AFTER explicit connect.
+            # Exception: coin in _pending_mirror (DEMO open while mirror was ON).
+            pending = (getattr(self, "_pending_mirror", None) or {}).get(coin)
+            if not pending:
+                try:
+                    opened_at = getattr(demo_pos, "opened_at", None)
+                    if opened_at:
+                        opened_ts = int(datetime.fromisoformat(str(opened_at).replace("Z", "+00:00")).timestamp())
+                        if opened_ts < watermark:
+                            print(f"[AI-LIVE] clone_missing SKIP {coin}: opened {opened_at} before watermark {watermark}", flush=True)
+                            continue
+                except Exception as _we:
+                    print(f"[AI-LIVE] clone_missing SKIP {coin}: watermark parse error {_we}", flush=True)
+                    continue
+            else:
+                print(f"[AI-LIVE] clone_missing {coin}: pending_mirror bypass watermark", flush=True)
             last = float(self._clone_attempt_ts.get(coin) or 0)
             if now - last < 15:
                 continue
@@ -8988,6 +9031,8 @@ class AIStrategy:
                     getattr(self.config, "live_disaster_stop", True)),
                 "disaster_stop_mult": getattr(self.config, "live_disaster_stop_mult", 1.8),
                 "trade_blocked": str(getattr(self, "_live_trade_blocked_reason", "") or ""),
+                "last_mirror_fail": str(getattr(self, "_last_mirror_fail", "") or ""),
+                "pending_mirror": list((getattr(self, "_pending_mirror", None) or {}).keys()),
                 "unprotected_open": [
                     p.coin for p in self._live_positions.values()
                     if not getattr(p, "disaster_algo_id", "")
