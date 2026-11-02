@@ -405,7 +405,10 @@ class AIConfig:
     # Market orders on both legs -> taker on both sides, plus slippage.
     fee_taker_pct: float = 0.0005          # OKX USDT-M taker, per side
     slippage_pct: float = 0.0002           # market-order slippage estimate, per side
-    cost_min_edge_mult: float = 3.0        # expected move should clear cost by >=3x
+    cost_min_edge_mult: float = 4.0        # v1.43.1: 3→4 — round trip must clear
+                                            # cost by 4x. At 3x the edge was eaten
+                                            # by frequency × fees (86% of gross was
+                                            # commission over the 80-trade sample).
     # LIVE disaster stop: a wide reduce-only exchange STOP that only fires if the
     # bot process dies. Set beyond the strategy stop so normal management never
     # reaches it (v1.19 removed tighter algos because they closed LIVE alone).
@@ -438,7 +441,10 @@ class AIConfig:
     btc_filter_enabled: bool = True
     btc_roc_block: float = 0.6             # |BTC ROC%| above this is a strong impulse
     btc_roc_veto: float = 0.20             # BTC ROC% against side → block open (short blocked if btc_roc >= this)
-    min_confidence: float = 0.68           # fewer marginal opens
+    min_confidence: float = 0.72           # v1.43.1: 0.68→0.72 — fewer marginal
+                                            # opens. Same lever as cost edge: the
+                                            # book only wins when the marginal
+                                            # trades are worth the round trip.
     min_adx: float = 20.0                  # stronger trend required
     # Soft ADX: if align is strong, allow down to adx_soft_floor
     adx_soft_floor: float = 16.0
@@ -458,7 +464,11 @@ class AIConfig:
     block_llm_error_opens: bool = True
     # Indicator-based exit (do not wait for distant TP)
     indicator_exit: bool = True
-    min_hold_minutes: float = 90.0         # v1.30: hold through 1H noise
+    min_hold_minutes: float = 120.0        # v1.43.1: 90→120 — hold through two
+                                            # 1H bars of noise. 90m was still
+                                            # inside the commission breakeven,
+                                            # so every chop tick was a potential
+                                            # premature exit.
     exit_min_profit_pct: float = 0.60      # exit-v2: 0.20→0.60 — a "lock" below
                                            # 3× round-trip (~0.42%) is just fees
     ind_exit_soft_hold_pct: float = 2.00   # exit-v2: let a trending winner run to
@@ -471,7 +481,10 @@ class AIConfig:
                                             # ATR trigger so ATR governs arming
     trail_lock_pct: float = 0.22           # v1.30: wider trail — less noise stops
     # Anti-churn: close→same-side reopen wastes fees when trend continues
-    reopen_cooldown_min: float = 75.0      # block same coin+side reopen after close
+    reopen_cooldown_min: float = 120.0     # v1.43.1: 75→120 — block same coin+side
+                                            # reopen after close. 75m was short
+                                            # enough to re-enter the same chop
+                                            # (XRP triple on 14 Oct).
     reopen_align_override: float = 0.82    # only reopen earlier if align is this strong
     # Do not indicator-exit at a loss if same-side trend still confirmed
     hold_loss_if_align: float = 0.60       # align >= this → skip soft/hard ind exit while red
@@ -1941,7 +1954,7 @@ class AIStrategy:
             return f"quant_veto:low_conf:{conf:.2f}<{self._effective_min_confidence():.2f}"
         stop = float(decision.get("stop_pct") or 0.03)
         take = float(decision.get("take_pct") or 0.06)
-        if stop > 0 and take / stop < 1.8:
+        if stop > 0 and take / stop < 2.0:
             return f"quant_veto:rr:{take/stop:.2f}"
         cq = (q.get("coins") or {}).get(coin) or {}
         if cq.get("block_open"):
