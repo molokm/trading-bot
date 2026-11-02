@@ -77,7 +77,7 @@ from app.services.position_claim import (
 )
 from app.services.risk_guard import assert_can_open, _symbol_to_group
 from app.services.risk_regime import regime_multiplier
-from app.services.telegram_notifier import TelegramNotifier
+from app.services.telegram_notifier import TelegramNotifier, _esc
 from app.services import health_guard as hg
 from app.services.trade_memory import build_lessons, settle_trade
 
@@ -635,6 +635,9 @@ class AIStrategy:
         # bot_id (positions table is UNIQUE on bot_id/inst/side, no account_mode)
         # and account_mode="live" for full DB isolation.
         self._live_positions: dict[str, AIPosition] = {}
+        # DEMO positions that (still) have no LIVE twin: since when + last alert.
+        self._mirror_gap_since: dict[str, float] = {}
+        self._mirror_gap_alerted: dict[str, float] = {}
         self._live_audit: list = []   # every LIVE order attempt (why/who)
         self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
         self._second_entry_bar: str | None = None  # v1.33: bar already asked for a 2nd slot
@@ -1274,6 +1277,10 @@ class AIStrategy:
             await self._load_tg_pending()
         except Exception as e:
             print(f"[AI] TG pending restore: {e}", flush=True)
+        try:
+            await self._load_live_audit()
+        except Exception as e:
+            print(f"[AI] live audit restore: {e}", flush=True)
         try:
             if self.db:
                 await self.db.ensure_bot(self.BOT_ID, strategy_id="ai_discretionary",
@@ -3697,6 +3704,7 @@ class AIStrategy:
             if not await self._mirror_enabled():
                 _m = "disabled_by_user"
                 self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
+                self._audit_live("open_skip", coin, side, 0, _m, ok=False)
                 print(f"[AI-LIVE] mirror skip {coin}: disabled by user", flush=True)
             else:
                 await self._try_refresh_live_client()
@@ -3713,6 +3721,7 @@ class AIStrategy:
                 else:
                     _m = "live_not_ready"
                     self._exec_log.append(_exec_evt("mirror_skip", coin, side, reason=_m))
+                    self._audit_live("open_skip", coin, side, 0, _m, ok=False)
                     print(f"[AI-LIVE] mirror skip {coin}: live not ready", flush=True)
                 # Fast retries in background: 2s → 5s → 12s (not wait for next poll)
                 if not ok:
@@ -3834,6 +3843,60 @@ class AIStrategy:
     # An entry signal is only useful while the move is live: retrying a failed
     # open for hours would post a stale «вход» long after the fact.
     TG_OPEN_TTL_SEC = 900
+
+    # A DEMO position without a LIVE twin is normal for a few seconds (mirror
+    # retries take <20s). After this long it is a real divergence worth telling
+    # the owner about — otherwise it stays invisible until someone notices that
+    # «сделка не дошла до зеркала».
+    MIRROR_GAP_ALERT_SEC = 600
+
+    async def _mirror_gap_watch(self, missing: list) -> None:
+        """Tell the owner when a DEMO position stays unmirrored on LIVE."""
+        now = time.time()
+        missing = [c for c in (missing or []) if c in (self._positions or {})]
+        for c in list(getattr(self, "_mirror_gap_since", {})):
+            if c not in missing:
+                self._mirror_gap_since.pop(c, None)
+                self._mirror_gap_alerted.pop(c, None)
+        if not missing or not await self._mirror_enabled():
+            return
+        watermark = await self._live_clone_watermark()
+        for c in missing:
+            pos = self._positions.get(c)
+            if pos is None:
+                continue
+            # A DEMO position opened before «Подключить LIVE» is not a gap: the
+            # mirror is not supposed to clone it.
+            try:
+                opened_ts = int(datetime.fromisoformat(
+                    str(getattr(pos, "opened_at", "") or "").replace("Z", "+00:00")
+                ).timestamp())
+            except Exception:
+                opened_ts = 0
+            if watermark and opened_ts and opened_ts < watermark:
+                self._mirror_gap_since.pop(c, None)
+                continue
+            since = self._mirror_gap_since.setdefault(c, now)
+            age = now - since
+            if age < self.MIRROR_GAP_ALERT_SEC:
+                continue
+            if now - float(self._mirror_gap_alerted.get(c, 0) or 0) < 3600:
+                continue
+            self._mirror_gap_alerted[c] = now
+            reason = str(getattr(self, "_last_mirror_fail", "") or "нет данных")
+            print(f"[AI-LIVE] gap alert {c}: DEMO {int(age // 60)}m без зеркала ({reason})",
+                  flush=True)
+            try:
+                if self.notifier:
+                    await self.notifier.send(
+                        "⚠️ <b>DEMO без зеркала</b>\n"
+                        f"{_esc(c)} {_esc(getattr(pos, 'side', '') or '')}: DEMO в позиции "
+                        f"{int(age // 60)} мин, на LIVE её нет.\n"
+                        f"Причина: <code>{_esc(reason[:160])}</code>"
+                    )
+            except Exception as e:
+                print(f"[AI-LIVE] gap alert send: {e}", flush=True)
+            self._audit_live("gap_alert", c, getattr(pos, "side", "") or "", 0, reason, ok=False)
 
     async def _queue_tg_close(self, text: str, mode: str, coin: str,
                               kind: str = "close") -> None:
@@ -5276,6 +5339,24 @@ class AIStrategy:
             except Exception as e:
                 print(f"[AI-LIVE] clone_missing {coin}: {e}", flush=True)
 
+    async def _load_live_audit(self) -> None:
+        """Restore the LIVE decision trail after a restart.
+
+        The trail answers «почему DEMO-сделка не дошла до зеркала». It used to
+        be write-only from memory: the first reconcile after a deploy persisted
+        an empty list and wiped every answer.
+        """
+        if not self.db:
+            return
+        try:
+            raw = await self.db.get_setting(f"live_audit:{self._live_bot_id()}")
+            rows = json.loads(raw) if raw else []
+            if isinstance(rows, list) and rows:
+                self._live_audit = [r for r in rows if isinstance(r, dict)][-200:]
+                print(f"[AI-LIVE] audit restored: {len(self._live_audit)}", flush=True)
+        except Exception as e:
+            print(f"[AI-LIVE] audit load: {e}", flush=True)
+
     def _persist_live(self):
         """Save live open positions snapshot (separate key from primary)."""
         if not self.db:
@@ -5296,10 +5377,13 @@ class AIStrategy:
             key = f"live_book:{live_bid}"
             val = json.dumps({c: asdict(p) for c, p in self._live_positions.items()})
             await self.db.set_setting(key, val)
-            await self.db.set_setting(
-                f"live_audit:{live_bid}",
-                json.dumps(getattr(self, "_live_audit", [])[-200:], ensure_ascii=False),
-            )
+            # Never overwrite a real trail with an empty list: after a restart
+            # memory starts empty and the first reconcile used to erase history.
+            if getattr(self, "_live_audit", None):
+                await self.db.set_setting(
+                    f"live_audit:{live_bid}",
+                    json.dumps(self._live_audit[-200:], ensure_ascii=False),
+                )
         except Exception as e:
             print(f"[AI-LIVE] persist: {e}", flush=True)
 
@@ -6992,13 +7076,17 @@ class AIStrategy:
             print(f"[AI-LIVE] tick reconcile: {_le}", flush=True)
         # Gap-fill: demo open without live twin (failed mirror / late connect)
         try:
-            if await self._mirror_enabled():
+            if await self._mirror_enabled() and self._positions:
                 await self._try_refresh_live_client()
-                if self._live_ready() and self._positions:
+                if self._live_ready():
                     missing = [c for c in self._positions if c not in self._live_positions]
                     if missing:
                         print(f"[AI-LIVE] gap-fill missing on live: {missing}", flush=True)
                         await self._clone_missing_to_live()
+                else:
+                    # No LIVE client at all: every DEMO position is unmirrored.
+                    missing = list(self._positions)
+                await self._mirror_gap_watch(missing)
         except Exception as _ge:
             print(f"[AI-LIVE] gap-fill: {_ge}", flush=True)
         # Once per process-ish: sweep unclaimed exchange positions
