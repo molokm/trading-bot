@@ -3868,6 +3868,15 @@ async def ai_status(request: Request):
             }
         except Exception as e:
             print(f'[ai/status] telegram diag: {e}', flush=True)
+        try:
+            # v1.44 flow control + measured execution cost: «why did the bot not
+            # open today» and «what did each fill actually cost» without logs.
+            if hasattr(ai_bot, '_flow_status'):
+                status['flow'] = ai_bot._flow_status()
+            if hasattr(ai_bot, 'exec_stats_summary'):
+                status['exec_stats'] = ai_bot.exec_stats_summary()
+        except Exception as e:
+            print(f'[ai/status] flow diag: {e}', flush=True)
     # History overlay replaces lifetime_pnl, so rebuild turnover from the same
     # numbers — otherwise gross_pnl_usd keeps the stale in-memory (post-restart 0).
     try:

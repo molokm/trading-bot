@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.43.1-flow-control"
+STRATEGY_VERSION = "v1.44.0-flow-control"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -481,6 +481,19 @@ class AIConfig:
 
     daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
     weekly_loss_limit_pct: float = 0.06    # ...and after -6% week (MSK ISO week)
+    # ── v1.44 flow control: fees were 41% of gross on 86 trades ──
+    # The binding constraint is not "is this a good setup" but "is one more
+    # round trip worth a fee". 0 disables each cap (no code rollback needed).
+    max_opens_per_day: int = 6
+    max_daily_fees_usd: float = 8.0
+    # Breadth: momentum entries fade when almost no coin is trending. Thin
+    # breadth does not ban trading — it restricts new opens to BTC/ETH, the
+    # cleanest trends and the smallest fee-to-move ratio.
+    breadth_gate_enable: bool = True
+    breadth_min_adx: float = 20.0
+    breadth_min_frac: float = 0.35
+    breadth_min_coins: int = 6
+    breadth_core_only: str = "BTC,ETH"
     # Phase-3: funding + BTC leadership filter
     funding_filter_enabled: bool = True
     funding_fail_closed: bool = True       # P2.2: unknown funding rate → block open (no data = no trade)
@@ -765,6 +778,16 @@ class AIStrategy:
         self._daily_realized_day = ""
         self._weekly_realized = 0.0
         self._weekly_realized_week = ""
+        # v1.44 flow control: opens and fees for the current MSK day.
+        self._flow_day = ""
+        self._daily_opens = 0
+        self._daily_fees = 0.0
+        # v1.44 execution telemetry (session-scoped, for measuring the cost of
+        # our own execution: slippage, liquidity, fill time).
+        self._exec_stats = {"since": datetime.now(timezone.utc).isoformat(),
+                            "n": 0, "adverse_bps_sum": 0.0, "fee_usd": 0.0,
+                            "maker": 0, "taker": 0, "last": {}}
+        self._last_fill_liquidity = ""
         try:
             from app.services.pnl_engine import PNL_TZ
             _now = datetime.now(timezone.utc).astimezone(PNL_TZ)
@@ -776,6 +799,10 @@ class AIStrategy:
             if str(st.get("weekly_realized_week") or "") == _w:
                 self._weekly_realized = float(st.get("weekly_realized") or 0.0)
                 self._weekly_realized_week = _w
+            if str(st.get("flow_day") or "") == _d:
+                self._flow_day = _d
+                self._daily_opens = int(st.get("daily_opens") or 0)
+                self._daily_fees = float(st.get("daily_fees") or 0.0)
         except Exception:
             pass
         self._funding_cache = {}  # coin -> {rate, ts}
@@ -1121,6 +1148,9 @@ class AIStrategy:
         """
         coin = inst_id.split("-")[0]
         tick = _tick_size(coin)
+        # Telemetry default: any fallback path is a taker fill; the two paths
+        # that rest on the book flip this to "maker".
+        self._last_fill_liquidity = "taker"
         if tick <= 0 or not sz:
             return await self._place(client, inst_id, side, sz, pos_side,
                                      is_close=is_close, cl_ord_id=cl_ord_id)
@@ -1165,6 +1195,7 @@ class AIStrategy:
             return await self._place(client, inst_id, side, sz, pos_side,
                                      is_close=is_close, cl_ord_id=cl_ord_id)
         if _maker_ok(resp):
+            self._last_fill_liquidity = "maker"
             return resp
         # Resting on the book: give the market a moment to come to us, then
         # cancel and market whatever is still unfilled (never drop a trade).
@@ -1181,6 +1212,7 @@ class AIStrategy:
                 except (TypeError, ValueError):
                     filled = 0.0
                 if str(orow.get("state") or "").lower() == "filled" and fill_px > 0:
+                    self._last_fill_liquidity = "maker"
                     return {"data": [{"ordId": oid, "avgPx": str(fill_px),
                                       "fillSz": str(filled or sz),
                                       "fee": str(fee)}]}
@@ -2116,6 +2148,10 @@ class AIStrategy:
         """Return reason string if quant layer blocks an LLM open."""
         if (decision.get("action") or "").lower() != "open":
             return None
+        # v1.44: portfolio-level flow caps run before any per-coin work.
+        flow = self._flow_veto((decision.get("symbol") or "").upper())
+        if flow:
+            return flow
         q = self._build_quant()
         # NOTE: no global-chop veto here. A BTC/global chop reading used to
         # block every coin before the per-coin gate below ran, so a coin in its
@@ -2718,6 +2754,14 @@ class AIStrategy:
         # v1.44: the entry commission was paid at open and never subtracted
         # from a close result, so every reported net was short by ~half the
         # round-trip cost. Whole remaining position closes -> whole remaining fee.
+        self.note_fee_flow(fee_c)
+        # Stop fills are the expensive ones: measure them against the stop the
+        # bot actually planned, not against their own fill price (0 bps).
+        _ref_px = (float(getattr(pos, "stop_price", 0) or 0)
+                   if "stop" in str(reason or "").lower() else float(exit_px or 0))
+        self._exec_stat("exit", _ref_px, float(exit_px or 0), fee_c,
+                        liquidity="taker",
+                        bought=(str(side).lower() == "short"))
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
@@ -3260,6 +3304,63 @@ class AIStrategy:
         except Exception:
             pass
         print(f"[AI] exec {event} {data}", flush=True)
+
+    def _exec_stat(self, kind: str, ref_px: float, fill_px: float, fee: float = 0.0,
+                   liquidity: str = "", bought: bool = True) -> None:
+        """Record one fill: adverse slippage in bps, liquidity, commission.
+
+        v1.44 telemetry. `slippage_pct` is an assumption and the whole cost
+        gate is calibrated on it — this measures what execution actually costs
+        (and whether the post-only entry is really earning the spread).
+        """
+        try:
+            stats = getattr(self, "_exec_stats", None)
+            if not isinstance(stats, dict):
+                stats = {"since": datetime.now(timezone.utc).isoformat(), "n": 0,
+                         "adverse_bps_sum": 0.0, "fee_usd": 0.0,
+                         "maker": 0, "taker": 0, "last": {}}
+                self._exec_stats = stats
+            adverse = 0.0
+            if ref_px and fill_px and float(ref_px) > 0:
+                adverse = (float(fill_px) - float(ref_px)) / float(ref_px) * 10000.0
+                if not bought:
+                    adverse = -adverse
+            stats["n"] = int(stats.get("n") or 0) + 1
+            stats["adverse_bps_sum"] = float(stats.get("adverse_bps_sum") or 0) + adverse
+            stats["fee_usd"] = float(stats.get("fee_usd") or 0) + abs(float(fee or 0))
+            liq = str(liquidity or "")
+            if liq in ("maker", "taker"):
+                stats[liq] = int(stats.get(liq) or 0) + 1
+            stats["last"] = {
+                "kind": kind,
+                "ref_px": round(float(ref_px or 0), 6),
+                "fill_px": round(float(fill_px or 0), 6),
+                "adverse_bps": round(adverse, 2),
+                "liquidity": liq,
+                "fee": round(abs(float(fee or 0)), 4),
+                "time": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as e:
+            print(f"[AI] exec stat: {e}", flush=True)
+
+    def exec_stats_summary(self) -> dict:
+        """Session execution metrics for /api/ai/status."""
+        s = getattr(self, "_exec_stats", None) or {}
+        n = int(s.get("n") or 0)
+        maker = int(s.get("maker") or 0)
+        taker = int(s.get("taker") or 0)
+        return {
+            "since": s.get("since"),
+            "fills": n,
+            "adverse_bps_avg": (round(float(s.get("adverse_bps_sum") or 0) / n, 2)
+                                if n else None),
+            "fee_usd": round(float(s.get("fee_usd") or 0), 2),
+            "maker": maker,
+            "taker": taker,
+            "maker_share": (round(100.0 * maker / (maker + taker), 1)
+                            if (maker + taker) else None),
+            "last": s.get("last") or {},
+        }
 
     # ── sizing (anti-liq) ──────────────────────────────────────
     def _size_factor(self, size_pct: float) -> float:
@@ -3852,6 +3953,11 @@ class AIStrategy:
             entry_thesis=str(thesis or "")[:280],
         )
         self._positions[coin] = pos
+        # v1.44 flow control: this open consumed one daily slot and its fee.
+        self.note_open_flow(fee_cost(fee))
+        self._exec_stat("entry", float(entry or 0), float(fill_px or 0),
+                        fee_cost(fee), liquidity=self._last_fill_liquidity,
+                        bought=(str(side).lower() == "long"))
         self._equity -= fee_cost(fee)
         ok_claim = await claim_or_flatten(self.db, client, self.BOT_ID, inst, side, sz, fill_px)
         if not ok_claim:
@@ -4462,6 +4568,18 @@ class AIStrategy:
                 fee_c = float(_fc)
         else:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
+        # v1.44: feed the flow caps and the execution telemetry.
+        self.note_fee_flow(fee_c)
+        self._exec_stat("exit", float(mark or fill_px), float(fill_px or 0), fee_c,
+                        liquidity="taker",
+                        bought=(str(getattr(pos, "side", "")).lower() == "short"))
+        # v1.44: the entry commission is part of the trade result.
+        _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _entry_fee > 0:
+            pnl = float(pnl or 0) - _entry_fee
+            fee_c = float(fee_c or 0) + _entry_fee
+            self._lifetime_fees += _entry_fee
+            pos.entry_fee = 0.0
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
         self._weekly_realized = float(getattr(self, "_weekly_realized", 0) or 0) + float(pnl or 0)
@@ -4733,6 +4851,10 @@ class AIStrategy:
                         pass
         if not fill_px or fill_px <= 0:
             fill_px = entry
+        # v1.44: real-money execution quality (slippage/fee/liquidity).
+        self._exec_stat("entry_live", float(entry or 0), float(fill_px or 0),
+                        fee_cost(fee), liquidity=self._last_fill_liquidity,
+                        bought=(str(order_side).lower() == "buy"))
         if side == "long":
             stop = fill_px * (1 - stop_pct)
             take = fill_px * (1 + take_pct)
@@ -4972,6 +5094,10 @@ class AIStrategy:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
                              CT_VAL.get(coin, 0.01))
         # v1.44: charge the entry commission to this leg (see _close).
+        self.note_fee_flow(fee_c)
+        self._exec_stat("exit_live", float(mark or fill_px), float(fill_px or 0),
+                        fee_c, liquidity="taker",
+                        bought=(str(getattr(pos, "side", "")).lower() == "short"))
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
@@ -6311,6 +6437,10 @@ class AIStrategy:
         else:
             pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee,
                             CT_VAL.get(coin, 0.01))
+        self.note_fee_flow(fee_c)
+        self._exec_stat("partial", float(fill_px or 0), float(fill_px or 0), fee_c,
+                        liquidity="taker",
+                        bought=(str(getattr(pos, "side", "")).lower() == "short"))
         # v1.44: a partial carries the share of the entry commission for the
         # size it closed; the remainder stays on the position for later legs.
         try:
@@ -7356,6 +7486,95 @@ class AIStrategy:
             self._daily_realized_day = day
             self._daily_realized = 0.0
         return float(getattr(self, "_daily_realized", 0.0) or 0.0)
+
+    # ── v1.44 flow control ─────────────────────────────────────
+    def _flow_day_counters(self) -> tuple[int, float]:
+        """(opens today, fees paid today), MSK day boundary like the cards."""
+        from datetime import datetime, timezone
+        from app.services.pnl_engine import PNL_TZ
+        day = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+        if day != getattr(self, "_flow_day", ""):
+            self._flow_day = day
+            self._daily_opens = 0
+            self._daily_fees = 0.0
+        return (int(getattr(self, "_daily_opens", 0) or 0),
+                float(getattr(self, "_daily_fees", 0.0) or 0.0))
+
+    def note_open_flow(self, fee: float = 0.0) -> None:
+        """Count an accepted open and the entry commission it cost."""
+        self._flow_day_counters()
+        self._daily_opens = int(getattr(self, "_daily_opens", 0) or 0) + 1
+        if fee:
+            self._daily_fees = float(getattr(self, "_daily_fees", 0.0) or 0.0) + abs(float(fee))
+
+    def note_fee_flow(self, fee: float) -> None:
+        """Count a commission paid on an existing position (exit or partial)."""
+        self._flow_day_counters()
+        if fee:
+            self._daily_fees = float(getattr(self, "_daily_fees", 0.0) or 0.0) + abs(float(fee))
+
+    def _breadth(self) -> tuple[float, int, int]:
+        """(share of tracked coins in a real trend, trending, tracked)."""
+        try:
+            floor = float(getattr(self.config, "breadth_min_adx", 20.0) or 20.0)
+        except (TypeError, ValueError):
+            floor = 20.0
+        n = trend = 0
+        for _coin, ind in (self._latest_indicators or {}).items():
+            if not isinstance(ind, dict):
+                continue
+            try:
+                adx = float(ind.get("adx") or 0)
+            except (TypeError, ValueError):
+                continue
+            n += 1
+            if adx >= floor:
+                trend += 1
+        return ((trend / n) if n else 0.0), trend, n
+
+    def _flow_status(self) -> dict:
+        """Current flow caps + breadth, for /api/ai/status."""
+        opens, fees = self._flow_day_counters()
+        frac, trend, n = self._breadth()
+        cfg = self.config
+        return {
+            "day": self._flow_day,
+            "opens_today": opens,
+            "max_opens_per_day": int(getattr(cfg, "max_opens_per_day", 0) or 0),
+            "fees_today": round(fees, 2),
+            "max_daily_fees_usd": float(getattr(cfg, "max_daily_fees_usd", 0.0) or 0.0),
+            "breadth_frac": round(frac, 3),
+            "breadth_trending": trend,
+            "breadth_tracked": n,
+            "breadth_min_frac": float(getattr(cfg, "breadth_min_frac", 0.35) or 0.35),
+            "breadth_gate": bool(getattr(cfg, "breadth_gate_enable", True)),
+        }
+
+    def _flow_veto(self, coin: str) -> str | None:
+        """Daily caps and breadth gate (v1.44). None = open allowed.
+
+        Every gate is config-off-able: 0 disables a cap, breadth_gate_enable
+        = false removes the regime filter — no code rollback required.
+        """
+        cfg = self.config
+        opens, fees = self._flow_day_counters()
+        cap = int(getattr(cfg, "max_opens_per_day", 0) or 0)
+        if cap > 0 and opens >= cap:
+            return f"flow:opens_today:{opens}/{cap}"
+        fee_cap = float(getattr(cfg, "max_daily_fees_usd", 0.0) or 0.0)
+        if fee_cap > 0 and fees >= fee_cap:
+            return f"flow:daily_fees:{fees:.2f}/{fee_cap:.2f}"
+        if bool(getattr(cfg, "breadth_gate_enable", True)):
+            frac, _trend, n = self._breadth()
+            need = float(getattr(cfg, "breadth_min_frac", 0.35) or 0.0)
+            min_n = int(getattr(cfg, "breadth_min_coins", 6) or 0)
+            if n >= min_n and need > 0 and frac < need:
+                core = {c.strip().upper()
+                        for c in str(getattr(cfg, "breadth_core_only", "BTC,ETH") or "").split(",")
+                        if c.strip()}
+                if str(coin or "").upper() not in core:
+                    return f"flow:breadth:{frac:.2f}<{need:.2f}"
+        return None
 
     def weekly_realized_pnl(self) -> float:
         """Realised PnL for the current MSK ISO week (Mon 00:00 MSK)."""
@@ -8648,6 +8867,9 @@ class AIStrategy:
             "session_pnl": self._session_pnl,
             "daily_realized": self._daily_realized,
             "daily_realized_day": self._daily_realized_day,
+            "flow_day": self._flow_day,
+            "daily_opens": self._daily_opens,
+            "daily_fees": self._daily_fees,
             "weekly_realized": self._weekly_realized,
             "weekly_realized_week": self._weekly_realized_week,
             "adapt": {
@@ -9244,6 +9466,9 @@ class AIStrategy:
             "turnover": self._turnover_stats(
                 self._lifetime_pnl, self._lifetime_fees,
                 float(self._account_equity or self._equity)),
+            # v1.44 flow control + measured execution cost (diag + card hint).
+            "flow": self._flow_status(),
+            "exec_stats": self.exec_stats_summary(),
             "total_trades": self._lifetime_trades,
             "session_trades": len(closed),
             "open_fills": len([t for t in self._trade_log if t.get("reason") == "open"]),
