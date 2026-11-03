@@ -675,6 +675,7 @@ class AIPosition:
     owner_prefix: str = ""
     demo_trade_id: str = ""       # shared id: DEMO clOrdId=aid{id}, LIVE=ail{id}
     # ── settlement memory (P2): context captured at entry ──
+    entry_fee: float = 0.0        # v1.44: commission paid to open, consumed on close
     risk_usd: float = 0.0         # planned risk in USDT (size * stop distance)
     btc_ref: float = 0.0          # BTC price at entry — benchmark anchor
     entry_confidence: float = 0.0
@@ -2714,6 +2715,15 @@ class AIStrategy:
                 self._lifetime_fees += abs(float(fee_c or 0))
             except Exception:
                 pnl = 0.0
+        # v1.44: the entry commission was paid at open and never subtracted
+        # from a close result, so every reported net was short by ~half the
+        # round-trip cost. Whole remaining position closes -> whole remaining fee.
+        _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _entry_fee > 0:
+            pnl = float(pnl or 0) - _entry_fee
+            fee_c = float(fee_c or 0) + _entry_fee
+            self._lifetime_fees += _entry_fee
+            pos.entry_fee = 0.0
         pnl = round(float(pnl or 0), 2)
         # The engine drops zero-PnL rows; only bump the counters for rows it
         # will actually count, otherwise internal KPI can never converge.
@@ -3832,6 +3842,9 @@ class AIStrategy:
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
             peak_price=fill_px, signal_id=int(signal_id or 0),
             demo_trade_id=str(trade_id or ""),
+            # v1.44: the entry commission is real money and belongs to the trade
+            # result — consumed on close (fully) or proportionally (partials).
+            entry_fee=fee_cost(fee),
             risk_usd=round(
                 abs(sz) * CT_VAL.get(coin, 0.01) * fill_px * float(stop_pct or 0), 4),
             btc_ref=float((self._latest_indicators.get("BTC") or {}).get("close") or 0),
@@ -4745,6 +4758,7 @@ class AIStrategy:
             leverage=lev, opened_at=datetime.now(timezone.utc).isoformat(),
             peak_price=fill_px, signal_id=int(signal_id or 0),
             demo_trade_id=str(trade_id or ""),
+            entry_fee=fee_cost(fee),
         )
         ok_claim = await claim_open(self.db, live_bid, inst, side, sz, fill_px)
         if not ok_claim:
@@ -4957,6 +4971,12 @@ class AIStrategy:
         else:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee,
                              CT_VAL.get(coin, 0.01))
+        # v1.44: charge the entry commission to this leg (see _close).
+        _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _entry_fee > 0:
+            pnl = float(pnl or 0) - _entry_fee
+            fee_c = float(fee_c or 0) + _entry_fee
+            pos.entry_fee = 0.0
         self._audit_live("close", coin, pos.side, pos.size, reason or "demo_close", ok=True)
         self._live_equity += pnl
         self._live_session_pnl += pnl
@@ -6090,6 +6110,7 @@ class AIStrategy:
                     "take_price": float(getattr(pos, "take_price", 0) or 0),
                     "partial_taken": bool(getattr(pos, "partial_taken", False)),
                     "loss_partial_done": bool(getattr(pos, "loss_partial_done", False)),
+                    "entry_fee": float(getattr(pos, "entry_fee", 0) or 0),
                     "side": getattr(pos, "side", ""),
                     "entry_price": float(getattr(pos, "entry_price", 0) or 0),
                 }
@@ -6126,6 +6147,9 @@ class AIStrategy:
                         pos.partial_taken = True
                     if meta.get("loss_partial_done"):
                         pos.loss_partial_done = True
+                    _ef = float(meta.get("entry_fee") or 0)
+                    if _ef > 0:
+                        pos.entry_fee = _ef
                     # prefer tighter stored stop for shorts/longs
                     sp = float(meta.get("stop_price") or 0)
                     if sp > 0:
@@ -6287,6 +6311,18 @@ class AIStrategy:
         else:
             pnl = close_pnl(pos.side, close_sz, pos.entry_price, fill_px, fee,
                             CT_VAL.get(coin, 0.01))
+        # v1.44: a partial carries the share of the entry commission for the
+        # size it closed; the remainder stays on the position for later legs.
+        try:
+            _ef_left = float(getattr(pos, "entry_fee", 0) or 0)
+            _full_sz = float(getattr(pos, "size", 0) or 0) + float(close_sz or 0)
+            if _ef_left > 0 and _full_sz > 0 and close_sz > 0:
+                _ef_share = _ef_left * min(1.0, float(close_sz) / _full_sz)
+                pos.entry_fee = max(0.0, _ef_left - _ef_share)
+                pnl = float(pnl or 0) - _ef_share
+                fee_c = float(fee_c or 0) + _ef_share
+        except (TypeError, ValueError):
+            pass
         pnl = float(pnl or 0)
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + pnl
@@ -6334,7 +6370,8 @@ class AIStrategy:
                 await self.db.save_trade(
                     bot_id=self.BOT_ID, side=close_side, sz=close_sz, px=fill_px,
                     ord_id=oid, inst_id=pos.inst_id, ord_type="market",
-                    fee=fee_cost(fee), fee_ccy="USDT", pnl=round(pnl, 2),
+                    # fee_c already includes this leg's share of the entry fee.
+                    fee=round(float(fee_c or 0), 6), fee_ccy="USDT", pnl=round(pnl, 2),
                     state="closed", signal_id=signal_id or None,
                     account_mode=mode, account_key=key,
                 )

@@ -7656,12 +7656,32 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
             close_by_ord[oid]['ts'] = ts
         if clord and (not close_by_ord[oid]['cl_ord_id']):
             close_by_ord[oid]['cl_ord_id'] = clord
+    # Entry commissions (v1.44): an OKX bill carries ONE leg's fee. The close
+    # bill's `pnl` is the price move and its `fee` is the exit commission; the
+    # entry commission sits on the open bill (subType 3/4) and used to be
+    # dropped, so every card total was short by ~half the round-trip cost
+    # (NEAR 03.11: −15.06 gross, −5.24 total fees, card showed −17.68 instead
+    # of −20.30). Pair by clOrdId: entry aid{tid} / close aid{tid}c.
+    from app.services.pnl_engine import entry_fee_by_close as _entry_fee_by_close
+    _entry_fees = _entry_fee_by_close(bills)
     rows = []
     recovered_labels: list = []
+    _without_entry = 0
+    _entry_fees_total = 0.0
     for oid, info in close_by_ord.items():
         if _edge_cutoff and int(info.get('ts_min') or 0) < _edge_cutoff:
             # Touches the unfetched edge of the window — its PnL may be partial.
             continue
+        _e_share = float(_entry_fees.get(oid) or 0.0)
+        if _e_share <= 0:
+            # Entry bill outside this window (long hold, or a fresh process
+            # before the full pass). Still write the close — hiding a real trade
+            # is worse than one leg of fee — and the full sync corrects it.
+            _without_entry += 1
+        else:
+            info['pnl'] -= _e_share
+            info['fee'] += _e_share
+            _entry_fees_total += _e_share
         clord = (info['cl_ord_id'] or '').lower()
         bot_label = ''
         for pfx, label in sorted(_CLORD_BOT_MAP.items(), key=lambda x: -len(x[0])):
@@ -7704,7 +7724,10 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
         if not bot_label and AI_ONLY_MODE:
             bot_label = ''
         rows.append({'ord_id': oid, 'inst_id': info['inst_id'], 'cl_ord_id': info['cl_ord_id'], 'bot_label': bot_label, 'pnl': round(info['pnl'], 6), 'fee': round(info['fee'], 6), 'sz': round(info['sz'], 6), 'avg_px': round(avg_px, 6), 'close_ts': close_ts, 'sub_type': info['sub_type'], 'account_mode': info.get('account_mode') or _mode, 'account_key': 'showcase' if _mode == 'demo' else 'live'})
-    print(f'[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} close_orders={len(close_by_ord)} rows={len(rows)}', flush=True)
+    print(f'[exchange-sync] bills={len(bills)} subtypes={_sub_types_seen} '
+          f'close_orders={len(close_by_ord)} rows={len(rows)} '
+          f'entry_fees={_entry_fees_total:.2f} without_entry={_without_entry}',
+          flush=True)
     if recovered_labels:
         _rc: dict = {}
         for _label, _inst in recovered_labels:
@@ -7716,7 +7739,9 @@ async def _sync_exchange_close_trades_impl(mode: str, *, recent_only: bool = Fal
     _sd = _sync_diag.setdefault(_mode, {})
     _sd.update({'ts': int(_time.time()),
                 'bills': len(bills), 'close_orders': len(close_by_ord),
-                'rows': len(rows)})
+                'rows': len(rows),
+                'entry_fees_usd': round(_entry_fees_total, 2),
+                'closes_without_entry': _without_entry})
     if rows:
         try:
             n = await db.upsert_exchange_close_trades(rows)

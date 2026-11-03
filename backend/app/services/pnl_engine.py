@@ -17,6 +17,7 @@ Rules (unified filter — one set T for cards, history, bot KPI, TG):
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
 from zoneinfo import ZoneInfo
@@ -933,6 +934,98 @@ def _merge_close_rows(
     return merged, extra
 
 
+def _bill_num(v) -> float:
+    """Absolute numeric value of a bill field (fees arrive signed by OKX)."""
+    try:
+        return abs(float(v if v not in (None, "") else 0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def clord_entry_id(cl_ord_id) -> str:
+    """Recover the entry trade id from an entry OR close clOrdId.
+
+    The AI bot tags an entry ``aid{tid}`` (demo) / ``ail{tid}`` (live) and every
+    close of that position ``aid{tid}c``. Trimming the trailing ``c`` pairs a
+    close with the commission paid on its entry without guessing by timestamp.
+    """
+    s = re.sub(r"[^a-zA-Z0-9]", "", str(cl_ord_id or "")).lower()
+    if not s.startswith(("aid", "ail")):
+        return ""
+    body = s[3:]
+    if body.endswith("c"):
+        body = body[:-1]
+    return s[:3] + body
+
+
+def entry_fee_by_close(bills: list[dict]) -> dict[str, float]:
+    """Entry commission owed by each close order, keyed by ``ordId``.
+
+    An OKX bill carries the commission of ONE leg: the close bill's ``fee`` is
+    the exit commission, while the entry commission sits on the open bill
+    (subType 3/4). Only the exit leg was ever subtracted, so every net total
+    was short by ~half the round-trip cost (NEAR 03.11: gross −15.06, close fee
+    2.63, entry fee 2.62, card −17.68 instead of −20.30).
+
+    Pairing is by position lifecycle, not clOrdId: our close orders go out with
+    an EMPTY clOrdId (the bill proves it), so an id-based match silently found
+    nothing. For each instrument the bills are replayed in time order, opens
+    add to a pending pot of (fee, size), and every close draws its size share
+    of that pot. Partial closes split it proportionally; the pot is consumed
+    exactly once, so the sum over all closes never exceeds what was paid.
+    """
+    by_inst: dict[str, list] = {}
+    for b in bills or []:
+        if not isinstance(b, dict):
+            continue
+        st = str(b.get("subType") or "")
+        if st not in ("3", "4", "5", "6"):
+            continue
+        inst = str(b.get("instId") or "")
+        oid = str(b.get("ordId") or "").strip()
+        if not inst or not oid:
+            continue
+        try:
+            ts = int(b.get("ts") or b.get("fillTime") or 0)
+        except (TypeError, ValueError):
+            ts = 0
+        by_inst.setdefault(inst, []).append((ts, 0 if st in ("3", "4") else 1, st, oid, b))
+
+    out: dict[str, float] = {}
+    for _inst, rows in by_inst.items():
+        rows.sort(key=lambda r: (r[0], r[1]))
+        pending: list[list] = []  # [fee_left, size_left]
+        for _ts, _kind, st, oid, b in rows:
+            sz = _bill_num(b.get("sz"))
+            if st in ("3", "4"):
+                pending.append([_bill_num(b.get("fee")), sz])
+                continue
+            need = sz
+            take = 0.0
+            while need > 1e-12 and pending:
+                slot = pending[0]
+                fee_left, size_left = slot[0], slot[1]
+                if size_left > 0:
+                    use = min(need, size_left)
+                    share = fee_left * (use / size_left)
+                    slot[0] = max(0.0, fee_left - share)
+                    slot[1] = max(0.0, size_left - use)
+                else:
+                    # No size on the entry bill (spot-like row): give the fee
+                    # to the first close rather than lose it.
+                    use = need
+                    share = fee_left
+                    slot[0] = 0.0
+                    slot[1] = 0.0
+                take += share
+                need -= use
+                if slot[1] <= 1e-12 or slot[0] <= 1e-12:
+                    pending.pop(0)
+            if take > 0:
+                out[oid] = out.get(oid, 0.0) + take
+    return out
+
+
 def rows_from_bills(
     bills: list[dict],
     *,
@@ -945,27 +1038,21 @@ def rows_from_bills(
     platform is AI-only (then untagged closes are attributed to AI).
     """
     ep = epoch_ms() if epoch is None else int(epoch)
-    out: list[dict] = []
-    seen: set[str] = set()
+    # Entry commissions live on the OPEN bills; allocate them to closes so the
+    # row pnl is the true round-trip net (gross − entry fee − exit fee).
+    fees_by_close = entry_fee_by_close(bills)
+
+    # One close order can be filled in many bills (NEAR 03.11: 14 fills).
+    # Taking the first fill only — as this used to — booked a fraction of the
+    # real result, so aggregate the order before building the row.
+    groups: dict[str, dict] = {}
     for b in bills or []:
         if not isinstance(b, dict):
             continue
         if str(b.get("subType") or "") not in ("5", "6"):
             continue
         oid = str(b.get("ordId") or "").strip()
-        if not oid or oid in seen:
-            continue
-        try:
-            bp = float(b.get("pnl") or 0)
-        except (TypeError, ValueError):
-            bp = 0.0
-        if abs(bp) < 1e-12:
-            continue
-        try:
-            bts = int(b.get("ts") or 0)
-        except (TypeError, ValueError):
-            bts = 0
-        if bts and bts < ep:
+        if not oid:
             continue
         cl = str(b.get("clOrdId") or "").strip()
         cl_l = cl.lower()
@@ -973,21 +1060,44 @@ def rows_from_bills(
             continue
         if not cl_l.startswith("ai") and not allow_untagged_ai:
             continue
-        seen.add(oid)
-        # OKX bill `pnl` is gross of the trade fee; the balance change is
-        # pnl + fee. Every consumer treats row pnl as NET, so subtract here.
+        g = groups.setdefault(oid, {"pnl": 0.0, "fee": 0.0, "cl": "",
+                                    "ts": None, "inst": ""})
         try:
-            bf = abs(float(b.get("fee") or 0) or 0)
+            g["pnl"] += float(b.get("pnl") or 0)
         except (TypeError, ValueError):
-            bf = 0.0
+            pass
+        g["fee"] += _bill_num(b.get("fee"))
+        try:
+            bts = int(b.get("ts") or 0)
+        except (TypeError, ValueError):
+            bts = 0
+        # Earliest fill = order time; epoch applies to the whole order.
+        if bts and (g["ts"] is None or bts < g["ts"]):
+            g["ts"] = bts
+        if cl and not g["cl"]:
+            g["cl"] = cl
+        if not g["inst"]:
+            g["inst"] = b.get("instId") or ""
+
+    out: list[dict] = []
+    for oid, g in groups.items():
+        ts = int(g["ts"] or 0)
+        if ts and ts < ep:
+            continue
+        if abs(g["pnl"]) < 1e-12:
+            continue
+        e_share = fees_by_close.get(oid, 0.0)
         out.append({
             "ord_id": oid,
-            "inst_id": b.get("instId") or "",
-            "cl_ord_id": cl,
-            "pnl": bp - bf,
-            "gross_pnl": bp,
-            "fee": bf,
-            "close_ts": bts,
+            "inst_id": g["inst"],
+            "cl_ord_id": g["cl"],
+            # OKX bill `pnl` is gross of the trade fee; the balance change is
+            # pnl + fee. Row pnl is NET: both legs of the commission go out.
+            "pnl": g["pnl"] - g["fee"] - e_share,
+            "gross_pnl": g["pnl"],
+            "fee": g["fee"] + e_share,
+            "entry_fee": round(e_share, 6),
+            "close_ts": ts,
             "account_mode": "live",
             "account_key": "live",
             "bot_label": "AI Discretionary 1H",
