@@ -110,7 +110,7 @@ async def test_bar_closes_are_the_last_five_closed_bars():
 def _veto_bot(build_quant):
     bot = _flat_bot()
     bot._build_quant = build_quant
-    bot._effective_min_confidence = lambda: 0.50
+    bot._effective_min_confidence = lambda coin="": 0.50
     bot._round_trip_cost_pct = lambda: 0.0014
     bot._atr_pct = lambda coin, entry=0.0: 0.02     # 2% ATR -> clears cost
     bot._momentum_against = lambda side, ind: None

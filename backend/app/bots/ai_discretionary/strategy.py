@@ -286,6 +286,15 @@ LOT_SZ = {
     "LINK": 0.1, "AVAX": 0.1, "ADA": 0.1,
     "LTC": 0.1, "DOT": 1.0, "UNI": 1.0, "NEAR": 0.1,
 }
+# OKX USDT-M price step (tickSize) per coin. A limit order whose price is not
+# on the grid is rejected outright — and a market order pays the spread, which
+# is the single biggest avoidable cost (v1.43.1: ~$80–110/period).
+PRICE_TICKS = {
+    "BTC": 0.01, "ETH": 0.01, "SOL": 0.01, "XRP": 0.001,
+    "OKB": 0.01, "DOGE": 0.0001, "BCH": 0.01, "DAI": 0.01,
+    "LINK": 0.01, "AVAX": 0.01, "ADA": 0.001,
+    "LTC": 0.01, "DOT": 0.01, "UNI": 0.01, "NEAR": 0.01,
+}
 
 
 def compare_contract_specs(rows, coins=None) -> list:
@@ -341,6 +350,38 @@ def _fmt_px(px: float, coin: str = "") -> str:
     if p >= 1:
         return f"{p:.5f}".rstrip("0").rstrip(".")
     return f"{p:.6f}".rstrip("0").rstrip(".")
+
+
+def _tick_size(coin: str) -> float:
+    """OKX price step for a coin; 0.01 fallback when unknown."""
+    return float(PRICE_TICKS.get(coin, 0.01) or 0.01)
+
+
+def _round_entry_px(px: float, coin: str, side: str) -> float:
+    """Snap an entry price to the exchange grid, in the trade's direction.
+
+    Buy: round DOWN to the best bid we can actually hit (worse than mid).
+    Sell: round UP. Snapping the wrong way turns a maker order into a taker
+    one — the whole point of post-only is lost.
+    """
+    tick = _tick_size(coin)
+    if tick <= 0 or not px or px <= 0:
+        return float(px or 0.0)
+    steps = math.floor(px / tick) if str(side).lower() == "long" else math.ceil(px / tick)
+    return round(max(steps, 1) * tick, 12)
+
+
+def _best_entry_px(px: float, coin: str, side: str, depth: int = 1) -> float:
+    """Price from the book, not the last close.
+
+    A market order pays the spread; a post-only limit resting on the book
+    earns the spread instead. `depth` walks one level deeper when the top of
+    the book is too thin for our size (v1.43.1).
+    """
+    px = _round_entry_px(px, coin, side)
+    if side == "long":
+        return max(px - _tick_size(coin) * depth, _tick_size(coin))
+    return px + _tick_size(coin) * depth
 
 
 def compute_close_metrics(pos, coin: str, exit_px: float, fee=0, fills=None):
@@ -431,6 +472,12 @@ class AIConfig:
     bar_close_lookback: int = 2            # use candle[-2] as last CLOSED bar ([-1] is forming)
     llm_min_interval_sec: int = 180        # hard floor between LLM calls (entry)
     llm_manage_interval_sec: int = 90       # v1.15: more frequent LLM while in a position
+    # v1.43.1: post-only entry. A market order pays the spread on both legs;
+    # a resting limit earns it. If the maker order is not filled within this
+    # many seconds it is cancelled and re-sent as a market order, so a thin
+    # book never blocks an entry (fallback = old behaviour).
+    maker_entry: bool = True
+    maker_wait_sec: float = 2.0
 
     daily_loss_limit_pct: float = 0.02     # stop new opens after -2% day
     weekly_loss_limit_pct: float = 0.06    # ...and after -6% week (MSK ISO week)
@@ -526,6 +573,13 @@ class AIConfig:
     sol_min_align: float = 0.88
     # Same-coin reopen after a loss — 75m was too short (XRP triple on 14 Oct).
     loss_reopen_cooldown_min: float = 180.0
+    # v1.43.1 per-coin performance gate: after N straight losses a coin must
+    # clear a higher confidence bar for COIN_GATE_TTL_HOURS. The 80-trade
+    # sample was not uniform — LTC −40.1, DOGE −26.6, XRP −17.4, ADA −5.2
+    # carried almost all of the loss while SOL/ETH/BTC were green.
+    coin_gate_loss_streak: int = 5
+    coin_gate_conf_add: float = 0.10
+    coin_gate_ttl_hours: float = 48.0
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
@@ -655,6 +709,7 @@ class AIStrategy:
         self._mirror_gap_since: dict[str, float] = {}
         self._mirror_gap_alerted: dict[str, float] = {}
         self._live_audit: list = []   # every LIVE order attempt (why/who)
+        self._latest_books: dict = {}  # coin -> raw OKX books response (1H tick)
         self._live_drift_warned: set = set()   # DEMO/LIVE divergence already logged
         self._second_entry_bar: str | None = None  # v1.33: bar already asked for a 2nd slot
         self._live_equity = 0.0
@@ -1000,8 +1055,9 @@ class AIStrategy:
 
     async def _live_market_order(
         self, lc, *, inst, order_side, sz, pos_side, cl_ord_id, coin, is_close, reason,
+        ord_type="market", px=None,
     ) -> dict:
-        """Single chokepoint for every LIVE market order."""
+        """Single chokepoint for every LIVE order (market or post-only)."""
         side = (pos_side or "long").lower()
         if side not in ("long", "short"):
             side = "long"
@@ -1023,6 +1079,11 @@ class AIStrategy:
                 return {"error": True, "message": f"blocked:{why}"}
         self._mirror_call_active = True
         try:
+            if ord_type == "postonly":
+                return (await self._place_postonly(
+                    lc, inst, order_side, sz, side, px=px, cl_ord_id=cl_ord_id,
+                    is_close=is_close,
+                ) or {})
             return await self._place(
                 lc, inst, order_side, sz, side,
                 is_close=is_close, cl_ord_id=cl_ord_id,
@@ -1031,6 +1092,96 @@ class AIStrategy:
             return {"error": True, "message": str(e)[:200]}
         finally:
             self._mirror_call_active = False
+
+    async def _place_postonly(self, client, inst_id: str, side: str, sz: float,
+                              pos_side: str, *, px: float = None,
+                              cl_ord_id: str = None, is_close: bool = False) -> dict:
+        """Post-only limit at the near side of the book; falls back to market.
+
+        Every entry is a market order today, which means the bot pays the
+        spread on both legs of every round trip — the single biggest avoidable
+        cost (~$80–110 per period at current frequency). A post-only limit
+        resting on the book earns the spread instead, and if it is not filled
+        within MAKER_TIMEOUT_SEC it is cancelled and re-sent as a market order,
+        so a thin book never blocks an entry.
+        """
+        coin = inst_id.split("-")[0]
+        tick = _tick_size(coin)
+        if tick <= 0 or not sz:
+            return await self._place(client, inst_id, side, sz, pos_side,
+                                     is_close=is_close, cl_ord_id=cl_ord_id)
+        if px is None or float(px) <= 0:
+            px = _best_entry_px(
+                float(self._latest_indicators.get(coin, {}).get("close") or 0),
+                coin, side)
+
+        def _maker_ok(r: dict) -> bool:
+            """True when the ack actually carries a fill (avgPx/fillPx)."""
+            rows = list((r or {}).get("data") or [])
+            if not rows:
+                return False
+            if str(rows[0].get("sCode") or "") not in ("", "0"):
+                return False
+            try:
+                return float(rows[0].get("avgPx") or rows[0].get("fillPx") or 0) > 0
+            except (TypeError, ValueError):
+                return False
+
+        try:
+            resp = await client.place_order(
+                inst_id=inst_id, side=side, ord_type="post_only",
+                sz=self._fmt_sz(coin, sz), px=str(px), td_mode="cross",
+                pos_side=pos_side, cl_ord_id=cl_ord_id, is_close=is_close,
+            )
+        except Exception as e:
+            print(f"[AI] maker place {coin}: {e}", flush=True)
+            return await self._place(client, inst_id, side, sz, pos_side,
+                                     is_close=is_close, cl_ord_id=cl_ord_id)
+        if resp.get("error"):
+            print(f"[AI] maker rejected {coin} ({str(resp.get('message') or '')[:60]}) → market",
+                  flush=True)
+            return await self._place(client, inst_id, side, sz, pos_side,
+                                     is_close=is_close, cl_ord_id=cl_ord_id)
+        rows = list(resp.get("data") or [])
+        if rows and str(rows[0].get("sCode") or "") not in ("", "0"):
+            # OKX ack with sCode != 0 = rejected (51121 post-only would cross,
+            # 80011/80014 price grid, 51008 margin). Market fallback is safe.
+            print(f"[AI] maker sCode {rows[0].get('sCode')} {coin} "
+                  f"({str(rows[0].get('sMsg') or '')[:60]}) → market", flush=True)
+            return await self._place(client, inst_id, side, sz, pos_side,
+                                     is_close=is_close, cl_ord_id=cl_ord_id)
+        if _maker_ok(resp):
+            return resp
+        # Resting on the book: give the market a moment to come to us, then
+        # cancel and market whatever is still unfilled (never drop a trade).
+        oid = str((rows[0].get("ordId") if rows else "") or "")
+        await asyncio.sleep(float(getattr(self.config, "maker_wait_sec", 2.0) or 2.0))
+        filled = 0.0
+        if oid:
+            try:
+                o = await client.get_order(inst_id, ord_id=oid)
+                orow = (o.get("data") or [{}])[0]
+                fill_px, fee, _ = extract_fill_avg([orow], 0.0)
+                try:
+                    filled = abs(float(orow.get("accFillSz") or orow.get("fillSz") or 0))
+                except (TypeError, ValueError):
+                    filled = 0.0
+                if str(orow.get("state") or "").lower() == "filled" and fill_px > 0:
+                    return {"data": [{"ordId": oid, "avgPx": str(fill_px),
+                                      "fillSz": str(filled or sz),
+                                      "fee": str(fee)}]}
+            except Exception:
+                pass
+            try:
+                await client.cancel_order(inst_id, oid)
+            except Exception:
+                pass
+        remain = float(sz) - float(filled or 0)
+        if remain <= 0:
+            return await self._place(client, inst_id, side, sz, pos_side,
+                                     is_close=is_close, cl_ord_id=cl_ord_id)
+        return await self._place(client, inst_id, side, remain, pos_side,
+                                 is_close=is_close, cl_ord_id=cl_ord_id)
 
     def _live_bot_id(self) -> str:
         """Distinct bot_id for live mirror records (positions table has no account_mode)."""
@@ -1950,8 +2101,9 @@ class AIStrategy:
         coin = (decision.get("symbol") or "").upper()
         side = (decision.get("side") or "").lower()
         conf = float(decision.get("confidence") or 0)
-        if conf < float(self._effective_min_confidence()):
-            return f"quant_veto:low_conf:{conf:.2f}<{self._effective_min_confidence():.2f}"
+        _min_conf = float(self._effective_min_confidence(coin))
+        if conf < _min_conf:
+            return f"quant_veto:low_conf:{conf:.2f}<{_min_conf:.2f}"
         stop = float(decision.get("stop_pct") or 0.03)
         take = float(decision.get("take_pct") or 0.06)
         if stop > 0 and take / stop < 2.0:
@@ -2759,8 +2911,50 @@ class AIStrategy:
             out[k] = list(v) if isinstance(v, list) else v
         return out
 
-    def _effective_min_confidence(self) -> float:
-        return float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
+    def _coin_gate_add(self, coin: str) -> float:
+        """Extra confidence a coin must clear after its own losing streak.
+
+        Global thresholds let a coin with a broken edge keep trading because
+        the book as a whole is roughly flat. Five straight losses on the same
+        coin is evidence about that coin, not about the market, so it gets a
+        higher bar for 48h after the last loss (and no ban — the market may
+        have turned).
+        """
+        n = int(getattr(self.config, "coin_gate_loss_streak", 5) or 0)
+        add = float(getattr(self.config, "coin_gate_conf_add", 0.10) or 0.0)
+        if n <= 0 or add <= 0 or not coin:
+            return 0.0
+        coin = str(coin).upper()
+        try:
+            closed = self._closed_trades(demo_only=True)
+        except Exception:
+            return 0.0
+        tail = [t for t in closed
+                if str(t.get("symbol") or "").upper().startswith(coin + "-")]
+        if len(tail) < n:
+            return 0.0
+        last_n = tail[-n:]
+        try:
+            if not all(float(t.get("pnl") or 0) < 0 for t in last_n):
+                return 0.0
+        except (TypeError, ValueError):
+            return 0.0
+        try:
+            ts = datetime.fromisoformat(
+                str(tail[-1].get("time") or "").replace("Z", "+00:00"))
+            age_h = (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+        except Exception:
+            age_h = 0.0
+        ttl = float(getattr(self.config, "coin_gate_ttl_hours", 48.0) or 0.0)
+        if ttl > 0 and age_h > ttl:
+            return 0.0
+        return add
+
+    def _effective_min_confidence(self, coin: str = "") -> float:
+        base = float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
+        if coin:
+            base += self._coin_gate_add(coin)
+        return base
 
     def _effective_min_align(self) -> float:
         return float((self._adapt or {}).get("quant_min_align") or self.config.quant_min_align)
@@ -3485,7 +3679,11 @@ class AIStrategy:
         trade_id = self._new_demo_trade_id()
         cl_demo = self._clord_demo(trade_id)
         try:
-            resp = await self._place(client, inst, order_side, sz, pos_side_try, cl_ord_id=cl_demo)
+            # Use post-only entry when maker entry is enabled (saves fees)
+            if bool(getattr(self.config, "maker_entry", True)):
+                resp = await self._place_postonly(client, inst, order_side, sz, pos_side_try, cl_ord_id=cl_demo)
+            else:
+                resp = await self._place(client, inst, order_side, sz, pos_side_try, cl_ord_id=cl_demo)
         except Exception as e:
             self._record_exec("open_error", coin=coin, side=side, reason=str(e),
                               size=sz, leverage=lev)
@@ -4471,9 +4669,12 @@ class AIStrategy:
             except Exception:
                 pass
         # Strict chokepoint: blocks if no DEMO twin position
+        # Use post-only entry when maker entry is enabled (saves fees)
+        ord_type = "postonly" if bool(getattr(self.config, "maker_entry", True)) else "market"
         resp = await self._live_market_order(
             lc, inst=inst, order_side=order_side, sz=sz, pos_side=side,
             cl_ord_id=cl_live, coin=coin, is_close=False, reason=reason,
+            ord_type=ord_type,
         )
         if resp.get("error"):
             return _fail(f"order blocked: {resp.get('message')}")
@@ -4691,9 +4892,13 @@ class AIStrategy:
         _cl_close = self._clord_live_close(getattr(pos, "demo_trade_id", ""))
         # Strict chokepoint: blocks if DEMO still open (not paired close)
         self._demo_closing_coin = coin  # marker for paired close
+        # Closes are reduce-only; post-only on closes may fail, so keep as market for now.
+        # if maker_entry is enabled and it's a normal reduce (not a market close), try postonly.
+        ord_type = "market"  # keep closes as market to avoid reduce-only post-only issues
         resp = await self._live_market_order(
             lc, inst=pos.inst_id, order_side=close_side, sz=pos.size, pos_side=pos.side,
             cl_ord_id=(_cl_close or None), coin=coin, is_close=True, reason=reason,
+            ord_type=ord_type,
         )
         self._demo_closing_coin = None
         if resp.get("error"):
@@ -7386,7 +7591,7 @@ class AIStrategy:
                             continue
                     if al < max(min_al, 0.85):
                         continue
-                    if al < min_cf and al < 0.88:
+                    if al < (min_cf + self._coin_gate_add(coin_q)) and al < 0.88:
                         continue
                     if best is None or al > best[2]:
                         best = (coin_q, side, al, reg)
