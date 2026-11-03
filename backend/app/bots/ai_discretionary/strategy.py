@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.43.0-guard-specs"
+STRATEGY_VERSION = "v1.43.1-flow-control"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -564,10 +564,22 @@ class AIConfig:
     partial_take_enable: bool = True
     partial_take_pct: float = 2.60       # exit-v2: was 1.80 — bank after a real leg
     partial_take_frac: float = 0.30      # bank 30%, ride 70%
+    # v1.43.1 loss partial: on a failed trade take half off at −1×ATR, so the
+    # full stop never takes the whole position. One more order, half the pain;
+    # the remaining half keeps the original stop (nothing is moved above the
+    # market, which would close it instantly).
+    loss_partial_enable: bool = True
+    loss_partial_atr_mult: float = 1.0
+    loss_partial_frac: float = 0.50
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
     thesis_break_exit: bool = True
+    # v1.43.1: 2-of-3 soft flips inside a LIVE trend are noise, not a broken
+    # thesis — this exit was cutting trades that resumed hours later. Only a
+    # dead trend (ADX below the floor) makes a flip final.
+    thesis_break_require_dead_trend: bool = True
+    thesis_break_dead_adx: float = 18.0
     # SOL was the drag (reflection: about −127 over 9 trades). Higher bar, not a ban.
     sol_min_adx: float = 28.0
     sol_min_align: float = 0.88
@@ -650,6 +662,7 @@ class AIPosition:
     peak_price: float = 0.0
     peak_upl_pct: float = 0.0            # best unrealized % seen while open
     partial_taken: bool = False          # v1.28 one-shot scale-out done
+    loss_partial_done: bool = False      # v1.43.1 one-shot −1×ATR de-risk done
     signal_close_notified: str = ""       # signal-only mode: last exit already alerted
     unrealized_pnl: float = 0.0
     mark_px: float = 0.0          # last mark from guard/tick (UI + breach checks)
@@ -1993,6 +2006,15 @@ class AIStrategy:
             return None
         if upl >= 0.50:  # v1.30: winners left to giveback/trail, not thesis-break
             return None
+        # v1.43.1: a soft 2-of-3 flip inside a LIVE trend is noise. Only a dead
+        # trend (ADX below the floor) turns a flip into a broken thesis.
+        if bool(getattr(self.config, "thesis_break_require_dead_trend", True)):
+            try:
+                adx_v = float(ind.get("adx") or 0)
+            except (TypeError, ValueError):
+                adx_v = 0.0
+            if adx_v >= float(getattr(self.config, "thesis_break_dead_adx", 18.0) or 18.0):
+                return None
         try:
             close = float(ind.get("close") or 0)
             ema21 = float(ind.get("ema21") or ind.get("ema_fast") or 0)
@@ -6067,6 +6089,7 @@ class AIStrategy:
                     "stop_price": float(getattr(pos, "stop_price", 0) or 0),
                     "take_price": float(getattr(pos, "take_price", 0) or 0),
                     "partial_taken": bool(getattr(pos, "partial_taken", False)),
+                    "loss_partial_done": bool(getattr(pos, "loss_partial_done", False)),
                     "side": getattr(pos, "side", ""),
                     "entry_price": float(getattr(pos, "entry_price", 0) or 0),
                 }
@@ -6101,6 +6124,8 @@ class AIStrategy:
                         pos.peak_price = pp
                     if meta.get("partial_taken"):
                         pos.partial_taken = True
+                    if meta.get("loss_partial_done"):
+                        pos.loss_partial_done = True
                     # prefer tighter stored stop for shorts/longs
                     sp = float(meta.get("stop_price") or 0)
                     if sp > 0:
@@ -6138,12 +6163,20 @@ class AIStrategy:
         except Exception as e:
             print(f"[AI-LIVE] sync stop {coin}: {e}", flush=True)
 
-    async def _scale_out_partial(self, client, coin: str, frac: float, reason: str) -> bool:
-        """Close a fraction of the DEMO position (and mirror) to bank profit."""
+    async def _scale_out_partial(self, client, coin: str, frac: float, reason: str,
+                                 kind: str = "profit") -> bool:
+        """Close a fraction of the DEMO position (and mirror).
+
+        kind="profit" banks a winner (one-shot, partial_taken);
+        kind="loss" is the v1.43.1 −1×ATR de-risk (one-shot, loss_partial_done).
+        """
         pos = self._positions.get(coin)
         if not pos or frac <= 0 or frac >= 0.99:
             return False
-        if bool(getattr(pos, "partial_taken", False)):
+        if kind == "loss":
+            if bool(getattr(pos, "loss_partial_done", False)):
+                return False
+        elif bool(getattr(pos, "partial_taken", False)):
             return False
         full = float(pos.size or 0)
         lot = float(LOT_SZ.get(coin, 0.01) or 0.01)
@@ -6157,7 +6190,10 @@ class AIStrategy:
             return True
         if not self._execute_enabled():
             pos.size = remain
-            pos.partial_taken = True
+            if kind == "loss":
+                pos.loss_partial_done = True
+            else:
+                pos.partial_taken = True
             print(f"[AI] SIGNAL partial {coin} close={close_sz} remain={remain} ({reason})", flush=True)
             return True
         close_side = "buy" if pos.side == "short" else "sell"
@@ -6169,7 +6205,10 @@ class AIStrategy:
                 print(f"[AI] partial fail {coin}: {resp.get('message')}", flush=True)
                 return False
             pos.size = remain
-            pos.partial_taken = True
+            if kind == "loss":
+                pos.loss_partial_done = True
+            else:
+                pos.partial_taken = True
             print(f"[AI] partial close {coin} sz={close_sz} remain={remain} ({reason})", flush=True)
             # Book the realized leg. Before this the 30% that was banked only
             # shrank pos.size: trades/equity/daily/lifetime never saw the
@@ -6195,7 +6234,10 @@ class AIStrategy:
                             finally:
                                 self._mirror_call_active = False
                             lpos.size = max(lot, lfull - lclose)
-                            lpos.partial_taken = True
+                            if kind == "loss":
+                                lpos.loss_partial_done = True
+                            else:
+                                lpos.partial_taken = True
             except Exception as e:
                 print(f"[AI-LIVE] partial mirror: {e}", flush=True)
             try:
@@ -6610,6 +6652,25 @@ class AIStrategy:
                     fav_atr = (px - float(pos.entry_price)) / (atr_p * float(pos.entry_price))
                 else:
                     fav_atr = (float(pos.entry_price) - px) / (atr_p * float(pos.entry_price))
+            # v1.43.1 loss partial: a failed trade gives back half at −1×ATR
+            # instead of the full stop taking the whole position. The remainder
+            # keeps the original stop — nothing is moved above the market.
+            try:
+                _lp_mult = self._cfg_f("loss_partial_atr_mult", 1.0)
+                if (self._cfg_b("loss_partial_enable", True)
+                        and _lp_mult > 0 and atr_p > 0
+                        and not bool(getattr(pos, "loss_partial_done", False))
+                        and not bool(getattr(pos, "partial_taken", False))
+                        and upl <= -(atr_p * 100.0) * _lp_mult):
+                    ok_lp = await self._scale_out_partial(
+                        client, coin, self._cfg_f("loss_partial_frac", 0.50),
+                        f"loss_partial_atr{upl:.1f}", kind="loss",
+                    )
+                    if ok_lp:
+                        print(f"[AI] loss partial {coin} {pos.side}: upl={upl:+.2f}% "
+                              f"(-{_lp_mult:.2f}×ATR) remain={pos.size}", flush=True)
+            except Exception as e:
+                print(f"[AI] loss partial check: {e}", flush=True)
             # Early BE after +breakeven_atr_mult × ATR (fallback 0.45), or the legacy
             # pct floor — kept in sync via breakeven_min_pct so one doesn't silently
             # override the other (see v1.16 notes on the config fields above).
