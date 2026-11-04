@@ -178,3 +178,91 @@ def test_flow_status_exposes_limits_for_the_ui():
     assert st["max_daily_fees_usd"] == pytest.approx(9.0)
     assert st["breadth_trending"] == 2
     assert st["breadth_tracked"] == 8
+
+
+# ── caps survive a redeploy ─────────────────────────────────────────────
+# The file snapshot lives under /tmp on Render and is wiped by every deploy.
+# Previously the counters were written only by close paths, so a restart
+# between entry and exit handed the strategy a fresh 6-open budget and the
+# fee cap restarted at 0 while the day was already spent.
+
+def test_note_open_flow_persists_immediately():
+    bot = _bot()
+    calls = []
+    bot._persist = lambda: calls.append(1)
+    bot.note_open_flow(1.0)
+    assert calls, "an open must persist the daily counters right away"
+
+
+def test_note_fee_flow_persists_immediately():
+    bot = _bot()
+    calls = []
+    bot._persist = lambda: calls.append(1)
+    bot.note_fee_flow(0.5)
+    assert calls, "a fee must persist the daily budget right away"
+
+
+def test_persist_failure_never_breaks_the_tick():
+    bot = _bot()
+
+    def _boom():
+        raise RuntimeError("disk full")
+
+    bot._persist = _boom
+    bot.note_open_flow(1.0)          # must not raise
+    assert bot._daily_opens == 1
+
+
+def test_restore_takes_the_higher_of_file_and_db():
+    from datetime import datetime, timezone
+    from app.services.pnl_engine import PNL_TZ
+
+    today = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+    bot = _bot()
+    bot._flow_day = today
+    bot._daily_opens = 2
+    bot._daily_fees = 1.0
+    bot._restore_flow_counters(
+        {"flow_day": today, "daily_opens": 5, "daily_fees": 0.75})
+    assert bot._daily_opens == 5      # DB ahead -> DB wins
+    assert bot._daily_fees == pytest.approx(1.0)   # file ahead -> file wins
+
+
+def test_restore_ignores_yesterdays_blob():
+    bot = _bot()
+    bot._flow_day = "2026-01-01"
+    bot._daily_opens = 3
+    bot._daily_fees = 2.0
+    bot._restore_flow_counters(
+        {"flow_day": "1999-01-01", "daily_opens": 99, "daily_fees": 99.0})
+    assert bot._daily_opens == 3
+    assert bot._daily_fees == pytest.approx(2.0)
+
+
+def test_persist_blob_carries_the_flow_counters(monkeypatch):
+    import app.bots.ai_discretionary.strategy as S
+
+    captured = {}
+    monkeypatch.setattr(S, "save_ai_state", lambda payload: captured.update(payload))
+    bot = _bot()
+    bot._lifetime_pnl = 0.0
+    bot._lifetime_trades = 0
+    bot._lifetime_wins = 0
+    bot._lifetime_fees = 0.0
+    bot._session_pnl = 0.0
+    bot._daily_realized = 0.0
+    bot._daily_realized_day = ""
+    bot._weekly_realized = 0.0
+    bot._weekly_realized_week = ""
+    bot._adapt = {}
+    bot._reflection = ""
+    bot._journal = []
+    bot._daily_lessons = []
+    bot._last_lesson_day = ""
+    bot._adapt_log = []
+    bot.db = None
+    bot._loop = None
+    bot.note_open_flow(1.25)
+    assert captured["daily_opens"] == 1
+    assert captured["daily_fees"] == pytest.approx(1.25)
+    assert captured["flow_day"] == bot._flow_day

@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.0-flow-control"
+STRATEGY_VERSION = "v1.44.1-fee-accounting"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -2797,7 +2797,8 @@ class AIStrategy:
         # v1.44: the entry commission was paid at open and never subtracted
         # from a close result, so every reported net was short by ~half the
         # round-trip cost. Whole remaining position closes -> whole remaining fee.
-        if not abs(float(getattr(pos, "entry_fee", 0) or 0)):
+        _stored_entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _stored_entry_fee <= 0:
             _ef_rec = await self._recover_entry_fee(client, pos, live=False)
             if _ef_rec > 0:
                 pos.entry_fee = _ef_rec
@@ -2810,12 +2811,12 @@ class AIStrategy:
                         liquidity="taker",
                         bought=(str(side).lower() == "short"))
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
-        if _entry_fee <= 0:
-            _entry_fee = await self._recover_entry_fee(client, pos, live=False)
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
             fee_c = float(fee_c or 0) + _entry_fee
             self._lifetime_fees += _entry_fee
+            if _stored_entry_fee <= 0:
+                self.note_fee_flow(_entry_fee)
             pos.entry_fee = 0.0
         pnl = round(float(pnl or 0), 2)
         # The engine drops zero-PnL rows; only bump the counters for rows it
@@ -4617,17 +4618,28 @@ class AIStrategy:
                 fee_c = float(_fc)
         else:
             pnl = close_pnl(pos.side, pos.size, pos.entry_price, fill_px, fee, CT_VAL.get(coin, 0.01))
+        # v1.44: post-only entries can return no fee — recover it so DEMO PnL
+        # matches the exchange-bill card (see _recover_entry_fee).
+        _stored_entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _stored_entry_fee <= 0:
+            _ef_rec = await self._recover_entry_fee(client, pos, live=False)
+            if _ef_rec > 0:
+                pos.entry_fee = _ef_rec
         # v1.44: feed the flow caps and the execution telemetry.
         self.note_fee_flow(fee_c)
         self._exec_stat("exit", float(mark or fill_px), float(fill_px or 0), fee_c,
                         liquidity="taker",
                         bought=(str(getattr(pos, "side", "")).lower() == "short"))
-        # v1.44: the entry commission is part of the trade result.
+        # v1.44: the entry commission is part of the trade result. fee_c below
+        # already carries it, and `_lifetime_fees += fee_c` books it once — an
+        # extra += _entry_fee here double-counted the entry leg.
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
             fee_c = float(fee_c or 0) + _entry_fee
-            self._lifetime_fees += _entry_fee
+            if _stored_entry_fee <= 0:
+                # Recovered now, so it never reached the daily fee budget at open.
+                self.note_fee_flow(_entry_fee)
             pos.entry_fee = 0.0
         self._equity += pnl
         self._daily_realized = float(getattr(self, "_daily_realized", 0) or 0) + float(pnl or 0)
@@ -4943,6 +4955,9 @@ class AIStrategy:
                 print(f"[AI-LIVE] snapshot on claim-fail: {e}", flush=True)
             self._last_mirror_fail = f"claim_failed_but_kept:{coin}"
         self._live_positions[coin] = pos
+        # v1.44: same daily fee budget as DEMO — count the real-money entry
+        # commission, but not another "open" (the signal was already counted).
+        self.note_fee_flow(fee_cost(fee))
         self._live_equity -= fee_cost(fee)
         self._live_equity_ts = 0.0
         self._live_trade_log_append(pos, "open", fill_px, sz, -fee_cost(fee))
@@ -5147,7 +5162,8 @@ class AIStrategy:
         self._exec_stat("exit_live", float(mark or fill_px), float(fill_px or 0),
                         fee_c, liquidity="taker",
                         bought=(str(getattr(pos, "side", "")).lower() == "short"))
-        _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        _stored_entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        _entry_fee = _stored_entry_fee
         if _entry_fee <= 0:
             # Post-only entries sometimes return no fee — recover it from the
             # exchange so LIVE PnL matches the main page (see _recover_entry_fee).
@@ -5155,6 +5171,8 @@ class AIStrategy:
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
             fee_c = float(fee_c or 0) + _entry_fee
+            if _stored_entry_fee <= 0:
+                self.note_fee_flow(_entry_fee)
             pos.entry_fee = 0.0
         self._audit_live("close", coin, pos.side, pos.size, reason or "demo_close", ok=True)
         self._live_equity += pnl
@@ -6505,6 +6523,7 @@ class AIStrategy:
         # size it closed; the remainder stays on the position for later legs.
         try:
             _ef_left = float(getattr(pos, "entry_fee", 0) or 0)
+            _ef_stored = _ef_left
             if _ef_left <= 0:
                 _ef_left = await self._recover_entry_fee(client, pos, live=False)
                 if _ef_left > 0:
@@ -6515,6 +6534,8 @@ class AIStrategy:
                 pos.entry_fee = max(0.0, _ef_left - _ef_share)
                 pnl = float(pnl or 0) - _ef_share
                 fee_c = float(fee_c or 0) + _ef_share
+                if _ef_stored <= 0:
+                    self.note_fee_flow(_ef_share)
         except (TypeError, ValueError):
             pass
         pnl = float(pnl or 0)
@@ -7570,12 +7591,44 @@ class AIStrategy:
         self._daily_opens = int(getattr(self, "_daily_opens", 0) or 0) + 1
         if fee:
             self._daily_fees = float(getattr(self, "_daily_fees", 0.0) or 0.0) + abs(float(fee))
+        # Opens used to persist only on close: a deploy between entry and exit
+        # reset the caps to zero and the day's 6th+ signal was accepted again.
+        self._persist_flow()
 
     def note_fee_flow(self, fee: float) -> None:
         """Count a commission paid on an existing position (exit or partial)."""
         self._flow_day_counters()
         if fee:
             self._daily_fees = float(getattr(self, "_daily_fees", 0.0) or 0.0) + abs(float(fee))
+        self._persist_flow()
+
+    def _persist_flow(self) -> None:
+        """Save the daily flow counters without letting persistence break a tick."""
+        try:
+            self._persist()
+        except Exception as e:
+            print(f"[AI] persist flow: {e}", flush=True)
+
+    def _restore_flow_counters(self, data: dict) -> None:
+        """Reload today's open/fee counters from the durable settings blob.
+
+        max() keeps the file snapshot if it is ahead of the DB blob, so a
+        restart can never hand the strategy a fresh daily budget.
+        """
+        try:
+            from app.services.pnl_engine import PNL_TZ
+            today = datetime.now(timezone.utc).astimezone(PNL_TZ).strftime("%Y-%m-%d")
+            if str((data or {}).get("flow_day") or "") != today:
+                return
+            self._flow_day = today
+            self._daily_opens = max(
+                int(getattr(self, "_daily_opens", 0) or 0),
+                int(data.get("daily_opens") or 0))
+            self._daily_fees = max(
+                float(getattr(self, "_daily_fees", 0.0) or 0.0),
+                float(data.get("daily_fees") or 0.0))
+        except Exception as e:
+            print(f"[AI] hydrate flow: {e}", flush=True)
 
     def _breadth(self) -> tuple[float, int, int]:
         """(share of tracked coins in a real trend, trending, tracked)."""
@@ -8675,8 +8728,10 @@ class AIStrategy:
                                                      "size_cap", "preset", "reason")})
                     if data.get("reflection"):
                         self._reflection = str(data.get("reflection"))
+                    self._restore_flow_counters(data)
                     print(f"[AI] hydrate settings: trades={self._lifetime_trades} "
-                          f"pnl={self._lifetime_pnl:.2f}", flush=True)
+                          f"pnl={self._lifetime_pnl:.2f} "
+                          f"flow={self._daily_opens} opens/{self._daily_fees:.2f} fees", flush=True)
         except Exception as e:
             print(f"[AI] hydrate settings: {e}", flush=True)
 
@@ -8966,6 +9021,11 @@ class AIStrategy:
                 "lifetime_trades": self._lifetime_trades,
                 "lifetime_wins": self._lifetime_wins,
                 "lifetime_fees": self._lifetime_fees,
+                # v1.44 flow caps must survive a redeploy, not just a close:
+                # the file state under /tmp is wiped on every Render restart.
+                "flow_day": self._flow_day,
+                "daily_opens": self._daily_opens,
+                "daily_fees": self._daily_fees,
                 "adapt": {
                     "min_confidence": (self._adapt or {}).get("min_confidence"),
                     "quant_min_align": (self._adapt or {}).get("quant_min_align"),

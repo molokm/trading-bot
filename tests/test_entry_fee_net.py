@@ -235,3 +235,149 @@ async def test_recover_entry_fee_without_trade_id_is_zero():
     ex = _Ex(order_fee="-1.0")
     assert await bot._recover_entry_fee(ex, _fee_pos(tid=""), live=True) == 0.0
     assert ex.order_calls == 0
+
+
+# ── the entry fee is booked exactly once ────────────────────────────────
+# _close() added entry_fee to fee_c (so the round trip is complete) and ALSO
+# did `_lifetime_fees += _entry_fee`, double-counting the entry leg. The card
+# masked it by overlaying engine_stats, but the process counter was wrong.
+
+class _CloseClient:
+    demo = True
+
+    async def get_positions(self, inst_id=None):
+        return {"data": [{"pos": "1", "instId": inst_id}]}
+
+    async def get_order(self, *a, **k):
+        return {"data": []}
+
+
+@pytest.mark.asyncio
+async def test_close_books_the_entry_fee_once(monkeypatch):
+    import app.bots.ai_discretionary.strategy as S
+    from app.bots.ai_discretionary.strategy import AIConfig, AIPosition, AIStrategy
+
+    async def _noop(*a, **k):
+        return None
+
+    async def _false():
+        return False
+
+    async def _place(*a, **k):
+        return {"data": [{
+            "ordId": "c1", "avgPx": "110", "fillSz": "1",
+            "fee": "-0.06", "fillPnl": "10", "clOrdId": "adc1",
+        }]}
+
+    monkeypatch.setattr(S, "release_open", _noop)
+
+    bot = object.__new__(AIStrategy)
+    bot.config = AIConfig()
+    bot.db = None
+    bot.client_manager = None
+    bot.analysis = None
+    bot._execute_enabled = lambda: True
+    bot._cancel_exchange_sl_tp = _noop
+    bot._place = _place
+    bot._persist = lambda: None
+    bot._refresh_adaptive = lambda: None
+    bot._account_mode_tag = lambda: ("demo", "showcase")
+    bot._notify_close_tg = _noop
+    bot._remember_close = _noop
+    bot._settle_close_memory = lambda *a, **k: None
+    bot._mirror_enabled = _false
+    bot._exec_stat = lambda *a, **k: None
+    bot._lifetime_pnl = 0.0
+    bot._lifetime_trades = 0
+    bot._lifetime_wins = 0
+    bot._lifetime_fees = 0.0
+    bot._session_pnl = 0.0
+    bot._daily_realized = 0.0
+    bot._weekly_realized = 0.0
+    bot._equity = 10000.0
+    bot._flow_day = ""
+    bot._daily_opens = 0
+    bot._daily_fees = 0.0
+    bot._engine_stats_ts = 0.0
+    bot._trade_log = []
+    bot._pending_live_closes = set()
+    bot._latest_indicators = {"ETH": {"close": 110.0}}
+    bot._positions = {"ETH": AIPosition(
+        coin="ETH", inst_id="ETH-USDT-SWAP", side="long", size=1.0,
+        entry_price=100.0, stop_price=98.0, take_price=110.0, leverage=3,
+        opened_at="2026-11-04T00:00:00+00:00", entry_fee=0.05,
+    )}
+
+    await bot._close(_CloseClient(), "ETH", "take_profit")
+
+    # exit 0.06 + entry 0.05 — not 0.06 + 0.05 + 0.05
+    assert bot._lifetime_fees == pytest.approx(0.11)
+    # open fee was already counted at open, so the close only adds the exit leg
+    assert bot._daily_fees == pytest.approx(0.06)
+
+
+@pytest.mark.asyncio
+async def test_close_recovered_entry_fee_hits_the_daily_budget(monkeypatch):
+    """A fee recovered at close never passed note_open_flow — count it now."""
+    import app.bots.ai_discretionary.strategy as S
+    from app.bots.ai_discretionary.strategy import AIConfig, AIPosition, AIStrategy
+
+    async def _noop(*a, **k):
+        return None
+
+    async def _false():
+        return False
+
+    async def _place(*a, **k):
+        return {"data": [{
+            "ordId": "c2", "avgPx": "110", "fillSz": "1",
+            "fee": "-0.06", "fillPnl": "10", "clOrdId": "adc2",
+        }]}
+
+    async def _recover(self, client, pos, *, live):
+        return 0.04
+
+    monkeypatch.setattr(S, "release_open", _noop)
+
+    bot = object.__new__(AIStrategy)
+    bot.config = AIConfig()
+    bot.db = None
+    bot.client_manager = None
+    bot.analysis = None
+    bot._execute_enabled = lambda: True
+    bot._cancel_exchange_sl_tp = _noop
+    bot._place = _place
+    bot._persist = lambda: None
+    bot._refresh_adaptive = lambda: None
+    bot._account_mode_tag = lambda: ("demo", "showcase")
+    bot._notify_close_tg = _noop
+    bot._remember_close = _noop
+    bot._settle_close_memory = lambda *a, **k: None
+    bot._mirror_enabled = _false
+    bot._exec_stat = lambda *a, **k: None
+    bot._recover_entry_fee = _recover.__get__(bot)
+    bot._lifetime_pnl = 0.0
+    bot._lifetime_trades = 0
+    bot._lifetime_wins = 0
+    bot._lifetime_fees = 0.0
+    bot._session_pnl = 0.0
+    bot._daily_realized = 0.0
+    bot._weekly_realized = 0.0
+    bot._equity = 10000.0
+    bot._flow_day = ""
+    bot._daily_opens = 0
+    bot._daily_fees = 0.0
+    bot._engine_stats_ts = 0.0
+    bot._trade_log = []
+    bot._pending_live_closes = set()
+    bot._latest_indicators = {"ETH": {"close": 110.0}}
+    bot._positions = {"ETH": AIPosition(
+        coin="ETH", inst_id="ETH-USDT-SWAP", side="long", size=1.0,
+        entry_price=100.0, stop_price=98.0, take_price=110.0, leverage=3,
+        opened_at="2026-11-04T00:00:00+00:00", entry_fee=0.0,
+    )}
+
+    await bot._close(_CloseClient(), "ETH", "take_profit")
+
+    assert bot._lifetime_fees == pytest.approx(0.10)
+    assert bot._daily_fees == pytest.approx(0.10)   # exit 0.06 + recovered 0.04
