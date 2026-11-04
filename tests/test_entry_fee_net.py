@@ -11,6 +11,7 @@ fee is allocated by position lifecycle (instrument + time), because our close
 orders reach OKX with an EMPTY clOrdId and an id-based match finds nothing.
 """
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -163,3 +164,74 @@ async def test_recent_sync_never_drops_a_close_without_its_entry(monkeypatch):
     n, rows = await _run(monkeypatch, [_close()], recent_only=True)
     assert n == 1
     assert rows[-1]["pnl"] == pytest.approx(-15.056 - 2.62)
+
+
+# ── entry fee recovered from the exchange at close ──────────────────────
+# A post-only entry often returns no fee, so pos.entry_fee stays 0 and the
+# close message (Telegram, DB row) silently drops the entry leg while the main
+# page — built from exchange bills — subtracts it. BTC 04.11: TG +3.31, card
+# +3.14. These lock the recovery order: stored → order → fills.
+
+class _Ex:
+    def __init__(self, order_fee=None, fills=None):
+        self.order_fee = order_fee
+        self.fills = fills or []
+        self.order_calls = 0
+        self.fill_calls = 0
+
+    async def get_order(self, inst_id, ord_id=None, cl_ord_id=None):
+        self.order_calls += 1
+        if self.order_fee is None:
+            return {"data": []}
+        return {"data": [{"fee": str(self.order_fee)}]}
+
+    async def get_fills(self, inst_id=None, limit=20, **kw):
+        self.fill_calls += 1
+        return {"data": [{"fee": str(f)} for f in self.fills]}
+
+
+def _fee_bot():
+    from app.bots.ai_discretionary.strategy import AIStrategy
+    bot = object.__new__(AIStrategy)
+    return bot
+
+
+def _fee_pos(entry_fee=0.0, tid="c9d8897c44b2"):
+    return SimpleNamespace(
+        inst_id="BTC-USDT-SWAP", entry_fee=entry_fee, demo_trade_id=tid,
+    )
+
+
+@pytest.mark.asyncio
+async def test_recover_entry_fee_prefers_the_stored_value():
+    bot = _fee_bot()
+    ex = _Ex(order_fee="-9.99")
+    fee = await bot._recover_entry_fee(ex, _fee_pos(entry_fee=0.17), live=True)
+    assert fee == pytest.approx(0.17)
+    assert ex.order_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_recover_entry_fee_reads_the_entry_order():
+    bot = _fee_bot()
+    ex = _Ex(order_fee="-0.1696")
+    fee = await bot._recover_entry_fee(ex, _fee_pos(), live=True)
+    assert fee == pytest.approx(0.1696)
+    assert ex.fill_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_recover_entry_fee_falls_back_to_fills():
+    bot = _fee_bot()
+    ex = _Ex(order_fee=None, fills=["-0.10", "-0.07"])
+    fee = await bot._recover_entry_fee(ex, _fee_pos(), live=True)
+    assert fee == pytest.approx(0.17)
+    assert ex.order_calls == 1 and ex.fill_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_recover_entry_fee_without_trade_id_is_zero():
+    bot = _fee_bot()
+    ex = _Ex(order_fee="-1.0")
+    assert await bot._recover_entry_fee(ex, _fee_pos(tid=""), live=True) == 0.0
+    assert ex.order_calls == 0

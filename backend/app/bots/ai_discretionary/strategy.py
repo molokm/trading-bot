@@ -2611,6 +2611,49 @@ class AIStrategy:
             "has_pnl": any(p[4] for p in picked),
         }
 
+    async def _recover_entry_fee(self, client, pos, *, live: bool) -> float:
+        """Commission paid to open ``pos`` — stored value, else ask the exchange.
+
+        A post-only (maker) entry often comes back WITHOUT a fee in the order
+        response, so ``pos.entry_fee`` stays 0. The close then reported gross −
+        exit fee (Telegram: +3.31) while the main page — built from exchange
+        bills — subtracted the real entry fee (+3.14). BTC 04.11 was exactly
+        this: 0.17 USDT of entry commission silently missing from the message.
+        """
+        try:
+            fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        except (TypeError, ValueError):
+            fee = 0.0
+        if fee > 0 or client is None:
+            return fee
+        inst = str(getattr(pos, "inst_id", "") or "")
+        tid = str(getattr(pos, "demo_trade_id", "") or "")
+        if not inst or not tid:
+            return 0.0
+        cl = self._clord_live(tid) if live else self._clord_demo(tid)
+        if not cl:
+            return 0.0
+        # 1) The entry order itself (fast, carries `fee` once filled).
+        try:
+            resp = await client.get_order(inst, cl_ord_id=cl)
+            rows = (resp or {}).get("data") or []
+            if rows:
+                f = abs(float(rows[0].get("fee") or 0))
+                if f > 0:
+                    return f
+        except Exception:
+            pass
+        # 2) Fills history — survives long holds where the order record expired.
+        try:
+            resp = await client.get_fills(inst, limit=100, clOrdId=cl)
+            rows = (resp or {}).get("data") or []
+            total = sum(abs(float(r.get("fee") or 0)) for r in rows)
+            if total > 0:
+                return total
+        except Exception:
+            pass
+        return 0.0
+
     async def _remember_close(self, coin: str, side: str, pnl: float,
                               reason: str) -> None:
         """Remember (and persist) the last close per coin for the anti-churn cooldown.
@@ -2754,6 +2797,10 @@ class AIStrategy:
         # v1.44: the entry commission was paid at open and never subtracted
         # from a close result, so every reported net was short by ~half the
         # round-trip cost. Whole remaining position closes -> whole remaining fee.
+        if not abs(float(getattr(pos, "entry_fee", 0) or 0)):
+            _ef_rec = await self._recover_entry_fee(client, pos, live=False)
+            if _ef_rec > 0:
+                pos.entry_fee = _ef_rec
         self.note_fee_flow(fee_c)
         # Stop fills are the expensive ones: measure them against the stop the
         # bot actually planned, not against their own fill price (0 bps).
@@ -2763,6 +2810,8 @@ class AIStrategy:
                         liquidity="taker",
                         bought=(str(side).lower() == "short"))
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _entry_fee <= 0:
+            _entry_fee = await self._recover_entry_fee(client, pos, live=False)
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
             fee_c = float(fee_c or 0) + _entry_fee
@@ -5099,6 +5148,10 @@ class AIStrategy:
                         fee_c, liquidity="taker",
                         bought=(str(getattr(pos, "side", "")).lower() == "short"))
         _entry_fee = abs(float(getattr(pos, "entry_fee", 0) or 0))
+        if _entry_fee <= 0:
+            # Post-only entries sometimes return no fee — recover it from the
+            # exchange so LIVE PnL matches the main page (see _recover_entry_fee).
+            _entry_fee = await self._recover_entry_fee(lc, pos, live=True)
         if _entry_fee > 0:
             pnl = float(pnl or 0) - _entry_fee
             fee_c = float(fee_c or 0) + _entry_fee
@@ -5560,6 +5613,13 @@ class AIStrategy:
                         except Exception:
                             pass
                         _e, exit_px, pnl, _f = compute_close_metrics(pos, coin, exit_px, fee=0)
+                        # v1.44: same round-trip rule as every other close path.
+                        _ef = abs(float(getattr(pos, "entry_fee", 0) or 0))
+                        if _ef <= 0:
+                            _ef = await self._recover_entry_fee(lc, pos, live=True)
+                        if _ef > 0:
+                            pnl = float(pnl or 0) - _ef
+                            pos.entry_fee = 0.0
                         try:
                             # v1.17: LIVE no longer carries its own exchange SL/TP, so
                             # this path should now only fire on manual intervention,
@@ -6445,6 +6505,10 @@ class AIStrategy:
         # size it closed; the remainder stays on the position for later legs.
         try:
             _ef_left = float(getattr(pos, "entry_fee", 0) or 0)
+            if _ef_left <= 0:
+                _ef_left = await self._recover_entry_fee(client, pos, live=False)
+                if _ef_left > 0:
+                    pos.entry_fee = _ef_left
             _full_sz = float(getattr(pos, "size", 0) or 0) + float(close_sz or 0)
             if _ef_left > 0 and _full_sz > 0 and close_sz > 0:
                 _ef_share = _ef_left * min(1.0, float(close_sz) / _full_sz)
