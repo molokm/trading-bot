@@ -9,8 +9,9 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      # PORT is set by Render; entrypoint uses PORT first
       - key: BACKEND_PORT
-        value: "8000"
+        value: "10000"
       - key: BACKEND_HOST
         value: "0.0.0.0"
       - key: OKX_DEMO
@@ -27,6 +28,14 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
+      - key: RISK_KILL_SWITCH
+        sync: false
+      - key: RISK_MAX_DAILY_LOSS_USD
+        sync: false
+      - key: RISK_MAX_POSITION_USD
+        sync: false
+      - key: RISK_MAX_LEVERAGE
+        sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: TELEGRAM_BOT_TOKEN
@@ -35,15 +44,9 @@ services:
         sync: false
       - key: TELEGRAM_CHANNEL_ID
         sync: false
-      - key: SIGNAL_PRICE_STARS
-        value: "100"
-      - key: SIGNAL_PLAN_DAYS
-        value: "30"
-      - key: SIGNAL_INVITE_DAYS
-        value: "3"
+      # Pro plan (Telegram Stars). The paid "Signals" plan and the public
+      # /tracker page are retired — removed SIGNAL_* / TRACKER_URL keys.
       - key: PRO_PRICE_STARS
         value: "500"
       - key: PRO_PLAN_DAYS
         value: "30"
-      - key: TRACKER_URL
-        value: "https://trading-bot-mu99.onrender.com/tracker"
