@@ -210,7 +210,11 @@ def _market_bot(regime, adx, side="short"):
     return bot
 
 
-def _stale_pos(side="short", entry=0.2, hours=12.0):
+def _stale_pos(side="short", entry=0.2, hours=None):
+    # default: just past the configured stale horizon so the test tracks
+    # time_stop_stale_hours instead of a hard-coded value
+    if hours is None:
+        hours = float(AIConfig().time_stop_stale_hours) + 2.0
     opened = datetime.now(timezone.utc) - timedelta(hours=hours)
     return AIPosition(
         coin="ADA",

@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.2-entry-quality"
+STRATEGY_VERSION = "v1.44.3-hold-horizon"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.44 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -245,7 +245,8 @@ STRATEGY_DESC = (
     "должно превышать round-trip издержки минимум в 3×, иначе вход вето. "
     "Chop-вето по режиму самой монеты; глобальный chop больше не блокирует "
     "монету в собственном тренде. Дебаты bull/bear на втором проходе LLM "
-    "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, BE/трейл позже; "
+    "(AI_DEBATE=0 отключает). Удержание тренда: min hold 90м, максимум 24ч "
+    "(stale-стоп 14ч), BE/трейл позже; "
     "soft take +5.0%, partial 30%@+2.6%. Второй слот: при открытой и уже "
     "зелёной позиции бот может взять ещё одну — но только сильный (align≥0.85, "
     "ADX≥25, conf≥0.80) и НЕкоррелированный актив, с половинным риском и "
@@ -528,8 +529,14 @@ class AIConfig:
                                             # while *also* diagnosing "wins too small vs
                                             # losses"; that shrank wins further. Restored
                                             # above the pre-v1.10 0.035 baseline.
-    max_hold_hours: float = 18.0            # v1.30: allow multi-session trends
-    time_stop_stale_hours: float = 10.0     # v1.30: give trend more room
+    # v1.44.3: 18→24 / stale 10→14 — half-sample sweep (adx24, tp2R): holding
+    # longer improved PF and expectancy in BOTH halves (PF 0.82→0.86 full,
+    # 1.01→1.06 older, 0.64→0.69 newer; per-coin better on 5, flat 8, worse 1).
+    # Live confirms exits fire early: only 3 of 51 demo exits hit the stop.
+    # The pair moves together — stale (10h) binds before max_hold (18h),
+    # so raising only one would be invisible.
+    max_hold_hours: float = 24.0            # v1.44.3: allow multi-session trends
+    time_stop_stale_hours: float = 14.0     # v1.44.3: give trend more room
     time_stop_min_progress_pct: float = 0.20
     time_stop_require_dead_trend: bool = True  # P2.3: only exit a stalled trade when trend is dead
     time_stop_dead_adx: float = 18.0           # P2.3: ADX at/above this in-direction = trend alive
