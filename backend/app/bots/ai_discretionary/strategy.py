@@ -236,11 +236,12 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.1-fee-accounting"
+STRATEGY_VERSION = "v1.44.2-entry-quality"
 
 STRATEGY_DESC = (
-    "AI Discretionary 1H v1.36 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
-    "ADX≥20, align≥0.62, conf≥0.68. Cost-edge: ожидаемое движение (ATR 1H) "
+    "AI Discretionary 1H v1.44 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
+    "ADX≥24 (мягкий обход до 18 при align≥0.78), align≥0.62, conf≥0.68. "
+    "Cost-edge: ожидаемое движение (ATR 1H) "
     "должно превышать round-trip издержки минимум в 3×, иначе вход вето. "
     "Chop-вето по режиму самой монеты; глобальный chop больше не блокирует "
     "монету в собственном тренде. Дебаты bull/bear на втором проходе LLM "
@@ -255,7 +256,10 @@ STRATEGY_DESC = (
     "open, и по явному action=add; риск-гейт получает notional и leverage. "
     "Размер: заявленный LLM size_pct_equity масштабирует риск и не превышает "
     "adaptive size_cap. Издержки явные: LLM видит round-trip fee+slippage, "
-    "статус показывает долю брутто-PnL, съеденную комиссиями. LIVE-зеркало "
+    "статус показывает долю брутто-PnL, съеденную комиссиями. "
+    "v1.44.2: per-coin гейт включается после 3 минусов подряд на монете "
+    "(+0.15 conf на 72ч, не бан), максимум 4 открытия в день, пауза перед "
+    "повторным входом в ту же монету 180м. LIVE-зеркало "
     "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
     "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
     "стоит широкий reduce-only disaster stop за стратегическим стопом: "
@@ -484,7 +488,9 @@ class AIConfig:
     # ── v1.44 flow control: fees were 41% of gross on 86 trades ──
     # The binding constraint is not "is this a good setup" but "is one more
     # round trip worth a fee". 0 disables each cap (no code rollback needed).
-    max_opens_per_day: int = 6
+    # v1.44.2: 6→4 — fees are now 87.7% of gross (408.78 of 466.02); with a
+    # 41.9% book win rate a 5th/6th entry of the day is negative EV after fees.
+    max_opens_per_day: int = 4
     max_daily_fees_usd: float = 8.0
     # Breadth: momentum entries fade when almost no coin is trending. Thin
     # breadth does not ban trading — it restricts new opens to BTC/ETH, the
@@ -505,9 +511,15 @@ class AIConfig:
                                             # opens. Same lever as cost edge: the
                                             # book only wins when the marginal
                                             # trades are worth the round trip.
-    min_adx: float = 20.0                  # stronger trend required
+    # v1.44.2: 20→24 — half-sample backtest (1440×1H bars, 14 coins): the
+    # higher bar improved net/DD in BOTH halves (avgDD 19.8→16.8 older,
+    # 17.6→16.3 newer) and PF on 9 of 13 coins. Fees are 87.7% of gross, so
+    # fewer, better entries is the cheapest edge available.
+    min_adx: float = 24.0                  # stronger trend required
     # Soft ADX: if align is strong, allow down to adx_soft_floor
-    adx_soft_floor: float = 16.0
+    # (16→18: the soft bypass must not sit below the new hard bar by a wide
+    # margin — align≥0.78 still earns a 6-point discount, not 8+)
+    adx_soft_floor: float = 18.0
     adx_align_bypass: float = 0.78         # only very strong align softens ADX
     min_roc_abs: float = 0.15
     min_stop_pct: float = 0.016
@@ -541,7 +553,10 @@ class AIConfig:
                                             # ATR trigger so ATR governs arming
     trail_lock_pct: float = 0.22           # v1.30: wider trail — less noise stops
     # Anti-churn: close→same-side reopen wastes fees when trend continues
-    reopen_cooldown_min: float = 120.0     # v1.43.1: 75→120 — block same coin+side
+    reopen_cooldown_min: float = 180.0    # v1.44.2: 120→180 — the live book
+                                           # re-entered LINK 6× at 11.27 and
+                                           # BTC 5× at 76473.32; a 2h gap still
+                                           # churned fees, 3h matches the loss gap
                                             # reopen after close. 75m was short
                                             # enough to re-enter the same chop
                                             # (XRP triple on 14 Oct).
@@ -602,9 +617,13 @@ class AIConfig:
     # clear a higher confidence bar for COIN_GATE_TTL_HOURS. The 80-trade
     # sample was not uniform — LTC −40.1, DOGE −26.6, XRP −17.4, ADA −5.2
     # carried almost all of the loss while SOL/ETH/BTC were green.
-    coin_gate_loss_streak: int = 5
-    coin_gate_conf_add: float = 0.10
-    coin_gate_ttl_hours: float = 48.0
+    # v1.44.2: 5→3 / +0.15 / 48→72 — LINK printed 6 straight losses (−58.9)
+    # and LTC 4 (−37.5) before the old bar fired. Three losses is already
+    # evidence about the coin; the penalty is a higher bar for longer, still
+    # no ban (the market may have turned — bans were tested and rejected).
+    coin_gate_loss_streak: int = 3
+    coin_gate_conf_add: float = 0.15
+    coin_gate_ttl_hours: float = 72.0
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
