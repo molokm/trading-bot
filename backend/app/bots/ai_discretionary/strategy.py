@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.3-hold-horizon"
+STRATEGY_VERSION = "v1.44.4-chase-guard"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.44 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -259,8 +259,11 @@ STRATEGY_DESC = (
     "adaptive size_cap. Издержки явные: LLM видит round-trip fee+slippage, "
     "статус показывает долю брутто-PnL, съеденную комиссиями. "
     "v1.44.2: per-coin гейт включается после 3 минусов подряд на монете "
-    "(+0.15 conf на 72ч, не бан), максимум 4 открытия в день, пауза перед "
-    "повторным входом в ту же монету 180м. LIVE-зеркало "
+    "(+0.15 conf на 72ч, не бан; но не выше 0.88, иначе порог недостижим), "
+    "максимум 4 открытия в день, пауза перед повторным входом в ту же "
+    "монету 180м. v1.44.4: вход не открывается, если 12-барный ROC уже "
+    "прошёл больше 2×ATR1H (не догоняем последнюю ногу движения). "
+    "LIVE-зеркало "
     "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
     "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
     "стоит широкий reduce-only disaster stop за стратегическим стопом: "
@@ -608,6 +611,13 @@ class AIConfig:
     loss_partial_frac: float = 0.50
     # v1.25: do not enter against the live 1H impulse (EMA21 + MACD hist + ROC).
     momentum_entry_filter: bool = True
+    # v1.44.4 chase guard: an entry joins a move, it does not buy its last leg.
+    # Live 05–10 Nov: BTC shorts fired after a −7% drop and were stopped by the
+    # bounce; ETH was signalled at a 12-bar ROC of −4.6% (≈2.3×ATR1H). On
+    # 1440×1H bars, skipping entries with |ROC12| > 2.0×ATR1H raised PF in BOTH
+    # halves (full 0.81→0.89, older 1.00→1.13, newer 0.64→0.77) and on the last
+    # 10 days (0.51→0.70); 1.5× and 1.0× over-filter. 0 disables the filter.
+    max_roc_atr_mult: float = 2.0
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
     thesis_break_exit: bool = True
     # v1.43.1: 2-of-3 soft flips inside a LIVE trend are noise, not a broken
@@ -631,6 +641,11 @@ class AIConfig:
     coin_gate_loss_streak: int = 3
     coin_gate_conf_add: float = 0.15
     coin_gate_ttl_hours: float = 72.0
+    # v1.44.4: cap the gated bar. adaptive base 0.78 + 0.15 = 0.93, which no
+    # decision reaches — the "higher bar, not a ban" design became a 72h ban in
+    # practice (live: ETH skipped at conf 0.85). 0.88 reproduces the severity of
+    # the previously validated +0.10 add while streak 3 / TTL 72 stay.
+    coin_gate_conf_cap: float = 0.88
     # Scale-in on continuation instead of close+reopen
     scale_in_enabled: bool = True
     scale_in_min_align: float = 0.70
@@ -2037,6 +2052,20 @@ class AIStrategy:
             return None
         if close <= 0:
             return None
+        # v1.44.4 chase guard: roc is the 12-bar ROC in %, ATR is 1H volatility,
+        # so the ratio is "how many ATRs the last 12h already moved". Beyond
+        # max_roc_atr_mult the entry is late and the bounce does the damage.
+        try:
+            _mult = float(getattr(self.config, "max_roc_atr_mult", 2.0) or 0.0)
+            _atr = float(ind.get("atr") or 0)
+            if _mult > 0 and _atr > 0:
+                _atr_pct = _atr / close * 100.0
+                if _atr_pct > 0:
+                    _ratio = abs(roc) / _atr_pct
+                    if _ratio > _mult:
+                        return f"overextended_roc:{_ratio:.1f}x_atr"
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
         if side == "short":
             if ema21 > 0 and close > ema21 * 1.001:
                 return "bounce_above_ema21"
@@ -3102,11 +3131,19 @@ class AIStrategy:
             return 0.0
         return add
 
+    def _gated_min_confidence(self, base: float, coin: str) -> float:
+        """base bar plus the per-coin penalty, capped so it cannot become a ban."""
+        base = float(base or 0.0)
+        add = self._coin_gate_add(coin) if coin else 0.0
+        if add <= 0:
+            return base
+        gated = base + add
+        cap = float(getattr(self.config, "coin_gate_conf_cap", 0.88) or 0.0)
+        return min(gated, cap) if cap > 0 else gated
+
     def _effective_min_confidence(self, coin: str = "") -> float:
         base = float((self._adapt or {}).get("min_confidence") or self.config.min_confidence)
-        if coin:
-            base += self._coin_gate_add(coin)
-        return base
+        return self._gated_min_confidence(base, coin)
 
     def _effective_min_align(self) -> float:
         return float((self._adapt or {}).get("quant_min_align") or self.config.quant_min_align)
@@ -8051,7 +8088,7 @@ class AIStrategy:
                             continue
                     if al < max(min_al, 0.85):
                         continue
-                    if al < (min_cf + self._coin_gate_add(coin_q)) and al < 0.88:
+                    if al < self._gated_min_confidence(min_cf, coin_q) and al < 0.88:
                         continue
                     if best is None or al > best[2]:
                         best = (coin_q, side, al, reg)

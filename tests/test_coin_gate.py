@@ -76,3 +76,14 @@ def test_global_effective_confidence_unchanged_without_coin():
     bot = _bot()
     bot._trade_log = [_close("LTC", -10) for _ in range(3)]
     assert bot._effective_min_confidence() == 0.72
+
+
+def test_gate_is_capped_so_it_never_becomes_a_ban():
+    # adaptive base 0.78 + 0.15 = 0.93 -> nothing passes; cap keeps it at 0.88
+    bot = _bot()
+    bot._adapt = {"min_confidence": 0.78}
+    bot._trade_log = [_close("LTC", -10) for _ in range(3)]
+    assert bot._coin_gate_add("LTC") == 0.15
+    assert abs(bot._effective_min_confidence("LTC") - 0.88) < 1e-9
+    # below the cap the raw penalty applies
+    assert abs(bot._gated_min_confidence(0.72, "LTC") - 0.87) < 1e-9
