@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.5-close-gate"
+STRATEGY_VERSION = "v1.44.6-stretch-guard"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.44 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -266,6 +266,9 @@ STRATEGY_DESC = (
     "v1.44.5: LLM-закрытие разрешено только при реальном минусе (≤−1.2%), "
     "снятом плюсе или старой «плоской» позиции в мёртвом тренде (ADX<18); "
     "шумовые закрытия по −0.35% остаются в позиции до стопа/тейка. "
+    "v1.44.6: вход не открывается, если цена ушла от EMA21 больше чем на "
+    "1.4×ATR1H в слабом тренде (ADX<30) — растянутая «резинка» это поздний "
+    "вход; при ADX≥30 продолжение считается настоящим и вход разрешён. "
     "LIVE-зеркало "
     "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
     "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
@@ -621,6 +624,17 @@ class AIConfig:
     # halves (full 0.81→0.89, older 1.00→1.13, newer 0.64→0.77) and on the last
     # 10 days (0.51→0.70); 1.5× and 1.0× over-filter. 0 disables the filter.
     max_roc_atr_mult: float = 2.0
+    # v1.44.6 stretch guard (ForexFactory "MA Crossover System that works for
+    # me", rule 3: never enter while the rubber band is stretched). 1.4×ATR
+    # from EMA21 is the plateau, not the peak, but only in a WEAK trend: with
+    # ADX ≥ stretch_adx_free the extension is a real trend leg and the entry
+    # is kept. On 1440×1H bars (14 coins × 60d) this raised PF in BOTH halves
+    # (full 0.93→0.97, older 1.17→1.20, newer 0.85→0.90, last 10d 1.86→1.97)
+    # and 8 coins better / 4 flat / 2 worse. A hard cap with no ADX escape
+    # hurt the older half — the escape is what makes it robust.
+    # max_stretch_atr = 0 disables the filter.
+    max_stretch_atr: float = 1.4
+    stretch_adx_free: float = 30.0
     # v1.44.5 LLM close gate. Live 10–14 Nov: 18 of 24 exits were the model's
     # "closed" (WR 3/18, −28.9 USD) and afterwards price kept moving in the
     # trade's direction (+0.66% 6h, +1.30% 12h, +2.04% 24h) — the old gate let
@@ -2111,15 +2125,29 @@ class AIStrategy:
         # v1.44.4 chase guard: roc is the 12-bar ROC in %, ATR is 1H volatility,
         # so the ratio is "how many ATRs the last 12h already moved". Beyond
         # max_roc_atr_mult the entry is late and the bounce does the damage.
+        _atr = 0.0
         try:
-            _mult = float(getattr(self.config, "max_roc_atr_mult", 2.0) or 0.0)
             _atr = float(ind.get("atr") or 0)
+            _mult = float(getattr(self.config, "max_roc_atr_mult", 2.0) or 0.0)
             if _mult > 0 and _atr > 0:
                 _atr_pct = _atr / close * 100.0
                 if _atr_pct > 0:
                     _ratio = abs(roc) / _atr_pct
                     if _ratio > _mult:
                         return f"overextended_roc:{_ratio:.1f}x_atr"
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        # v1.44.6 stretch guard: price this far from EMA21 means the move is
+        # already spent and the entry is a chase. Only a live trend (ADX above
+        # the free level) earns the right to extend.
+        try:
+            _cap = float(getattr(self.config, "max_stretch_atr", 1.4) or 0.0)
+            if _cap > 0 and _atr > 0 and ema21 > 0:
+                _stretch = abs(close - ema21) / _atr
+                _free = float(getattr(self.config, "stretch_adx_free", 30.0) or 0.0)
+                _adx = float(ind.get("adx") or 0)
+                if _stretch > _cap + 1e-9 and (_free <= 0 or _adx < _free):
+                    return f"stretched_from_ema21:{_stretch:.1f}x_atr"
         except (TypeError, ValueError, ZeroDivisionError):
             pass
         if side == "short":
