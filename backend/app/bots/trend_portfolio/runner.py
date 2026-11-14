@@ -154,6 +154,8 @@ class TrendPaperRunner:
             "exit_lookback": self.cfg.exit_lookback,
             "chandelier_mult": self.cfg.chandelier_mult,
             "sizing_halflife_days": self.cfg.sizing_halflife_days,
+            "regime_symbol": self.cfg.regime_symbol,
+            "regime_ma": self.cfg.regime_ma,
             "universe_size": len(self.cfg.universe),
             **st,
         }

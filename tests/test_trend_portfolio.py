@@ -37,6 +37,8 @@ def _cfg(**kw):
         slippage_pct=0.0002,
         funding_pct_day=0.0,
         max_sleeve_leverage=1000.0,
+        regime_symbol="",          # gate is opt-in; off in the unit helpers
+        regime_ma=200,
     )
     base.update(kw)
     return TrendPortfolioConfig(**base)
@@ -134,6 +136,54 @@ def test_risk_usd_scales_with_smoothed_equity():
     book = TrendPortfolio(cfg)
     book.smooth_equity = 2000.0
     assert book._risk_usd() == pytest.approx(0.32 * 2000.0 / 2)
+
+
+# ── regime gate ──────────────────────────────────────────────────────────
+
+def _ramp(n, base=100.0, slope=5.0):
+    return [
+        Bar(ts=TS0 + i * DAY, open=base + slope * i, high=base + slope * i + 1,
+            low=base + slope * i - 1, close=base + slope * i)
+        for i in range(n)
+    ]
+
+
+def test_regime_gate_off_by_default():
+    assert TrendPortfolioConfig().regime_symbol == ""
+    cfg = _cfg()
+    book = TrendPortfolio(cfg)
+    assert book._regime_ok(1) is True
+
+
+def test_regime_gate_blocks_entry_in_a_downtrend():
+    cfg = _cfg(universe=("AAA", "BTC"), regime_symbol="BTC", regime_ma=5)
+    book = TrendPortfolio(cfg)
+    _feed(book, "BTC", _ramp(7, slope=-5.0))     # BTC below its own mean
+    events = _feed(book, "AAA", _accel(7))
+    assert [e for e in events if e["kind"] == "open"] == []
+    assert book.sleeves["AAA"].position is None
+
+
+def test_regime_gate_allows_entry_in_an_uptrend():
+    cfg = _cfg(universe=("AAA", "BTC"), regime_symbol="BTC", regime_ma=5)
+    book = TrendPortfolio(cfg)
+    _feed(book, "BTC", _ramp(7, slope=5.0))      # BTC above its own mean
+    events = _feed(book, "AAA", _accel(7))
+    assert len([e for e in events if e["kind"] == "open"]) == 1
+
+
+def test_regime_symbol_must_be_in_universe():
+    with pytest.raises(ValueError):
+        _cfg(universe=("AAA",), regime_symbol="BTC").validate()
+
+
+def test_regime_env_gate(monkeypatch):
+    monkeypatch.setenv("TREND_PORTFOLIO_ENABLE", "1")
+    monkeypatch.setenv("TREND_PORTFOLIO_REGIME", "btc")
+    monkeypatch.setenv("TREND_PORTFOLIO_REGIME_MA", "180")
+    cfg = TrendPortfolioConfig.from_env()
+    assert cfg.regime_symbol == "BTC"
+    assert cfg.regime_ma == 180
 
 
 # ── exits ────────────────────────────────────────────────────────────────

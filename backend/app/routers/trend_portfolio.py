@@ -27,6 +27,8 @@ class BacktestRequest(BaseModel):
     exit_lookback: int | None = None
     chandelier_mult: float | None = None
     sizing_halflife_days: float | None = None
+    regime_symbol: str | None = None
+    regime_ma: int | None = None
     coins: list[str] | None = None
     bars: int = 300
 
@@ -74,6 +76,10 @@ async def trend_backtest(req: BacktestRequest):
         cfg.chandelier_mult = req.chandelier_mult
     if req.sizing_halflife_days is not None:
         cfg.sizing_halflife_days = req.sizing_halflife_days
+    if req.regime_symbol is not None:
+        cfg.regime_symbol = req.regime_symbol.strip().upper()
+    if req.regime_ma is not None:
+        cfg.regime_ma = req.regime_ma
     if req.coins:
         cfg.universe = tuple(c.upper() for c in req.coins)
     try:

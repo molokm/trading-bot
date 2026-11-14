@@ -45,10 +45,12 @@ class Position:
     risk_usd: float
     notional: float
     peak_close: float
+    side: int = 1                      # +1 long, -1 short
 
     def as_dict(self) -> dict:
         return {
             "coin": self.coin,
+            "side": self.side,
             "entry": round(self.entry, 8),
             "qty": self.qty,
             "stop": round(self.stop, 8),
@@ -150,7 +152,7 @@ class TrendPortfolio:
         for s in self.sleeves.values():
             p = s.position
             if p and s.closes:
-                eq += (s.closes[-1] - p.entry) * p.qty
+                eq += (s.closes[-1] - p.entry) * p.qty * p.side
         return eq
 
     def open_notional(self) -> float:
@@ -180,10 +182,13 @@ class TrendPortfolio:
             self.last_ts = bar.ts
 
         # 1) fill a pending order at this bar's open
-        if sleeve.pending == "enter" and sleeve.position is None:
+        if sleeve.pending in ("enter", "enter_short") and sleeve.position is None:
             out += self._fill_entry(sleeve, bar)
         elif sleeve.pending == "exit" and sleeve.position is not None:
-            out += self._fill_exit(sleeve, bar, bar.open * (1 - self.cfg.slippage_pct), "signal")
+            side = sleeve.position.side
+            out += self._fill_exit(
+                sleeve, bar, bar.open * (1 - side * self.cfg.slippage_pct), "signal"
+            )
         sleeve.pending = None
 
         # 2) manage an open position
@@ -197,10 +202,11 @@ class TrendPortfolio:
 
     # ── internals ────────────────────────────────────────────────────────
     def _fill_entry(self, sleeve: Sleeve, bar: Bar) -> List[dict]:
+        side = -1 if sleeve.pending == "enter_short" else 1
         atr = sleeve.atr(self.cfg.atr_period)
         if not atr or atr <= 0 or bar.open <= 0:
             return []
-        entry = bar.open * (1 + self.cfg.slippage_pct)
+        entry = bar.open * (1 + side * self.cfg.slippage_pct)
         stop_dist = self.cfg.chandelier_mult * atr
         risk_usd = self._risk_usd()
         equity = self.smooth_equity
@@ -217,15 +223,17 @@ class TrendPortfolio:
             coin=sleeve.coin,
             entry=entry,
             qty=qty,
-            stop=entry - stop_dist,
+            stop=entry - side * stop_dist,
             entry_ts=bar.ts,
             risk_usd=stop_dist * qty,
             notional=notional,
             peak_close=entry,
+            side=side,
         )
         ev = {
             "kind": "open",
             "coin": sleeve.coin,
+            "side": side,
             "ts": bar.ts,
             "price": round(entry, 8),
             "qty": qty,
@@ -241,7 +249,7 @@ class TrendPortfolio:
         if p is None:
             return []
         fee = abs(price * p.qty) * self.cfg.fee_pct
-        pnl = (price - p.entry) * p.qty - fee
+        pnl = (price - p.entry) * p.qty * p.side - fee
         self.fees += fee
         self.realized += pnl
         sleeve.realized_pnl += pnl
@@ -252,6 +260,7 @@ class TrendPortfolio:
         ev = {
             "kind": "close",
             "coin": sleeve.coin,
+            "side": p.side,
             "ts": bar.ts,
             "price": round(price, 8),
             "qty": p.qty,
@@ -269,25 +278,52 @@ class TrendPortfolio:
 
         atr = sleeve.atr(self.cfg.atr_period)
         if atr and atr > 0:
-            p.peak_close = max(p.peak_close, bar.close)
-            p.stop = max(p.stop, p.peak_close - self.cfg.chandelier_mult * atr)
+            if p.side > 0:
+                p.peak_close = max(p.peak_close, bar.close)
+                p.stop = max(p.stop, p.peak_close - self.cfg.chandelier_mult * atr)
+            else:
+                p.peak_close = min(p.peak_close, bar.close)
+                p.stop = min(p.stop, p.peak_close + self.cfg.chandelier_mult * atr)
 
-        if bar.low <= p.stop:
+        if p.side > 0 and bar.low <= p.stop:
             return self._fill_exit(sleeve, bar, p.stop * (1 - self.cfg.slippage_pct), "stop")
+        if p.side < 0 and bar.high >= p.stop:
+            return self._fill_exit(sleeve, bar, p.stop * (1 + self.cfg.slippage_pct), "stop")
 
-        low_n = sleeve.donchian_low(self.cfg.exit_lookback, exclude_current=True)
-        if low_n is not None and bar.close < low_n:
-            sleeve.pending = "exit"
-            out.append({"kind": "exit_pending", "coin": sleeve.coin, "ts": bar.ts})
+        if p.side > 0:
+            low_n = sleeve.donchian_low(self.cfg.exit_lookback, exclude_current=True)
+            if low_n is not None and bar.close < low_n:
+                sleeve.pending = "exit"
+                out.append({"kind": "exit_pending", "coin": sleeve.coin, "ts": bar.ts})
+        else:
+            high_n = sleeve.donchian_high(self.cfg.exit_lookback, exclude_current=True)
+            if high_n is not None and bar.close > high_n:
+                sleeve.pending = "exit"
+                out.append({"kind": "exit_pending", "coin": sleeve.coin, "ts": bar.ts})
         return out
+
+    def _regime_ok(self, side: int) -> bool:
+        """Market-regime gate (no-op when ``regime_symbol`` is empty)."""
+        sym = self.cfg.regime_symbol
+        if not sym:
+            return True
+        s = self.sleeves.get(sym)
+        if s is None or len(s.closes) < self.cfg.regime_ma:
+            return False
+        ma = sum(s.closes[-self.cfg.regime_ma:]) / self.cfg.regime_ma
+        last = s.closes[-1]
+        return last > ma if side > 0 else last < ma
 
     def _check_entry(self, sleeve: Sleeve, bar: Bar) -> List[dict]:
         high_n = sleeve.donchian_high(self.cfg.entry_lookback, exclude_current=True)
-        if high_n is None:
-            return []
-        if bar.close > high_n:
+        if high_n is not None and bar.close > high_n and self._regime_ok(1):
             sleeve.pending = "enter"
             return [{"kind": "enter_pending", "coin": sleeve.coin, "ts": bar.ts}]
+        if self.cfg.allow_short and self._regime_ok(-1):
+            low_n = sleeve.donchian_low(self.cfg.entry_lookback, exclude_current=True)
+            if low_n is not None and bar.close < low_n:
+                sleeve.pending = "enter_short"
+                return [{"kind": "enter_pending", "coin": sleeve.coin, "ts": bar.ts}]
         return []
 
     # ── reporting ────────────────────────────────────────────────────────
@@ -398,6 +434,7 @@ class TrendPortfolio:
                     risk_usd=float(pos.get("risk_usd", 0.0)),
                     notional=float(pos.get("notional", 0.0)),
                     peak_close=float(pos.get("peak_close", pos["entry"])),
+                    side=int(pos.get("side", 1)),
                 )
         return book
 
@@ -424,19 +461,20 @@ def backtest(
         curve.append({"ts": ts, "equity": book.realized_equity, "mark": book.mark_equity()})
 
     return {
-        "stats": _curve_stats(curve, book.start_equity),
+        "stats": _curve_stats(curve, book.start_equity, cfg.bars_per_year),
         "book": book.stats(),
         "curve": curve,
         "trades": sum(s.trades for s in book.sleeves.values()),
     }
 
 
-def _curve_stats(curve: List[dict], start: float) -> dict:
+def _curve_stats(curve: List[dict], start: float, bars_per_year: int = 365) -> dict:
     if not curve:
         return {"cagr_pct": 0.0, "max_dd_pct": 0.0, "sharpe": 0.0, "days": 0}
     eq = [max(p["equity"], 1e-9) for p in curve]
     days = len(eq)
-    years = days / 365.0 if days else 0
+    bpy = bars_per_year or 365
+    years = days / float(bpy) if days else 0
     final = eq[-1] / start
     cagr = (final ** (1 / years) - 1) * 100 if years > 0 and final > 0 else -100.0
     peak = eq[0]
@@ -450,7 +488,7 @@ def _curve_stats(curve: List[dict], start: float) -> dict:
         mean = sum(rets) / len(rets)
         var = sum((r - mean) ** 2 for r in rets) / len(rets)
         sd = math.sqrt(var)
-        sharpe = (mean / sd) * math.sqrt(365) if sd > 0 else 0.0
+        sharpe = (mean / sd) * math.sqrt(bpy) if sd > 0 else 0.0
     return {
         "cagr_pct": round(cagr, 2),
         "max_dd_pct": round(max_dd * 100, 2),

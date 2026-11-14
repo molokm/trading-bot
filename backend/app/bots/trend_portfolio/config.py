@@ -10,13 +10,29 @@ Research basis (45 majors, Binance daily 2021-05 → 2026-11, 5.5y):
     sizing base = equity smoothed with a 365-day half-life.
 
 HONEST performance (single account, this engine — validated 2026-11-14):
-    CAGR +13.6%, maxDD 30.2%, Sharpe 1.02
-    per year: 2021 +30, 2022 -19, 2023 -8, 2024 +150, 2025 +14, 2026 -5
-    WITHOUT 2024: +1.3%/yr.  Block bootstrap: median +11.7%, p10 -2.4%,
-    p90 +33.1%, P(5y loss) 17%, median maxDD 20.3%.
 
-Do not quote 20-25% for this module: the earlier 21.6% came from a
-per-sleeve-rebalanced model that a single exchange account cannot reproduce.
+  A) baseline (regime gate OFF, risk 0.32/sleeve = 0.71%/trade)
+     CAGR +13.4%, maxDD 30.1%, Sharpe 1.01, 627 trades, WR 37%
+     per year: 2021 +30, 2022 -19, 2023 -7, 2024 +149, 2025 +13, 2026 -5
+     WITHOUT 2024: +1.3%/yr.  Bootstrap 5y: median +11.7%, p10 -2.4%,
+     p90 +33.1%, P(loss) 17%, median maxDD 20.3%.
+
+  B) with the BTC regime gate ON (regime_symbol="BTC", regime_ma=200), i.e.
+     take a breakout only while BTC trades above its own 200-day mean:
+       risk 0.32/sleeve (0.71%):  CAGR +12.6%, maxDD 12.0%, Sharpe 1.10
+       risk 0.64/sleeve (1.42%):  CAGR +19.5%, maxDD 22.1%, Sharpe 1.00
+       risk 0.80/sleeve (1.78%):  CAGR +21.4%, maxDD 23.8%, Sharpe 0.98
+     The gate is a risk reducer, not a return driver: it removes the 2022
+     bear-market drawdown (-19% → 0) and halves maxDD at equal risk.  It has
+     a plateau over MA 180-240 (DD 12-14%); MA ≤160 or ≥260 degrades DD to
+     24-28%.  Bootstrap (risk 0.64): median +18.8%, p10 +9.8%, p90 +29.5%.
+     On the second half alone it lifts Sharpe 1.25 → 1.65 and halves DD.
+
+Do NOT quote 20-25% as a given: the earlier 21.6% came from a
+per-sleeve-rebalanced model a single account cannot reproduce, and every
+variant here still earns most of its return in one year (2024).  The 20%
+figure only appears with the gate ON *and* the risk budget doubled, at a
+~22% drawdown.
 """
 from __future__ import annotations
 
@@ -78,6 +94,17 @@ class TrendPortfolioConfig:
     exit_lookback: int = 20        # close < min(low[-20:])  → flat next open
     chandelier_mult: float = 5.0   # trailing stop = peak_close - 5*ATR
     atr_period: int = 14
+    # Symmetric book: also go short on a break of the 40-bar LOW.
+    # Off for crypto (shorts lost money: Sharpe -1.10); on for cross-asset,
+    # where crisis alpha lives on the short side (2008, 2022).
+    allow_short: bool = False
+
+    # Market-regime gate: only take a breakout when the regime asset trades
+    # above its own N-bar mean (below it, for shorts).  Empty = no gate.
+    # BTC = the market beta of the whole 45-coin book, so the gate is a cheap
+    # "don't buy breakouts into a bear market" switch.
+    regime_symbol: str = ""
+    regime_ma: int = 200
 
     # ── sizing / risk ────────────────────────────────────────────────────
     capital: float = 10_000.0      # paper starting equity
@@ -111,6 +138,7 @@ class TrendPortfolioConfig:
     # ── reporting ────────────────────────────────────────────────────────
     state_name: str = "trend_portfolio"
     max_equity_points: int = 2_000
+    bars_per_year: int = 365          # 252 for exchange-traded assets
 
     @property
     def risk_per_trade_pct(self) -> float:
@@ -134,6 +162,10 @@ class TrendPortfolioConfig:
             raise ValueError("trend_portfolio: sizing_halflife_days must be > 0")
         if self.capital <= 0:
             raise ValueError("trend_portfolio: capital must be > 0")
+        if self.regime_symbol and self.regime_symbol not in self.universe:
+            raise ValueError("trend_portfolio: regime_symbol must be in the universe")
+        if self.regime_symbol and self.regime_ma < 5:
+            raise ValueError("trend_portfolio: regime_ma too small")
         if self.warmup_bars <= max(self.entry_lookback, self.atr_period):
             raise ValueError("trend_portfolio: warmup_bars too small")
 
@@ -148,6 +180,8 @@ class TrendPortfolioConfig:
             chandelier_mult=_env_float("TREND_PORTFOLIO_CHANDELIER", 5.0),
             max_sleeve_leverage=_env_float("TREND_PORTFOLIO_MAX_LEV", 3.0),
             sizing_halflife_days=_env_float("TREND_PORTFOLIO_SIZING_HALFLIFE", 365.0),
+            regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
+            regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
             poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),
         )
         cfg.validate()
