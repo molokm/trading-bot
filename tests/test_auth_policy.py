@@ -83,6 +83,9 @@ TIGHTENED_IN_3B = {
     '/api/live/status',
     # Research lab: owner-only experiments, nothing a customer needs.
     '/api/lab/backtest/run', '/api/lab/backtest/last', '/api/lab/hyperopt',
+    # Daily trend portfolio (paper-only, owner's research book).
+    '/api/trend/status', '/api/trend/positions', '/api/trend/cycle',
+    '/api/trend/backtest',
     # LIVE order provenance: owner's real-money fills.
     '/api/live/audit',
     # Destroyed the platform's shared DEMO / owner's LIVE book for any

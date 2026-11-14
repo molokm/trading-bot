@@ -1599,6 +1599,18 @@ async def startup():
                 pass
     except Exception as e:
         print(f'[startup] Scale PnL memory shift: {e}', flush=True)
+    # ── Daily trend portfolio (paper only, gated by TREND_PORTFOLIO_ENABLE) ──
+    # Read-only market data, no order path. Silent no-op when the flag is off.
+    try:
+        from app.bots.trend_portfolio.runner import get_runner
+        _trend_runner = get_runner()
+        if _trend_runner is not None and _trend_runner.cfg.enabled:
+            if _trend_runner.start():
+                print('[startup] trend portfolio paper runner started', flush=True)
+        else:
+            print('[startup] trend portfolio disabled (TREND_PORTFOLIO_ENABLE=0)', flush=True)
+    except Exception as e:
+        print(f'[startup] trend portfolio: {e}', flush=True)
     try:
         _publish_runtime()
         print('[startup] runtime published', flush=True)
@@ -1609,6 +1621,11 @@ async def startup():
 @app.on_event('shutdown')
 async def shutdown():
     global _warm_task
+    try:
+        from app.bots.trend_portfolio.runner import stop_runner
+        await stop_runner()
+    except Exception:
+        pass
     if _warm_task:
         try:
             _warm_task.cancel()
