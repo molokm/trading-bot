@@ -289,6 +289,32 @@ def test_state_round_trip_preserves_book():
     assert restored.sleeves["AAA"].last_ts == book.sleeves["AAA"].last_ts
 
 
+def test_closed_trade_is_recorded_and_persisted():
+    cfg = _cfg()
+    book = TrendPortfolio(cfg)
+    _feed(book, "AAA", _accel(7))
+    book.on_bar("AAA", Bar(ts=TS0 + 7 * DAY, open=140, high=140, low=20, close=25))
+    assert len(book.closed_trades) == 1
+    t = book.closed_trades[0]
+    assert t["coin"] == "AAA" and t["side"] == 1
+    assert t["entry_ts"] < t["exit_ts"]
+    assert t["pnl"] == pytest.approx(book.realized, abs=1e-3)
+    assert t["reason"] == "stop"
+    # survives a state round-trip
+    restored = TrendPortfolio.from_state(cfg, book.to_state())
+    assert len(restored.closed_trades) == 1
+    assert restored.closed_trades[0]["pnl"] == pytest.approx(t["pnl"])
+
+
+def test_runner_trades_are_newest_first():
+    from app.bots.trend_portfolio.runner import TrendPaperRunner
+
+    runner = TrendPaperRunner(_cfg(state_name="test_trend_trades_xyz"))
+    runner.book.closed_trades = [{"coin": "A"}, {"coin": "B"}, {"coin": "C"}]
+    assert [x["coin"] for x in runner.trades(2)] == ["C", "B"]
+    assert [x["coin"] for x in runner.trades(100)] == ["C", "B", "A"]
+
+
 def test_replayed_state_does_not_retrade_old_bars():
     cfg = _cfg()
     book = TrendPortfolio(cfg)
@@ -332,6 +358,7 @@ def test_router_routes_are_declared_and_policy_marked():
     paths = {r.path for r in app.routes}
     assert "/api/trend/status" in paths
     assert "/api/trend/positions" in paths
+    assert "/api/trend/trades" in paths
     assert "/api/trend/cycle" in paths
     assert "/api/trend/backtest" in paths
     unmarked, _ = audit_routes(app)

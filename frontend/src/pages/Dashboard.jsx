@@ -329,7 +329,7 @@ function DashBotPanel({
 }
 
 /** Compact paper Trend book panel (ADMIN). No controls — env-gated on server. */
-function TrendDashPanel({ status, t }) {
+function TrendDashPanel({ status, lastTrade, t }) {
   if (!status) return null
   const running = !!status.running
   const enabled = status.enabled !== false && !status.reason
@@ -339,6 +339,8 @@ function TrendDashPanel({ status, t }) {
   const npos = (status.open_positions || []).length
   const riskPct = status.risk_per_trade_pct
   const gate = status.regime_symbol ? `${status.regime_symbol} ${status.regime_ma}d` : 'выкл'
+  const tp = lastTrade ? Number(lastTrade.pnl || 0) : null
+  const exitD = lastTrade?.exit_ts ? new Date(Number(lastTrade.exit_ts)).toLocaleDateString() : null
   return (
     <div className="panel flex-shrink-0 !border-[var(--profit)]/30">
       <div className="panel-header">
@@ -375,6 +377,17 @@ function TrendDashPanel({ status, t }) {
           {riskPct != null && <span>Риск: <span className="mono text-[var(--txt)]">{Number(riskPct).toFixed(2)}%/сделку</span></span>}
           <span>Гейт: <span className="mono text-[var(--txt)]">{gate}</span></span>
         </div>
+        {lastTrade && (
+          <div className="flex items-center justify-between gap-2 text-[0.6rem] pt-1 border-t border-[var(--border)]/60">
+            <span className="text-[var(--txt-muted)] truncate">
+              Последняя: <span className="text-[var(--txt)] font-medium">{lastTrade.coin}</span>
+              {exitD ? ` · ${exitD}` : ''}
+            </span>
+            <span className={`mono font-semibold flex-shrink-0 ${tp >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {tp >= 0 ? '+' : ''}{tp.toFixed(2)}
+            </span>
+          </div>
+        )}
         {status.last_error && (
           <div className="text-[0.6rem] text-[var(--warn)] break-words">Ошибка: {status.last_error}</div>
         )}
@@ -395,6 +408,7 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
   const [trendStatus, setTrendStatus] = useState(null)
+  const [trendLastTrade, setTrendLastTrade] = useState(null)
   const [liveStatus, setLiveStatus] = useState(null)
   const [livePnl, setLivePnl] = useState(null)
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
@@ -412,16 +426,18 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
 
   // Paper trend book (ADMIN only) — own light poll, independent of the AI tiers.
   useEffect(() => {
-    if (!isAdmin) { setTrendStatus(null); return }
+    if (!isAdmin) { setTrendStatus(null); setTrendLastTrade(null); return }
     let cancelled = false
     const pull = async () => {
       try {
-        const [st, pos] = await Promise.all([
+        const [st, pos, tr] = await Promise.all([
           api.trendStatus().catch(() => null),
           api.trendPositions().catch(() => null),
+          api.trendTrades(1).catch(() => null),
         ])
         if (cancelled || !st) return
         setTrendStatus({ ...st, open_positions: pos?.positions || [] })
+        setTrendLastTrade((tr?.trades || [])[0] || null)
       } catch { /* ignore */ }
     }
     pull()
@@ -1878,7 +1894,7 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
             }}
           />
 
-          <TrendDashPanel status={trendStatus} t={t} />
+          <TrendDashPanel status={trendStatus} lastTrade={trendLastTrade} t={t} />
 
           {/* ─── LIVE Mirror Panel ─── */}
           {liveStatus?.connected && (

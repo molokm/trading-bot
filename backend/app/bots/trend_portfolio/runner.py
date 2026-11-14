@@ -163,6 +163,11 @@ class TrendPaperRunner:
     def positions(self) -> List[dict]:
         return self.book.positions()
 
+    def trades(self, limit: int = 50) -> List[dict]:
+        """Closed paper trades, newest first."""
+        n = max(1, min(int(limit or 50), 500))
+        return list(reversed(self.book.closed_trades[-n:]))
+
 
 _runner: Optional[TrendPaperRunner] = None
 

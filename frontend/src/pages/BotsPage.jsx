@@ -574,7 +574,7 @@ function KV({ label, value, tone = 'default' }) {
 }
 
 /** Paper daily trend book (ADMIN). Read-only module — no start/stop here. */
-function TrendPortfolioCard({ status, positions = [], onRunCycle, loading, isGuest, t }) {
+function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, loading, isGuest, t }) {
   if (!status) return null
   const configRejected = !!status.reason
   const enabled = status.enabled !== false && !configRejected
@@ -679,6 +679,46 @@ function TrendPortfolioCard({ status, positions = [], onRunCycle, loading, isGue
           </div>
         )}
 
+        {trades.length > 0 && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-2xs text-[var(--txt-muted)] font-medium">Последние сделки</span>
+              <span className="text-[0.6rem] text-[var(--txt-muted)] mono">{trades.length} из {tradeCount}</span>
+            </div>
+            <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+              {trades.map((tr, i) => {
+                const p = Number(tr.pnl || 0)
+                const pct = Number(tr.pnl_pct || 0)
+                const isLong = tr.side !== -1 && tr.side !== 'short'
+                const exitD = tr.exit_ts ? new Date(Number(tr.exit_ts)).toLocaleDateString() : '—'
+                const reason = tr.reason === 'stop' ? 'стоп' : tr.reason === 'trail' ? 'трейл' : tr.reason || ''
+                return (
+                  <div
+                    key={`${tr.coin}-${tr.exit_ts}-${i}`}
+                    className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]/50"
+                    title={`${tr.entry} → ${tr.exit}${tr.r_multiple != null ? ` · ${tr.r_multiple}R` : ''}`}
+                  >
+                    <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
+                      <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                      <span className="text-[var(--txt)] font-medium">{tr.coin}</span>
+                      <span className="mono text-[0.6rem] text-[var(--txt-muted)] truncate">{reason}</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{exitD}</span>
+                      <span className={`mono font-semibold ${p >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {p >= 0 ? '+' : ''}{p.toFixed(2)}
+                      </span>
+                      <span className={`mono text-[0.6rem] w-10 text-right ${pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {pct >= 0 ? '+' : ''}{pct.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {lastErr && (
           <div className="flex items-start gap-2 text-[0.6rem] text-[var(--warn)]">
             <AlertTriangle size={11} className="mt-px flex-shrink-0" />
@@ -725,21 +765,24 @@ export default function BotsPage({ connected, isGuest, isAdmin }) {
   const [confirmStopAll, setConfirmStopAll] = useState(false)
   const [trendStatus, setTrendStatus] = useState(null)
   const [trendPositions, setTrendPositions] = useState([])
+  const [trendTrades, setTrendTrades] = useState([])
   const [trendLoading, setTrendLoading] = useState(false)
 
   const refreshStatus = useCallback(async () => {
     // One public payload + status (client-cached) instead of separate heavy /api/pnl
-    const [a, ls, dash, tr, trp] = await Promise.all([
+    const [a, ls, dash, tr, trp, trt] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
       api.meDashboard().catch(() => null),
       isAdmin ? api.trendStatus().catch(() => null) : Promise.resolve(null),
       isAdmin ? api.trendPositions().catch(() => null) : Promise.resolve(null),
+      isAdmin ? api.trendTrades(20).catch(() => null) : Promise.resolve(null),
     ])
     if (a) setAiStatus(a)
     if (ls) setLiveStatus(ls)
     if (tr) setTrendStatus(tr)
     if (trp) setTrendPositions(trp.positions || [])
+    if (trt) setTrendTrades(trt.trades || [])
     const pnl = dash?.pnl
     if (pnl && !pnl.detail && (pnl.total != null || pnl.per_bot)) {
       setDemoPnl(pnl)
@@ -933,6 +976,7 @@ const aiRunning = !!aiStatus?.running
           <TrendPortfolioCard
             status={trendStatus}
             positions={trendPositions}
+            trades={trendTrades}
             onRunCycle={trendCycle}
             loading={trendLoading}
             isGuest={isGuest}

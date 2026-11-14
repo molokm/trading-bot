@@ -51,6 +51,16 @@ async def trend_positions():
     return {"enabled": runner.cfg.enabled, "positions": runner.positions()}
 
 
+@router.get("/api/trend/trades")
+@policy(ADMIN)
+async def trend_trades(limit: int = 50):
+    """Closed paper trades, newest first. Read-only."""
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "trades": []}
+    return {"enabled": runner.cfg.enabled, "trades": runner.trades(limit)}
+
+
 @router.post("/api/trend/cycle")
 @policy(ADMIN)
 async def trend_cycle():

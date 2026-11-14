@@ -124,6 +124,8 @@ class TrendPortfolio:
         self.smooth_equity = float(cfg.capital)
         self.smooth_ts = 0
         self.events: List[dict] = []
+        # Closed-trade history (bounded, persisted) for the dashboard.
+        self.closed_trades: List[dict] = []
 
     # ── sizing ───────────────────────────────────────────────────────────
     @property
@@ -269,6 +271,22 @@ class TrendPortfolio:
             "reason": reason,
         }
         self.events.append(ev)
+        self.closed_trades.append({
+            "coin": sleeve.coin,
+            "side": p.side,
+            "entry": round(p.entry, 8),
+            "exit": round(price, 8),
+            "entry_ts": p.entry_ts,
+            "exit_ts": bar.ts,
+            "qty": p.qty,
+            "notional": round(p.notional, 4),
+            "pnl": round(pnl, 4),
+            "pnl_pct": round((price / p.entry - 1) * 100 * p.side, 3) if p.entry else 0.0,
+            "r_multiple": round(pnl / p.risk_usd, 3) if p.risk_usd else None,
+            "reason": reason,
+        })
+        if len(self.closed_trades) > 500:
+            self.closed_trades = self.closed_trades[-500:]
         return [ev]
 
     def _manage(self, sleeve: Sleeve, bar: Bar) -> List[dict]:
@@ -378,6 +396,7 @@ class TrendPortfolio:
             "last_ts": self.last_ts,
             "smooth_equity": self.smooth_equity,
             "smooth_ts": self.smooth_ts,
+            "closed_trades": self.closed_trades[-500:],
             "sleeves": {
                 c: {
                     "highs": s.highs[-self.cfg.warmup_bars:],
@@ -409,6 +428,7 @@ class TrendPortfolio:
         book.last_ts = int(state.get("last_ts", 0) or 0)
         book.smooth_equity = float(state.get("smooth_equity", cfg.capital))
         book.smooth_ts = int(state.get("smooth_ts", 0) or 0)
+        book.closed_trades = list(state.get("closed_trades") or [])[-500:]
         for coin, raw in (state.get("sleeves") or {}).items():
             s = book.sleeves.get(coin)
             if s is None:

@@ -312,6 +312,7 @@ export const api = {
   // ── Daily trend portfolio (paper, ADMIN) ──
   trendStatus: () => request('/trend/status'),
   trendPositions: () => request('/trend/positions'),
+  trendTrades: (limit = 50) => request(`/trend/trades?limit=${limit}`),
   trendCycle: () => request('/trend/cycle', { method: 'POST' }),
   trendBacktest: (body) =>
     request('/trend/backtest', { method: 'POST', body: JSON.stringify(body || {}) }),
