@@ -1,7 +1,7 @@
 """Telegram bot command & payments poller for the Pro subscription.
 
 Long-polls Telegram getUpdates and handles:
-  /start, /help, /subscribe_pro, /status       — text commands
+  /start, /help, /subscribe_pro, /status, /stats — text commands
   pre_checkout_query                            — Stars invoice confirmation
   successful_payment                            — activate/extend the Pro
                                                   subscription (mini-app access)
@@ -23,18 +23,44 @@ from typing import Optional
 
 import httpx
 
-from .telegram_notifier import TelegramNotifier
+from .strategy_cards import (
+    telegram_metrics_block,
+    telegram_profile_description,
+    telegram_short_description,
+)
+from .telegram_notifier import ENV_CHANNEL, TelegramNotifier, _esc
 
 log = logging.getLogger("telegram_bot")
 
 PRO_PRICE_STARS = int(os.getenv("PRO_PRICE_STARS", "500"))
 PRO_PLAN_DAYS = int(os.getenv("PRO_PLAN_DAYS", "30"))
 PRO_LABEL = os.getenv("PRO_PLAN_LABEL", "Pro-тариф: мини-ап + свой счёт OKX 1 мес")
-TRACKER_URL = os.getenv("TRACKER_URL", "")
 
 PLANS = {
     "pro": (PRO_PRICE_STARS, PRO_PLAN_DAYS, PRO_LABEL),
 }
+
+
+
+def _parse_stats_args(raw: str = "all") -> tuple:
+    """Split '/stats' args into (mode, period).
+
+    Accepts 'live', 'demo', optional period, in any of the two positions:
+    'live week', 'week live', 'demo today', 'all'.
+    """
+    aliases = {"today": "today", "1d": "today", "day": "today",
+               "сегодня": "today", "week": "week", "w": "week",
+               "неделя": "week", "30d": "30d", "month": "30d",
+               "месяц": "30d", "90d": "90d", "quarter": "90d",
+               "all": "all", "всё": "all", "все": "all", "total": "all"}
+    mode = "demo"
+    period = ""
+    for tok in str(raw or "").strip().lower().split():
+        if tok in ("live", "demo"):
+            mode = tok
+        elif tok in aliases:
+            period = aliases[tok]
+    return mode, (period or "all")
 
 
 class TelegramBotPoller:
@@ -86,14 +112,32 @@ class TelegramBotPoller:
         if cq:
             await self._handle_callback(cq)
             return
+        if update.get("my_chat_member"):
+            await self._on_my_chat_member(update["my_chat_member"])
+            return
+        if update.get("channel_post"):
+            await self._on_channel_post(update["channel_post"])
+            return
         msg = update.get("message")
         if not msg:
             return
         if msg.get("successful_payment"):
             await self._on_successful_payment(msg)
             return
+        # Owner forwarded a post from the signals channel → adopt that channel.
+        fwd = msg.get("forward_from_chat") or {}
+        if fwd.get("type") == "channel" and self._is_owner(msg["chat"]["id"]):
+            await self._set_channel(str(fwd.get("id") or ""),
+                                    title=fwd.get("title") or "", reason="forward")
+            return
+        # A group upgraded to a supergroup gets a new id — keep posting there.
+        mig = msg.get("migrate_to_chat_id")
+        if mig and str(msg.get("chat", {}).get("id") or "") == str(self.notifier.channel_id or ""):
+            await self._set_channel(str(mig), reason="migrated")
+            return
         text = (msg.get("text") or "").strip()
         chat_id = msg["chat"]["id"]
+        in_group = str((msg.get("chat") or {}).get("type") or "") in ("group", "supergroup")
         if text.startswith("/"):
             cmd = text.split()[0].lower().split("@")[0]
             if cmd in ("/start", "/help", "/menu"):
@@ -102,6 +146,15 @@ class TelegramBotPoller:
                 await self._cmd_subscribe(chat_id, "pro")
             elif cmd in ("/status",):
                 await self._cmd_status(chat_id)
+            elif cmd in ("/stats", "/stat", "/statistics"):
+                # optional period: /stats week
+                parts = text.split()
+                period = " ".join(parts[1:]).lower() if len(parts) > 1 else "all"
+                await self._cmd_stats(chat_id, period=period)
+            elif cmd in ("/channel", "/setchannel", "/unsetchannel"):
+                await self._cmd_channel(chat_id, text, msg)
+            elif cmd in ("/connect", "/signals_here"):
+                await self._cmd_connect(chat_id, msg)
             elif cmd in ("/tracker",):
                 await self._send_info(chat_id, "results")
             elif cmd == "/about":
@@ -111,7 +164,269 @@ class TelegramBotPoller:
             else:
                 await self._send_msg(chat_id, self._menu_text())
             return
+        if in_group:
+            # In a group the bot sees far more messages than it should answer:
+            # never spam a menu for ordinary chatter.
+            return
+        if self._is_owner(chat_id):
+            ref = self._channel_ref_from_text(text)
+            if ref:
+                chat = await self.notifier.resolve_chat(ref)
+                ctype = str((chat or {}).get("type") or "")
+                if chat and ctype in ("channel", "group", "supergroup"):
+                    await self._set_channel(str(chat.get("id") or ref),
+                                            title=chat.get("title") or "",
+                                            reason="link", ctype=ctype)
+                else:
+                    await self._send_msg(
+                        chat_id,
+                        "❌ Чат не найден или бот в нём не состоит.\n"
+                        f"<code>{_esc(text)}</code>",
+                    )
+                return
         await self._send_msg(chat_id, self._menu_text())
+
+    # ─── Signals channel setup (owner) ───
+
+    def _owner_chat_id(self) -> str:
+        return str(self.notifier.chat_id or "").strip()
+
+    def _is_owner(self, chat_id) -> bool:
+        owner = self._owner_chat_id()
+        return bool(owner) and str(chat_id) == owner
+
+    def _is_owner_user(self, user) -> bool:
+        """Owner check for group chats, where chat id ≠ owner's user id."""
+        owner = self._owner_chat_id()
+        uid = str((user or {}).get("id") or "")
+        return bool(owner) and bool(uid) and uid == owner
+
+    async def _cmd_connect(self, chat_id, msg: dict) -> None:
+        """`/connect` in a channel/group the bot belongs to → signals go there.
+
+        Easier than hunting for «Администраторы» in the channel settings: the
+        bot only sees the chat once it is a member, so this command is the last
+        step, and it works for groups where any member can add a bot.
+        """
+        chat = msg.get("chat") or {}
+        ctype = str(chat.get("type") or "")
+        if ctype in ("group", "supergroup"):
+            if not self._is_owner_user(msg.get("from")):
+                await self._send_msg(chat_id, "Подключить сигналы может только владелец бота.")
+                return
+            await self._set_channel(str(chat.get("id") or ""),
+                                    title=chat.get("title") or "",
+                                    reason="connect", ctype=ctype)
+            return
+        if ctype == "channel":
+            await self._on_channel_post(msg)
+            return
+        await self._send_msg(
+            chat_id,
+            "Команда работает в канале или группе, куда добавлен бот.\n\n"
+            "Канал: добавьте @RotationTradeBot администратором.\n"
+            "Группа: «Участники» → «Добавить участника» → @RotationTradeBot, "
+            "затем /connect.",
+        )
+
+    async def _set_channel(self, cid: str, title: str = "", reason: str = "",
+                           ctype: str = "") -> None:
+        """Persist the signals channel (env + DB) and tell the owner.
+
+        Called automatically when Telegram reports the bot was added to a
+        channel, when a channel post arrives, or when the owner forwards a post
+        or uses /setchannel — no manual env editing in the hosting panel.
+        """
+        cid = str(cid or "").strip()
+        word, verb, was = ("Группа", "подключена", "отключена") \
+            if ctype in ("group", "supergroup") else ("Канал", "подключён", "отключён")
+        before = str(self.notifier.channel_id or "").strip()
+        self.notifier.channel_id = cid
+        try:
+            os.environ[ENV_CHANNEL] = cid
+        except Exception:
+            pass
+        try:
+            if self.db:
+                await self.db.set_setting(ENV_CHANNEL, cid)
+        except Exception as e:
+            log.warning("channel setting save: %s", e)
+        try:
+            TelegramNotifier._channel_cache.clear()
+        except Exception:
+            pass
+        owner = self._owner_chat_id()
+        if not owner:
+            return
+        if not cid:
+            await self._send_msg(
+                owner,
+                f"⚠️ <b>{word} {was}</b>"
+                + (f"\n{_esc(title)}" if title else "")
+                + "\nСигналы продолжат приходить в этот чат.",
+            )
+            return
+        if cid == before and reason != "manual":
+            return
+        await self._send_msg(
+            owner,
+            f"✅ <b>{word} {verb}</b>\n"
+            + (f"{_esc(title)}\n" if title else "")
+            + f"<code>{_esc(cid)}</code>",
+        )
+        probe = await self._api("sendMessage", chat_id=cid,
+                                text="✅ Сигналы подключены к этому чату.")
+        if not probe.get("ok"):
+            await self._send_msg(
+                owner,
+                "⚠️ Не удалось опубликовать: "
+                + _esc(probe.get("description") or "unknown error")
+                + "\nКанал: выдайте боту права администратора с публикацией.\n"
+                "Группа: проверьте, что бот не ограничен в отправке сообщений.",
+            )
+
+    async def _on_my_chat_member(self, upd: dict) -> None:
+        """Bot added to / removed from a channel or group.
+
+        A channel is adopted silently (the bot only gets there when an admin
+        added it). A group is *not* adopted automatically — anyone can drop a
+        bot into a group, and signals must not leak there. Instead the owner is
+        told once and can confirm with /connect right in that group.
+        """
+        chat = upd.get("chat") or {}
+        ctype = str(chat.get("type") or "")
+        status = str((upd.get("new_chat_member") or {}).get("status") or "").lower()
+        cid = str(chat.get("id") or "")
+        if not cid:
+            return
+        active = status in ("administrator", "member", "creator")
+        gone = status in ("left", "kicked")
+        configured = str(self.notifier.channel_id or "").strip()
+        if ctype == "channel":
+            if active:
+                await self._set_channel(cid, title=chat.get("title") or "",
+                                        reason="added", ctype=ctype)
+            elif gone and cid == configured:
+                await self._set_channel("", title=chat.get("title") or "",
+                                        reason="removed", ctype=ctype)
+            return
+        if ctype not in ("group", "supergroup"):
+            return
+        if gone:
+            if cid == configured:
+                await self._set_channel("", title=chat.get("title") or "",
+                                        reason="removed", ctype=ctype)
+            return
+        if not active:
+            return
+        # Only the owner may turn a group into the signals target.
+        adder = upd.get("from") or {}
+        if not self._is_owner_user(adder):
+            return
+        if cid == configured:
+            return
+        owner = self._owner_chat_id()
+        if owner:
+            await self._send_msg(
+                owner,
+                "👥 <b>Бот добавлен в группу</b>\n"
+                + (f"{_esc(chat.get('title') or '')}\n" if chat.get("title") else "")
+                + f"<code>{_esc(cid)}</code>\n\n"
+                "Публиковать сигналы сюда? Отправьте <code>/connect</code> "
+                "в самой группе.",
+            )
+
+    async def _on_channel_post(self, msg: dict) -> None:
+        chat = msg.get("chat") or {}
+        if chat.get("type") != "channel":
+            return
+        cid = str(chat.get("id") or "")
+        if cid and cid != str(self.notifier.channel_id or "").strip():
+            await self._set_channel(cid, title=chat.get("title") or "",
+                                    reason="post", ctype="channel")
+
+    def _channel_ref_from_text(self, text: str) -> str:
+        """Turn «@name», «t.me/name», «-100…» or a post link into a chat ref."""
+        t = (text or "").strip()
+        if not t or len(t) > 200:
+            return ""
+        for prefix in ("https://t.me/", "http://t.me/", "https://telegram.me/",
+                       "http://telegram.me/", "t.me/", "telegram.me/"):
+            if t.lower().startswith(prefix):
+                tail = t[len(prefix):].strip("/").split("?")[0].split("/")[0]
+                if not tail or tail.startswith("+") or tail in ("joinchat", "addstickers"):
+                    return ""
+                return "@" + tail
+        if t.startswith("@"):
+            return t
+        if t.startswith("-100") and t[4:].isdigit():
+            return t
+        return ""
+
+    async def _cmd_channel(self, chat_id, text: str, msg: dict | None = None) -> None:
+        if not (self._is_owner(chat_id)
+                or self._is_owner_user((msg or {}).get("from"))):
+            await self._send_msg(chat_id, "Команда доступна только владельцу бота.")
+            return
+        parts = text.split()
+        sub = parts[0].lower().split("@")[0]
+        if sub == "/unsetchannel":
+            await self._set_channel("", reason="manual")
+            return
+        if sub == "/setchannel":
+            if len(parts) < 2:
+                await self._send_msg(
+                    chat_id,
+                    "Использование:\n<code>/setchannel @username</code>\n"
+                    "<code>/setchannel -100…</code>\n\n"
+                    "Проще: добавьте бота администратором в канал или перешлите "
+                    "сюда любой пост из канала.",
+                )
+                return
+            ref = parts[1]
+            chat = await self.notifier.resolve_chat(ref)
+            if not chat:
+                await self._send_msg(
+                    chat_id,
+                    "❌ Чат не найден.\nДобавьте @RotationTradeBot администратором "
+                    "в канал и повторите — либо перешлите сюда пост из канала.",
+                )
+                return
+            ctype = str(chat.get("type") or "")
+            if ctype not in ("channel", "group", "supergroup"):
+                await self._send_msg(chat_id, f"Это не канал и не группа (type={_esc(ctype or '?')}).")
+                return
+            await self._set_channel(str(chat.get("id") or ref),
+                                    title=chat.get("title") or "",
+                                    reason="manual", ctype=ctype)
+            return
+        info = await self.notifier.check_channel(force=True)
+        if not info.get("configured"):
+            await self._send_msg(
+                chat_id,
+                "📡 <b>Сигналы никуда не публикуются</b>\n\n"
+                "Добавьте @RotationTradeBot в канал (администратором) или в группу "
+                "(участником) — бот подхватит чат сам.\n"
+                "В группе после добавления отправьте <code>/connect</code>.",
+            )
+            return
+        if info.get("ok"):
+            await self._send_msg(
+                chat_id,
+                "📡 <b>Сигналы публикуются</b>\n"
+                f"{_esc(info.get('title') or '')}\n"
+                f"<code>{_esc(info.get('channel_id') or '')}</code>\n"
+                "Бот — администратор, публикация работает.",
+            )
+        else:
+            await self._send_msg(
+                chat_id,
+                "⚠️ <b>Чат недоступен</b>\n"
+                f"<code>{_esc(info.get('channel_id') or '')}</code>\n"
+                f"{_esc(info.get('error') or '')}\n\n"
+                "Добавьте бота администратором в канал или в группу, либо задайте "
+                "другой: <code>/setchannel @username</code>",
+            )
 
     def _menu_keyboard(self) -> dict:
         return {
@@ -121,8 +436,9 @@ class TelegramBotPoller:
                  {"text": "🔍 Результаты", "callback_data": "info_results"}],
                 [{"text": "💳 Оплата", "callback_data": "info_payment"},
                  {"text": "⚠️ Риски", "callback_data": "info_risks"}],
-                [{"text": "❓ FAQ", "callback_data": "info_faq"},
+                [{"text": "📊 Статистика", "callback_data": "stats_all"},
                  {"text": "ℹ️ О боте", "callback_data": "about"}],
+                [{"text": "❓ FAQ", "callback_data": "info_faq"}],
             ]
         }
 
@@ -145,31 +461,33 @@ class TelegramBotPoller:
             "overview": (
                 "📚 <b>Как это работает</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Это алгоритмический трейдер: бот торгует фьючерсами на OKX по дневным "
-                "свечам, сам находит сигналы, открывает позиции, ставит стопы и закрывает "
-                "сделки. Вам ничего не нужно делать вручную — только наблюдать за результатом.\n\n"
-                "📡 <b>Сигналы</b> — каждая сделка публикуется прямо в этом боте, бесплатно.\n"
-                "🚀 <b>Pro</b> — бот торгует на вашем счёте OKX, управление через мини-ап\n\n"
-                "Подробнее — в разделах ниже."
+                "AI Discretionary 1H <b>v1.10</b> смотрит закрытые часовые свечи "
+                "и решает: открыть, закрыть или подождать.\n\n"
+                "Монеты: <b>BTC · ETH · SOL · XRP</b> (USDT-SWAP на OKX).\n"
+                "Защитный режим: высокий порог входа, риск ~1.5% на сделку, "
+                "ранний трейл и перевод в безубыток, лимит дня −2%.\n\n"
+                "📡 <b>Сигналы</b> — сделки публикуются здесь бесплатно.\n"
+                "🚀 <b>Pro</b> — AI торгует на <b>вашем</b> счёте OKX через мини-ап.\n\n"
+                "Подробнее: /about · /status"
             ),
             "signals": (
                 "📡 <b>Бесплатные сигналы</b>\n"
                 "━━━━━━━━━━━━━━━\n"
                 "<b>Теперь бесплатно и прямо в этом боте.</b>\n\n"
-                "• Каждая сделка бота публикуется здесь автоматически\n"
+                "• Каждая сделка AI публикуется здесь автоматически\n"
                 "• Цена входа, стоп-лосс, тейк и итоговый результат\n"
                 "• Направление (лонг/шорт) и текущие открытые позиции\n\n"
                 "Никакой оплаты и отдельного канала не нужно — следите за "
                 "сигналами прямо здесь.\n\n"
-                "Хотите, чтобы бот торговал на вашем счёте? → 🚀 Pro: /subscribe_pro"
+                "Хотите, чтобы AI торговал на вашем счёте? → 🚀 Pro: /subscribe_pro"
             ),
             "pro": (
                 f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Те же стратегии торгуют <b>на вашем счёте OKX</b> полностью автоматически.\n\n"
+                "AI торгует на <b>вашем счёте OKX</b> полностью автоматически.\n\n"
                 "<b>Что вы получаете:</b>\n"
                 "• Подключаете свои ключи OKX (шифруются на сервере)\n"
-                "• Запускаете ботов в один тап в мини-апе\n"
+                "• Запускаете AI в один тап в мини-апе\n"
                 "• Бот сам открывает/закрывает сделки, ставит стопы и ведёт риск\n"
                 "• Статистика и управление — в мини-апе в Telegram\n\n"
                 "<b>Требования:</b>\n"
@@ -179,19 +497,12 @@ class TelegramBotPoller:
                 "Оплатить: /subscribe_pro или кнопкой в меню."
             ),
             "results": (
-                "🔍 <b>Результаты и проверка</b>\n"
+                "🔍 <b>Результаты</b>\n"
                 "━━━━━━━━━━━━━━━\n"
-                "Мы публикуем честные цифры и не прячем их:\n\n"
-                "• Стратегии проверены на реальных свечах OKX (нативные 1D, 10 монет, "
-                "2023–2026) и дополнительно провалидированы walk-forward (вне выборки)\n"
-                "• Результаты подтверждены <b>независимым бэктест-движком (Backtrader)</b> "
-                "на реальных биржевых данных\n"
-                "• Ориентиры бэктестов: CAGR ~55–65% в год, win rate ~51–59%, "
-                "<b>0 ликвидаций</b>, управляемая просадка\n"
-                "• Живые результаты бота видны на странице трекера\n\n"
-                "Главное: результаты можно <b>проверить самостоятельно</b> — скрипты "
-                "верификации лежат в открытом репозитории проекта.\n\n"
-                "Живой отчёт: /tracker"
+                "Живые сделки и PnL — в мини-апе и на дашборде.\n\n"
+                f"{telegram_metrics_block(html=True)}\n\n"
+                "Прошлые результаты не гарантируют будущую доходность.\n\n"
+                "Отчёт: мини-ап и дашборд"
             ),
             "payment": (
                 "💳 <b>Оплата Pro</b>\n"
@@ -202,7 +513,7 @@ class TelegramBotPoller:
                 "<b>Как оплатить:</b>\n"
                 "1. Нажмите «Оплатить» под счётом (кнопка Pro)\n"
                 "2. Подтвердите оплату Stars\n"
-                "3. Откройте мини-ап через кнопку меню — подключите счёт и запустите ботов\n\n"
+                "3. Откройте мини-ап через кнопку меню — подключите счёт и запустите AI\n\n"
                 "<b>Продление:</b> срок подписки складывается при каждой оплате.\n\n"
                 f"Тариф: Pro — {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n\n"
                 "📡 Сигналы — бесплатно, прямо в этом боте."
@@ -232,7 +543,7 @@ class TelegramBotPoller:
                 "<b>Можно ли отменить подписку?</b>\n"
                 "Да — просто не продлевайте после истечения срока.\n\n"
                 "<b>Что после оплаты Pro?</b>\n"
-                "Открываете мини-ап, подключаете ключи OKX и запускаете ботов одной кнопкой.\n\n"
+                "Открываете мини-ап, подключаете ключи OKX и запускаете AI одной кнопкой.\n\n"
                 "<b>Почему не обещаете +1000%?</b>\n"
                 "Потому что это ложь. Мы даём реальные цифры и защиту капитала."
             ),
@@ -245,43 +556,39 @@ class TelegramBotPoller:
 
     def _menu_text(self) -> str:
         return (
-            "🤖 <b>Ваш личный алгоритмический трейдер</b>\n"
+            "🤖 <b>COPIX — ваш AI-трейдер на OKX</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "Мы не обещаем космос — тот, кто обещает +1000% в месяц, врёт.\n"
-            "Наша цель проще и честнее: <b>реальная доходность при минимальных рисках</b>.\n\n"
-            "Бот сам торгует фьючерсами на OKX по двум проверенным стратегиям — "
-            "открывает, ведёт и закрывает позиции за вас, без эмоций.\n\n"
-            "🛡️ <b>Риски — главный приоритет</b>\n"
-            "• Жёсткий стоп на каждую сделку, безубыток, частичный тейк\n"
-            "• За всю историю бэктестов — <b>0 ликвидаций</b>\n"
-            "• Просадка управляемая, а не «всё или ничего»\n\n"
-            "📊 <b>Честные ожидания</b> (бэктест 2023–2026)\n"
-            "• Доходность — <b>CAGR ~55–65% в год</b>, а не «x10 за месяц»\n"
-            "• Win rate ~51–59%: не угадываем каждую сделку — даём стабильное преимущество\n"
-            "• Подтверждено независимым бэктест-движком (Backtrader)\n\n"
-            "📡 <b>Сигналы</b> — бесплатно, каждая сделка публикуется прямо здесь.\n\n"
+            "Пока вы отдыхаете, AI анализирует рынок и торгует.\n"
+            "BTC · ETH · SOL · XRP · v1.10 defensive — круглосуточно, без эмоций.\n\n"
+            "📡 <b>Бесплатно</b> — каждая сделка публикуется здесь, прямо в боте.\n"
+            "🚀 <b>Pro</b> — AI торгует на <b>вашем</b> счёте OKX. "
+            "Подключите ключи в мини-апе — и всё, бот делает остальное.\n\n"
+            "🛡️ <b>Риск под контролем</b>\n"
+            "• Лимит риска на сделку и число позиций\n"
+            "• Умеренное плечо, стопы и автоматический выход\n"
+            "• Цель — без ликвидаций при штатных настройках\n\n"
+            "📊 <b>Честно</b>\n"
+            f"{telegram_metrics_block(html=True)}\n\n"
             f"🚀 <b>Pro</b> · {PRO_PRICE_STARS} ⭐ / {PRO_PLAN_DAYS} дн.\n"
-            "Бот торгует на вашем счёте OKX, управление — в мини-апе.\n\n"
-            "Команды: /subscribe_pro · /info · /status · /about"
+            "AI торгует на <b>вашем</b> счёте OKX, управление — в мини-апе.\n\n"
+            "Команды: /stats · /subscribe_pro · /info · /status · /about · /start"
         )
 
     def _about_text(self) -> str:
         return (
-            "📈 <b>О боте</b>\n"
+            "📈 <b>Как это работает</b>\n"
             "━━━━━━━━━━━━━━━\n"
-            "• <b>Стратегии:</b> Momentum Rotation (до 2 позиций) + Impulse 1D (до 3)\n"
-            "• <b>Таймфрейм:</b> дневные свечи, 10 монет\n"
-            "• <b>Защита капитала:</b> стоп-лоссы, трейлинг, безубыток, частичный тейк — "
-            "всё автоматически; 0 ликвидаций за всю историю бэктестов\n"
-            "• <b>Честная позиция:</b> мы не обещаем космической доходности. Реальные "
-            "ориентиры — CAGR ~55–65% в год (бэктест 2023–2026) при управляемой просадке\n"
-            "• <b>Проверяемость:</b> результаты на реальных свечах OKX (нативные 1D), "
-            "воспроизводятся скриптами из открытого репозитория и подтверждены независимым "
-            "бэктест-движком (Backtrader)\n"
-            "• <b>Прозрачность:</b> живые результаты — в мини-апе и на странице трекера\n\n"
-            "Живой отчёт: /tracker\n\n"
-            "⚠️ Прошлые результаты не гарантируют будущей доходности. Торговля "
-            "фьючерсами с плечом — высокорисковый инструмент; возможны убыточные периоды."
+            "AI Discretionary 1H <b>v1.10</b> анализирует закрытые часовые свечи "
+            "(BTC · ETH · SOL · XRP), оценивает тренд и риски — "
+            "и решает: открыть, закрыть или держать.\n\n"
+            "• <b>Что делает:</b> AI Discretionary 1H v1.10 — BTC · ETH · SOL · XRP на OKX\n• <b>Риск:</b> ~1.5% на сделку, ранний трейл, лимит дня −2%\n"
+            "• <b>Как решает:</b> LLM-модель + индикаторы — фильтр входа и выхода\n"
+            "• <b>Защита:</b> лимит риска, стопы, умеренное плечо, контроль позиций\n"
+            f"{telegram_metrics_block(html=True)}\n"
+            "• <b>Прозрачность:</b> сделки и PnL — в мини-апе и на дашборде\n\n"
+            "Отчёт: мини-ап и дашборд\n\n"
+            "⚠️ Прошлые и текущие результаты не гарантируют будущей доходности. "
+            "Торговля фьючерсами с плечом — высокий риск."
         )
 
     async def _cmd_about(self, chat_id):
@@ -304,9 +611,135 @@ class TelegramBotPoller:
             await self._send_msg(chat_id, self._about_text())
         elif data == "menu":
             await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
+        elif data.startswith("stats_"):
+            period = data[len("stats_"):] or "all"
+            await self._cmd_stats(chat_id, period=period)
         elif data.startswith("info_"):
             section = data[len("info_"):]
             await self._send_info(chat_id, section)
+
+    def _stats_keyboard(self, period: str = "all") -> dict:
+        periods = [
+            ("today", "Сегодня"),
+            ("week", "Неделя"),
+            ("30d", "30д"),
+            ("90d", "90д"),
+            ("all", "Всё"),
+        ]
+        row = []
+        for pid, label in periods:
+            mark = "· " if pid == period else ""
+            row.append({"text": f"{mark}{label}", "callback_data": f"stats_{pid}"})
+        return {
+            "inline_keyboard": [
+                row[:3],
+                row[3:],
+                [{"text": "🔄 Обновить", "callback_data": f"stats_{period}"},
+                 {"text": "🔙 В меню", "callback_data": "menu"}],
+            ]
+        }
+
+    @staticmethod
+    def _fmt_pnl(v) -> str:
+        try:
+            n = float(v or 0)
+        except (TypeError, ValueError):
+            return "—"
+        sign = "+" if n > 0 else ""
+        return f"{sign}{n:.2f}"
+
+    async def _cmd_stats(self, chat_id, period: str = "all"):
+        """Stats for DEMO (default) or LIVE — same engine as web /api/stats.
+
+        Usage: /stats [live|demo] [today|week|30d|90d|all]
+        """
+        mode, period = _parse_stats_args(period)
+        aliases = {
+            "today": "today", "1d": "today", "day": "today", "сегодня": "today",
+            "week": "week", "w": "week", "неделя": "week",
+            "30d": "30d", "month": "30d", "месяц": "30d",
+            "90d": "90d", "quarter": "90d",
+            "all": "all", "всё": "all", "все": "all", "total": "all",
+        }
+        period = aliases.get(period, "all")
+        period_labels = {
+            "today": "сегодня",
+            "week": "неделя (с пн)",
+            "30d": "30 дней",
+            "90d": "90 дней",
+            "all": "всё время",
+        }
+
+        if not self.db:
+            await self._send_msg(chat_id, "⚠️ Статистика временно недоступна (нет БД).")
+            return
+
+        try:
+            from app.services import pnl_engine
+            bills = None
+            allow_untagged = False
+            if mode == "live":
+                try:
+                    from app.main import _fetch_all_trade_bills
+                    from app.main import AI_ONLY_MODE as _ai_only
+                    bills = await _fetch_all_trade_bills(
+                        limit_per_page=100, mode="live")
+                    allow_untagged = bool(_ai_only)
+                except Exception as _be:
+                    log.warning("stats cmd live bills: %s", _be)
+            data = await pnl_engine.compute_stats(
+                self.db,
+                account_mode=mode,
+                ai_only=True,
+                period=period,
+                bills=bills,
+                allow_untagged_ai=allow_untagged,
+                sync_fn=None,  # avoid blocking TG on OKX; uses latest stored closes
+            )
+        except Exception as e:
+            log.warning("stats cmd error: %s", e)
+            await self._send_msg(chat_id, f"⚠️ Не удалось загрузить статистику: {e}")
+            return
+
+        realized = self._fmt_pnl(data.get("realized_pnl"))
+        trades = int(data.get("trades") or 0)
+        wins = int(data.get("wins") or 0)
+        losses = int(data.get("losses") or 0)
+        wr = data.get("win_rate")
+        pf = data.get("profit_factor")
+        avg_w = self._fmt_pnl(data.get("avg_win"))
+        avg_l = self._fmt_pnl(data.get("avg_loss"))
+        d_from = data.get("from") or "—"
+        d_to = data.get("to") or "—"
+
+        by_coin = data.get("by_coin") or []
+        coin_lines = []
+        for c in by_coin[:6]:
+            coin_lines.append(
+                f"  {c.get('coin')}: <b>{self._fmt_pnl(c.get('pnl'))}</b> $ "
+                f"({c.get('trades', 0)} сд., WR {c.get('win_rate', 0)}%)"
+            )
+        coins_block = "\n".join(coin_lines) if coin_lines else "  нет закрытий"
+
+        pf_s = f"{pf}" if pf is not None else "—"
+        wr_s = f"{wr}%" if wr is not None else "—"
+
+        text = (
+            f"📊 <b>Статистика {mode.upper()} · AI</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"Период: <b>{period_labels.get(period, period)}</b>\n"
+            f"{d_from} → {d_to}\n\n"
+            f"Realized PnL: <b>{realized} USDT</b>\n"
+            f"Сделок: <b>{trades}</b> · ✅ {wins} / ❌ {losses}\n"
+            f"Win rate: <b>{wr_s}</b> · PF <b>{pf_s}</b>\n"
+            f"Ср. плюс: <b>{avg_w}</b> · Ср. минус: <b>{avg_l}</b>\n\n"
+            f"<b>По монетам</b>\n{coins_block}\n\n"
+            f"<i>Только закрытые сделки · МСК · {'/stats live' if mode == 'live' else '/stats'}</i>"
+        )
+        await self._send_msg(
+            chat_id, text,
+            reply_markup=self._stats_keyboard(period),
+        )
 
     async def _cmd_start(self, chat_id):
         await self._send_msg(chat_id, self._menu_text(), reply_markup=self._menu_keyboard())
@@ -355,7 +788,7 @@ class TelegramBotPoller:
             return
         until = sub.get("active_until", "")
         active = _is_active(sub)
-        plan = sub.get("plan", "pro")
+        sub.get("plan", "pro")
         plan_label = "💎 Pro"
         state = "✅ активна" if active else "⛔ истекла"
         await self._send_msg(
@@ -383,7 +816,7 @@ class TelegramBotPoller:
         first_name = user.get("first_name", "")
 
         # Only the Pro plan exists now; plan is always "pro".
-        payload = payment.get("invoice_payload", "") or ""
+        payment.get("invoice_payload", "") or ""
         plan = "pro"
         days = PRO_PLAN_DAYS
 
@@ -426,7 +859,7 @@ class TelegramBotPoller:
         await self._send_msg(
             chat_id,
             "Откройте мини-ап через кнопку меню или "
-            "https://t.me/<yourbot>/app — подключите ключи OKX и запустите ботов.",
+            "https://t.me/<yourbot>/app — подключите ключи OKX и запустите AI.",
         )
 
     # ─── Lifecycle ───
@@ -473,27 +906,22 @@ class TelegramBotPoller:
         description; without this call it keeps the old strategy text forever.
         """
         desc = (
-            "Алгоритмический трейдер: Momentum Rotation + Impulse 1D на OKX.\n"
-            "Дневные свечи, 10 монет, жёсткие стопы, трейлинг, 0 ликвидаций.\n"
-            "Бэктест 2023–2026 (нативные 1D, независимый движок Backtrader): "
-            "CAGR ~55–65% в год.\n"
-            "📡 Сигналы — бесплатно прямо в боте.\n"
-            "🚀 Pro — боты торгуют на вашем счёте OKX: /subscribe_pro"
+            telegram_profile_description()
+            + "\n📡 Сигналы AI — бесплатно в боте."
+            + "\n🚀 Pro — AI на вашем счёте OKX: /subscribe_pro"
         )
-        short = (
-            "Сигналы бесплатно · Pro — торговые боты на вашем OKX "
-            "(Momentum + Impulse). Бэктест CAGR ~55–65%."
-        )
-        await self._api("setMyName", name="Rotation Trade Bot")
-        await self._api("setMyDescription", description=desc)
-        await self._api("setMyShortDescription", short_description=short)
+        short = telegram_short_description()
+        await self._api("setMyName", name="COPIX AI Trader")
+        await self._api("setMyDescription", description=desc[:512])
+        await self._api("setMyShortDescription", short_description=short[:120])
         await self._api("setMyCommands", commands=[
             {"command": "start", "description": "Главное меню"},
-            {"command": "info", "description": "Как это работает"},
-            {"command": "status", "description": "Статус ботов"},
+            {"command": "stats", "description": "Статистика DEMO (PnL, win rate)"},
+            {"command": "info", "description": "Как работает AI"},
+            {"command": "status", "description": "Подписка и статус"},
             {"command": "tracker", "description": "Живой отчёт"},
-            {"command": "about", "description": "О боте"},
-            {"command": "subscribe_pro", "description": "Pro-тариф"},
+            {"command": "about", "description": "Как работает AI-трейдер"},
+            {"command": "subscribe_pro", "description": "Pro — AI на вашем OKX"},
         ])
 
     async def _poll_loop(self):
@@ -519,7 +947,8 @@ class TelegramBotPoller:
                 res = await self._api(
                     "getUpdates",
                     offset=offset, timeout=30,
-                    allowed_updates=["message", "callback_query", "pre_checkout_query"],
+                    allowed_updates=["message", "callback_query", "pre_checkout_query",
+                                     "my_chat_member", "channel_post"],
                 )
                 if res.get("ok"):
                     for u in res.get("result", []):
