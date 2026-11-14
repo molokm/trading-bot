@@ -212,7 +212,7 @@ function AppLayout() {
             ) : null}
             {health?.bots && (
               <span className="hidden sm:flex items-center gap-1 ml-0.5" title={t('nav.bots_status_tip')}>
-                {['rotation', 'impulse', 'validation'].map(k => (
+                {['ai', 'trend'].map(k => (
                   <span
                     key={k}
                     className={`w-1.5 h-1.5 rounded-full ${health.bots[k] ? 'bg-[var(--profit)]' : 'bg-[var(--txt-muted)] opacity-40'}`}
@@ -270,8 +270,8 @@ function AppLayout() {
       <main className="app-main flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pb-[calc(3.75rem+env(safe-area-inset-bottom,0px))] md:pb-0">
         <Suspense fallback={<div className="flex items-center justify-center h-full"><Loader /></div>}>
         <Routes>
-          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} />} />
-          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} />} />
+          <Route path="/" element={<Dashboard health={health} connected={connected} isGuest={isGuest} isAdmin={isAdmin} />} />
+          <Route path="/bots" element={<BotsPage connected={connected} isGuest={isGuest} isAdmin={isAdmin} />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/admin" element={<AdminPage />} />

@@ -563,7 +563,146 @@ function BotCard({
   )
 }
 
-export default function BotsPage({ connected, isGuest }) {
+function KV({ label, value, tone = 'default' }) {
+  const color = tone === 'profit' ? 'text-[var(--profit)]' : tone === 'muted' ? 'text-[var(--txt-muted)]' : 'text-[var(--txt)]'
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-[var(--txt-muted)]">{label}</span>
+      <span className={`mono font-semibold ${color}`}>{value}</span>
+    </div>
+  )
+}
+
+/** Paper daily trend book (ADMIN). Read-only module — no start/stop here. */
+function TrendPortfolioCard({ status, positions = [], onRunCycle, loading, isGuest, t }) {
+  if (!status) return null
+  const configRejected = !!status.reason
+  const enabled = status.enabled !== false && !configRejected
+  const running = !!status.running
+  const eq = Number(status.equity ?? status.start_equity ?? 0)
+  const start = Number(status.start_equity ?? 0)
+  const retPct = status.return_pct != null ? Number(status.return_pct) : (start ? (eq / start - 1) * 100 : 0)
+  const pnl = Number(status.realized_pnl ?? (eq - start))
+  const tradeCount = status.trades ?? 0
+  const wr = status.win_rate_pct
+  const riskPct = status.risk_per_trade_pct
+  const gate = status.regime_symbol ? `${status.regime_symbol} · ${status.regime_ma}d` : 'выкл'
+  const lastBar = status.last_bar_ts ? new Date(Number(status.last_bar_ts)).toLocaleDateString() : '—'
+  const lastErr = status.last_error
+
+  return (
+    <div className="panel !overflow-visible flex flex-col transition-colors hover:border-[var(--border-hover)]">
+      <div className="relative px-4 py-3.5 border-b border-[var(--border)] bg-gradient-to-br from-[var(--profit-dim)] via-transparent to-transparent rounded-t-[var(--radius-lg)]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)] flex items-center justify-center shadow-sm">
+              <TrendingUp size={22} className="text-[var(--profit)]" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-base font-bold text-[var(--txt)]">Daily Trend Portfolio</span>
+                <span className="text-[0.6rem] font-bold mono px-1.5 py-0.5 rounded-md bg-[var(--info)]/15 text-[var(--info)]">1D</span>
+                <span className="text-[0.6rem] font-bold mono px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-400">PAPER</span>
+              </div>
+              <div className="text-2xs text-[var(--txt-muted)] mono">trend_portfolio · long-only Donchian</div>
+            </div>
+          </div>
+          <StatusBadge
+            mode={running ? 'live' : 'stopped'}
+            label={configRejected ? 'ошибка конфига' : !enabled ? 'выключен' : running ? t('bots.status_running') : t('bots.status_stopped')}
+          />
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4 flex flex-col flex-1">
+        {configRejected && (
+          <div className="flex items-center gap-2 text-2xs text-[var(--loss)]">
+            <AlertTriangle size={12} />
+            <span>Конфиг отклонён: {status.reason}</span>
+          </div>
+        )}
+
+        {!configRejected && !enabled && (
+          <div className="text-2xs text-[var(--txt-muted)] leading-snug p-2 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
+            Модуль выключен (<span className="mono">TREND_PORTFOLIO_ENABLE=0</span>). Кнопки старта здесь нет — бот запускается только переменной окружения на сервере, чтобы его нельзя было включить случайно.
+          </div>
+        )}
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">Бумажный результат</span>
+            {running && (
+              <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)]">
+                <Clock size={11} /><span>бары до {lastBar}</span>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <PerfTile label="Капитал" value={`$${eq.toFixed(2)}`} tone={pnl >= 0 ? 'profit' : 'loss'} />
+            <PerfTile label="Доход" value={`${retPct >= 0 ? '+' : ''}${retPct.toFixed(2)}%`} tone={retPct >= 0 ? 'profit' : 'loss'} />
+            <PerfTile label="Сделок" value={tradeCount} />
+            <PerfTile label="Win rate" value={wr != null ? `${wr}%` : '—'} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+          <KV label="Вселенная" value={`${status.universe_size ?? '—'} монет`} />
+          <KV label="Риск/сделку" value={riskPct != null ? `${Number(riskPct).toFixed(2)}%` : '—'} />
+          <KV label="Вход / выход" value={`${status.entry_lookback}/${status.exit_lookback} дн`} />
+          <KV label="Трейл" value={`${status.chandelier_mult}×ATR`} />
+          <KV label="Гейт режима" value={gate} tone={status.regime_symbol ? 'profit' : 'muted'} />
+          <KV label="Позиций" value={positions.length} />
+        </div>
+
+        {positions.length > 0 && (
+          <div className="space-y-1">
+            <div className="text-2xs text-[var(--txt-muted)] font-medium">Открытые позиции (бумага)</div>
+            {positions.map((p, i) => {
+              const upnl = Number(p.unrealized || 0)
+              const isLong = p.side !== -1 && p.side !== 'short'
+              return (
+                <div key={`${p.coin}-${i}`} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <span className={`px-1 py-0.5 rounded font-bold ${isLong ? 'bg-[var(--profit-dim)] text-[var(--profit)]' : 'bg-[var(--loss-dim)] text-[var(--loss)]'}`}>{isLong ? 'L' : 'S'}</span>
+                    <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                  </div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {p.entry != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry).toPrecision(5)}</span>}
+                    {p.stop != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">стоп {Number(p.stop).toPrecision(5)}</span>}
+                    <span className={`mono font-semibold flex-shrink-0 ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {lastErr && (
+          <div className="flex items-start gap-2 text-[0.6rem] text-[var(--warn)]">
+            <AlertTriangle size={11} className="mt-px flex-shrink-0" />
+            <span className="break-words">Последняя ошибка цикла: {lastErr}</span>
+          </div>
+        )}
+
+        <div className="text-[0.6rem] text-[var(--txt-muted)] leading-snug">
+          Бумажный портфель на публичных дневных свечах, ордера не выставляются. Гейт BTC200 + риск 0.64 → бэктест ≈ +19.5% CAGR при просадке ≈ 22%.
+        </div>
+
+        {!isGuest && enabled && (
+          <div className="flex gap-1.5 pt-1 mt-auto">
+            <button className="btn btn-ghost btn-sm flex-1" onClick={onRunCycle} disabled={loading}>
+              {loading ? <Loader /> : <><RotateCcw size={12} /> Прогнать цикл</>}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function BotsPage({ connected, isGuest, isAdmin }) {
   const { t } = useTranslation()
   const [aiStatus, setAiStatus] = useState(null)
   const [demoPnl, setDemoPnl] = useState(null)
@@ -584,16 +723,23 @@ export default function BotsPage({ connected, isGuest }) {
   })
   const [apiAlive, setApiAlive] = useState(true)
   const [confirmStopAll, setConfirmStopAll] = useState(false)
+  const [trendStatus, setTrendStatus] = useState(null)
+  const [trendPositions, setTrendPositions] = useState([])
+  const [trendLoading, setTrendLoading] = useState(false)
 
   const refreshStatus = useCallback(async () => {
     // One public payload + status (client-cached) instead of separate heavy /api/pnl
-    const [a, ls, dash] = await Promise.all([
+    const [a, ls, dash, tr, trp] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
       api.meDashboard().catch(() => null),
+      isAdmin ? api.trendStatus().catch(() => null) : Promise.resolve(null),
+      isAdmin ? api.trendPositions().catch(() => null) : Promise.resolve(null),
     ])
     if (a) setAiStatus(a)
     if (ls) setLiveStatus(ls)
+    if (tr) setTrendStatus(tr)
+    if (trp) setTrendPositions(trp.positions || [])
     const pnl = dash?.pnl
     if (pnl && !pnl.detail && (pnl.total != null || pnl.per_bot)) {
       setDemoPnl(pnl)
@@ -601,7 +747,16 @@ export default function BotsPage({ connected, isGuest }) {
       setDemoPnl({ total: a.lifetime_pnl, per_bot: { 'AI Discretionary 1H': a.lifetime_pnl } })
     }
     setApiAlive(!!a)
-  }, [])
+  }, [isAdmin])
+
+  const trendCycle = async () => {
+    setTrendLoading(true)
+    try {
+      await api.trendCycle()
+      await refreshStatus()
+    } catch (e) { alert(e?.message || String(e)) }
+    setTrendLoading(false)
+  }
 
   useEffect(() => {
     refreshStatus()
@@ -773,6 +928,17 @@ const aiRunning = !!aiStatus?.running
           isGuest={isGuest}
           t={t}
         />
+
+        {isAdmin && (
+          <TrendPortfolioCard
+            status={trendStatus}
+            positions={trendPositions}
+            onRunCycle={trendCycle}
+            loading={trendLoading}
+            isGuest={isGuest}
+            t={t}
+          />
+        )}
       </div>
 
       <ConfirmDialog

@@ -309,6 +309,13 @@ export const api = {
   labHyperopt: () =>
     request('/lab/hyperopt', { method: 'POST', body: JSON.stringify({}) }),
 
+  // ── Daily trend portfolio (paper, ADMIN) ──
+  trendStatus: () => request('/trend/status'),
+  trendPositions: () => request('/trend/positions'),
+  trendCycle: () => request('/trend/cycle', { method: 'POST' }),
+  trendBacktest: (body) =>
+    request('/trend/backtest', { method: 'POST', body: JSON.stringify(body || {}) }),
+
   aiGetConfig: () => request('/ai/config'),
   aiSaveConfig: (config) =>
     request('/ai/config', { method: 'PUT', body: JSON.stringify(config || {}) }),

@@ -328,7 +328,62 @@ function DashBotPanel({
   )
 }
 
-export default function Dashboard({ health, connected, isGuest }) {
+/** Compact paper Trend book panel (ADMIN). No controls — env-gated on server. */
+function TrendDashPanel({ status, t }) {
+  if (!status) return null
+  const running = !!status.running
+  const enabled = status.enabled !== false && !status.reason
+  const pnl = Number(status.realized_pnl ?? 0)
+  const ret = Number(status.return_pct ?? 0)
+  const wr = status.win_rate_pct
+  const npos = (status.open_positions || []).length
+  const riskPct = status.risk_per_trade_pct
+  const gate = status.regime_symbol ? `${status.regime_symbol} ${status.regime_ma}d` : 'выкл'
+  return (
+    <div className="panel flex-shrink-0 !border-[var(--profit)]/30">
+      <div className="panel-header">
+        <TrendingUp size={13} className="text-[var(--profit)]" />
+        <span className="flex-1 truncate">Daily Trend Portfolio</span>
+        <span className="text-2xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold">PAPER</span>
+        {running
+          ? <StatusBadge mode="live" label={t('dash.running')} />
+          : <StatusBadge mode="stopped" label={enabled ? t('dash.stopped') : 'OFF'} />}
+      </div>
+      <div className="p-3 space-y-2 text-2xs">
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">PnL</div>
+            <div className={`mono font-semibold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+            </div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Сделок</div>
+            <div className="mono font-semibold">{status.trades ?? 0}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">WR</div>
+            <div className="mono font-semibold">{wr != null ? `${wr}%` : '-'}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Поз.</div>
+            <div className="mono font-semibold">{npos}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[var(--txt-muted)]">
+          <span>Доход: <span className={`mono ${ret >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{ret >= 0 ? '+' : ''}{ret.toFixed(2)}%</span></span>
+          {riskPct != null && <span>Риск: <span className="mono text-[var(--txt)]">{Number(riskPct).toFixed(2)}%/сделку</span></span>}
+          <span>Гейт: <span className="mono text-[var(--txt)]">{gate}</span></span>
+        </div>
+        {status.last_error && (
+          <div className="text-[0.6rem] text-[var(--warn)] break-words">Ошибка: {status.last_error}</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function Dashboard({ health, connected, isGuest, isAdmin }) {
   const demoMode = health?.demo !== false
   const [portfolio, setPortfolio] = useState(null)
   const [positions, setPositions] = useState([])
@@ -339,6 +394,7 @@ export default function Dashboard({ health, connected, isGuest }) {
   const [impulseStatus, setImpulseStatus] = useState(null)
   const [validationStatus, setValidationStatus] = useState(null)
   const [aiStatus, setAiStatus] = useState(null)
+  const [trendStatus, setTrendStatus] = useState(null)
   const [liveStatus, setLiveStatus] = useState(null)
   const [livePnl, setLivePnl] = useState(null)
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
@@ -353,6 +409,28 @@ export default function Dashboard({ health, connected, isGuest }) {
     setTradeLog([])
     setPositions([])
   }, [demoMode])
+
+  // Paper trend book (ADMIN only) — own light poll, independent of the AI tiers.
+  useEffect(() => {
+    if (!isAdmin) { setTrendStatus(null); return }
+    let cancelled = false
+    const pull = async () => {
+      try {
+        const [st, pos] = await Promise.all([
+          api.trendStatus().catch(() => null),
+          api.trendPositions().catch(() => null),
+        ])
+        if (cancelled || !st) return
+        setTrendStatus({ ...st, open_positions: pos?.positions || [] })
+      } catch { /* ignore */ }
+    }
+    pull()
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      pull()
+    }, 30000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [isAdmin])
   const [closing, setClosing] = useState(null)
   const [closingAll, setClosingAll] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -1799,6 +1877,8 @@ export default function Dashboard({ health, connected, isGuest }) {
               try { await api.aiStop(); loadData() } catch (e) { alert(e.message) }
             }}
           />
+
+          <TrendDashPanel status={trendStatus} t={t} />
 
           {/* ─── LIVE Mirror Panel ─── */}
           {liveStatus?.connected && (
