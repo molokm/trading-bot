@@ -236,7 +236,7 @@ async def _resolve_opened_at(db, inst_id: str, side: str, fallback: str | None =
     return best or now_iso
 
 STRATEGY_NAME = "AI Discretionary 1H"
-STRATEGY_VERSION = "v1.44.4-chase-guard"
+STRATEGY_VERSION = "v1.44.5-close-gate"
 
 STRATEGY_DESC = (
     "AI Discretionary 1H v1.44 — 14 монет. Вход: импульс EMA21+MACD+ROC, "
@@ -263,6 +263,9 @@ STRATEGY_DESC = (
     "максимум 4 открытия в день, пауза перед повторным входом в ту же "
     "монету 180м. v1.44.4: вход не открывается, если 12-барный ROC уже "
     "прошёл больше 2×ATR1H (не догоняем последнюю ногу движения). "
+    "v1.44.5: LLM-закрытие разрешено только при реальном минусе (≤−1.2%), "
+    "снятом плюсе или старой «плоской» позиции в мёртвом тренде (ADX<18); "
+    "шумовые закрытия по −0.35% остаются в позиции до стопа/тейка. "
     "LIVE-зеркало "
     "несёт общий trade_id у открытий и закрытий (aid*/ail*), поэтому DEMO "
     "и LIVE сделки парятся, а закрытия опознаются как зеркальные. На LIVE "
@@ -618,6 +621,22 @@ class AIConfig:
     # halves (full 0.81→0.89, older 1.00→1.13, newer 0.64→0.77) and on the last
     # 10 days (0.51→0.70); 1.5× and 1.0× over-filter. 0 disables the filter.
     max_roc_atr_mult: float = 2.0
+    # v1.44.5 LLM close gate. Live 10–14 Nov: 18 of 24 exits were the model's
+    # "closed" (WR 3/18, −28.9 USD) and afterwards price kept moving in the
+    # trade's direction (+0.66% 6h, +1.30% 12h, +2.04% 24h) — the old gate let
+    # it close at upl <= −0.35% or after 90 flat minutes. A close now needs a
+    # real loss, a banked winner, or an aged FLAT trade in a dead trend.
+    # 0 / False return the strategy to the previous behaviour.
+    llm_close_enable: bool = True
+    llm_close_loss_pct: float = 1.20
+    llm_close_flat_minutes: float = 240.0
+    llm_close_flat_max_upl: float = 0.15
+    llm_close_flat_require_dead_trend: bool = True
+    # v1.44.5: a timed-out entry ack can still land on the exchange, and the
+    # retry then dies with 51016 (clOrdId already exists) — the entry was lost
+    # while the exchange held the order. Adopt the existing order instead of
+    # re-sending (a fresh id would double the position). False = old behaviour.
+    dedup_clordid_retry: bool = True
     # Exit a flat/red trade once the entry thesis is broken (2 of 3 flipped).
     thesis_break_exit: bool = True
     # v1.43.1: 2-of-3 soft flips inside a LIVE trend are noise, not a broken
@@ -1269,6 +1288,43 @@ class AIStrategy:
                                      is_close=is_close, cl_ord_id=cl_ord_id)
         return await self._place(client, inst_id, side, remain, pos_side,
                                  is_close=is_close, cl_ord_id=cl_ord_id)
+
+    async def _resolve_dup_clordid(self, client, inst_id: str, cl_ord_id: str, *,
+                                   coin: str, side: str, order_side: str,
+                                   sz: float, pos_side) -> tuple[dict, str]:
+        """Handle 51016: adopt the order that already landed, else retry once.
+
+        A timed-out entry ack can still reach the exchange; the retry then dies
+        with "Client order ID already exists" and the entry was lost while the
+        exchange held the position. Re-sending with a fresh id would open a
+        second position, so first look the id up and adopt it.
+        Returns ``(resp, cl_ord_id_used)``.
+        """
+        existing = ""
+        try:
+            o = await client.get_order(inst_id, cl_ord_id=cl_ord_id)
+            rows = (o or {}).get("data") or []
+            if rows:
+                existing = str(rows[0].get("ordId") or "")
+        except Exception:
+            existing = ""
+        if existing:
+            self._record_exec(
+                "open_dedup", coin=coin, side=side,
+                reason=f"51016_adopted:{existing}", size=sz,
+            )
+            return {"data": [{"ordId": existing, "clOrdId": cl_ord_id}]}, cl_ord_id
+        new_cl = self._clord_demo(self._new_demo_trade_id())
+        try:
+            if bool(getattr(self.config, "maker_entry", True)):
+                resp = await self._place_postonly(
+                    client, inst_id, order_side, sz, pos_side, cl_ord_id=new_cl)
+            else:
+                resp = await self._place(
+                    client, inst_id, order_side, sz, pos_side, cl_ord_id=new_cl)
+        except Exception as e:
+            return {"error": True, "message": str(e)}, new_cl
+        return resp, new_cl
 
     def _live_bot_id(self) -> str:
         """Distinct bot_id for live mirror records (positions table has no account_mode)."""
@@ -3936,6 +3992,22 @@ class AIStrategy:
             return
         if resp.get("error"):
             msg = str(resp.get("message") or resp)
+            # v1.44.5: "Client order ID already exists" means the earlier ack
+            # timed out but the order landed. Adopt it — a retry with a fresh
+            # id would open a second position (live 14 Nov 05:02 lost a BTC
+            # entry to this exact error).
+            if "51016" in msg and self._cfg_b("dedup_clordid_retry", True):
+                resp, cl_demo = await self._resolve_dup_clordid(
+                    client, inst, cl_demo, coin=coin, side=side,
+                    order_side=order_side, sz=sz, pos_side=pos_side_try,
+                )
+                if resp.get("error"):
+                    self._record_exec(
+                        "open_error", coin=coin, side=side,
+                        reason=str(resp.get("message") or resp),
+                        size=sz, leverage=lev, raw=str(resp)[:300],
+                    )
+                    return
             # Retry net-mode accounts (no hedge long/short)
             if "pos" in msg.lower() or "51000" in msg or "posside" in msg.lower():
                 try:
@@ -6306,6 +6378,49 @@ class AIStrategy:
         except Exception:
             return bool(default)
 
+    def _llm_close_allowed(self, coin: str, upl: float, held_min: float) -> str:
+        """Allow-reason for an AI close, or "" when it is noise and must wait.
+
+        v1.44.5: the old gate allowed a close at upl <= −0.35% (or 90 min flat).
+        Live 10–14 Nov: 18 of 24 exits were those closes, 3/18 green, −28.9 USD,
+        and the price continued in the trade's direction after each exit. A
+        close is now justified by a real loss (``llm_close_loss_pct``), a
+        banked winner, or an aged flat trade in a DEAD trend; a flat trade
+        inside a live trend is left to the stop/take levels.
+        """
+        if not self._cfg_b("llm_close_enable", True):
+            return "disabled"
+        try:
+            upl = float(upl)
+        except (TypeError, ValueError):
+            upl = 0.0
+        try:
+            held = float(held_min)
+        except (TypeError, ValueError):
+            held = 0.0
+        loss = self._cfg_f("llm_close_loss_pct", 1.20)
+        if loss > 0 and upl <= -loss:
+            return "deep_loss"
+        if upl >= self._cfg_f("soft_profit_take_pct", 5.00):
+            return "profit_take"
+        flat_min = self._cfg_f("llm_close_flat_minutes", 240.0)
+        min_hold = self._cfg_f("min_hold_minutes", 45.0)
+        if held >= max(min_hold, flat_min) and upl < self._cfg_f("llm_close_flat_max_upl", 0.15):
+            if not self._cfg_b("llm_close_flat_require_dead_trend", True):
+                return "flat_aged"
+            ind = {}
+            try:
+                ind = self._latest_indicators.get(coin) or {}
+            except Exception:
+                ind = {}
+            try:
+                adx_v = float(ind.get("adx") or 0)
+            except (TypeError, ValueError):
+                adx_v = 0.0
+            if adx_v < self._cfg_f("thesis_break_dead_adx", 18.0):
+                return "flat_dead_trend"
+        return ""
+
     async def _ticker_last(self, client, inst_id: str) -> float:
         """Best-effort last trade price from OKX ticker (demo or live client)."""
         if not client or not inst_id:
@@ -8138,17 +8253,11 @@ class AIStrategy:
                         held = 999.0
                     px = await self._price_for_exit(client, coin, pos)
                     upl = self._unrealized_pct(pos, px) if px else 0.0
-                    min_hold = self._cfg_f("min_hold_minutes", 45.0)
-                    # Allow LLM close only if: red enough, or big green, or aged + thesis weak
-                    allow = (
-                        upl <= -0.35
-                        or upl >= self._cfg_f("soft_profit_take_pct", 5.00)
-                        or (held >= max(min_hold, 90.0) and upl < 0.15)
-                    )
-                    if not allow:
+                    allow_reason = self._llm_close_allowed(coin, upl, held)
+                    if not allow_reason:
                         print(
                             f"[AI] LLM close BLOCKED {coin}: upl={upl:+.2f}% held={held:.0f}m "
-                            f"(noise guard — let winners run)",
+                            f"(noise guard — let the stop/take decide)",
                             flush=True,
                         )
                         self._record_exec(
@@ -8156,19 +8265,35 @@ class AIStrategy:
                             reason=f"upl={upl:+.2f}_held={held:.0f}m",
                         )
                         return
+                    self._record_exec(
+                        "llm_close_ok", coin=coin, side=getattr(pos, "side", ""),
+                        reason=f"{allow_reason}_upl={upl:+.2f}_held={held:.0f}m",
+                    )
                 except Exception as e:
                     print(f"[AI] LLM close gate: {e}", flush=True)
             await self._close(client, coin, decision.get("reason") or "ai_close")
             return
         if action == "reduce" and coin and coin in self._positions:
-            # Same noise guard as close — reduce was full-close in practice
+            # Same evidence bar as close — reduce was a full close in practice,
+            # so it must not become a back door around the v1.44.5 close gate.
             pos = self._positions.get(coin)
             if pos:
                 try:
+                    held = 0.0
+                    try:
+                        opened = datetime.fromisoformat(str(pos.opened_at).replace("Z", "+00:00"))
+                        held = (datetime.now(timezone.utc) - opened).total_seconds() / 60.0
+                    except Exception:
+                        held = 999.0
                     px = await self._price_for_exit(client, coin, pos)
                     upl = self._unrealized_pct(pos, px) if px else 0.0
-                    if -0.20 < upl < self._cfg_f("partial_take_pct", 2.60):
-                        print(f"[AI] LLM reduce BLOCKED {coin}: upl={upl:+.2f}%", flush=True)
+                    allow_reason = self._llm_close_allowed(coin, upl, held)
+                    if not allow_reason:
+                        print(f"[AI] LLM reduce BLOCKED {coin}: upl={upl:+.2f}% held={held:.0f}m", flush=True)
+                        self._record_exec(
+                            "llm_reduce_blocked", coin=coin, side=getattr(pos, "side", ""),
+                            reason=f"upl={upl:+.2f}_held={held:.0f}m",
+                        )
                         return
                 except Exception:
                     pass
