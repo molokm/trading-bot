@@ -50,3 +50,17 @@ services:
         value: "500"
       - key: PRO_PLAN_DAYS
         value: "30"
+      # ── Daily trend portfolio (paper-only, read-only) ──────────────────
+      # The book itself cannot place an order: it only reads public daily
+      # candles.  Enabled here to build a forward paper track record.
+      # Target profile chosen 2026-11-14: BTC 200-day regime gate ON, risk
+      # 0.64 per 1/45 sleeve (= 1.42% of the account per trade) → backtest
+      # ~+19.5% CAGR at ~22% maxDD.  Set TREND_PORTFOLIO_ENABLE=0 to stop it.
+      - key: TREND_PORTFOLIO_ENABLE
+        value: "1"
+      - key: TREND_PORTFOLIO_REGIME
+        value: "BTC"
+      - key: TREND_PORTFOLIO_REGIME_MA
+        value: "200"
+      - key: TREND_PORTFOLIO_RISK
+        value: "0.64"
