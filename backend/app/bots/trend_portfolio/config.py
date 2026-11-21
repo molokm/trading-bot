@@ -1,0 +1,204 @@
+"""Configuration for the daily trend portfolio (paper-only).
+
+Every knob is off/neutral by default and the whole module is gated by a single
+env switch, ``TREND_PORTFOLIO_ENABLE``.  Nothing here can place an order: the
+module has no exchange write path at all (see ``engine.py`` docstring).
+
+Research basis (45 majors, Binance daily 2021-05 → 2026-11, 5.5y):
+    long-only Donchian40 / exit20 / Chandelier 5xATR,
+    risk 32% of a 1/45 sleeve (= 0.71% of the account per trade),
+    sizing base = equity smoothed with a 365-day half-life.
+
+HONEST performance (single account, this engine — validated 2026-11-14):
+
+  A) baseline (regime gate OFF, risk 0.32/sleeve = 0.71%/trade)
+     CAGR +13.4%, maxDD 30.1%, Sharpe 1.01, 627 trades, WR 37%
+     per year: 2021 +30, 2022 -19, 2023 -7, 2024 +149, 2025 +13, 2026 -5
+     WITHOUT 2024: +1.3%/yr.  Bootstrap 5y: median +11.7%, p10 -2.4%,
+     p90 +33.1%, P(loss) 17%, median maxDD 20.3%.
+
+  B) with the BTC regime gate ON (regime_symbol="BTC", regime_ma=200), i.e.
+     take a breakout only while BTC trades above its own 200-day mean:
+       risk 0.32/sleeve (0.71%):  CAGR +12.6%, maxDD 12.0%, Sharpe 1.10
+       risk 0.64/sleeve (1.42%):  CAGR +19.5%, maxDD 22.1%, Sharpe 1.00
+       risk 0.80/sleeve (1.78%):  CAGR +21.4%, maxDD 23.8%, Sharpe 0.98
+     The gate is a risk reducer, not a return driver: it removes the 2022
+     bear-market drawdown (-19% → 0) and halves maxDD at equal risk.  It has
+     a plateau over MA 180-240 (DD 12-14%); MA ≤160 or ≥260 degrades DD to
+     24-28%.  Bootstrap (risk 0.64): median +18.8%, p10 +9.8%, p90 +29.5%.
+     On the second half alone it lifts Sharpe 1.25 → 1.65 and halves DD.
+
+Do NOT quote 20-25% as a given: the earlier 21.6% came from a
+per-sleeve-rebalanced model a single account cannot reproduce, and every
+variant here still earns most of its return in one year (2024).  The 20%
+figure only appears with the gate ON *and* the risk budget doubled, at a
+~22% drawdown.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Tuple
+
+# The universe the backtest was measured on.  Kept explicit (not "top-N by
+# volume") so that a live run holds exactly what was validated.
+DEFAULT_UNIVERSE: Tuple[str, ...] = (
+    "BTC", "ETH", "BNB", "XRP", "DOGE", "ADA", "SOL", "DOT", "LINK", "LTC",
+    "BCH", "AVAX", "TRX", "ETC", "XLM", "ALGO", "VET", "FIL", "ATOM", "ICP",
+    "NEAR", "UNI", "AAVE", "MKR", "CRV", "SAND", "MANA", "AXS", "EOS", "NEO",
+    "IOTA", "THETA", "GRT", "QNT", "APT", "ARB", "SUI", "INJ", "SEI", "TIA",
+    "OP", "PEPE", "SHIB", "WAVES", "ZEC",
+)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name)
+        return float(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name)
+        return int(raw) if raw not in (None, "") else default
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass
+class TrendPortfolioConfig:
+    """All parameters of the long-only daily breakout book."""
+
+    # ── master switch ────────────────────────────────────────────────────
+    enabled: bool = False          # TREND_PORTFOLIO_ENABLE (default OFF)
+
+    # ── safety invariants ────────────────────────────────────────────────
+    # This module can only ever simulate.  Kept as a field (not a constant) so
+    # that a test can assert it is True and refuse to start otherwise.
+    paper_only: bool = True
+
+    # ── universe ─────────────────────────────────────────────────────────
+    universe: Tuple[str, ...] = DEFAULT_UNIVERSE
+
+    # ── signal (validated plateau, not a grid peak) ──────────────────────
+    entry_lookback: int = 40       # close > max(high[-40:])
+    exit_lookback: int = 20        # close < min(low[-20:])  → flat next open
+    chandelier_mult: float = 5.0   # trailing stop = peak_close - 5*ATR
+    atr_period: int = 14
+    # Symmetric book: also go short on a break of the 40-bar LOW.
+    # Off for crypto (shorts lost money: Sharpe -1.10); on for cross-asset,
+    # where crisis alpha lives on the short side (2008, 2022).
+    allow_short: bool = False
+
+    # Market-regime gate: only take a breakout when the regime asset trades
+    # above its own N-bar mean (below it, for shorts).  Empty = no gate.
+    # BTC = the market beta of the whole 45-coin book, so the gate is a cheap
+    # "don't buy breakouts into a bear market" switch.
+    regime_symbol: str = ""
+    regime_ma: int = 200
+
+    # ── sizing / risk ────────────────────────────────────────────────────
+    capital: float = 10_000.0      # paper starting equity
+
+    @property
+    def sleeve_equity(self) -> float:
+        return self.capital / max(len(self.universe), 1)
+
+    # risk per trade as a fraction of ONE sleeve (1/N of the account).
+    # 0.32 / 45 = 0.71% of the account per trade.
+    risk_per_sleeve: float = 0.32
+    max_sleeve_leverage: float = 3.0   # notional cap per sleeve (rarely binds)
+
+    # Sizing base = account equity smoothed with this half-life (days).
+    # Trend returns are year-clustered (+150% in 2024, -19% in 2022), so sizing
+    # straight off realised equity systematically over-bets right after a good
+    # year. Smoothing keeps Sharpe at ~1.0 instead of bleeding it to 0.88.
+    sizing_halflife_days: float = 365.0
+
+    # ── costs (conservative vs OKX retail) ───────────────────────────────
+    fee_pct: float = 0.0008            # per side; OKX perp maker is 0.0002
+    slippage_pct: float = 0.0002       # per side
+    funding_pct_day: float = 0.00005   # 0.005%/day long perp ≈ 1.8%/yr
+
+    # ── runtime ──────────────────────────────────────────────────────────
+    bar: str = "1D"
+    candle_limit: int = 300            # OKX /market/candles max per request
+    warmup_bars: int = 90              # need > entry_lookback + atr_period
+    poll_interval_sec: int = 3600      # check once an hour; acts on bar close
+
+    # ── reporting ────────────────────────────────────────────────────────
+    state_name: str = "trend_portfolio"
+    max_equity_points: int = 2_000
+    bars_per_year: int = 365          # 252 for exchange-traded assets
+
+    @property
+    def risk_per_trade_pct(self) -> float:
+        """Risk of one trade as a fraction of the whole account."""
+        return self.risk_per_sleeve / max(len(self.universe), 1)
+
+    @property
+    def state_bars(self) -> int:
+        """Bars kept per sleeve in the state file.
+
+        Must cover the longest window the engine reads *after* a restore:
+        the regime MA (200), the entry lookback and the ATR period.  Storing
+        only ``warmup_bars`` used to leave the gate blind for ~110 days
+        after a state restore (200 closes needed, 90 stored).
+        """
+        return max(
+            self.warmup_bars,
+            self.regime_ma + 1 if self.regime_symbol else 0,
+            self.entry_lookback + 2,
+            self.atr_period + 2,
+        )
+
+    def validate(self) -> None:
+        if not self.paper_only:
+            raise ValueError("trend_portfolio: paper_only must stay True")
+        if not self.universe:
+            raise ValueError("trend_portfolio: empty universe")
+        if self.entry_lookback < 5 or self.exit_lookback < 2:
+            raise ValueError("trend_portfolio: lookbacks too small")
+        if self.exit_lookback >= self.entry_lookback:
+            raise ValueError("trend_portfolio: exit window must be < entry window")
+        if not (0 < self.risk_per_sleeve <= 1.0):
+            raise ValueError("trend_portfolio: risk_per_sleeve must be (0, 1]")
+        if self.chandelier_mult <= 0:
+            raise ValueError("trend_portfolio: chandelier_mult must be > 0")
+        if self.sizing_halflife_days <= 0:
+            raise ValueError("trend_portfolio: sizing_halflife_days must be > 0")
+        if self.capital <= 0:
+            raise ValueError("trend_portfolio: capital must be > 0")
+        if self.regime_symbol and self.regime_symbol not in self.universe:
+            raise ValueError("trend_portfolio: regime_symbol must be in the universe")
+        if self.regime_symbol and self.regime_ma < 5:
+            raise ValueError("trend_portfolio: regime_ma too small")
+        if self.warmup_bars <= max(self.entry_lookback, self.atr_period):
+            raise ValueError("trend_portfolio: warmup_bars too small")
+
+    @classmethod
+    def from_env(cls) -> "TrendPortfolioConfig":
+        cfg = cls(
+            enabled=_env_bool("TREND_PORTFOLIO_ENABLE", False),
+            capital=_env_float("TREND_PORTFOLIO_CAPITAL", 10_000.0),
+            risk_per_sleeve=_env_float("TREND_PORTFOLIO_RISK", 0.32),
+            entry_lookback=_env_int("TREND_PORTFOLIO_ENTRY", 40),
+            exit_lookback=_env_int("TREND_PORTFOLIO_EXIT", 20),
+            chandelier_mult=_env_float("TREND_PORTFOLIO_CHANDELIER", 5.0),
+            max_sleeve_leverage=_env_float("TREND_PORTFOLIO_MAX_LEV", 3.0),
+            sizing_halflife_days=_env_float("TREND_PORTFOLIO_SIZING_HALFLIFE", 365.0),
+            regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
+            regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
+            poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),
+        )
+        cfg.validate()
+        return cfg

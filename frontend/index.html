@@ -2,11 +2,53 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+
+    <!-- PWA / theme -->
+    <meta name="theme-color" content="#0a0b0f" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#0a0b0f" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="COPIX — торговый терминал и панель ботов OKX" />
+
+    <!-- iOS Home Screen -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="COPIX" />
+    <meta name="application-name" content="COPIX" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png" />
+
     <title>COPIX — Торговый Терминал</title>
-    <script async src="https://telegram.org/js/telegram-web-app.js"></script>
+
+    <!--
+      Telegram WebApp SDK. Must be loaded SYNCHRONOUSLY and BEFORE the app bundle:
+      MiniAppPage reads window.Telegram.WebApp.initData on mount to get an auth
+      token, and App.jsx uses it to detect an in-Telegram session. A deferred or
+      dynamically injected script lost that race — the Mini App opened as a guest
+      (no LIVE data), and opening the bot at "/" rendered the full website shell.
+      Loaded only where it is needed (mini route or inside the Telegram client),
+      so the public site keeps its fast first paint.
+    -->
+    <script>
+      (function () {
+        try {
+          var path = String(location.pathname || '');
+          var isMini = path === '/mini' || path.indexOf('/mini/') === 0;
+          var inTelegram = /Telegram/i.test(String(navigator.userAgent || ''))
+            || !!window.TelegramWebviewProxy
+            || !!window.TelegramWebviewProxyProto;
+          if (isMini || inTelegram) {
+            document.write('<script src="https://telegram.org/js/telegram-web-app.js"><\/script>');
+          }
+        } catch (e) { /* ignore */ }
+      })();
+    </script>
   </head>
   <body class="bg-gray-950">
     <div id="root"></div>

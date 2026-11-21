@@ -27,7 +27,7 @@ OKX 1D свечи. Свежий прогон даёт цифры, **близки
 
 ---
 
-## Momentum Rotation v5 — `backtrader_momentum_rotation.py`
+## Momentum Rotation v6.1 — `backtrader_momentum_rotation.py`
 
 ```
 python external/backtests/backtrader_momentum_rotation.py \
@@ -43,7 +43,7 @@ python external/backtests/backtrader_momentum_rotation.py \
 | allocation_pct | 0.5 |
 | max_leverage | 2.0 |
 | adx_min | 25.0 |
-| min_roc | 4.5 |
+| min_roc | 3.5 |
 | vol_mult | 2.2 |
 | corr_threshold | 0.85 |
 | atr_stop_mult | 4.5 |
@@ -55,9 +55,9 @@ python external/backtests/backtrader_momentum_rotation.py \
 
 | Метрика | Карточка | Свежий прогон (15.08) |
 |---|---|---|
-| CAGR | 59.8% | 62.6% |
-| MaxDD | −51.8% | −51.8% |
-| Годовые | 2023 +34.0% / 2024 +41.4% / 2025 +14.3% / 2026 +113.6% | 2023 +35.6% / 2024 +41.4% / 2025 +14.3% / 2026 +123.7% |
+| CAGR | 75.9% | 75.9% |
+| MaxDD | −43.4% | −43.4% |
+| Годовые | 2023 +20.6% / 2024 +85.0% / 2025 +16.7% / 2026 +150.5% | v6.1 min_roc=3.5 |
 
 Источник оптимизации: sweep + walk-forward в `external/backtests/sweep_momentum.py`
 и `walkforward.py` (коммит `6c3da9d`, TUNED-конфиг).
