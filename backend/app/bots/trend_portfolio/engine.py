@@ -399,10 +399,10 @@ class TrendPortfolio:
             "closed_trades": self.closed_trades[-500:],
             "sleeves": {
                 c: {
-                    "highs": s.highs[-self.cfg.warmup_bars:],
-                    "lows": s.lows[-self.cfg.warmup_bars:],
-                    "closes": s.closes[-self.cfg.warmup_bars:],
-                    "trs": s.trs[-self.cfg.warmup_bars:],
+                    "highs": s.highs[-self.cfg.state_bars:],
+                    "lows": s.lows[-self.cfg.state_bars:],
+                    "closes": s.closes[-self.cfg.state_bars:],
+                    "trs": s.trs[-self.cfg.state_bars:],
                     "prev_close": s.prev_close,
                     "last_ts": s.last_ts,
                     "pending": s.pending,
@@ -433,10 +433,10 @@ class TrendPortfolio:
             s = book.sleeves.get(coin)
             if s is None:
                 continue
-            s.highs = [float(x) for x in raw.get("highs") or []]
-            s.lows = [float(x) for x in raw.get("lows") or []]
-            s.closes = [float(x) for x in raw.get("closes") or []]
-            s.trs = [float(x) for x in raw.get("trs") or []]
+            s.highs = [float(x) for x in raw.get("highs") or []][-cfg.state_bars:]
+            s.lows = [float(x) for x in raw.get("lows") or []][-cfg.state_bars:]
+            s.closes = [float(x) for x in raw.get("closes") or []][-cfg.state_bars:]
+            s.trs = [float(x) for x in raw.get("trs") or []][-cfg.state_bars:]
             s.prev_close = raw.get("prev_close")
             s.last_ts = int(raw.get("last_ts", 0) or 0)
             s.pending = raw.get("pending")
@@ -459,6 +459,28 @@ class TrendPortfolio:
         return book
 
 
+def feed_chronological(book: "TrendPortfolio", series: Dict[str, Sequence["Bar"]]) -> int:
+    """Feed ``series`` (coin → ascending bars) in strict timestamp order.
+
+    This is the ONLY correct way to replay a book that has a cross-coin
+    dependency: the regime gate reads the regime asset's *latest* close, so
+    feeding one coin's whole history at a time evaluates every historical
+    alt entry against the regime asset's final bar (e.g. today's BTC), not
+    the regime state of that day.  ``backtest`` and the paper runner must
+    both use this helper so a live book and its validation agree.
+    """
+    by_ts: Dict[int, Dict[str, Bar]] = {}
+    for coin, bars in series.items():
+        for b in bars:
+            by_ts.setdefault(b.ts, {})[coin] = b
+    fed = 0
+    for ts in sorted(by_ts):
+        for coin, bar in by_ts[ts].items():
+            book.on_bar(coin, bar)
+            fed += 1
+    return fed
+
+
 def backtest(
     series: Dict[str, Sequence[Bar]],
     cfg: TrendPortfolioConfig,
@@ -469,12 +491,12 @@ def backtest(
     """
     book = TrendPortfolio(cfg)
     stamps = sorted({b.ts for bars in series.values() for b in bars})
+    curve: List[dict] = []
     by_ts: Dict[int, Dict[str, Bar]] = {}
     for coin, bars in series.items():
         for b in bars:
             by_ts.setdefault(b.ts, {})[coin] = b
 
-    curve: List[dict] = []
     for ts in stamps:
         for coin, bar in by_ts.get(ts, {}).items():
             book.on_bar(coin, bar)

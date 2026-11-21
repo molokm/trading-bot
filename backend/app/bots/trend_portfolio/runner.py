@@ -21,7 +21,7 @@ import httpx
 
 from app.bots.base import load_state, save_state
 from app.bots.trend_portfolio.config import TrendPortfolioConfig
-from app.bots.trend_portfolio.engine import Bar, TrendPortfolio
+from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, feed_chronological
 
 log = logging.getLogger("trend_portfolio")
 
@@ -112,8 +112,8 @@ class TrendPaperRunner:
         """Fetch fresh bars for the universe and step the book."""
         self.cycles += 1
         self.last_cycle_ts = time.time()
-        fresh = 0
         errors: Dict[str, str] = {}
+        series: Dict[str, List[Bar]] = {}
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
             try:
@@ -124,12 +124,15 @@ class TrendPaperRunner:
             sleeve = self.book.sleeves.get(coin)
             if sleeve is None:
                 continue
-            for bar in bars:
-                if bar.ts <= sleeve.last_ts:
-                    continue
-                if self.book.on_bar(coin, bar):
-                    fresh += 1
+            fresh = [b for b in bars if b.ts > sleeve.last_ts]
+            if fresh:
+                series[coin] = fresh
             await asyncio.sleep(0)  # cooperative
+        # Replay in strict timestamp order: the regime gate reads the regime
+        # asset's latest close, so feeding one coin at a time would judge every
+        # historical alt entry against *today's* regime state (see
+        # engine.feed_chronological).
+        fresh = feed_chronological(self.book, series)
         self.bars_consumed += fresh
         save_state(self.cfg.state_name, self.book.to_state())
         status = self.status()

@@ -145,6 +145,22 @@ class TrendPortfolioConfig:
         """Risk of one trade as a fraction of the whole account."""
         return self.risk_per_sleeve / max(len(self.universe), 1)
 
+    @property
+    def state_bars(self) -> int:
+        """Bars kept per sleeve in the state file.
+
+        Must cover the longest window the engine reads *after* a restore:
+        the regime MA (200), the entry lookback and the ATR period.  Storing
+        only ``warmup_bars`` used to leave the gate blind for ~110 days
+        after a state restore (200 closes needed, 90 stored).
+        """
+        return max(
+            self.warmup_bars,
+            self.regime_ma + 1 if self.regime_symbol else 0,
+            self.entry_lookback + 2,
+            self.atr_period + 2,
+        )
+
     def validate(self) -> None:
         if not self.paper_only:
             raise ValueError("trend_portfolio: paper_only must stay True")

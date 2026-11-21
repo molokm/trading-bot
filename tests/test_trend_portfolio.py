@@ -186,6 +186,116 @@ def test_regime_env_gate(monkeypatch):
     assert cfg.regime_ma == 180
 
 
+# ── replay order (cross-coin gate) ───────────────────────────────────────
+#
+# The regime gate reads the regime asset's *latest* close.  Feeding one coin's
+# whole history at a time therefore judges every historical alt entry against
+# today's regime state instead of the state on that bar — in Nov 2026 it hid
+# all but one trade of the live paper book.
+
+def _flat_bars(n, price=100.0, start=0):
+    return [
+        Bar(ts=TS0 + (start + i) * DAY, open=price, high=price + 1,
+            low=price - 1, close=price)
+        for i in range(n)
+    ]
+
+
+def _btc_step_series():
+    """BTC flat for 20 bars, then a ramp that turns a 5-day mean gate ON."""
+    bars = _flat_bars(20)
+    bars += [
+        Bar(ts=TS0 + i * DAY, open=100 + 2 * (i - 19), high=101 + 2 * (i - 19),
+            low=99 + 2 * (i - 19), close=100 + 2 * (i - 19))
+        for i in range(20, 40)
+    ]
+    return bars
+
+
+def _alt_two_breakouts():
+    """AAA breaks out at i=10 (gate OFF) and again at i=25 (gate ON)."""
+    bars = []
+    for i in range(40):
+        if i == 10:
+            bars.append(Bar(ts=TS0 + i * DAY, open=100, high=131, low=99, close=130))
+        elif i == 25:
+            bars.append(Bar(ts=TS0 + i * DAY, open=101, high=131, low=100, close=130))
+        elif i == 26:
+            bars.append(Bar(ts=TS0 + i * DAY, open=130, high=131, low=129, close=130))
+        elif i == 27:
+            bars.append(Bar(ts=TS0 + i * DAY, open=130, high=131, low=55, close=60))
+        else:
+            bars.append(Bar(ts=TS0 + i * DAY, open=100, high=101, low=99, close=100))
+    return bars
+
+
+def _gate_cfg(**kw):
+    base = dict(universe=("BTC", "AAA"), regime_symbol="BTC", regime_ma=5)
+    base.update(kw)
+    return _cfg(**base)
+
+
+def test_chronological_feed_judges_the_gate_on_the_bar_date():
+    from app.bots.trend_portfolio.engine import feed_chronological
+
+    cfg = _gate_cfg()
+    book = TrendPortfolio(cfg)
+    feed_chronological(book, {"BTC": _btc_step_series(), "AAA": _alt_two_breakouts()})
+    # the i=10 breakout happened while the gate was OFF -> not taken
+    assert len(book.closed_trades) == 1
+    assert book.closed_trades[0]["entry_ts"] == TS0 + 26 * DAY
+
+
+def test_per_coin_feed_is_the_bug_the_helper_replaces():
+    cfg = _gate_cfg()
+    book = TrendPortfolio(cfg)
+    _feed(book, "BTC", _btc_step_series())
+    _feed(book, "AAA", _alt_two_breakouts())
+    # per-coin order lets AAA trade the i=10 breakout against BTC's final bar
+    assert book.closed_trades, "expected the greedy replay to trade before the gate opened"
+    assert book.closed_trades[0]["entry_ts"] < TS0 + 20 * DAY
+
+
+def test_state_keeps_the_history_the_regime_gate_needs():
+    cfg = _gate_cfg(regime_ma=200, warmup_bars=90)
+    book = TrendPortfolio(cfg)
+    bars = [
+        Bar(ts=TS0 + i * DAY, open=100 + i * 0.5, high=101 + i * 0.5,
+            low=99 + i * 0.5, close=100 + i * 0.5)
+        for i in range(250)
+    ]
+    from app.bots.trend_portfolio.engine import feed_chronological
+
+    feed_chronological(book, {"BTC": bars, "AAA": bars})
+    state = book.to_state()
+    assert len(state["sleeves"]["BTC"]["closes"]) >= 200
+    restored = TrendPortfolio.from_state(cfg, state)
+    assert len(restored.sleeves["BTC"].closes) >= 200
+    assert restored._regime_ok(1) is True       # uptrend: gate must be usable
+
+
+def test_runner_cycle_replays_in_timestamp_order(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_chrono_cycle")
+    btc, aaa = _btc_step_series(), _alt_two_breakouts()
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0):
+        coin = inst_id.split("-")[0]
+        return list(btc if coin == "BTC" else aaa)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+
+    runner = runner_mod.TrendPaperRunner(cfg)
+    asyncio.run(runner.cycle())
+    assert len(runner.book.closed_trades) == 1
+    assert runner.book.closed_trades[0]["entry_ts"] == TS0 + 26 * DAY
+
+
 # ── exits ────────────────────────────────────────────────────────────────
 
 def test_chandelier_stop_fires_when_low_breaks_it():
