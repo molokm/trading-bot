@@ -117,6 +117,7 @@ class TrendPaperRunner:
         self.cycles: int = 0
         self.bars_consumed: int = 0
         self.sources_used: Dict[str, int] = {}
+        self.data_note: str = ""
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -163,18 +164,30 @@ class TrendPaperRunner:
         self.last_cycle_ts = time.time()
         errors: Dict[str, str] = {}
         series: Dict[str, List[Bar]] = {}
+        primary_down = False
+        primary_failures = 0
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
             sleeve = self.book.sleeves.get(coin)
             if sleeve is None:
                 continue
-            primary, bars = self.cfg.source, None
-            try:
-                bars = await fetch_daily_bars(
-                    inst, limit=self.cfg.candle_limit, source=primary
-                )
-                self.sources_used[primary] = self.sources_used.get(primary, 0) + 1
-            except Exception as exc:
+            primary = self.cfg.source
+            bars = None
+            if not primary_down:
+                try:
+                    bars = await fetch_daily_bars(
+                        inst, limit=self.cfg.candle_limit, source=primary
+                    )
+                    self.sources_used[primary] = self.sources_used.get(primary, 0) + 1
+                except Exception as exc:
+                    primary_failures += 1
+                    # Binance returns 451 from some cloud regions.  After a few
+                    # failures stop probing it for the rest of the cycle instead
+                    # of doubling the request count on every coin.
+                    if primary_failures >= 3:
+                        primary_down = True
+                    errors[coin] = f"{primary} failed ({type(exc).__name__})"
+            if bars is None:
                 # Binance blocks some cloud regions; the book must keep running
                 # on OKX rather than silently losing days.
                 fallback = "okx" if primary != "okx" else "binance"
@@ -183,14 +196,20 @@ class TrendPaperRunner:
                         inst, limit=self.cfg.candle_limit, source=fallback
                     )
                     self.sources_used[fallback] = self.sources_used.get(fallback, 0) + 1
-                    errors[coin] = f"{primary} failed ({type(exc).__name__}) → {fallback}"
                 except Exception as exc2:
-                    errors[coin] = f"{primary} {type(exc).__name__}; {fallback} {type(exc2).__name__}"
+                    errors[coin] = f"{errors.get(coin, primary)}; {fallback} {type(exc2).__name__}"
                     continue
             fresh = [b for b in bars if b.ts > sleeve.last_ts]
             if fresh:
                 series[coin] = fresh
             await asyncio.sleep(0)  # cooperative
+        if primary_down:
+            self.data_note = (
+                f"{self.cfg.source} unreachable from this host — bars served by the "
+                f"fallback venue for this cycle"
+            )
+        else:
+            self.data_note = ""
         # Replay in strict timestamp order: the regime gate reads the regime
         # asset's latest close, so feeding one coin at a time would judge every
         # historical alt entry against *today's* regime state (see
@@ -222,6 +241,7 @@ class TrendPaperRunner:
             "sizing_halflife_days": self.cfg.sizing_halflife_days,
             "source": self.cfg.source,
             "sources_used": dict(self.sources_used),
+            "data_note": self.data_note,
             "regime_symbol": self.cfg.regime_symbol,
             "regime_ma": self.cfg.regime_ma,
             "universe_size": len(self.cfg.universe),

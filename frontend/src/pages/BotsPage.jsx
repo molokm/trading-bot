@@ -740,6 +740,13 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
           </div>
         )}
 
+        {status.data_note && (
+          <div className="flex items-start gap-2 text-[0.6rem] text-[var(--warn)]">
+            <AlertTriangle size={11} className="mt-px flex-shrink-0" />
+            <span className="break-words">{status.data_note}</span>
+          </div>
+        )}
+
         <div className="text-[0.6rem] text-[var(--txt-muted)] leading-snug">
           Бумажный портфель на публичных дневных свечах, ордера не выставляются. Гейт BTC200 + риск 0.64 → бэктест ≈ +19.5% CAGR при просадке ≈ 22%.
         </div>

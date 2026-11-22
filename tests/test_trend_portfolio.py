@@ -335,9 +335,15 @@ def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
 
     import app.bots.trend_portfolio.runner as runner_mod
 
-    cfg = _gate_cfg(universe=("BTC",), state_name="test_trend_fallback", source="binance")
+    cfg = _gate_cfg(
+        universe=("BTC", "ETH", "BNB", "ADA"),
+        state_name="test_trend_fallback",
+        source="binance",
+    )
+    calls = []
 
     async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        calls.append(source)
         if source == "binance":
             raise RuntimeError("451 blocked")
         return _btc_step_series()
@@ -348,9 +354,13 @@ def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
 
     runner = runner_mod.TrendPaperRunner(cfg)
     status = asyncio.run(runner.cycle())
-    assert status["sources_used"] == {"okx": 1}
+    assert status["sources_used"] == {"okx": 4}
     assert status["source"] == "binance"
-    assert "→ okx" in status["errors"]["BTC"]
+    # after 3 failures the cycle stops probing the dead venue
+    assert calls.count("binance") == 3
+    assert calls.count("okx") == 4
+    assert "unreachable" in status["data_note"]
+    assert "binance failed" in status["errors"]["BTC"]
     assert runner.book.sleeves["BTC"].last_ts == TS0 + 39 * DAY
 
 
