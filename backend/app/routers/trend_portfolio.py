@@ -101,7 +101,7 @@ async def trend_backtest(req: BacktestRequest):
     errors = {}
     for coin in cfg.universe:
         try:
-            bars = await fetch_daily_bars(f"{coin}-USDT", limit=req.bars)
+            bars = await fetch_daily_bars(f"{coin}-USDT", limit=req.bars, source=cfg.source)
             if bars:
                 series[coin] = bars
         except Exception as exc:

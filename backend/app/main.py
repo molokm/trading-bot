@@ -5408,14 +5408,24 @@ async def health(request: Request):
         _specs = []
     # Paper trend book — public boolean only (no positions/equity here).
     _trend_on = False
+    _trend_data = None
     try:
         from app.bots.trend_portfolio.runner import get_runner
 
         _tr = get_runner()
         _trend_on = bool(_tr is not None and _tr.cfg.enabled and _tr.running)
+        if _tr is not None:
+            # Which venue the paper book actually reads (ops check only:
+            # Binance blocks some cloud regions and the runner then falls
+            # back to OKX).  No prices, positions or equity.
+            _trend_data = {
+                'source': _tr.cfg.source,
+                'used': dict(_tr.sources_used),
+            }
     except Exception:
         _trend_on = False
-    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False)), 'trend': _trend_on}, 'contract_specs': _specs, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_read': (bool(_live_key_perms.get('has_read')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'key_perm_err': (str(_live_key_perms.get('error') or '')[:160] if not _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
+        _trend_data = None
+    return {'status': 'ok', 'connected': connected, 'demo': locals().get('_ui_demo', _env_demo), 'version': os.environ.get('RENDER_GIT_COMMIT', '')[:12], 'uptime_sec': uptime, 'bots': {'rotation': _bot_flag(rotation), 'impulse': _bot_flag(impulse), 'validation': _bot_flag(validation), 'ai': _bot_flag(ai_bot), 'ai_scale': _bot_flag(ai_scale_bot), 'scalp': False, 'vwap_rev': _bot_flag(vwap_rev_bot), 'smart_money': bool(getattr(sm_tracker, '_running', False)), 'trend': _trend_on}, 'trend_data': _trend_data, 'contract_specs': _specs, 'live_mirror': {'connected': _live_on, 'enabled': (str(_live_en or '').strip() not in ('0', 'false', 'no', 'off')), 'key_trade': (bool(_live_key_perms.get('has_trade')) if _lm_perms_ok else None), 'key_read': (bool(_live_key_perms.get('has_read')) if _lm_perms_ok else None), 'key_perm': (_live_key_perms.get('perm') if _lm_perms_ok else None), 'key_perm_err': (str(_live_key_perms.get('error') or '')[:160] if not _lm_perms_ok else None), 'trade_blocked': str(getattr(ai_bot, '_live_trade_blocked_reason', '') or '') if ai_bot is not None else ''}, 'auth': 'jwt', 'risk': risk_get_status(ai_bot=ai_bot).to_dict(), 'sm_diag': diag}
 
 @app.get('/api/health/guard')
 @policy(PUBLIC)

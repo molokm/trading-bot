@@ -282,7 +282,7 @@ def test_runner_cycle_replays_in_timestamp_order(monkeypatch):
     cfg = _gate_cfg(state_name="test_trend_chrono_cycle")
     btc, aaa = _btc_step_series(), _alt_two_breakouts()
 
-    async def fake_fetch(inst_id, limit=300, timeout=20.0):
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
         coin = inst_id.split("-")[0]
         return list(btc if coin == "BTC" else aaa)
 
@@ -294,6 +294,64 @@ def test_runner_cycle_replays_in_timestamp_order(monkeypatch):
     asyncio.run(runner.cycle())
     assert len(runner.book.closed_trades) == 1
     assert runner.book.closed_trades[0]["entry_ts"] == TS0 + 26 * DAY
+
+
+# ── market-data venue ────────────────────────────────────────────────────
+
+def test_source_defaults_to_okx_and_is_configurable(monkeypatch):
+    monkeypatch.delenv("TREND_PORTFOLIO_SOURCE", raising=False)
+    assert TrendPortfolioConfig.from_env().source == "okx"
+    monkeypatch.setenv("TREND_PORTFOLIO_SOURCE", "BINANCE")
+    assert TrendPortfolioConfig.from_env().source == "binance"
+    with pytest.raises(ValueError):
+        _cfg(source="kraken").validate()
+
+
+def test_fetch_daily_bars_routes_to_the_selected_venue(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    calls = []
+
+    async def fake_binance(coin, limit=300, timeout=20.0):
+        calls.append(("binance", coin))
+        return [Bar(ts=TS0, open=1, high=2, low=0.5, close=1.5)]
+
+    async def fake_okx(inst_id, limit=300, timeout=20.0):
+        calls.append(("okx", inst_id))
+        return [Bar(ts=TS0, open=1, high=2, low=0.5, close=1.5)]
+
+    monkeypatch.setattr(runner_mod, "fetch_binance_daily_bars", fake_binance)
+    monkeypatch.setattr(runner_mod, "fetch_okx_daily_bars", fake_okx)
+
+    asyncio.run(runner_mod.fetch_daily_bars("BTC-USDT", source="binance"))
+    asyncio.run(runner_mod.fetch_daily_bars("BTC-USDT", source="okx"))
+    assert calls == [("binance", "BTC"), ("okx", "BTC-USDT")]
+
+
+def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(universe=("BTC",), state_name="test_trend_fallback", source="binance")
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        if source == "binance":
+            raise RuntimeError("451 blocked")
+        return _btc_step_series()
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+
+    runner = runner_mod.TrendPaperRunner(cfg)
+    status = asyncio.run(runner.cycle())
+    assert status["sources_used"] == {"okx": 1}
+    assert status["source"] == "binance"
+    assert "→ okx" in status["errors"]["BTC"]
+    assert runner.book.sleeves["BTC"].last_ts == TS0 + 39 * DAY
 
 
 # ── exits ────────────────────────────────────────────────────────────────

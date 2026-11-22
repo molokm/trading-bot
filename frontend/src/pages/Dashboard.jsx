@@ -376,6 +376,7 @@ function TrendDashPanel({ status, lastTrade, t }) {
           <span>Доход: <span className={`mono ${ret >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{ret >= 0 ? '+' : ''}{ret.toFixed(2)}%</span></span>
           {riskPct != null && <span>Риск: <span className="mono text-[var(--txt)]">{Number(riskPct).toFixed(2)}%/сделку</span></span>}
           <span>Гейт: <span className="mono text-[var(--txt)]">{gate}</span></span>
+          <span>Данные: <span className="mono text-[var(--txt)]">{status.source === 'binance' ? 'Binance' : 'OKX'}</span></span>
         </div>
         {lastTrade && (
           <div className="flex items-center justify-between gap-2 text-[0.6rem] pt-1 border-t border-[var(--border)]/60">

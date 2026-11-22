@@ -89,6 +89,16 @@ class TrendPortfolioConfig:
     # ── universe ─────────────────────────────────────────────────────────
     universe: Tuple[str, ...] = DEFAULT_UNIVERSE
 
+    # ── market data ──────────────────────────────────────────────────────
+    # Venue for the daily bars.  "okx" (default) or "binance".
+    # The 5.5-year validation used UTC-bucketed Binance days; OKX buckets its
+    # 1D candles on UTC+8 and identical rules score visibly worse there
+    # (2023-08→2026-11: CAGR 14% / Sharpe 0.57 on OKX vs 24% / 0.85 on
+    # Binance), so the venue is part of the strategy, not an implementation
+    # detail.  The runner always falls back to OKX when the primary venue is
+    # unreachable (Binance blocks some cloud regions).
+    source: str = "okx"
+
     # ── signal (validated plateau, not a grid peak) ──────────────────────
     entry_lookback: int = 40       # close > max(high[-40:])
     exit_lookback: int = 20        # close < min(low[-20:])  → flat next open
@@ -184,6 +194,8 @@ class TrendPortfolioConfig:
             raise ValueError("trend_portfolio: regime_ma too small")
         if self.warmup_bars <= max(self.entry_lookback, self.atr_period):
             raise ValueError("trend_portfolio: warmup_bars too small")
+        if self.source not in ("okx", "binance"):
+            raise ValueError("trend_portfolio: source must be 'okx' or 'binance'")
 
     @classmethod
     def from_env(cls) -> "TrendPortfolioConfig":
@@ -199,6 +211,7 @@ class TrendPortfolioConfig:
             regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
             regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
             poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),
+            source=(os.getenv("TREND_PORTFOLIO_SOURCE", "okx") or "okx").strip().lower(),
         )
         cfg.validate()
         return cfg

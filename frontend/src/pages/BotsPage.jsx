@@ -652,6 +652,20 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
           <KV label="Трейл" value={`${status.chandelier_mult}×ATR`} />
           <KV label="Гейт режима" value={gate} tone={status.regime_symbol ? 'profit' : 'muted'} />
           <KV label="Позиций" value={positions.length} />
+          <KV
+            label="Данные"
+            value={status.source === 'binance' ? 'Binance · UTC' : 'OKX · UTC+8'}
+            tone={status.source === 'binance' ? 'profit' : 'muted'}
+          />
+          <KV
+            label="Фолбэк"
+            value={
+              status.sources_used && status.source === 'binance' && status.sources_used.okx
+                ? `OKX · ${status.sources_used.okx}`
+                : '—'
+            }
+            tone={status.sources_used && status.source === 'binance' && status.sources_used.okx ? 'loss' : 'muted'}
+          />
         </div>
 
         {positions.length > 0 && (

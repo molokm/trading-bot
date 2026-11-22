@@ -64,3 +64,10 @@ services:
         value: "200"
       - key: TREND_PORTFOLIO_RISK
         value: "0.64"
+      # Venue for the daily bars.  The 5.5y validation was measured on
+      # UTC-bucketed Binance days; OKX buckets 1D on UTC+8 and the same rules
+      # score 14% CAGR / Sharpe 0.57 there vs 24% / 0.85 on Binance over
+      # 2023-08→2026-11.  Falls back to OKX automatically if Binance is
+      # unreachable from this region.
+      - key: TREND_PORTFOLIO_SOURCE
+        value: "binance"

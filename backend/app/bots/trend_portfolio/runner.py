@@ -26,9 +26,18 @@ from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, feed_chronologi
 log = logging.getLogger("trend_portfolio")
 
 OKX_BASE = "https://www.okx.com"
+BINANCE_BASE = "https://api.binance.com"
 
 
-async def fetch_daily_bars(inst_id: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+def _drop_forming_bar(bars: List[Bar]) -> List[Bar]:
+    """Sort ascending and drop the candle that is still forming today."""
+    bars.sort(key=lambda b: b.ts)
+    if bars:
+        bars.pop()
+    return bars
+
+
+async def fetch_okx_daily_bars(inst_id: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
     """Public daily candles, ascending, with the still-forming bar dropped."""
     url = f"{OKX_BASE}/api/v5/market/candles"
     params = {"instId": inst_id, "bar": "1D", "limit": str(min(max(limit, 1), 300))}
@@ -36,6 +45,8 @@ async def fetch_daily_bars(inst_id: str, limit: int = 300, timeout: float = 20.0
         resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
         resp.raise_for_status()
         payload = resp.json()
+    if str(payload.get("code", "0")) != "0":
+        raise RuntimeError(f"okx {payload.get('code')}: {payload.get('msg')}")
     rows = payload.get("data") or []
     bars: List[Bar] = []
     for r in rows:
@@ -51,10 +62,47 @@ async def fetch_daily_bars(inst_id: str, limit: int = 300, timeout: float = 20.0
             )
         except (TypeError, ValueError, IndexError):
             continue
-    bars.sort(key=lambda b: b.ts)
-    if bars:
-        bars.pop()  # last candle is the bar still forming
-    return bars
+    return _drop_forming_bar(bars)
+
+
+async def fetch_binance_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """Public UTC-bucketed daily klines — the venue the research was measured on."""
+    url = f"{BINANCE_BASE}/api/v3/klines"
+    params = {
+        "symbol": f"{coin.upper()}USDT",
+        "interval": "1d",
+        "limit": min(max(limit, 1), 1000),
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
+        resp.raise_for_status()
+        rows = resp.json()
+    if not isinstance(rows, list):
+        raise RuntimeError(f"binance unexpected payload: {type(rows).__name__}")
+    bars: List[Bar] = []
+    for r in rows:
+        try:
+            bars.append(
+                Bar(
+                    ts=int(r[0]),
+                    open=float(r[1]),
+                    high=float(r[2]),
+                    low=float(r[3]),
+                    close=float(r[4]),
+                )
+            )
+        except (TypeError, ValueError, IndexError):
+            continue
+    return _drop_forming_bar(bars)
+
+
+async def fetch_daily_bars(
+    inst_id: str, limit: int = 300, timeout: float = 20.0, source: str = "okx"
+) -> List[Bar]:
+    """Daily bars from the configured venue (``inst_id`` is e.g. ``BTC-USDT``)."""
+    if source == "binance":
+        return await fetch_binance_daily_bars(inst_id.split("-")[0], limit=limit, timeout=timeout)
+    return await fetch_okx_daily_bars(inst_id, limit=limit, timeout=timeout)
 
 
 class TrendPaperRunner:
@@ -68,6 +116,7 @@ class TrendPaperRunner:
         self.last_error: str = ""
         self.cycles: int = 0
         self.bars_consumed: int = 0
+        self.sources_used: Dict[str, int] = {}
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -116,14 +165,28 @@ class TrendPaperRunner:
         series: Dict[str, List[Bar]] = {}
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
-            try:
-                bars = await fetch_daily_bars(inst, limit=self.cfg.candle_limit)
-            except Exception as exc:
-                errors[coin] = f"{type(exc).__name__}"
-                continue
             sleeve = self.book.sleeves.get(coin)
             if sleeve is None:
                 continue
+            primary, bars = self.cfg.source, None
+            try:
+                bars = await fetch_daily_bars(
+                    inst, limit=self.cfg.candle_limit, source=primary
+                )
+                self.sources_used[primary] = self.sources_used.get(primary, 0) + 1
+            except Exception as exc:
+                # Binance blocks some cloud regions; the book must keep running
+                # on OKX rather than silently losing days.
+                fallback = "okx" if primary != "okx" else "binance"
+                try:
+                    bars = await fetch_daily_bars(
+                        inst, limit=self.cfg.candle_limit, source=fallback
+                    )
+                    self.sources_used[fallback] = self.sources_used.get(fallback, 0) + 1
+                    errors[coin] = f"{primary} failed ({type(exc).__name__}) → {fallback}"
+                except Exception as exc2:
+                    errors[coin] = f"{primary} {type(exc).__name__}; {fallback} {type(exc2).__name__}"
+                    continue
             fresh = [b for b in bars if b.ts > sleeve.last_ts]
             if fresh:
                 series[coin] = fresh
@@ -157,6 +220,8 @@ class TrendPaperRunner:
             "exit_lookback": self.cfg.exit_lookback,
             "chandelier_mult": self.cfg.chandelier_mult,
             "sizing_halflife_days": self.cfg.sizing_halflife_days,
+            "source": self.cfg.source,
+            "sources_used": dict(self.sources_used),
             "regime_symbol": self.cfg.regime_symbol,
             "regime_ma": self.cfg.regime_ma,
             "universe_size": len(self.cfg.universe),
