@@ -83,6 +83,14 @@ def test_env_gate_off_by_default(monkeypatch):
     assert CorePortfolioConfig.from_env().enabled is False
 
 
+def test_default_source_is_binance_utc(monkeypatch):
+    # 6h was validated on UTC bars; OKX (UTC+8) must be an explicit opt-in.
+    monkeypatch.delenv("CORE_PORTFOLIO_SOURCE", raising=False)
+    cfg = CorePortfolioConfig.from_env()
+    assert cfg.source == "binance"
+    assert cfg.daily_source == "binance"
+
+
 def test_env_gate_on_and_params(monkeypatch):
     monkeypatch.setenv("CORE_PORTFOLIO_ENABLE", "1")
     monkeypatch.setenv("CORE_PORTFOLIO_DAILY_WEIGHT", "0.6")
@@ -376,6 +384,36 @@ def test_runner_cycle_combines_two_books(monkeypatch):
     assert status["sources_used"] == {runner.h6_venue: 2}
     assert status["h6_venue"] == runner.daily_venue
     assert status["data_note"] == ""
+
+
+def test_runner_stops_probing_a_blocked_venue(monkeypatch):
+    import asyncio
+
+    import app.bots.core_portfolio.runner as runner_mod
+
+    universe = ("BTC", "AAA", "BBB", "CCC", "DDD", "EEE")
+    daily = {c: _flat(120, step=86_400_000) for c in universe}
+    six = {c: _flat(120) for c in universe}
+    calls = {"binance": 0}
+
+    async def fake_fetch(coin, interval, limit, venue, timeout=20.0):
+        if venue == "binance":
+            calls["binance"] += 1
+            raise RuntimeError("451 blocked")
+        return list(six[coin] if interval == "6h" else daily[coin])
+
+    monkeypatch.setattr(runner_mod, "fetch_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    runner = CorePaperRunner(
+        _runner_cfg(source="binance", universe=universe, h6_candle_limit=130)
+    )
+    status = asyncio.run(runner.cycle())
+    # 1 gate probe for the 6h block + at most 3 daily coins, not 2 x 6.
+    assert calls["binance"] <= 4
+    assert runner.h6_venue == "binance_vision"
+    assert runner.daily_venue == "binance_vision"
+    assert status["last_error"] == ""
 
 
 def test_runner_does_not_start_when_disabled():

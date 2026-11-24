@@ -104,8 +104,9 @@ class CorePortfolioConfig:
     # ── market data ──────────────────────────────────────────────────────
     # okx | binance | binance_vision.  Binance buckets bars on UTC (the venue
     # the research used); OKX buckets 6H on UTC+8 and answers 451 from some
-    # cloud regions on the main host.
-    source: str = "okx"
+    # cloud regions on the main host.  The default is Binance because the 6h
+    # block was validated on UTC bars — OKX must be an explicit opt-in.
+    source: str = "binance"
     h6_candle_limit: int = 400      # per coin, enough for warmup + replay
     gate_bars: int = 900            # BTC only: 200 days * 4 bars + slack
     daily_candle_limit: int = 300
@@ -228,7 +229,7 @@ class CorePortfolioConfig:
             daily_chandelier=_env_float("CORE_PORTFOLIO_DAILY_CHANDELIER", 5.0),
             regime_symbol=(os.getenv("CORE_PORTFOLIO_REGIME", "BTC") or "").strip().upper(),
             regime_ma_days=_env_int("CORE_PORTFOLIO_REGIME_MA", 200),
-            source=(os.getenv("CORE_PORTFOLIO_SOURCE", "okx") or "okx").strip().lower(),
+            source=(os.getenv("CORE_PORTFOLIO_SOURCE", "binance") or "binance").strip().lower(),
             h6_candle_limit=_env_int("CORE_PORTFOLIO_H6_BARS", 400),
             gate_bars=_env_int("CORE_PORTFOLIO_GATE_BARS", 900),
             daily_candle_limit=_env_int("CORE_PORTFOLIO_DAILY_BARS", 300),

@@ -421,6 +421,7 @@ class CorePaperRunner:
                     errors[gate_coin] = f"{venue} empty"
                     continue
             series: Dict[str, List[Bar]] = {}
+            fails_in_row = 0
             for coin in self.cfg.universe:
                 if coin == gate_coin and gate_bars:
                     series[coin] = gate_bars
@@ -429,7 +430,17 @@ class CorePaperRunner:
                     bars = await fetch_bars(coin, interval, per_coin_limit, venue)
                 except Exception as exc:
                     venue_errors[coin] = f"{venue} {type(exc).__name__}"
+                    fails_in_row += 1
+                    # A blocked host (Binance answers 451 from some cloud
+                    # regions) fails the first coins; stop probing it for the
+                    # rest of the cycle instead of sending 45 doomed requests.
+                    if fails_in_row >= 3 and not series:
+                        errors["_venues"] = (
+                            f"{venue}: {type(exc).__name__} on the first coins"
+                        )
+                        break
                     continue
+                fails_in_row = 0
                 if bars:
                     series[coin] = bars
                 if venue == "okx":
