@@ -356,7 +356,7 @@ _bots_auto_start = os.getenv('BOTS_AUTO_START', '1').strip().lower() not in ('0'
 _mom_auto = os.getenv('MOM_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
 _imp_auto = os.getenv('IMP_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
 _val_auto = os.getenv('VAL_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
-_ai_auto = os.getenv('AI_AUTO_START', '1').strip().lower() not in ('0', 'false', 'no', 'off')
+_ai_auto = os.getenv('AI_AUTO_START', '0').strip().lower() not in ('0', 'false', 'no', 'off')
 AI_ONLY_MODE = True
 if AI_ONLY_MODE:
     _mom_auto = False

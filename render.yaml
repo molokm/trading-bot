@@ -50,6 +50,12 @@ services:
         value: "500"
       - key: PRO_PLAN_DAYS
         value: "30"
+      # ── AI Discretionary: muted 2026-11-24 ─────────────────────────────
+      # Owner's call: stop the LLM bot and focus on the paper daily trend
+      # book.  The AI engine stays in the codebase; set to "1" (or press
+      # Start in the UI) to bring it back.  Demo-only, no real money.
+      - key: AI_AUTO_START
+        value: "0"
       # ── Daily trend portfolio (paper-only, read-only) ──────────────────
       # The book itself cannot place an order: it only reads public daily
       # candles.  Enabled here to build a forward paper track record.
