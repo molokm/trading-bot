@@ -397,6 +397,91 @@ function TrendDashPanel({ status, lastTrade, t }) {
   )
 }
 
+/** Compact paper Core portfolio panel (ADMIN). No controls — env-gated on server. */
+function CoreDashPanel({ status, lastTrade, t }) {
+  if (!status) return null
+  const running = !!status.running
+  const enabled = status.enabled !== false && !status.reason
+  const c = status.combined || {}
+  const blocks = status.blocks || {}
+  const d = blocks.daily || {}
+  const h = blocks.h6 || {}
+  const eq = Number(c.equity ?? 0)
+  const ret = Number(c.return_pct ?? 0)
+  const pnl = Number(c.realized_pnl ?? 0)
+  const npos = Array.isArray(status.open_positions)
+    ? status.open_positions.length
+    : Number(c.open_positions ?? 0)
+  const venues = [...new Set([status.daily_venue, status.h6_venue].filter(Boolean))]
+  const gate = status.regime_symbol ? `${status.regime_symbol} ${status.regime_ma_days}d` : 'выкл'
+  const tp = lastTrade ? Number(lastTrade.pnl || 0) : null
+  const exitD = lastTrade?.exit_ts ? new Date(Number(lastTrade.exit_ts)).toLocaleDateString() : null
+  return (
+    <div className="panel flex-shrink-0 !border-[var(--info)]/30">
+      <div className="panel-header">
+        <Target size={13} className="text-[var(--info)]" />
+        <span className="flex-1 truncate">Core Portfolio</span>
+        <span className="text-2xs px-1.5 py-0.5 rounded bg-[var(--info)]/15 text-[var(--info)] font-semibold">1D+6H</span>
+        <span className="text-2xs px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-400 font-semibold">PAPER</span>
+        {running
+          ? <StatusBadge mode="live" label={t('dash.running')} />
+          : <StatusBadge mode="stopped" label={enabled ? t('dash.stopped') : 'OFF'} />}
+      </div>
+      <div className="p-3 space-y-2 text-2xs">
+        <div className="grid grid-cols-4 gap-1.5">
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">PnL</div>
+            <div className={`mono font-semibold ${pnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+            </div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Сделок</div>
+            <div className="mono font-semibold">{c.trades ?? 0}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">WR</div>
+            <div className="mono font-semibold">{c.win_rate_pct != null ? `${c.win_rate_pct}%` : '-'}</div>
+          </div>
+          <div className="rounded-md bg-[var(--bg)] border border-[var(--border)] p-1.5">
+            <div className="text-[var(--txt-muted)]">Поз.</div>
+            <div className="mono font-semibold">{npos}</div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[var(--txt-muted)]">
+          <span>Капитал: <span className="mono text-[var(--txt)]">${eq.toFixed(2)}</span></span>
+          <span>Доход: <span className={`mono ${ret >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{ret >= 0 ? '+' : ''}{ret.toFixed(2)}%</span></span>
+          <span>Гейт: <span className="mono text-[var(--txt)]">{gate}</span></span>
+          <span>Данные: <span className="mono text-[var(--txt)]">{venues.length ? venues.join('+') : '—'}</span></span>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[var(--txt-muted)]">
+          <span>1D: <span className={`mono ${Number(d.return_pct ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{Number(d.return_pct ?? 0) >= 0 ? '+' : ''}{Number(d.return_pct ?? 0).toFixed(2)}%</span></span>
+          <span>6H: <span className={`mono ${Number(h.return_pct ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>{Number(h.return_pct ?? 0) >= 0 ? '+' : ''}{Number(h.return_pct ?? 0).toFixed(2)}%</span></span>
+          <span>Сделок: <span className="mono text-[var(--txt)]">{d.trades ?? 0} / {h.trades ?? 0}</span></span>
+        </div>
+        {lastTrade && (
+          <div className="flex items-center justify-between gap-2 text-[0.6rem] pt-1 border-t border-[var(--border)]/60">
+            <span className="text-[var(--txt-muted)] truncate">
+              Последняя: <span className="text-[var(--txt)] font-medium">{lastTrade.coin}</span>
+              <span className="mono uppercase"> · {lastTrade.block}</span>
+              {exitD ? ` · ${exitD}` : ''}
+            </span>
+            <span className={`mono font-semibold flex-shrink-0 ${tp >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+              {tp >= 0 ? '+' : ''}{tp.toFixed(2)}
+            </span>
+          </div>
+        )}
+        {status.last_error && (
+          <div className="text-[0.6rem] text-[var(--warn)] break-words">Ошибка: {status.last_error}</div>
+        )}
+        {status.data_note && (
+          <div className="text-[0.6rem] text-[var(--warn)] break-words">{status.data_note}</div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function Dashboard({ health, connected, isGuest, isAdmin }) {
   const demoMode = health?.demo !== false
   const [portfolio, setPortfolio] = useState(null)
@@ -410,6 +495,8 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
   const [aiStatus, setAiStatus] = useState(null)
   const [trendStatus, setTrendStatus] = useState(null)
   const [trendLastTrade, setTrendLastTrade] = useState(null)
+  const [coreStatus, setCoreStatus] = useState(null)
+  const [coreLastTrade, setCoreLastTrade] = useState(null)
   const [liveStatus, setLiveStatus] = useState(null)
   const [livePnl, setLivePnl] = useState(null)
   const [aiScaleStatus, setAiScaleStatus] = useState(null)
@@ -439,6 +526,30 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
         if (cancelled || !st) return
         setTrendStatus({ ...st, open_positions: pos?.positions || [] })
         setTrendLastTrade((tr?.trades || [])[0] || null)
+      } catch { /* ignore */ }
+    }
+    pull()
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return
+      pull()
+    }, 30000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [isAdmin])
+
+  // Paper core portfolio (ADMIN only) — same light poll, two books in one payload.
+  useEffect(() => {
+    if (!isAdmin) { setCoreStatus(null); setCoreLastTrade(null); return }
+    let cancelled = false
+    const pull = async () => {
+      try {
+        const [st, pos, tr] = await Promise.all([
+          api.coreStatus().catch(() => null),
+          api.corePositions().catch(() => null),
+          api.coreTrades(1).catch(() => null),
+        ])
+        if (cancelled || !st) return
+        setCoreStatus({ ...st, open_positions: pos?.positions || [] })
+        setCoreLastTrade((tr?.trades || [])[0] || null)
       } catch { /* ignore */ }
     }
     pull()
@@ -1896,6 +2007,8 @@ export default function Dashboard({ health, connected, isGuest, isAdmin }) {
           />
 
           <TrendDashPanel status={trendStatus} lastTrade={trendLastTrade} t={t} />
+
+          <CoreDashPanel status={coreStatus} lastTrade={coreLastTrade} t={t} />
 
           {/* ─── LIVE Mirror Panel ─── */}
           {liveStatus?.connected && (

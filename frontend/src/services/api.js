@@ -317,6 +317,14 @@ export const api = {
   trendBacktest: (body) =>
     request('/trend/backtest', { method: 'POST', body: JSON.stringify(body || {}) }),
 
+  // ── Core portfolio (paper, ADMIN) ──
+  coreStatus: () => request('/core/status'),
+  corePositions: () => request('/core/positions'),
+  coreTrades: (limit = 50) => request(`/core/trades?limit=${limit}`),
+  coreCycle: () => request('/core/cycle', { method: 'POST' }),
+  coreBacktest: (body) =>
+    request('/core/backtest', { method: 'POST', body: JSON.stringify(body || {}) }),
+
   aiGetConfig: () => request('/ai/config'),
   aiSaveConfig: (config) =>
     request('/ai/config', { method: 'PUT', body: JSON.stringify(config || {}) }),

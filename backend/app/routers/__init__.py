@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 
 def include_routers(app: FastAPI) -> None:
-    from app.routers import meta, trend_portfolio
+    from app.routers import core_portfolio, meta, trend_portfolio
     app.include_router(meta.router)
     app.include_router(trend_portfolio.router)
+    app.include_router(core_portfolio.router)

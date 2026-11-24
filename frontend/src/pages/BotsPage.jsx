@@ -763,6 +763,251 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
   )
 }
 
+/** Combined paper equity sparkline for the core portfolio. */
+function EquitySparkline({ points = [] }) {
+  const eq = (points || []).map((p) => Number(p.equity || 0)).filter((v) => v > 0)
+  if (eq.length < 2) return null
+  const w = 320, h = 44, pad = 2
+  const min = Math.min(...eq), max = Math.max(...eq)
+  const range = max - min || 1
+  const step = (w - pad * 2) / (eq.length - 1)
+  const coords = eq.map((v, i) => [pad + i * step, pad + (1 - (v - min) / range) * (h - pad * 2)])
+  const line = coords.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join(' ')
+  const area = `${line} L${coords[coords.length - 1][0].toFixed(1)},${h - pad} L${pad},${h - pad} Z`
+  const up = eq[eq.length - 1] >= eq[0]
+  const color = up ? 'var(--profit)' : 'var(--loss)'
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-11 block" preserveAspectRatio="none">
+      <path d={area} fill={color} opacity="0.12" />
+      <path d={line} fill="none" stroke={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
+/** Core portfolio: daily book + 6h book, two independent paper accounts (ADMIN). */
+function CorePortfolioCard({ status, positions = [], trades = [], onRunCycle, loading, isGuest, t }) {
+  if (!status) return null
+  const rejected = !!status.reason
+  const enabled = status.enabled !== false && !rejected
+  const running = !!status.running
+  const c = status.combined || {}
+  const blocks = status.blocks || {}
+  const d = blocks.daily || {}
+  const h = blocks.h6 || {}
+  const eq = Number(c.equity ?? 0)
+  const start = Number(c.start_equity ?? 0)
+  const ret = Number(c.return_pct ?? 0)
+  const pnl = Number(c.realized_pnl ?? (eq - start))
+  const curve = c.curve || {}
+  const venues = [...new Set([status.daily_venue, status.h6_venue].filter(Boolean))]
+  const venueLabel = venues.length ? venues.join(' + ') : '—'
+  const gate = status.regime_symbol ? `${status.regime_symbol} · ${status.regime_ma_days}d` : 'выкл'
+  const dailyPos = positions.filter((p) => p.block === 'daily')
+  const h6Pos = positions.filter((p) => p.block === '6h')
+
+  const blockRow = (label, b, tone) => (
+    <div className="rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-2 space-y-1">
+      <div className="flex items-center justify-between">
+        <span className="text-2xs font-semibold text-[var(--txt)]">{label}</span>
+        <span className={`mono text-2xs ${Number(b.return_pct ?? 0) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+          {Number(b.return_pct ?? 0) >= 0 ? '+' : ''}{Number(b.return_pct ?? 0).toFixed(2)}%
+        </span>
+      </div>
+      <div className="mono text-xs font-bold text-[var(--txt)]">${Number(b.equity ?? 0).toFixed(2)}</div>
+      <div className="flex items-center justify-between text-[0.6rem] text-[var(--txt-muted)]">
+        <span>{b.trades ?? 0} сдел.</span>
+        <span>{b.open_positions ?? 0} поз.</span>
+        <span className={tone}>WR {b.win_rate_pct != null ? `${b.win_rate_pct}%` : '—'}</span>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="panel !overflow-visible flex flex-col transition-colors hover:border-[var(--border-hover)]">
+      <div className="relative px-4 py-3.5 border-b border-[var(--border)] bg-gradient-to-br from-[var(--info-dim,rgba(59,130,246,0.12))] via-transparent to-transparent rounded-t-[var(--radius-lg)]">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-xl bg-[var(--bg)]/70 ring-1 ring-[var(--border)] flex items-center justify-center shadow-sm">
+              <Target size={22} className="text-[var(--info)]" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-base font-bold text-[var(--txt)]">Core Portfolio</span>
+                <span className="text-[0.6rem] font-bold mono px-1.5 py-0.5 rounded-md bg-[var(--info)]/15 text-[var(--info)]">1D + 6H</span>
+                <span className="text-[0.6rem] font-bold mono px-1.5 py-0.5 rounded-md bg-amber-500/15 text-amber-400">PAPER</span>
+              </div>
+              <div className="text-2xs text-[var(--txt-muted)] mono">core_portfolio · 50/50 two books</div>
+            </div>
+          </div>
+          <StatusBadge
+            mode={running ? 'live' : 'stopped'}
+            label={rejected ? 'ошибка конфига' : !enabled ? 'выключен' : running ? t('bots.status_running') : t('bots.status_stopped')}
+          />
+        </div>
+      </div>
+
+      <div className="p-4 space-y-4 flex flex-col flex-1">
+        {rejected && (
+          <div className="flex items-center gap-2 text-2xs text-[var(--loss)]">
+            <AlertTriangle size={12} />
+            <span>Конфиг отклонён: {status.reason}</span>
+          </div>
+        )}
+
+        {!rejected && !enabled && (
+          <div className="text-2xs text-[var(--txt-muted)] leading-snug p-2 rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60">
+            Модуль выключен (<span className="mono">CORE_PORTFOLIO_ENABLE=0</span>). Запуск только переменной окружения на сервере.
+          </div>
+        )}
+
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-2xs font-semibold text-[var(--txt-muted)] uppercase tracking-wider">Совокупный бумажный результат</span>
+            {running && (
+              <div className="flex items-center gap-1.5 text-2xs text-[var(--txt-muted)]">
+                <Clock size={11} /><span>циклов {status.cycles ?? 0}</span>
+              </div>
+            )}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <PerfTile label="Капитал" value={`$${eq.toFixed(2)}`} tone={pnl >= 0 ? 'profit' : 'loss'} />
+            <PerfTile label="Доход" value={`${ret >= 0 ? '+' : ''}${ret.toFixed(2)}%`} tone={ret >= 0 ? 'profit' : 'loss'} />
+            <PerfTile label="Сделок" value={c.trades ?? 0} />
+            <PerfTile label="Win rate" value={c.win_rate_pct != null ? `${c.win_rate_pct}%` : '—'} />
+          </div>
+          {curve.days > 1 && (
+            <div className="mt-2">
+              <EquitySparkline points={status.equity_curve || []} />
+              <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[0.6rem] text-[var(--txt-muted)] mt-1">
+                <span>CAGR <span className="mono text-[var(--txt)]">{curve.cagr_pct >= 0 ? '+' : ''}{curve.cagr_pct}%</span></span>
+                <span>DD <span className="mono text-[var(--txt)]">{curve.max_dd_pct}%</span></span>
+                <span>Sharpe <span className="mono text-[var(--txt)]">{curve.sharpe}</span></span>
+                <span>{curve.days} дн.</span>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2">
+          {blockRow('Дневная книга', d, 'text-[var(--txt-muted)]')}
+          {blockRow('6h блок', h, 'text-[var(--txt-muted)]')}
+        </div>
+
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+          <KV label="Вселенная" value={`${status.universe_size ?? '—'} монет`} />
+          <KV label="Веса" value={`${Math.round(Number(c.daily_weight ?? 0.5) * 100)}/${Math.round(Number(c.h6_weight ?? 0.5) * 100)}`} />
+          <KV label="Гейт режима" value={gate} tone={status.regime_symbol ? 'profit' : 'muted'} />
+          <KV label="Позиций" value={positions.length} />
+          <KV label="Данные" value={venueLabel} tone={venues.length ? 'profit' : 'muted'} />
+          <KV
+            label="Фолбэк"
+            value={status.sources_used && Object.keys(status.sources_used).length > 1
+              ? Object.entries(status.sources_used).map(([k, v]) => `${k}:${v}`).join(' ')
+              : '—'}
+            tone={status.sources_used && Object.keys(status.sources_used).length > 1 ? 'loss' : 'muted'}
+          />
+          <KV label="6H вход/выход" value={`${status.h6?.entry ?? '—'}/${status.h6?.exit ?? '—'} баров`} />
+          <KV label="6H трейл" value={`${status.h6?.chandelier ?? '—'}×ATR`} />
+        </div>
+
+        {positions.length > 0 && (
+          <div className="space-y-1">
+            <div className="text-2xs text-[var(--txt-muted)] font-medium">
+              Открытые позиции (бумага) · 1D {dailyPos.length} · 6H {h6Pos.length}
+            </div>
+            {positions.slice(0, 12).map((p, i) => {
+              const upnl = Number(p.unrealized || 0)
+              return (
+                <div key={`${p.block}-${p.coin}-${i}`} className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)]">
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <span className="px-1 py-0.5 rounded font-bold bg-[var(--profit-dim)] text-[var(--profit)]">L</span>
+                    <span className="text-[var(--txt)] font-medium">{p.coin}</span>
+                    <span className="mono text-[0.55rem] text-[var(--txt-muted)] uppercase">{p.block}</span>
+                  </div>
+                  <div className="flex items-center gap-2 min-w-0">
+                    {p.entry != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">вх {Number(p.entry).toPrecision(5)}</span>}
+                    {p.stop != null && <span className="mono text-[0.6rem] text-[var(--txt-muted)]">стоп {Number(p.stop).toPrecision(5)}</span>}
+                    <span className={`mono font-semibold flex-shrink-0 ${upnl >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                      {upnl >= 0 ? '+' : ''}{upnl.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+
+        {trades.length > 0 && (
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-2xs text-[var(--txt-muted)] font-medium">Последние сделки</span>
+              <span className="text-[0.6rem] text-[var(--txt-muted)] mono">{trades.length} из {c.trades ?? 0}</span>
+            </div>
+            <div className="max-h-52 overflow-y-auto space-y-1 pr-0.5">
+              {trades.slice(0, 12).map((tr, i) => {
+                const p = Number(tr.pnl || 0)
+                const pct = Number(tr.pnl_pct || 0)
+                const exitD = tr.exit_ts ? new Date(Number(tr.exit_ts)).toLocaleDateString() : '—'
+                const reason = tr.reason === 'stop' ? 'стоп' : tr.reason === 'signal' ? 'сигнал' : tr.reason || ''
+                return (
+                  <div
+                    key={`${tr.block}-${tr.coin}-${tr.exit_ts}-${i}`}
+                    className="flex items-center justify-between gap-2 text-2xs p-1.5 rounded bg-[var(--bg)] border border-[var(--border)]/50"
+                    title={`${tr.entry} → ${tr.exit}`}
+                  >
+                    <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
+                      <span className="px-1 py-0.5 rounded font-bold bg-[var(--profit-dim)] text-[var(--profit)]">L</span>
+                      <span className="text-[var(--txt)] font-medium">{tr.coin}</span>
+                      <span className="mono text-[0.55rem] text-[var(--txt-muted)] uppercase">{tr.block}</span>
+                      <span className="mono text-[0.6rem] text-[var(--txt-muted)] truncate">{reason}</span>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="mono text-[0.6rem] text-[var(--txt-muted)]">{exitD}</span>
+                      <span className={`mono font-semibold ${p >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {p >= 0 ? '+' : ''}{p.toFixed(2)}
+                      </span>
+                      <span className={`mono text-[0.6rem] w-10 text-right ${pct >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                        {pct >= 0 ? '+' : ''}{pct.toFixed(1)}%
+                      </span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        {status.last_error && (
+          <div className="flex items-start gap-2 text-[0.6rem] text-[var(--warn)]">
+            <AlertTriangle size={11} className="mt-px flex-shrink-0" />
+            <span className="break-words">Последняя ошибка цикла: {status.last_error}</span>
+          </div>
+        )}
+
+        {status.data_note && (
+          <div className="flex items-start gap-2 text-[0.6rem] text-[var(--warn)]">
+            <AlertTriangle size={11} className="mt-px flex-shrink-0" />
+            <span className="break-words">{status.data_note}</span>
+          </div>
+        )}
+
+        <div className="text-[0.6rem] text-[var(--txt-muted)] leading-snug">
+          Две независимые бумажные книги по 50% капитала: дневной Donchian 40/20 + 6h Donchian 80/40, обе long-only с гейтом BTC200.
+          Бэктест 2021-06 → 2026-11 (издержки 0.16%/сторона): ≈ +21% CAGR, DD ≈ 15%, Sharpe ≈ 1.4. Ордера не выставляются.
+        </div>
+
+        {!isGuest && enabled && (
+          <div className="flex gap-1.5 pt-1 mt-auto">
+            <button className="btn btn-ghost btn-sm flex-1" onClick={onRunCycle} disabled={loading}>
+              {loading ? <Loader /> : <><RotateCcw size={12} /> Прогнать цикл</>}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export default function BotsPage({ connected, isGuest, isAdmin }) {
   const { t } = useTranslation()
   const [aiStatus, setAiStatus] = useState(null)
@@ -788,22 +1033,32 @@ export default function BotsPage({ connected, isGuest, isAdmin }) {
   const [trendPositions, setTrendPositions] = useState([])
   const [trendTrades, setTrendTrades] = useState([])
   const [trendLoading, setTrendLoading] = useState(false)
+  const [coreStatus, setCoreStatus] = useState(null)
+  const [corePositions, setCorePositions] = useState([])
+  const [coreTrades, setCoreTrades] = useState([])
+  const [coreLoading, setCoreLoading] = useState(false)
 
   const refreshStatus = useCallback(async () => {
     // One public payload + status (client-cached) instead of separate heavy /api/pnl
-    const [a, ls, dash, tr, trp, trt] = await Promise.all([
+    const [a, ls, dash, tr, trp, trt, cr, crp, crt] = await Promise.all([
       api.aiStatus().catch(() => null),
       api.liveStatus().catch(() => null),
       api.meDashboard().catch(() => null),
       isAdmin ? api.trendStatus().catch(() => null) : Promise.resolve(null),
       isAdmin ? api.trendPositions().catch(() => null) : Promise.resolve(null),
       isAdmin ? api.trendTrades(20).catch(() => null) : Promise.resolve(null),
+      isAdmin ? api.coreStatus().catch(() => null) : Promise.resolve(null),
+      isAdmin ? api.corePositions().catch(() => null) : Promise.resolve(null),
+      isAdmin ? api.coreTrades(20).catch(() => null) : Promise.resolve(null),
     ])
     if (a) setAiStatus(a)
     if (ls) setLiveStatus(ls)
     if (tr) setTrendStatus(tr)
     if (trp) setTrendPositions(trp.positions || [])
     if (trt) setTrendTrades(trt.trades || [])
+    if (cr) setCoreStatus(cr)
+    if (crp) setCorePositions(crp.positions || [])
+    if (crt) setCoreTrades(crt.trades || [])
     const pnl = dash?.pnl
     if (pnl && !pnl.detail && (pnl.total != null || pnl.per_bot)) {
       setDemoPnl(pnl)
@@ -820,6 +1075,15 @@ export default function BotsPage({ connected, isGuest, isAdmin }) {
       await refreshStatus()
     } catch (e) { alert(e?.message || String(e)) }
     setTrendLoading(false)
+  }
+
+  const coreCycle = async () => {
+    setCoreLoading(true)
+    try {
+      await api.coreCycle()
+      await refreshStatus()
+    } catch (e) { alert(e?.message || String(e)) }
+    setCoreLoading(false)
   }
 
   useEffect(() => {
@@ -1000,6 +1264,18 @@ const aiRunning = !!aiStatus?.running
             trades={trendTrades}
             onRunCycle={trendCycle}
             loading={trendLoading}
+            isGuest={isGuest}
+            t={t}
+          />
+        )}
+
+        {isAdmin && (
+          <CorePortfolioCard
+            status={coreStatus}
+            positions={corePositions}
+            trades={coreTrades}
+            onRunCycle={coreCycle}
+            loading={coreLoading}
             isGuest={isGuest}
             t={t}
           />

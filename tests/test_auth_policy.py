@@ -86,6 +86,9 @@ TIGHTENED_IN_3B = {
     # Daily trend portfolio (paper-only, owner's research book).
     '/api/trend/status', '/api/trend/positions', '/api/trend/trades',
     '/api/trend/cycle', '/api/trend/backtest',
+    # Core portfolio (paper-only, two research books over one universe).
+    '/api/core/status', '/api/core/positions', '/api/core/trades',
+    '/api/core/cycle', '/api/core/backtest',
     # LIVE order provenance: owner's real-money fills.
     '/api/live/audit',
     # Destroyed the platform's shared DEMO / owner's LIVE book for any

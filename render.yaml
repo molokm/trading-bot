@@ -71,3 +71,20 @@ services:
       # worth setting back to "binance" if the host can reach it.
       - key: TREND_PORTFOLIO_SOURCE
         value: "okx"
+      # ── Core portfolio (paper-only): daily book + 6h block, 50/50 ──────
+      # Two independent paper accounts over the same 45-coin universe.  No
+      # order path: public candles only.  Validated 2021-06 → 2026-11 at
+      # 0.16%/side: +21.0% CAGR, 14.9% maxDD, Sharpe 1.42 (daily alone
+      # 28.7% / 22.9% / 1.18; 6h alone 10.1% / 13.5% / 1.01; daily
+      # correlation -0.01).  Ships OFF — set to "1" to start the forward
+      # paper track record.
+      - key: CORE_PORTFOLIO_ENABLE
+        value: "0"
+      # 6h bars must be UTC-bucketed (the validated feed).  On Render the
+      # main Binance host answers 451, so the runner tries Binance, then
+      # data-api.binance.vision (same UTC klines).  If both are unreachable
+      # the 6h block skips that cycle instead of silently switching to OKX's
+      # UTC+8 buckets; set CORE_PORTFOLIO_SOURCE=okx only if you accept that
+      # different strategy.  Any bucketing change restarts the block.
+      - key: CORE_PORTFOLIO_SOURCE
+        value: "binance"
