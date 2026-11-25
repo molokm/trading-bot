@@ -13,6 +13,7 @@ SAFETY CONTRACT (do not weaken)
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Dict, List, Optional
@@ -106,12 +107,30 @@ async def fetch_daily_bars(
 
 
 class TrendPaperRunner:
-    """Steps the portfolio once per cycle over newly closed daily bars."""
+    """Steps the portfolio once per cycle over newly closed daily bars.
 
-    def __init__(self, cfg: Optional[TrendPortfolioConfig] = None):
+    State durability: the book is persisted to the database when a ``db``
+    handle is attached (``configure(db)`` from startup), with the JSON file as
+    a best-effort fallback.  Render's container filesystem is ephemeral, so a
+    file-only book replays its whole candle window after every deploy and can
+    never build a forward track record — the DB copy is what makes the
+    ``live_since`` baseline meaningful.
+    """
+
+    def __init__(self, cfg: Optional[TrendPortfolioConfig] = None, db=None):
         self.cfg = cfg or TrendPortfolioConfig.from_env()
+        self.db = db
+        self._db_restored = False
+        self._state_key = f"{self.cfg.state_name}_state"
         state = load_state(self.cfg.state_name, {}) or {}
         self.book = TrendPortfolio.from_state(self.cfg, state)
+        # Forward track record starts when the *first persisted* snapshot is
+        # written (i.e. after the initial replay).  Replayed PnL is already in
+        # the baseline, so ``forward_return_pct`` only measures what happened
+        # after the book was first saved to durable storage.
+        self.live_since = int(state.get("live_since") or 0)
+        self.live_start_equity = float(state.get("live_start_equity") or 0.0)
+        self.state_store = "file"
         self.last_cycle_ts: float = 0.0
         self.last_error: str = ""
         self.cycles: int = 0
@@ -120,6 +139,67 @@ class TrendPaperRunner:
         self.data_note: str = ""
         self._task: Optional[asyncio.Task] = None
         self._running = False
+
+    # ── durable state ────────────────────────────────────────────────────
+    async def _restore_from_db(self) -> None:
+        """Load the durable snapshot once, before the first cycle.
+
+        The DB copy wins over the container file: the file is recreated empty
+        after every deploy, and mixing the two would silently reset the book.
+        """
+        if self._db_restored or self.db is None:
+            return
+        try:
+            raw = await self.db.get_setting(self._state_key)
+        except Exception as exc:
+            # Transient DB error: retry on the next cycle instead of silently
+            # starting a second, file-only book.
+            log.warning("trend_portfolio db restore failed: %s", exc)
+            return
+        self._db_restored = True
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not data.get("sleeves"):
+                return
+            book = TrendPortfolio.from_state(self.cfg, data)
+            # Crash guard: if the previous save failed, the container file can
+            # be one bar ahead of the DB.  Keep the newer book and let the
+            # normal save write it back.
+            if book.last_ts < self.book.last_ts:
+                log.info("trend_portfolio db state behind file (db=%s file=%s)",
+                         book.last_ts, self.book.last_ts)
+                return
+            self.book = book
+            self.live_since = int(data.get("live_since") or 0)
+            self.live_start_equity = float(data.get("live_start_equity") or 0.0)
+            self.state_store = self._store_label()
+            log.info("trend_portfolio state restored from db (last_ts=%s)",
+                     self.book.last_ts)
+        except Exception as exc:
+            log.warning("trend_portfolio db state rejected: %s", exc)
+
+    def _store_label(self) -> str:
+        if self.db is None:
+            return "file"
+        return "postgres" if getattr(self.db, "_pg_mode", False) else "sqlite"
+
+    async def _save_state(self) -> None:
+        data = self.book.to_state()
+        data["live_since"] = self.live_since
+        data["live_start_equity"] = self.live_start_equity
+        data["saved_at"] = int(time.time() * 1000)
+        save_state(self.cfg.state_name, data)   # best-effort file copy
+        if self.db is None:
+            self.state_store = "file"
+            return
+        try:
+            await self.db.set_setting(self._state_key, json.dumps(data))
+            self.state_store = self._store_label()
+        except Exception as exc:
+            self.state_store = "file"
+            log.warning("trend_portfolio db save failed: %s", exc)
 
     # ── lifecycle ────────────────────────────────────────────────────────
     @property
@@ -160,6 +240,7 @@ class TrendPaperRunner:
     # ── one cycle ────────────────────────────────────────────────────────
     async def cycle(self) -> dict:
         """Fetch fresh bars for the universe and step the book."""
+        await self._restore_from_db()
         self.cycles += 1
         self.last_cycle_ts = time.time()
         errors: Dict[str, str] = {}
@@ -216,7 +297,12 @@ class TrendPaperRunner:
         # engine.feed_chronological).
         fresh = feed_chronological(self.book, series)
         self.bars_consumed += fresh
-        save_state(self.cfg.state_name, self.book.to_state())
+        # Start the forward baseline after the very first replay, so replayed
+        # PnL is excluded from ``forward_return_pct``.
+        if not self.live_since:
+            self.live_since = int(time.time() * 1000)
+            self.live_start_equity = self.book.mark_equity()
+        await self._save_state()
         status = self.status()
         status["fresh_events"] = fresh
         status["errors"] = errors
@@ -242,6 +328,15 @@ class TrendPaperRunner:
             "source": self.cfg.source,
             "sources_used": dict(self.sources_used),
             "data_note": self.data_note,
+            "state_store": self.state_store,
+            "live_since": self.live_since,
+            "live_start_equity": round(self.live_start_equity, 2),
+            "forward_days": round(
+                (time.time() * 1000 - self.live_since) / 86_400_000, 1
+            ) if self.live_since else 0.0,
+            "forward_return_pct": round(
+                (self.book.mark_equity() / self.live_start_equity - 1) * 100, 2
+            ) if self.live_start_equity else 0.0,
             "regime_symbol": self.cfg.regime_symbol,
             "regime_ma": self.cfg.regime_ma,
             "universe_size": len(self.cfg.universe),
@@ -258,6 +353,21 @@ class TrendPaperRunner:
 
 
 _runner: Optional[TrendPaperRunner] = None
+_db = None
+
+
+def configure(db) -> None:
+    """Attach the app database so the book's state survives restarts.
+
+    Called from startup right after ``db.init()``.  A runner that was built
+    earlier (file state only) is re-pointed at the DB and re-reads it on the
+    next cycle.
+    """
+    global _db
+    _db = db
+    if _runner is not None:
+        _runner.db = db
+        _runner._db_restored = False
 
 
 def get_runner() -> Optional[TrendPaperRunner]:
@@ -269,7 +379,7 @@ def get_runner() -> Optional[TrendPaperRunner]:
         except Exception as exc:
             log.warning("trend_portfolio config rejected: %s", exc)
             return None
-        _runner = TrendPaperRunner(cfg)
+        _runner = TrendPaperRunner(cfg, db=_db)
     return _runner
 
 

@@ -541,3 +541,106 @@ def test_router_routes_are_declared_and_policy_marked():
     assert "/api/trend/backtest" in paths
     unmarked, _ = audit_routes(app)
     assert unmarked == []
+
+
+# ── durable state (the book must survive a Render restart) ───────────────
+
+class _FakeDB:
+    """Minimal async settings store, same surface as app.database.db."""
+
+    def __init__(self):
+        self.store = {}
+        self._pg_mode = True
+
+    async def get_setting(self, key):
+        return self.store.get(key)
+
+    async def set_setting(self, key, value):
+        self.store[key] = value
+
+
+def _patch_fetch(monkeypatch, runner_mod):
+    btc, aaa = _btc_step_series(), _alt_two_breakouts()
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        return list(btc if inst_id.split("-")[0] == "BTC" else aaa)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    return btc, aaa
+
+
+def test_runner_persists_state_to_db(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_db_state")
+    _patch_fetch(monkeypatch, runner_mod)
+
+    db = _FakeDB()
+    runner = runner_mod.TrendPaperRunner(cfg, db=db)
+    status = asyncio.run(runner.cycle())
+    key = f"{cfg.state_name}_state"
+    assert key in db.store
+    assert status["state_store"] == "postgres"
+    assert status["live_since"] > 0
+    assert status["forward_return_pct"] == 0.0
+
+    # A fresh process restores the same book and keeps the forward baseline.
+    restored = runner_mod.TrendPaperRunner(cfg, db=db)
+    asyncio.run(restored._restore_from_db())
+    assert restored.book.last_ts == runner.book.last_ts
+    assert restored.live_since == runner.live_since
+    assert restored.live_start_equity == pytest.approx(runner.live_start_equity)
+    assert restored.state_store == "postgres"
+
+
+def test_runner_db_failure_falls_back_to_the_file(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    class _BrokenDB:
+        async def get_setting(self, key):
+            raise RuntimeError("db down")
+
+        async def set_setting(self, key, value):
+            raise RuntimeError("db down")
+
+    cfg = _gate_cfg(state_name="test_trend_db_down")
+    _patch_fetch(monkeypatch, runner_mod)
+    runner = runner_mod.TrendPaperRunner(cfg, db=_BrokenDB())
+    status = asyncio.run(runner.cycle())
+    assert status["state_store"] == "file"
+    assert status["live_since"] > 0
+    assert status["forward_return_pct"] == 0.0
+
+
+def test_runner_keeps_the_newer_file_state_when_db_is_behind(monkeypatch):
+    import asyncio
+    import json
+
+    import app.bots.trend_portfolio.runner as runner_mod
+    from app.bots.trend_portfolio.engine import feed_chronological
+
+    cfg = _gate_cfg(state_name="test_trend_db_behind")
+    btc, aaa = _btc_step_series(), _alt_two_breakouts()
+    file_book = TrendPortfolio(cfg)
+    feed_chronological(file_book, {"BTC": btc, "AAA": aaa})
+    db_book = TrendPortfolio(cfg)
+    feed_chronological(db_book, {"BTC": btc[:20], "AAA": aaa[:20]})
+
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: file_book.to_state())
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    db = _FakeDB()
+    db.store[f"{cfg.state_name}_state"] = json.dumps(db_book.to_state())
+
+    runner = runner_mod.TrendPaperRunner(cfg, db=db)
+    asyncio.run(runner._restore_from_db())
+    # the DB copy is one bar older (crashed save): keep the file book
+    assert runner.book.last_ts == file_book.last_ts
+    assert runner.state_store == "file"
+
+

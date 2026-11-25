@@ -1602,7 +1602,8 @@ async def startup():
     # ── Daily trend portfolio (paper only, gated by TREND_PORTFOLIO_ENABLE) ──
     # Read-only market data, no order path. Silent no-op when the flag is off.
     try:
-        from app.bots.trend_portfolio.runner import get_runner
+        from app.bots.trend_portfolio.runner import configure as configure_trend, get_runner
+        configure_trend(db)   # durable state: the book survives restarts
         _trend_runner = get_runner()
         if _trend_runner is not None and _trend_runner.cfg.enabled:
             if _trend_runner.start():
@@ -5438,6 +5439,11 @@ async def health(request: Request):
             _trend_data = {
                 'source': _tr.cfg.source,
                 'used': dict(_tr.sources_used),
+                # Where the book's state lives (file = ephemeral container,
+                # postgres/sqlite = durable across restarts) and when the
+                # forward track record started.  No prices/equity here.
+                'store': getattr(_tr, 'state_store', 'file'),
+                'live_since': int(getattr(_tr, 'live_since', 0) or 0),
             }
     except Exception:
         _trend_on = False
