@@ -356,8 +356,9 @@ def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
     status = asyncio.run(runner.cycle())
     assert status["sources_used"] == {"okx": 4}
     assert status["source"] == "binance"
-    # after 3 failures the cycle stops probing the dead venue
-    assert calls.count("binance") == 3
+    # after 3 failures the cycle stops probing the dead venue (each probe may
+    # retry once, but the 4th coin is never probed)
+    assert 3 <= calls.count("binance") <= 6
     assert calls.count("okx") == 4
     assert "unreachable" in status["data_note"]
     assert "binance failed" in status["errors"]["BTC"]
@@ -635,12 +636,110 @@ def test_runner_keeps_the_newer_file_state_when_db_is_behind(monkeypatch):
     monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: file_book.to_state())
     monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
     db = _FakeDB()
-    db.store[f"{cfg.state_name}_state"] = json.dumps(db_book.to_state())
+    db_state = db_book.to_state()
+    db_state["schema"] = runner_mod._STATE_SCHEMA
+    db.store[f"{cfg.state_name}_state"] = json.dumps(db_state)
 
     runner = runner_mod.TrendPaperRunner(cfg, db=db)
     asyncio.run(runner._restore_from_db())
     # the DB copy is one bar older (crashed save): keep the file book
     assert runner.book.last_ts == file_book.last_ts
     assert runner.state_store == "file"
+
+
+def test_runner_ignores_a_state_from_an_older_schema(monkeypatch):
+    import asyncio
+    import json
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_old_schema")
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    db = _FakeDB()
+    db.store[f"{cfg.state_name}_state"] = json.dumps({
+        "sleeves": {"BTC": {"closes": [1.0] * 5}},
+        "live_since": 123,
+        "live_start_equity": 10_000.0,
+    })
+    runner = runner_mod.TrendPaperRunner(cfg, db=db)
+    asyncio.run(runner._restore_from_db())
+    # A schema bump starts a fresh replay instead of mixing incompatible books.
+    assert runner.live_since == 0
+    assert runner.book.last_ts == 0
+    assert runner.state_store == "postgres"
+
+
+def test_runner_uses_the_fallback_venue_and_counts_only_real_gaps(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_fallback")
+    btc, aaa = _btc_step_series(), _alt_two_breakouts()
+    calls = []
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        coin = inst_id.split("-")[0]
+        calls.append((coin, source))
+        if coin == "AAA" and source == "okx":
+            raise RuntimeError("rate limited")
+        return list(btc if coin == "BTC" else aaa)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    runner = runner_mod.TrendPaperRunner(cfg, db=_FakeDB())
+    status = asyncio.run(runner.cycle())
+    # AAA was served by the fallback venue: not a failure, book stays complete.
+    assert ("AAA", "binance") in calls
+    assert status["last_failed"] == 0
+    assert runner.book.sleeves["AAA"].last_ts == aaa[-1].ts
+
+
+def test_runner_counts_a_coin_with_no_bars_at_all(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_missing")
+    btc, _aaa = _btc_step_series(), _alt_two_breakouts()
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        if inst_id.split("-")[0] == "AAA":
+            raise RuntimeError("no data")
+        return list(btc)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    runner = runner_mod.TrendPaperRunner(cfg, db=_FakeDB())
+    status = asyncio.run(runner.cycle())
+    assert status["last_failed"] == 1
+    assert "AAA" in status["data_note"]
+    assert runner.book.sleeves["AAA"].last_ts == 0
+
+
+def test_runner_seeds_a_coin_first_seen_after_the_baseline(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_late_coin")
+    btc, aaa = _btc_step_series(), _alt_two_breakouts()
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+        return list(btc if inst_id.split("-")[0] == "BTC" else aaa)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    runner = runner_mod.TrendPaperRunner(cfg, db=_FakeDB())
+    # Simulate a live book that has never seen AAA: only the newest bar may be
+    # fed, otherwise the forward record would inherit 40 bars of fake history.
+    runner.live_since = 1
+    runner.live_start_equity = runner.book.mark_equity()
+    asyncio.run(runner.cycle())
+    assert len(runner.book.sleeves["AAA"].closes) == 1
+    assert runner.book.sleeves["AAA"].last_ts == aaa[-1].ts
 
 

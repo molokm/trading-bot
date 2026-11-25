@@ -29,6 +29,11 @@ log = logging.getLogger("trend_portfolio")
 OKX_BASE = "https://www.okx.com"
 BINANCE_BASE = "https://api.binance.com"
 
+# Durable-state schema.  v1 was written while the OKX fetch silently served
+# only 26/45 coins (rate limit); v2 starts a fresh replay so the forward
+# record is based on the full universe.  Bump on any state format change.
+_STATE_SCHEMA = 2
+
 
 def _drop_forming_bar(bars: List[Bar]) -> List[Bar]:
     """Sort ascending and drop the candle that is still forming today."""
@@ -137,6 +142,7 @@ class TrendPaperRunner:
         self.bars_consumed: int = 0
         self.sources_used: Dict[str, int] = {}
         self.data_note: str = ""
+        self.last_failed: int = 0
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -158,10 +164,16 @@ class TrendPaperRunner:
             return
         self._db_restored = True
         if not raw:
+            self.state_store = self._store_label()
             return
         try:
             data = json.loads(raw)
             if not isinstance(data, dict) or not data.get("sleeves"):
+                return
+            if data.get("schema") != _STATE_SCHEMA:
+                log.info("trend_portfolio state schema %r -> %s: fresh replay",
+                         data.get("schema"), _STATE_SCHEMA)
+                self.state_store = self._store_label()
                 return
             book = TrendPortfolio.from_state(self.cfg, data)
             # Crash guard: if the previous save failed, the container file can
@@ -187,6 +199,7 @@ class TrendPaperRunner:
 
     async def _save_state(self) -> None:
         data = self.book.to_state()
+        data["schema"] = _STATE_SCHEMA
         data["live_since"] = self.live_since
         data["live_start_equity"] = self.live_start_equity
         data["saved_at"] = int(time.time() * 1000)
@@ -200,6 +213,29 @@ class TrendPaperRunner:
         except Exception as exc:
             self.state_store = "file"
             log.warning("trend_portfolio db save failed: %s", exc)
+
+    async def _fetch_retry(self, inst: str, source: str, attempts: int = 2):
+        """Fetch one coin with one retry and OKX pacing.
+
+        OKX rate-limits ``/market/candles`` (and its responses from cloud IPs
+        are sometimes slow), which silently shrank the universe to the first
+        coins of the list.  Pacing plus a single retry keeps the book on the
+        full 45-coin universe.
+        """
+        last: Optional[Exception] = None
+        for _ in range(max(1, attempts)):
+            try:
+                bars = await fetch_daily_bars(
+                    inst, limit=self.cfg.candle_limit, source=source
+                )
+            except Exception as exc:
+                last = exc
+                await asyncio.sleep(0.3)
+                continue
+            if source == "okx":
+                await asyncio.sleep(0.12)
+            return bars
+        raise last or RuntimeError(f"{source}: no data")
 
     # ── lifecycle ────────────────────────────────────────────────────────
     @property
@@ -247,6 +283,7 @@ class TrendPaperRunner:
         series: Dict[str, List[Bar]] = {}
         primary_down = False
         primary_failures = 0
+        missing = 0
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
             sleeve = self.book.sleeves.get(coin)
@@ -256,9 +293,7 @@ class TrendPaperRunner:
             bars = None
             if not primary_down:
                 try:
-                    bars = await fetch_daily_bars(
-                        inst, limit=self.cfg.candle_limit, source=primary
-                    )
+                    bars = await self._fetch_retry(inst, primary)
                     self.sources_used[primary] = self.sources_used.get(primary, 0) + 1
                 except Exception as exc:
                     primary_failures += 1
@@ -273,24 +308,30 @@ class TrendPaperRunner:
                 # on OKX rather than silently losing days.
                 fallback = "okx" if primary != "okx" else "binance"
                 try:
-                    bars = await fetch_daily_bars(
-                        inst, limit=self.cfg.candle_limit, source=fallback
-                    )
+                    bars = await self._fetch_retry(inst, fallback)
                     self.sources_used[fallback] = self.sources_used.get(fallback, 0) + 1
                 except Exception as exc2:
                     errors[coin] = f"{errors.get(coin, primary)}; {fallback} {type(exc2).__name__}"
+                    missing += 1
                     continue
             fresh = [b for b in bars if b.ts > sleeve.last_ts]
+            if fresh and self.live_since and sleeve.last_ts == 0:
+                # A coin seen for the first time *after* the forward baseline
+                # must not dump its whole history into the forward record:
+                # seed it with the newest bar and let indicators warm up.
+                fresh = fresh[-1:]
             if fresh:
                 series[coin] = fresh
-            await asyncio.sleep(0)  # cooperative
         if primary_down:
             self.data_note = (
                 f"{self.cfg.source} unreachable from this host — bars served by the "
                 f"fallback venue for this cycle"
             )
         else:
-            self.data_note = ""
+            self.data_note = "; ".join(f"{c}: {e}" for c, e in list(errors.items())[:5])
+        # Only coins with no bars at all count as failed: a coin served by the
+        # fallback venue keeps the book complete.
+        self.last_failed = missing
         # Replay in strict timestamp order: the regime gate reads the regime
         # asset's latest close, so feeding one coin at a time would judge every
         # historical alt entry against *today's* regime state (see
@@ -328,6 +369,7 @@ class TrendPaperRunner:
             "source": self.cfg.source,
             "sources_used": dict(self.sources_used),
             "data_note": self.data_note,
+            "last_failed": self.last_failed,
             "state_store": self.state_store,
             "live_since": self.live_since,
             "live_start_equity": round(self.live_start_equity, 2),
