@@ -71,12 +71,12 @@ services:
       - key: TREND_PORTFOLIO_RISK
         value: "0.64"
       # Venue for the daily bars.  Measured from Render on 2026-11-22:
-      # Binance answers 451, so the runner serves every coin from OKX via the
-      # automatic fallback — keep "okx" here to avoid 45 wasted probes/hour.
-      # Binance gives UTC-bucketed days (the validated research feed) and is
-      # worth setting back to "binance" if the host can reach it.
+      # api.binance.com answers 451 and OKX rate-limits the shared IP after
+      # ~26 of 45 coins, so the runner reads the public Binance mirror
+      # (data-api.binance.vision): same UTC-bucketed klines as the validated
+      # research feed, full universe, no 451.  OKX stays as the fallback.
       - key: TREND_PORTFOLIO_SOURCE
-        value: "okx"
+        value: "binance_vision"
       # ── Core portfolio (paper-only): daily book + 6h block, 50/50 ──────
       # Two independent paper accounts over the same 45-coin universe.  No
       # order path: public candles only.  Validated 2021-06 → 2026-11 at

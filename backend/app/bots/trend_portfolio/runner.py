@@ -28,11 +28,29 @@ log = logging.getLogger("trend_portfolio")
 
 OKX_BASE = "https://www.okx.com"
 BINANCE_BASE = "https://api.binance.com"
+# Public market-data mirror of the Binance API.  Same UTC-bucketed klines as
+# api.binance.com, but served from a static CDN that does not answer 451 to
+# cloud regions (Render).  This is the venue that can serve the full 45-coin
+# universe from the host, which is what makes the forward record complete.
+BINANCE_VISION_BASE = "https://data-api.binance.vision"
+
+# Per-venue fallback order.  The configured source is tried first; the rest are
+# only used when a venue fails repeatedly inside one cycle.
+VENUE_CHAIN = {
+    "binance_vision": ("binance_vision", "okx", "binance"),
+    "binance": ("binance", "binance_vision", "okx"),
+    "okx": ("okx", "binance_vision", "binance"),
+}
+
+# A coin whose newest bar is older than this is delisted/suspended: replaying
+# its history would open phantom positions at 2024 prices, so it is skipped.
+STALE_AFTER_MS = 3 * 86_400_000
 
 # Durable-state schema.  v1 was written while the OKX fetch silently served
-# only 26/45 coins (rate limit); v2 starts a fresh replay so the forward
-# record is based on the full universe.  Bump on any state format change.
-_STATE_SCHEMA = 2
+# only 26/45 coins (rate limit); v2 added retry/pacing; v3 moves the book to
+# the full-universe UTC venue and skips delisted coins.  Bump on any change
+# that makes old books incomparable.
+_STATE_SCHEMA = 3
 
 
 def _drop_forming_bar(bars: List[Bar]) -> List[Bar]:
@@ -71,20 +89,7 @@ async def fetch_okx_daily_bars(inst_id: str, limit: int = 300, timeout: float = 
     return _drop_forming_bar(bars)
 
 
-async def fetch_binance_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
-    """Public UTC-bucketed daily klines — the venue the research was measured on."""
-    url = f"{BINANCE_BASE}/api/v3/klines"
-    params = {
-        "symbol": f"{coin.upper()}USDT",
-        "interval": "1d",
-        "limit": min(max(limit, 1), 1000),
-    }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
-        resp.raise_for_status()
-        rows = resp.json()
-    if not isinstance(rows, list):
-        raise RuntimeError(f"binance unexpected payload: {type(rows).__name__}")
+def _klines_to_bars(rows) -> List[Bar]:
     bars: List[Bar] = []
     for r in rows:
         try:
@@ -102,12 +107,42 @@ async def fetch_binance_daily_bars(coin: str, limit: int = 300, timeout: float =
     return _drop_forming_bar(bars)
 
 
+async def _fetch_binance_klines(base: str, coin: str, limit: int, timeout: float) -> List[Bar]:
+    url = f"{base}/api/v3/klines"
+    params = {
+        "symbol": f"{coin.upper()}USDT",
+        "interval": "1d",
+        "limit": min(max(limit, 1), 1000),
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
+        resp.raise_for_status()
+        rows = resp.json()
+    if not isinstance(rows, list):
+        raise RuntimeError(f"binance unexpected payload: {type(rows).__name__}")
+    return _klines_to_bars(rows)
+
+
+async def fetch_binance_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """Public UTC-bucketed daily klines — the venue the research was measured on."""
+    return await _fetch_binance_klines(BINANCE_BASE, coin, limit, timeout)
+
+
+async def fetch_binance_vision_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """UTC daily klines from the public mirror (reachable from cloud hosts)."""
+    return await _fetch_binance_klines(BINANCE_VISION_BASE, coin, limit, timeout)
+
+
 async def fetch_daily_bars(
-    inst_id: str, limit: int = 300, timeout: float = 20.0, source: str = "okx"
+    inst_id: str, limit: int = 300, timeout: float = 20.0, source: str = "binance_vision"
 ) -> List[Bar]:
     """Daily bars from the configured venue (``inst_id`` is e.g. ``BTC-USDT``)."""
     if source == "binance":
         return await fetch_binance_daily_bars(inst_id.split("-")[0], limit=limit, timeout=timeout)
+    if source == "binance_vision":
+        return await fetch_binance_vision_daily_bars(
+            inst_id.split("-")[0], limit=limit, timeout=timeout
+        )
     return await fetch_okx_daily_bars(inst_id, limit=limit, timeout=timeout)
 
 
@@ -143,6 +178,7 @@ class TrendPaperRunner:
         self.sources_used: Dict[str, int] = {}
         self.data_note: str = ""
         self.last_failed: int = 0
+        self.stale_coins: int = 0
         self._task: Optional[asyncio.Task] = None
         self._running = False
 
@@ -281,39 +317,36 @@ class TrendPaperRunner:
         self.last_cycle_ts = time.time()
         errors: Dict[str, str] = {}
         series: Dict[str, List[Bar]] = {}
-        primary_down = False
-        primary_failures = 0
         missing = 0
+        chain = VENUE_CHAIN.get(self.cfg.source, (self.cfg.source,))
+        venue_fails: Dict[str, int] = {}
+        venue_down: List[str] = []
+        served_by: Dict[str, int] = {}
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
             sleeve = self.book.sleeves.get(coin)
             if sleeve is None:
                 continue
-            primary = self.cfg.source
             bars = None
-            if not primary_down:
-                try:
-                    bars = await self._fetch_retry(inst, primary)
-                    self.sources_used[primary] = self.sources_used.get(primary, 0) + 1
-                except Exception as exc:
-                    primary_failures += 1
-                    # Binance returns 451 from some cloud regions.  After a few
-                    # failures stop probing it for the rest of the cycle instead
-                    # of doubling the request count on every coin.
-                    if primary_failures >= 3:
-                        primary_down = True
-                    errors[coin] = f"{primary} failed ({type(exc).__name__})"
-            if bars is None:
-                # Binance blocks some cloud regions; the book must keep running
-                # on OKX rather than silently losing days.
-                fallback = "okx" if primary != "okx" else "binance"
-                try:
-                    bars = await self._fetch_retry(inst, fallback)
-                    self.sources_used[fallback] = self.sources_used.get(fallback, 0) + 1
-                except Exception as exc2:
-                    errors[coin] = f"{errors.get(coin, primary)}; {fallback} {type(exc2).__name__}"
-                    missing += 1
+            for venue in chain:
+                if venue in venue_down:
                     continue
+                try:
+                    bars = await self._fetch_retry(inst, venue)
+                except Exception as exc:
+                    venue_fails[venue] = venue_fails.get(venue, 0) + 1
+                    errors[coin] = f"{venue} {type(exc).__name__}"
+                    # A venue that fails three times in a row is having a
+                    # venue-wide problem (OKX rate limit, Binance 451): stop
+                    # probing it this cycle so the remaining coins are not lost.
+                    if venue_fails[venue] >= 3:
+                        venue_down.append(venue)
+                    continue
+                served_by[venue] = served_by.get(venue, 0) + 1
+                break
+            if bars is None:
+                missing += 1
+                continue
             fresh = [b for b in bars if b.ts > sleeve.last_ts]
             if fresh and self.live_since and sleeve.last_ts == 0:
                 # A coin seen for the first time *after* the forward baseline
@@ -322,10 +355,21 @@ class TrendPaperRunner:
                 fresh = fresh[-1:]
             if fresh:
                 series[coin] = fresh
-        if primary_down:
+        for venue, n in served_by.items():
+            self.sources_used[venue] = self.sources_used.get(venue, 0) + n
+        # Drop delisted coins: a stale series would replay 2024 prices and open
+        # phantom positions in the paper book.
+        self.stale_coins = 0
+        if series:
+            newest = max(bars[-1].ts for bars in series.values())
+            stale = [c for c, bars in series.items() if newest - bars[-1].ts > STALE_AFTER_MS]
+            for coin in stale:
+                series.pop(coin)
+            self.stale_coins = len(stale)
+        if served_by and self.cfg.source not in served_by:
             self.data_note = (
-                f"{self.cfg.source} unreachable from this host — bars served by the "
-                f"fallback venue for this cycle"
+                f"{self.cfg.source} unavailable from this host — bars served by "
+                + ", ".join(f"{v} ({n})" for v, n in served_by.items())
             )
         else:
             self.data_note = "; ".join(f"{c}: {e}" for c, e in list(errors.items())[:5])
@@ -370,6 +414,7 @@ class TrendPaperRunner:
             "sources_used": dict(self.sources_used),
             "data_note": self.data_note,
             "last_failed": self.last_failed,
+            "stale_coins": self.stale_coins,
             "state_store": self.state_store,
             "live_since": self.live_since,
             "live_start_equity": round(self.live_start_equity, 2),

@@ -298,11 +298,12 @@ def test_runner_cycle_replays_in_timestamp_order(monkeypatch):
 
 # ── market-data venue ────────────────────────────────────────────────────
 
-def test_source_defaults_to_okx_and_is_configurable(monkeypatch):
+def test_source_defaults_to_binance_vision_and_is_configurable(monkeypatch):
     monkeypatch.delenv("TREND_PORTFOLIO_SOURCE", raising=False)
-    assert TrendPortfolioConfig.from_env().source == "okx"
-    monkeypatch.setenv("TREND_PORTFOLIO_SOURCE", "BINANCE")
-    assert TrendPortfolioConfig.from_env().source == "binance"
+    assert TrendPortfolioConfig.from_env().source == "binance_vision"
+    for value in ("BINANCE", "BINANCE_VISION", "OKX"):
+        monkeypatch.setenv("TREND_PORTFOLIO_SOURCE", value)
+        assert TrendPortfolioConfig.from_env().source == value.lower()
     with pytest.raises(ValueError):
         _cfg(source="kraken").validate()
 
@@ -318,16 +319,26 @@ def test_fetch_daily_bars_routes_to_the_selected_venue(monkeypatch):
         calls.append(("binance", coin))
         return [Bar(ts=TS0, open=1, high=2, low=0.5, close=1.5)]
 
+    async def fake_vision(coin, limit=300, timeout=20.0):
+        calls.append(("binance_vision", coin))
+        return [Bar(ts=TS0, open=1, high=2, low=0.5, close=1.5)]
+
     async def fake_okx(inst_id, limit=300, timeout=20.0):
         calls.append(("okx", inst_id))
         return [Bar(ts=TS0, open=1, high=2, low=0.5, close=1.5)]
 
     monkeypatch.setattr(runner_mod, "fetch_binance_daily_bars", fake_binance)
+    monkeypatch.setattr(runner_mod, "fetch_binance_vision_daily_bars", fake_vision)
     monkeypatch.setattr(runner_mod, "fetch_okx_daily_bars", fake_okx)
 
     asyncio.run(runner_mod.fetch_daily_bars("BTC-USDT", source="binance"))
+    asyncio.run(runner_mod.fetch_daily_bars("BTC-USDT", source="binance_vision"))
     asyncio.run(runner_mod.fetch_daily_bars("BTC-USDT", source="okx"))
-    assert calls == [("binance", "BTC"), ("okx", "BTC-USDT")]
+    assert calls == [
+        ("binance", "BTC"),
+        ("binance_vision", "BTC"),
+        ("okx", "BTC-USDT"),
+    ]
 
 
 def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
@@ -354,14 +365,16 @@ def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
 
     runner = runner_mod.TrendPaperRunner(cfg)
     status = asyncio.run(runner.cycle())
-    assert status["sources_used"] == {"okx": 4}
+    # the whole book is served by the next venue in the chain
+    assert status["sources_used"] == {"binance_vision": 4}
     assert status["source"] == "binance"
     # after 3 failures the cycle stops probing the dead venue (each probe may
     # retry once, but the 4th coin is never probed)
     assert 3 <= calls.count("binance") <= 6
-    assert calls.count("okx") == 4
-    assert "unreachable" in status["data_note"]
-    assert "binance failed" in status["errors"]["BTC"]
+    assert calls.count("binance_vision") == 4
+    assert "unavailable" in status["data_note"]
+    assert "binance RuntimeError" in status["errors"]["BTC"]
+    assert status["last_failed"] == 0
     assert runner.book.sleeves["BTC"].last_ts == TS0 + 39 * DAY
 
 
@@ -678,10 +691,10 @@ def test_runner_uses_the_fallback_venue_and_counts_only_real_gaps(monkeypatch):
     btc, aaa = _btc_step_series(), _alt_two_breakouts()
     calls = []
 
-    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="binance_vision"):
         coin = inst_id.split("-")[0]
         calls.append((coin, source))
-        if coin == "AAA" and source == "okx":
+        if coin == "AAA" and source == "binance_vision":
             raise RuntimeError("rate limited")
         return list(btc if coin == "BTC" else aaa)
 
@@ -690,8 +703,9 @@ def test_runner_uses_the_fallback_venue_and_counts_only_real_gaps(monkeypatch):
     monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
     runner = runner_mod.TrendPaperRunner(cfg, db=_FakeDB())
     status = asyncio.run(runner.cycle())
-    # AAA was served by the fallback venue: not a failure, book stays complete.
-    assert ("AAA", "binance") in calls
+    # AAA was served by the next venue in the chain: not a failure, book stays
+    # complete.
+    assert ("AAA", "okx") in calls
     assert status["last_failed"] == 0
     assert runner.book.sleeves["AAA"].last_ts == aaa[-1].ts
 
@@ -727,7 +741,7 @@ def test_runner_seeds_a_coin_first_seen_after_the_baseline(monkeypatch):
     cfg = _gate_cfg(state_name="test_trend_late_coin")
     btc, aaa = _btc_step_series(), _alt_two_breakouts()
 
-    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="okx"):
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="binance_vision"):
         return list(btc if inst_id.split("-")[0] == "BTC" else aaa)
 
     monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
@@ -741,5 +755,28 @@ def test_runner_seeds_a_coin_first_seen_after_the_baseline(monkeypatch):
     asyncio.run(runner.cycle())
     assert len(runner.book.sleeves["AAA"].closes) == 1
     assert runner.book.sleeves["AAA"].last_ts == aaa[-1].ts
+
+
+def test_runner_skips_delisted_coins_instead_of_replaying_old_prices(monkeypatch):
+    import asyncio
+
+    import app.bots.trend_portfolio.runner as runner_mod
+
+    cfg = _gate_cfg(state_name="test_trend_stale")
+    btc = _btc_step_series()
+    dead = _flat_bars(11)          # stopped trading 29 days before BTC
+
+    async def fake_fetch(inst_id, limit=300, timeout=20.0, source="binance_vision"):
+        return list(btc if inst_id.split("-")[0] == "BTC" else dead)
+
+    monkeypatch.setattr(runner_mod, "fetch_daily_bars", fake_fetch)
+    monkeypatch.setattr(runner_mod, "load_state", lambda *a, **k: {})
+    monkeypatch.setattr(runner_mod, "save_state", lambda *a, **k: None)
+    runner = runner_mod.TrendPaperRunner(cfg, db=_FakeDB())
+    status = asyncio.run(runner.cycle())
+    assert status["stale_coins"] == 1
+    # no phantom position at 2024 prices from a delisted market
+    assert runner.book.sleeves["AAA"].last_ts == 0
+    assert runner.book.sleeves["BTC"].last_ts == btc[-1].ts
 
 

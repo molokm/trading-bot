@@ -587,6 +587,12 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
   const wr = status.win_rate_pct
   const riskPct = status.risk_per_trade_pct
   const gate = status.regime_symbol ? `${status.regime_symbol} · ${status.regime_ma}d` : 'выкл'
+  const venue = status.source === 'binance_vision'
+    ? 'Binance Vision · UTC'
+    : status.source === 'binance' ? 'Binance · UTC' : 'OKX · UTC+8'
+  const fallback = status.sources_used
+    ? Object.entries(status.sources_used).find(([v]) => v !== status.source)
+    : null
   const lastBar = status.last_bar_ts ? new Date(Number(status.last_bar_ts)).toLocaleDateString() : '—'
   const lastErr = status.last_error
 
@@ -643,10 +649,18 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
             <PerfTile label="Сделок" value={tradeCount} />
             <PerfTile label="Win rate" value={wr != null ? `${wr}%` : '—'} />
           </div>
+          {running && status.live_since > 0 && (
+            <div className="flex items-center justify-between gap-2 mt-2 text-2xs text-[var(--txt-muted)]">
+              <span>Форвард с {new Date(Number(status.live_since)).toLocaleDateString()}</span>
+              <span className={`mono font-semibold ${Number(status.forward_return_pct) >= 0 ? 'text-[var(--profit)]' : 'text-[var(--loss)]'}`}>
+                {status.forward_days} дн · {Number(status.forward_return_pct) >= 0 ? '+' : ''}{status.forward_return_pct}%
+              </span>
+            </div>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
-          <KV label="Вселенная" value={`${status.universe_size ?? '—'} монет`} />
+          <KV label="Вселенная" value={status.stale_coins ? `${(status.universe_size ?? 0) - status.stale_coins} из ${status.universe_size}` : `${status.universe_size ?? '—'} монет`} />
           <KV label="Риск/сделку" value={riskPct != null ? `${Number(riskPct).toFixed(2)}%` : '—'} />
           <KV label="Вход / выход" value={`${status.entry_lookback}/${status.exit_lookback} дн`} />
           <KV label="Трейл" value={`${status.chandelier_mult}×ATR`} />
@@ -654,17 +668,13 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
           <KV label="Позиций" value={positions.length} />
           <KV
             label="Данные"
-            value={status.source === 'binance' ? 'Binance · UTC' : 'OKX · UTC+8'}
-            tone={status.source === 'binance' ? 'profit' : 'muted'}
+            value={venue}
+            tone={status.source !== 'okx' ? 'profit' : 'muted'}
           />
           <KV
             label="Фолбэк"
-            value={
-              status.sources_used && status.source === 'binance' && status.sources_used.okx
-                ? `OKX · ${status.sources_used.okx}`
-                : '—'
-            }
-            tone={status.sources_used && status.source === 'binance' && status.sources_used.okx ? 'loss' : 'muted'}
+            value={fallback ? `${fallback[0]} · ${fallback[1]}` : '—'}
+            tone={fallback ? 'loss' : 'muted'}
           />
         </div>
 

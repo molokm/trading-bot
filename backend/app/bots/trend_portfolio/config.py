@@ -90,14 +90,17 @@ class TrendPortfolioConfig:
     universe: Tuple[str, ...] = DEFAULT_UNIVERSE
 
     # ── market data ──────────────────────────────────────────────────────
-    # Venue for the daily bars.  "okx" (default) or "binance".
+    # Venue for the daily bars: "binance_vision" (default), "binance" or "okx".
     # The 5.5-year validation used UTC-bucketed Binance days; OKX buckets its
     # 1D candles on UTC+8 and identical rules score visibly worse there
     # (2023-08→2026-11: CAGR 14% / Sharpe 0.57 on OKX vs 24% / 0.85 on
     # Binance), so the venue is part of the strategy, not an implementation
-    # detail.  The runner always falls back to OKX when the primary venue is
-    # unreachable (Binance blocks some cloud regions).
-    source: str = "okx"
+    # detail.  "binance_vision" is the public mirror of the same UTC klines:
+    # it serves all 45 coins from cloud hosts where api.binance.com answers
+    # 451 and OKX rate-limits the shared IP after ~26 requests.  The runner
+    # falls back along a venue chain inside a cycle, but a stable book should
+    # stay on one venue.
+    source: str = "binance_vision"
 
     # ── signal (validated plateau, not a grid peak) ──────────────────────
     entry_lookback: int = 40       # close > max(high[-40:])
@@ -194,8 +197,10 @@ class TrendPortfolioConfig:
             raise ValueError("trend_portfolio: regime_ma too small")
         if self.warmup_bars <= max(self.entry_lookback, self.atr_period):
             raise ValueError("trend_portfolio: warmup_bars too small")
-        if self.source not in ("okx", "binance"):
-            raise ValueError("trend_portfolio: source must be 'okx' or 'binance'")
+        if self.source not in ("okx", "binance", "binance_vision"):
+            raise ValueError(
+                "trend_portfolio: source must be 'binance_vision', 'binance' or 'okx'"
+            )
 
     @classmethod
     def from_env(cls) -> "TrendPortfolioConfig":
@@ -211,7 +216,7 @@ class TrendPortfolioConfig:
             regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
             regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
             poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),
-            source=(os.getenv("TREND_PORTFOLIO_SOURCE", "okx") or "okx").strip().lower(),
+            source=(os.getenv("TREND_PORTFOLIO_SOURCE", "binance_vision") or "binance_vision").strip().lower(),
         )
         cfg.validate()
         return cfg
