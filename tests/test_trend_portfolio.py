@@ -599,6 +599,7 @@ def test_runner_persists_state_to_db(monkeypatch):
     key = f"{cfg.state_name}_state"
     assert key in db.store
     assert status["state_store"] == "postgres"
+    assert status["restored_from"] == ""
     assert status["live_since"] > 0
     assert status["forward_return_pct"] == 0.0
 
@@ -609,6 +610,7 @@ def test_runner_persists_state_to_db(monkeypatch):
     assert restored.live_since == runner.live_since
     assert restored.live_start_equity == pytest.approx(runner.live_start_equity)
     assert restored.state_store == "postgres"
+    assert restored.restored_from == "postgres"
 
 
 def test_runner_db_failure_falls_back_to_the_file(monkeypatch):
@@ -628,6 +630,7 @@ def test_runner_db_failure_falls_back_to_the_file(monkeypatch):
     runner = runner_mod.TrendPaperRunner(cfg, db=_BrokenDB())
     status = asyncio.run(runner.cycle())
     assert status["state_store"] == "file"
+    assert status["restored_from"] == ""
     assert status["live_since"] > 0
     assert status["forward_return_pct"] == 0.0
 

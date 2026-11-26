@@ -5443,6 +5443,9 @@ async def health(request: Request):
                 # postgres/sqlite = durable across restarts) and when the
                 # forward track record started.  No prices/equity here.
                 'store': getattr(_tr, 'state_store', 'file'),
+                # "postgres"/"sqlite" after a deploy means the forward record
+                # was actually restored; "" means the book replayed from zero.
+                'restored': getattr(_tr, 'restored_from', ''),
                 'live_since': int(getattr(_tr, 'live_since', 0) or 0),
             }
     except Exception:

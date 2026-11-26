@@ -171,6 +171,10 @@ class TrendPaperRunner:
         self.live_since = int(state.get("live_since") or 0)
         self.live_start_equity = float(state.get("live_start_equity") or 0.0)
         self.state_store = "file"
+        # Where the in-memory book came from at startup ("" = fresh replay).
+        # Health exposes it: after a deploy it must say "postgres", otherwise
+        # the forward record is being rebuilt from scratch.
+        self.restored_from = "file" if self.live_since else ""
         self.last_cycle_ts: float = 0.0
         self.last_error: str = ""
         self.cycles: int = 0
@@ -223,6 +227,7 @@ class TrendPaperRunner:
             self.live_since = int(data.get("live_since") or 0)
             self.live_start_equity = float(data.get("live_start_equity") or 0.0)
             self.state_store = self._store_label()
+            self.restored_from = self.state_store
             log.info("trend_portfolio state restored from db (last_ts=%s)",
                      self.book.last_ts)
         except Exception as exc:
@@ -416,6 +421,7 @@ class TrendPaperRunner:
             "last_failed": self.last_failed,
             "stale_coins": self.stale_coins,
             "state_store": self.state_store,
+            "restored_from": self.restored_from,
             "live_since": self.live_since,
             "live_start_equity": round(self.live_start_equity, 2),
             "forward_days": round(
