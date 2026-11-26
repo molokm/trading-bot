@@ -5447,6 +5447,9 @@ async def health(request: Request):
                 # was actually restored; "" means the book replayed from zero.
                 'restored': getattr(_tr, 'restored_from', ''),
                 'live_since': int(getattr(_tr, 'live_since', 0) or 0),
+                # Risk profile actually in force (env is set in the Render
+                # dashboard, not in render.yaml, so this is how it is verified).
+                'risk': _tr.cfg.risk_per_sleeve,
             }
     except Exception:
         _trend_on = False
