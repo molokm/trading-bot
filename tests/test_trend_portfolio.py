@@ -539,6 +539,21 @@ def test_backtest_reports_stats_and_curve():
     assert len(res["curve"]) == 40
 
 
+def test_curve_stats_measures_the_drawdown_an_account_lives_through():
+    from app.bots.trend_portfolio.engine import _curve_stats
+
+    pts = [
+        {"equity": 100.0, "mark": 100.0},
+        {"equity": 100.0, "mark": 150.0},   # open-position peak
+        {"equity": 105.0, "mark": 90.0},    # gave the gain back
+    ]
+    st = _curve_stats(pts, 100.0)
+    # 150 -> 90 is the real drawdown; the realized curve never dipped at all
+    assert st["max_dd_pct"] == pytest.approx(40.0)
+    assert st["max_dd_realized_pct"] == pytest.approx(0.0)
+    assert st["final_equity"] == pytest.approx(90.0)
+
+
 def test_router_routes_are_declared_and_policy_marked():
     from fastapi import FastAPI
 

@@ -511,19 +511,33 @@ def backtest(
 
 
 def _curve_stats(curve: List[dict], start: float, bars_per_year: int = 365) -> dict:
+    """Drawdown/Sharpe/CAGR on **mark-to-market** equity.
+
+    The old version measured the realized-only curve, which only moves when a
+    trade closes: the open-position peak of 2024-12-08 ($280k mark vs $159k
+    realized) was invisible, so the same book reported a 24% max drawdown
+    instead of the 44% an account actually lived through.  The realized number
+    is still returned as ``max_dd_realized_pct`` for comparison.
+    """
     if not curve:
         return {"cagr_pct": 0.0, "max_dd_pct": 0.0, "sharpe": 0.0, "days": 0}
-    eq = [max(p["equity"], 1e-9) for p in curve]
+    eq = [max(p.get("mark", p["equity"]), 1e-9) for p in curve]
+    realized = [max(p["equity"], 1e-9) for p in curve]
     days = len(eq)
     bpy = bars_per_year or 365
     years = days / float(bpy) if days else 0
     final = eq[-1] / start
     cagr = (final ** (1 / years) - 1) * 100 if years > 0 and final > 0 else -100.0
-    peak = eq[0]
-    max_dd = 0.0
-    for v in eq:
-        peak = max(peak, v)
-        max_dd = max(max_dd, 1 - v / peak)
+
+    def _dd(series: List[float]) -> float:
+        peak = series[0]
+        worst = 0.0
+        for v in series:
+            peak = max(peak, v)
+            worst = max(worst, 1 - v / peak)
+        return worst
+
+    max_dd = _dd(eq)
     rets = [eq[i] / eq[i - 1] - 1 for i in range(1, len(eq))]
     sharpe = 0.0
     if rets:
@@ -534,6 +548,7 @@ def _curve_stats(curve: List[dict], start: float, bars_per_year: int = 365) -> d
     return {
         "cagr_pct": round(cagr, 2),
         "max_dd_pct": round(max_dd * 100, 2),
+        "max_dd_realized_pct": round(_dd(realized) * 100, 2),
         "sharpe": round(sharpe, 2),
         "days": days,
         "final_equity": round(eq[-1], 2),
