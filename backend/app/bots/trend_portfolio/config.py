@@ -4,35 +4,37 @@ Every knob is off/neutral by default and the whole module is gated by a single
 env switch, ``TREND_PORTFOLIO_ENABLE``.  Nothing here can place an order: the
 module has no exchange write path at all (see ``engine.py`` docstring).
 
-Research basis (45 majors, Binance daily 2021-05 → 2026-11, 5.5y):
+Research basis (45 majors, UTC daily bars, 2019-01 → 2026-11, 7.9y):
     long-only Donchian40 / exit20 / Chandelier 5xATR,
     risk 32% of a 1/45 sleeve (= 0.71% of the account per trade),
     sizing base = equity smoothed with a 365-day half-life.
 
-HONEST performance (single account, this engine — validated 2026-11-14):
+HONEST performance (single account, this engine, re-measured 2026-11-26 on
+Binance Vision, 0.16%/side).  Drawdown is **mark-to-market** — the equity an
+account actually lives through, including open positions:
 
-  A) baseline (regime gate OFF, risk 0.32/sleeve = 0.71%/trade)
-     CAGR +13.4%, maxDD 30.1%, Sharpe 1.01, 627 trades, WR 37%
-     per year: 2021 +30, 2022 -19, 2023 -7, 2024 +149, 2025 +13, 2026 -5
-     WITHOUT 2024: +1.3%/yr.  Bootstrap 5y: median +11.7%, p10 -2.4%,
-     p90 +33.1%, P(loss) 17%, median maxDD 20.3%.
+  BTC 200-day gate ON (the shipped profile):
+       risk 0.16/sleeve (0.36%):  CAGR +17.5%, maxDD 21.4%, Sharpe 1.01
+       risk 0.20/sleeve (0.44%):  CAGR +20.9%, maxDD 24.3%, Sharpe 1.03
+       risk 0.32/sleeve (0.71%):  CAGR +29.7%, maxDD 31.4%, Sharpe 1.07
+       risk 0.48/sleeve (1.07%):  CAGR +39.0%, maxDD 38.6%, Sharpe 1.09
+       risk 0.64/sleeve (1.42%):  CAGR +46.3%, maxDD 44.0%, Sharpe 1.10
+  Gate OFF at risk 0.64:          CAGR +45.0%, maxDD 49.5%, Sharpe 1.03
 
-  B) with the BTC regime gate ON (regime_symbol="BTC", regime_ma=200), i.e.
-     take a breakout only while BTC trades above its own 200-day mean:
-       risk 0.32/sleeve (0.71%):  CAGR +12.6%, maxDD 12.0%, Sharpe 1.10
-       risk 0.64/sleeve (1.42%):  CAGR +19.5%, maxDD 22.1%, Sharpe 1.00
-       risk 0.80/sleeve (1.78%):  CAGR +21.4%, maxDD 23.8%, Sharpe 0.98
-     The gate is a risk reducer, not a return driver: it removes the 2022
-     bear-market drawdown (-19% → 0) and halves maxDD at equal risk.  It has
-     a plateau over MA 180-240 (DD 12-14%); MA ≤160 or ≥260 degrades DD to
-     24-28%.  Bootstrap (risk 0.64): median +18.8%, p10 +9.8%, p90 +29.5%.
-     On the second half alone it lifts Sharpe 1.25 → 1.65 and halves DD.
+  The gate is a risk reducer: it costs ~1pp of CAGR and buys ~5pp of drawdown.
+  Its plateau is MA 180-240; MA ≤160 or ≥260 degrades DD to 24-28% (at 0.32).
 
-Do NOT quote 20-25% as a given: the earlier 21.6% came from a
-per-sleeve-rebalanced model a single account cannot reproduce, and every
-variant here still earns most of its return in one year (2024).  The 20%
-figure only appears with the gate ON *and* the risk budget doubled, at a
-~22% drawdown.
+WHY THE OLD TABLE WAS WRONG: earlier versions measured drawdown on the
+*realized* curve, which only moves when a trade closes.  On 2024-12-08 the book
+was worth $280k mark vs $159k realized; it then gave that back by 2025-09-25
+(291 days, -44%) and the realized curve reported only -23.8%.  At the shipped
+risk 0.64 the honest drawdown was therefore ~44%, not ~22%, and the account sat
+more than 25% below its high-water mark on 38% of all days.  To keep the
+DD<25% rule, risk per sleeve must stay at or below 0.20.
+
+Every variant still earns most of its return in one year (2023-2024), the
+universe is today's 45 survivors (survivorship bias inflates the result), and
+2025 was flat-to-negative.  Do not quote 20-25% CAGR as a given.
 """
 from __future__ import annotations
 

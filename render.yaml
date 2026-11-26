@@ -59,9 +59,13 @@ services:
       # ── Daily trend portfolio (paper-only, read-only) ──────────────────
       # The book itself cannot place an order: it only reads public daily
       # candles.  Enabled here to build a forward paper track record.
-      # Target profile chosen 2026-11-14: BTC 200-day regime gate ON, risk
-      # 0.64 per 1/45 sleeve (= 1.42% of the account per trade) → backtest
-      # ~+19.5% CAGR at ~22% maxDD.  Set TREND_PORTFOLIO_ENABLE=0 to stop it.
+      # Target profile chosen 2026-11-26: BTC 200-day regime gate ON, risk
+      # 0.32 per 1/45 sleeve (= 0.71% of the account per trade).  Measured on
+      # 7.9y of UTC daily bars at 0.16%/side: CAGR +29.7% with a *mark-to-
+      # market* maxDD of 31.4% (risk 0.64 gave +46.3% at 44.0%).  The old
+      # "19.5% CAGR at 22% DD" quote came from a realized-only curve and
+      # understated the drawdown by ~20pp.  Set TREND_PORTFOLIO_ENABLE=0 to
+      # stop the book.
       - key: TREND_PORTFOLIO_ENABLE
         value: "1"
       - key: TREND_PORTFOLIO_REGIME
@@ -69,7 +73,7 @@ services:
       - key: TREND_PORTFOLIO_REGIME_MA
         value: "200"
       - key: TREND_PORTFOLIO_RISK
-        value: "0.64"
+        value: "0.32"
       # Venue for the daily bars.  Measured from Render on 2026-11-22:
       # api.binance.com answers 451 and OKX rate-limits the shared IP after
       # ~26 of 45 coins, so the runner reads the public Binance mirror
