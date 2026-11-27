@@ -5455,6 +5455,8 @@ async def health(request: Request):
                 'universe': len(_tr.cfg.universe),
                 'failed': int(getattr(_tr, 'last_failed', 0) or 0),
                 'stale': int(getattr(_tr, 'stale_coins', 0) or 0),
+                # Current drawdown-brake multiplier (1.0 = full risk).
+                'brake': round(float(getattr(_tr.book, 'brake', 1.0) or 1.0), 2),
             }
     except Exception:
         _trend_on = False

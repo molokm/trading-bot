@@ -758,7 +758,7 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
         )}
 
         <div className="text-[0.6rem] text-[var(--txt-muted)] leading-snug">
-          Бумажный портфель на публичных дневных свечах, ордера не выставляются. Гейт BTC200 + риск 0.32 → бэктест ≈ +29.7% CAGR при просадке ≈ 31% (mark-to-market, 0.16%/сторона, 7.9 лет).
+          Бумажный портфель на публичных дневных свечах, ордера не выставляются. Гейт BTC200 + риск 0.64 + тормоз по просадке 20% → бэктест ≈ +35.5% CAGR при просадке ≈ 32% (mark-to-market, 0.16%/сторона, 7.9 лет).
         </div>
 
         {!isGuest && enabled && (

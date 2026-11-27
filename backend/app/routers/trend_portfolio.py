@@ -29,6 +29,9 @@ class BacktestRequest(BaseModel):
     sizing_halflife_days: float | None = None
     regime_symbol: str | None = None
     regime_ma: int | None = None
+    brake_start_pct: float | None = None
+    brake_mult: float | None = None
+    brake_recover_pct: float | None = None
     coins: list[str] | None = None
     bars: int = 300
 
@@ -90,6 +93,12 @@ async def trend_backtest(req: BacktestRequest):
         cfg.regime_symbol = req.regime_symbol.strip().upper()
     if req.regime_ma is not None:
         cfg.regime_ma = req.regime_ma
+    if req.brake_start_pct is not None:
+        cfg.brake_start_pct = req.brake_start_pct
+    if req.brake_mult is not None:
+        cfg.brake_mult = req.brake_mult
+    if req.brake_recover_pct is not None:
+        cfg.brake_recover_pct = req.brake_recover_pct
     if req.coins:
         cfg.universe = tuple(c.upper() for c in req.coins)
     try:

@@ -126,6 +126,10 @@ class TrendPortfolio:
         self.events: List[dict] = []
         # Closed-trade history (bounded, persisted) for the dashboard.
         self.closed_trades: List[dict] = []
+        # Drawdown brake: high-water mark of mark equity and the multiplier
+        # currently applied to NEW entries (1.0 = no brake).
+        self.hwm = float(cfg.capital)
+        self.brake = 1.0
 
     # ── sizing ───────────────────────────────────────────────────────────
     @property
@@ -136,8 +140,16 @@ class TrendPortfolio:
         return max(len(self.sleeves), 1)
 
     def _risk_usd(self) -> float:
-        """Risk per trade, in USD, from the *smoothed* account equity."""
-        return self.cfg.risk_per_sleeve * (self.smooth_equity / self._accounts())
+        """Risk per trade, in USD, from the *smoothed* account equity.
+
+        The drawdown brake multiplies this, so a book that is deep below its
+        high-water mark opens smaller (never larger) positions.
+        """
+        return (
+            self.cfg.risk_per_sleeve
+            * (self.smooth_equity / self._accounts())
+            * self.brake
+        )
 
     def _roll_smooth(self, ts: int) -> None:
         """Advance the smoothing base to ``ts`` (day granularity, no drift)."""
@@ -159,6 +171,25 @@ class TrendPortfolio:
 
     def open_notional(self) -> float:
         return sum(p.position.notional for p in self.sleeves.values() if p.position)
+
+    def end_of_day(self, ts: int) -> None:
+        """Update the high-water mark and the drawdown brake for ``ts``.
+
+        Must be called once per timestamp *after* every coin's bar for that day
+        has been fed: the mark is only complete then, and using it on the next
+        day's entries keeps the brake strictly causal.
+        """
+        if self.cfg.brake_start_pct <= 0:
+            return
+        eq = self.mark_equity()
+        if eq > self.hwm:
+            self.hwm = eq
+        dd = 100.0 * (1 - eq / self.hwm) if self.hwm > 0 else 0.0
+        recover = self.cfg.brake_recover_pct or self.cfg.brake_start_pct / 2
+        if dd >= self.cfg.brake_start_pct:
+            self.brake = self.cfg.brake_mult
+        elif dd < recover:
+            self.brake = 1.0
 
     # ── bar feed ─────────────────────────────────────────────────────────
     def on_bar(self, coin: str, bar: Bar) -> List[dict]:
@@ -214,7 +245,7 @@ class TrendPortfolio:
         equity = self.smooth_equity
         notional = min(
             risk_usd * entry / stop_dist,
-            self.cfg.max_sleeve_leverage * (equity / self._accounts()),
+            self.cfg.max_sleeve_leverage * (equity / self._accounts()) * self.brake,
         )
         if notional <= 0:
             return []
@@ -382,6 +413,8 @@ class TrendPortfolio:
             "open_positions": len(self.positions()),
             "open_notional": round(self.open_notional(), 2),
             "gross_leverage": round(self.open_notional() / eq, 3) if eq > 0 else 0.0,
+            "brake": round(self.brake, 3),
+            "hwm": round(self.hwm, 2),
             "last_bar_ts": self.last_ts,
         }
 
@@ -396,6 +429,8 @@ class TrendPortfolio:
             "last_ts": self.last_ts,
             "smooth_equity": self.smooth_equity,
             "smooth_ts": self.smooth_ts,
+            "hwm": self.hwm,
+            "brake": self.brake,
             "closed_trades": self.closed_trades[-500:],
             "sleeves": {
                 c: {
@@ -428,6 +463,8 @@ class TrendPortfolio:
         book.last_ts = int(state.get("last_ts", 0) or 0)
         book.smooth_equity = float(state.get("smooth_equity", cfg.capital))
         book.smooth_ts = int(state.get("smooth_ts", 0) or 0)
+        book.hwm = float(state.get("hwm", cfg.capital) or cfg.capital)
+        book.brake = float(state.get("brake", 1.0) or 1.0)
         book.closed_trades = list(state.get("closed_trades") or [])[-500:]
         for coin, raw in (state.get("sleeves") or {}).items():
             s = book.sleeves.get(coin)
@@ -478,6 +515,7 @@ def feed_chronological(book: "TrendPortfolio", series: Dict[str, Sequence["Bar"]
         for coin, bar in by_ts[ts].items():
             book.on_bar(coin, bar)
             fed += 1
+        book.end_of_day(ts)
     return fed
 
 
@@ -500,6 +538,7 @@ def backtest(
     for ts in stamps:
         for coin, bar in by_ts.get(ts, {}).items():
             book.on_bar(coin, bar)
+        book.end_of_day(ts)
         curve.append({"ts": ts, "equity": book.realized_equity, "mark": book.mark_equity()})
 
     return {

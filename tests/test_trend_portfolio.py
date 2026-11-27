@@ -378,6 +378,62 @@ def test_cycle_falls_back_when_the_primary_venue_fails(monkeypatch):
     assert runner.book.sleeves["BTC"].last_ts == TS0 + 39 * DAY
 
 
+# ── portfolio drawdown brake ─────────────────────────────────────────────
+
+def test_brake_is_off_by_default():
+    cfg = _cfg(universe=("AAA",))
+    book = TrendPortfolio(cfg)
+    book.realized = -5_000.0          # 50% below the high-water mark
+    book.end_of_day(TS0)
+    assert book.brake == 1.0
+
+
+def test_brake_engages_below_the_hwm_and_releases_on_recovery():
+    cfg = _cfg(universe=("AAA",), brake_start_pct=20.0, brake_mult=0.5)
+    book = TrendPortfolio(cfg)
+    book.realized = -250.0            # equity 750 of 1 000 → 25% drawdown
+    book.end_of_day(TS0)
+    assert book.brake == 0.5
+    book.realized = -50.0             # equity 950 → 5% drawdown (< 10%)
+    book.end_of_day(TS0 + DAY)
+    assert book.brake == 1.0
+    # the high-water mark only moves up
+    assert book.hwm == pytest.approx(1_000.0)
+
+
+def test_brake_halves_the_notional_of_a_new_entry():
+    cfg = _cfg(universe=("AAA",), brake_start_pct=10.0, brake_mult=0.5)
+    full = TrendPortfolio(cfg)
+    full.smooth_equity = 10_000.0
+    _feed(full, "AAA", _accel(7))
+    half = TrendPortfolio(cfg)
+    half.smooth_equity = 10_000.0
+    half.brake = 0.5
+    _feed(half, "AAA", _accel(7))
+    p_full = full.sleeves["AAA"].position
+    p_half = half.sleeves["AAA"].position
+    assert p_full is not None and p_half is not None
+    assert p_half.notional == pytest.approx(p_full.notional / 2, rel=1e-6)
+    assert p_half.risk_usd == pytest.approx(p_full.risk_usd / 2, rel=1e-6)
+
+
+def test_brake_state_survives_a_roundtrip():
+    cfg = _cfg(universe=("AAA",), brake_start_pct=20.0, brake_mult=0.5)
+    book = TrendPortfolio(cfg)
+    book.hwm = 12_345.0
+    book.brake = 0.5
+    restored = TrendPortfolio.from_state(cfg, book.to_state())
+    assert restored.hwm == pytest.approx(12_345.0)
+    assert restored.brake == pytest.approx(0.5)
+
+
+def test_brake_must_be_sane():
+    with pytest.raises(ValueError):
+        _cfg(brake_mult=0.0).validate()
+    with pytest.raises(ValueError):
+        _cfg(brake_start_pct=20.0, brake_recover_pct=25.0).validate()
+
+
 # ── exits ────────────────────────────────────────────────────────────────
 
 def test_chandelier_stop_fires_when_low_breaks_it():
