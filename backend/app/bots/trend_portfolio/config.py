@@ -154,7 +154,9 @@ class TrendPortfolioConfig:
     # the drawdown is back below ``brake_recover_pct`` (default: half of the
     # start).  Open positions are not resized — this throttles new risk, it
     # does not dump the book at the bottom.  Measured on 2019-2026 at 0.64:
-    # 20%/0.5 turns CAGR 46.3% / DD 44.0% into 34.9% / 32.7%.
+    # 20%/0.5 turns CAGR 46.3% / DD 44.0% into 35.5% / 32.4%, but Sharpe falls
+    # 1.10 -> 1.04 and only 4/7 folds stay positive (vs 5/7 unbraked).  It is
+    # a drawdown/CAGR trade, not an improvement — hence off by default.
     brake_start_pct: float = 0.0
     brake_mult: float = 0.5
     brake_recover_pct: float = 0.0
