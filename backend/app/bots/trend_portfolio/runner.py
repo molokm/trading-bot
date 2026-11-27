@@ -327,6 +327,7 @@ class TrendPaperRunner:
         venue_fails: Dict[str, int] = {}
         venue_down: List[str] = []
         served_by: Dict[str, int] = {}
+        last_seen: Dict[str, int] = {}
         for coin in self.cfg.universe:
             inst = f"{coin}-USDT"
             sleeve = self.book.sleeves.get(coin)
@@ -352,6 +353,7 @@ class TrendPaperRunner:
             if bars is None:
                 missing += 1
                 continue
+            last_seen[coin] = bars[-1].ts
             fresh = [b for b in bars if b.ts > sleeve.last_ts]
             if fresh and self.live_since and sleeve.last_ts == 0:
                 # A coin seen for the first time *after* the forward baseline
@@ -363,13 +365,15 @@ class TrendPaperRunner:
         for venue, n in served_by.items():
             self.sources_used[venue] = self.sources_used.get(venue, 0) + n
         # Drop delisted coins: a stale series would replay 2024 prices and open
-        # phantom positions in the paper book.
+        # phantom positions in the paper book.  Measured on every fetched coin,
+        # so the count stays stable after a restart (not only on the first
+        # replay, when fresh bars are rare).
         self.stale_coins = 0
-        if series:
-            newest = max(bars[-1].ts for bars in series.values())
-            stale = [c for c, bars in series.items() if newest - bars[-1].ts > STALE_AFTER_MS]
+        if last_seen:
+            newest = max(last_seen.values())
+            stale = [c for c, ts in last_seen.items() if newest - ts > STALE_AFTER_MS]
             for coin in stale:
-                series.pop(coin)
+                series.pop(coin, None)
             self.stale_coins = len(stale)
         if served_by and self.cfg.source not in served_by:
             self.data_note = (

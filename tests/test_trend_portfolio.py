@@ -796,5 +796,8 @@ def test_runner_skips_delisted_coins_instead_of_replaying_old_prices(monkeypatch
     # no phantom position at 2024 prices from a delisted market
     assert runner.book.sleeves["AAA"].last_ts == 0
     assert runner.book.sleeves["BTC"].last_ts == btc[-1].ts
+    # the count is measured on fetched coins, so it survives a quiet cycle
+    again = asyncio.run(runner.cycle())
+    assert again["stale_coins"] == 1
 
 
