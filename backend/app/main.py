@@ -5450,6 +5450,11 @@ async def health(request: Request):
                 # Risk profile actually in force (env is set in the Render
                 # dashboard, not in render.yaml, so this is how it is verified).
                 'risk': _tr.cfg.risk_per_sleeve,
+                # Completeness of the last cycle: coins with no bars at all and
+                # delisted coins that are skipped instead of replayed.
+                'universe': len(_tr.cfg.universe),
+                'failed': int(getattr(_tr, 'last_failed', 0) or 0),
+                'stale': int(getattr(_tr, 'stale_coins', 0) or 0),
             }
     except Exception:
         _trend_on = False
