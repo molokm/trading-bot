@@ -5457,6 +5457,11 @@ async def health(request: Request):
                 'stale': int(getattr(_tr, 'stale_coins', 0) or 0),
                 # Current drawdown-brake multiplier (1.0 = full risk).
                 'brake': round(float(getattr(_tr.book, 'brake', 1.0) or 1.0), 2),
+                # Shadow mirror: plans OKX orders, never sends them.
+                'mirror_mode': getattr(_tr.cfg, 'mirror_mode', 'off'),
+                'mirror_opens': int(getattr(_tr.mirror, 'opens', 0) or 0),
+                'mirror_skips': int(getattr(_tr.mirror, 'skips', 0) or 0),
+                'mirror_positions': len(getattr(_tr.mirror, 'positions', {}) or {}),
             }
     except Exception:
         _trend_on = False

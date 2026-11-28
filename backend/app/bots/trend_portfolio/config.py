@@ -161,6 +161,20 @@ class TrendPortfolioConfig:
     brake_mult: float = 0.5
     brake_recover_pct: float = 0.0
 
+    # ── shadow mirror (planning only, no order path) ─────────────────────
+    # "off"    — no mirror work at all (default);
+    # "shadow" — translate open/close events into the exact OKX USDT-M SWAP
+    #            orders a LIVE mirror would send, and record them.  Nothing is
+    #            sent: this module has no client and no credentials.
+    # "live" is deliberately NOT implemented: a bar-close mirror cannot yet
+    # reproduce the engine's intraday Chandelier stop, so it must not trade.
+    mirror_mode: str = "off"
+    # Equity the mirror would run with.  0 = mirror the book 1:1 ($10k).
+    # The order is scaled by mirror_equity / book.capital.
+    mirror_equity: float = 0.0
+    # Hard per-order notional cap (USD), 0 = no cap.
+    mirror_max_notional: float = 0.0
+
     # ── costs (conservative vs OKX retail) ───────────────────────────────
     fee_pct: float = 0.0008            # per side; OKX perp maker is 0.0002
     slippage_pct: float = 0.0002       # per side
@@ -233,6 +247,16 @@ class TrendPortfolioConfig:
             raise ValueError(
                 "trend_portfolio: brake_recover_pct must be [0, brake_start_pct)"
             )
+        if self.mirror_mode not in ("off", "shadow", "live"):
+            raise ValueError("trend_portfolio: mirror_mode must be off/shadow/live")
+        if self.mirror_mode == "live":
+            raise ValueError(
+                "trend_portfolio: mirror_mode=live is not implemented — the paper "
+                "engine fills its Chandelier stop intraday and a bar-close mirror "
+                "cannot reproduce that yet; use shadow"
+            )
+        if self.mirror_equity < 0 or self.mirror_max_notional < 0:
+            raise ValueError("trend_portfolio: mirror equity/cap must be >= 0")
 
     @classmethod
     def from_env(cls) -> "TrendPortfolioConfig":
@@ -248,6 +272,9 @@ class TrendPortfolioConfig:
             brake_start_pct=_env_float("TREND_PORTFOLIO_BRAKE_START", 0.0),
             brake_mult=_env_float("TREND_PORTFOLIO_BRAKE_MULT", 0.5),
             brake_recover_pct=_env_float("TREND_PORTFOLIO_BRAKE_RECOVER", 0.0),
+            mirror_mode=(os.getenv("TREND_MIRROR_MODE", "off") or "off").strip().lower(),
+            mirror_equity=_env_float("TREND_MIRROR_EQUITY", 0.0),
+            mirror_max_notional=_env_float("TREND_MIRROR_MAX_NOTIONAL", 0.0),
             regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
             regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
             poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),

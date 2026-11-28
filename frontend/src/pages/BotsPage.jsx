@@ -678,6 +678,38 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
           />
         </div>
 
+        {status.mirror && status.mirror.mode !== 'off' && (
+          <div className="rounded-lg bg-[var(--bg)] ring-1 ring-[var(--border)]/60 p-2 space-y-1.5">
+            <div className="flex items-center justify-between gap-2 text-2xs">
+              <span className="font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
+                Зеркало · {status.mirror.mode}
+              </span>
+              <span className="mono text-[var(--info)]">ордера не отправляются</span>
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+              <KV
+                label="OKX-инструменты"
+                value={`${status.mirror.instruments ?? 0} из ${status.mirror.universe ?? 0}`}
+                tone={(status.mirror.instruments ?? 0) < (status.mirror.universe ?? 0) ? 'loss' : 'profit'}
+              />
+              <KV label="Планов" value={`${status.mirror.opens ?? 0} откр · ${status.mirror.closes ?? 0} закр`} />
+              <KV
+                label="Пропусков"
+                value={status.mirror.skips ?? 0}
+                tone={status.mirror.skips ? 'loss' : 'muted'}
+              />
+              <KV label="Зеркальный notional" value={`$${Number(status.mirror.open_notional || 0).toFixed(0)}`} />
+            </div>
+            {status.mirror.orders?.[0] && (
+              <div className="text-[0.6rem] mono text-[var(--txt-muted)] truncate">
+                последний план: {status.mirror.orders[0].kind} {status.mirror.orders[0].coin} ·{' '}
+                {status.mirror.orders[0].inst_id} · {status.mirror.orders[0].side}{' '}
+                {status.mirror.orders[0].sz} · ${status.mirror.orders[0].notional}
+              </div>
+            )}
+          </div>
+        )}
+
         {positions.length > 0 && (
           <div className="space-y-1">
             <div className="text-2xs text-[var(--txt-muted)] font-medium">Открытые позиции (бумага)</div>

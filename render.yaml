@@ -78,6 +78,19 @@ services:
         value: "200"
       - key: TREND_PORTFOLIO_RISK
         value: "0.32"
+      # Shadow mirror: translate the paper book's open/close events into the
+      # exact OKX USDT-M SWAP orders a LIVE mirror would send, and record them.
+      # NOTHING is sent — the module has no client and no credentials, and
+      # TREND_MIRROR_MODE=live is rejected by the config.  Equity here is the
+      # hypothetical mirror account: the order is scaled by equity/book.capital.
+      # $2k is the smallest account that clears OKX minSz on nearly the whole
+      # 41-coin tradeable universe; $100 caps any single order.
+      - key: TREND_MIRROR_MODE
+        value: "shadow"
+      - key: TREND_MIRROR_EQUITY
+        value: "2000"
+      - key: TREND_MIRROR_MAX_NOTIONAL
+        value: "100"
       # Venue for the daily bars.  Measured from Render on 2026-11-22:
       # api.binance.com answers 451 and OKX rate-limits the shared IP after
       # ~26 of 45 coins, so the runner reads the public Binance mirror

@@ -4,6 +4,7 @@ The module must stay paper-only: a single test asserts that no order-placing
 call exists anywhere in its source, and another that the config cannot be
 flipped out of paper mode.
 """
+import asyncio
 import time
 
 import pytest
@@ -857,3 +858,137 @@ def test_runner_skips_delisted_coins_instead_of_replaying_old_prices(monkeypatch
     assert again["stale_coins"] == 1
 
 
+
+
+# ── shadow mirror: plans OKX orders, places nothing ──────────────────────
+
+from app.bots.trend_portfolio.mirror import ShadowMirror, SwapSpec
+
+
+class _MirrorBook:
+    capital = 1000.0
+
+
+_SPEC = SwapSpec(inst_id="AAA-USDT-SWAP", ct_val=1.0, lot_sz=0.1,
+                 min_sz=0.1, tick_sz=0.01)
+
+
+def _mirror(mode="shadow", equity=1000.0, **kw):
+    m = ShadowMirror(mode=mode, equity=equity, **kw)
+    m.specs = {"AAA": _SPEC}
+    m._specs_ts = time.time() + 10_000      # never refetch in a unit test
+    return m
+
+
+def test_contracts_are_floored_to_the_exchange_lot_step():
+    spec = SwapSpec("AAA-USDT-SWAP", ct_val=10.0, lot_sz=1.0,
+                    min_sz=1.0, tick_sz=0.01)
+    assert spec.contracts(1000.0, 10.0) == 10.0     # 1000 / (10 * 10)
+    assert spec.contracts(1050.0, 10.0) == 10.0     # 10.5 → floor 10
+    assert spec.contracts(50.0, 10.0) == 0.0        # 0.5 < minSz
+    assert spec.contracts(0.0, 10.0) == 0.0
+    assert spec.min_notional(10.0) == pytest.approx(100.0)
+
+
+def test_shadow_plans_an_open_and_its_close():
+    m = _mirror()
+    book = _MirrorBook()
+    opened = asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], book))
+    assert len(opened) == 1
+    o = opened[0]
+    assert o["side"] == "buy" and o["inst_id"] == "AAA-USDT-SWAP"
+    assert o["sz"] == pytest.approx(2.0)            # 200 / (100 * 1)
+    assert o["notional"] == pytest.approx(200.0)
+    assert o["cl_ord_id"].startswith("trdoAAA")
+    assert "AAA" in m.positions
+
+    closed = asyncio.run(m.on_events([{
+        "kind": "close", "coin": "AAA", "ts": TS0 + DAY,
+        "price": 90.0, "reason": "stop",
+    }], book))
+    assert len(closed) == 1
+    assert closed[0]["side"] == "sell" and closed[0]["sz"] == pytest.approx(2.0)
+    assert "AAA" not in m.positions
+    assert m.opens == 1 and m.closes == 1
+
+
+def test_shadow_scales_notional_to_the_mirror_equity():
+    m = _mirror(equity=100.0)                       # 10% of the $1k book
+    orders = asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], _MirrorBook()))
+    assert orders[0]["sz"] == pytest.approx(0.2)    # 20 USD / 100
+    assert orders[0]["book_notional"] == pytest.approx(200.0)
+
+
+def test_shadow_caps_a_single_order():
+    m = _mirror(equity=1000.0, max_notional=50.0)
+    orders = asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], _MirrorBook()))
+    assert orders[0]["notional"] == pytest.approx(50.0)
+
+
+def test_shadow_skips_a_coin_without_an_okx_swap():
+    m = _mirror()
+    orders = asyncio.run(m.on_events([{
+        "kind": "open", "coin": "VET", "ts": TS0,
+        "price": 1.0, "notional": 200.0, "stop": 0.8,
+    }], _MirrorBook()))
+    assert orders == []
+    assert m.skipped[-1]["reason"] == "no_okx_swap"
+    assert m.skips == 1
+
+
+def test_shadow_skips_an_order_below_the_exchange_minimum():
+    m = _mirror(equity=10.0)                        # 1% of the book
+    orders = asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], _MirrorBook()))
+    assert orders == []
+    assert m.skipped[-1]["reason"] == "below_min_sz"
+
+
+def test_shadow_ignores_a_close_it_never_opened():
+    m = _mirror()
+    orders = asyncio.run(m.on_events([{
+        "kind": "close", "coin": "AAA", "ts": TS0,
+        "price": 90.0, "reason": "signal",
+    }], _MirrorBook()))
+    assert orders == []
+    assert m.skipped[-1]["reason"] == "no_mirrored_position"
+
+
+def test_shadow_mode_off_does_nothing():
+    m = ShadowMirror(mode="off")
+    assert asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], _MirrorBook())) == []
+    assert m.opens == 0 and m.positions == {}
+
+
+def test_shadow_state_survives_a_roundtrip():
+    m = _mirror()
+    asyncio.run(m.on_events([{
+        "kind": "open", "coin": "AAA", "ts": TS0,
+        "price": 100.0, "notional": 200.0, "stop": 80.0,
+    }], _MirrorBook()))
+    restored = ShadowMirror(mode="shadow")
+    restored.from_state(m.to_state())
+    assert restored.opens == 1
+    assert restored.positions["AAA"]["sz"] == pytest.approx(2.0)
+    assert restored.orders[-1]["coin"] == "AAA"
+
+
+def test_live_mirror_mode_is_refused():
+    with pytest.raises(ValueError):
+        _cfg(mirror_mode="live").validate()
+    with pytest.raises(ValueError):
+        _cfg(mirror_mode="teleport").validate()

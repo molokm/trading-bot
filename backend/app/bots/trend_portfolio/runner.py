@@ -23,6 +23,7 @@ import httpx
 from app.bots.base import load_state, save_state
 from app.bots.trend_portfolio.config import TrendPortfolioConfig
 from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, feed_chronological
+from app.bots.trend_portfolio.mirror import ShadowMirror
 
 log = logging.getLogger("trend_portfolio")
 
@@ -164,6 +165,14 @@ class TrendPaperRunner:
         self._state_key = f"{self.cfg.state_name}_state"
         state = load_state(self.cfg.state_name, {}) or {}
         self.book = TrendPortfolio.from_state(self.cfg, state)
+        # Shadow mirror: plans the OKX orders a LIVE book would send.  It has
+        # no client and cannot place anything (see mirror.py).
+        self.mirror = ShadowMirror(
+            mode=self.cfg.mirror_mode,
+            equity=self.cfg.mirror_equity,
+            max_notional=self.cfg.mirror_max_notional,
+        )
+        self.mirror.from_state(state.get("mirror"))
         # Forward track record starts when the *first persisted* snapshot is
         # written (i.e. after the initial replay).  Replayed PnL is already in
         # the baseline, so ``forward_return_pct`` only measures what happened
@@ -177,6 +186,7 @@ class TrendPaperRunner:
         self.restored_from = "file" if self.live_since else ""
         self.last_cycle_ts: float = 0.0
         self.last_error: str = ""
+        self.last_mirror_orders: List[dict] = []
         self.cycles: int = 0
         self.bars_consumed: int = 0
         self.sources_used: Dict[str, int] = {}
@@ -226,6 +236,7 @@ class TrendPaperRunner:
             self.book = book
             self.live_since = int(data.get("live_since") or 0)
             self.live_start_equity = float(data.get("live_start_equity") or 0.0)
+            self.mirror.from_state(data.get("mirror"))
             self.state_store = self._store_label()
             self.restored_from = self.state_store
             log.info("trend_portfolio state restored from db (last_ts=%s)",
@@ -243,6 +254,7 @@ class TrendPaperRunner:
         data["schema"] = _STATE_SCHEMA
         data["live_since"] = self.live_since
         data["live_start_equity"] = self.live_start_equity
+        data["mirror"] = self.mirror.to_state()
         data["saved_at"] = int(time.time() * 1000)
         save_state(self.cfg.state_name, data)   # best-effort file copy
         if self.db is None:
@@ -389,8 +401,18 @@ class TrendPaperRunner:
         # asset's latest close, so feeding one coin at a time would judge every
         # historical alt entry against *today's* regime state (see
         # engine.feed_chronological).
+        _ev_before = len(self.book.events)
         fresh = feed_chronological(self.book, series)
+        _new_events = self.book.events[_ev_before:]
         self.bars_consumed += fresh
+        # Shadow mirror: turn this cycle's events into planned OKX orders.
+        # No-op unless TREND_MIRROR_MODE=shadow.  Never raises into the cycle.
+        try:
+            self.last_mirror_orders = await self.mirror.on_events(_new_events, self.book)
+        except Exception as exc:
+            self.last_mirror_orders = []
+            self.mirror.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("trend mirror cycle failed: %s", self.mirror.last_error)
         # Start the forward baseline after the very first replay, so replayed
         # PnL is excluded from ``forward_return_pct``.
         if not self.live_since:
@@ -437,6 +459,7 @@ class TrendPaperRunner:
             "regime_symbol": self.cfg.regime_symbol,
             "regime_ma": self.cfg.regime_ma,
             "universe_size": len(self.cfg.universe),
+            "mirror": self.mirror.status(),
             **st,
         }
 
