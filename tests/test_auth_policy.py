@@ -86,6 +86,8 @@ TIGHTENED_IN_3B = {
     # Daily trend portfolio (paper-only, owner's research book).
     '/api/trend/status', '/api/trend/positions', '/api/trend/trades',
     '/api/trend/cycle', '/api/trend/backtest',
+    # Trend mirror (LIVE orders): owner-only, explicit opt-in.
+    '/api/trend/mirror', '/api/trend/mirror/enable', '/api/trend/mirror/disable',
     # Core portfolio (paper-only, two research books over one universe).
     '/api/core/status', '/api/core/positions', '/api/core/trades',
     '/api/core/cycle', '/api/core/backtest',

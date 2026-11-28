@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from app.bots.trend_portfolio.config import TrendPortfolioConfig
 from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, backtest
+from app.bots.trend_portfolio.mirror import LIVE_FLAG
 from app.bots.trend_portfolio.runner import fetch_daily_bars, get_runner
 from app.services.route_policy import ADMIN, policy
 
@@ -72,6 +73,66 @@ async def trend_cycle():
     if runner is None:
         return {"ok": False, "reason": "config rejected"}
     return {"ok": True, **await runner.cycle()}
+
+
+@router.get("/api/trend/mirror")
+@policy(ADMIN)
+async def trend_mirror_status():
+    """Mirror ledger: planned/executed orders, skips, caps. Read-only."""
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "reason": "config rejected"}
+    return runner.mirror.status()
+
+
+@router.post("/api/trend/mirror/enable")
+@policy(ADMIN)
+async def trend_mirror_enable():
+    """Arm the LIVE trend mirror. Explicit, fail-closed opt-in.
+
+    Requires TREND_MIRROR_MODE=live, a coin whitelist, hard caps and an already
+    connected LIVE account. Does not place an order by itself.
+    """
+    runner = get_runner()
+    if runner is None:
+        return {"ok": False, "reason": "config rejected"}
+    cfg = runner.cfg
+    if cfg.mirror_mode != "live":
+        return {"ok": False, "reason": "TREND_MIRROR_MODE is not 'live'"}
+    if not cfg.mirror_coins:
+        return {"ok": False, "reason": "TREND_MIRROR_COINS is empty"}
+    if cfg.mirror_max_notional <= 0 or cfg.mirror_max_total_notional <= 0:
+        return {"ok": False, "reason": "mirror notional caps are not set"}
+    if runner.db is None:
+        return {"ok": False, "reason": "no database"}
+    try:
+        live = await runner.db.get_setting("live_mirror_enabled")
+    except Exception as exc:
+        return {"ok": False, "reason": f"cannot read LIVE flag: {exc}"}
+    if str(live or "").strip().lower() in ("", "0", "false", "no", "off"):
+        return {"ok": False, "reason": "LIVE mirror is not connected"}
+    await runner.db.set_setting(LIVE_FLAG, "1")
+    return {
+        "ok": True,
+        "enabled": True,
+        "coins": list(cfg.mirror_coins),
+        "max_notional": cfg.mirror_max_notional,
+        "max_total_notional": cfg.mirror_max_total_notional,
+        "daily_cap": cfg.mirror_daily_order_cap,
+    }
+
+
+@router.post("/api/trend/mirror/disable")
+@policy(ADMIN)
+async def trend_mirror_disable():
+    """Disarm the LIVE trend mirror. Open positions are left untouched."""
+    runner = get_runner()
+    if runner is None:
+        return {"ok": False, "reason": "config rejected"}
+    if runner.db is None:
+        return {"ok": False, "reason": "no database"}
+    await runner.db.set_setting(LIVE_FLAG, "0")
+    return {"ok": True, "enabled": False}
 
 
 @router.post("/api/trend/backtest")

@@ -574,17 +574,23 @@ def test_replayed_state_does_not_retrade_old_bars():
     assert events == []
 
 
-def test_module_has_no_order_placement_code():
+def test_paper_core_has_no_order_placement_code():
     import pathlib
 
     import app.bots.trend_portfolio as pkg
 
     root = pathlib.Path(pkg.__file__).parent
     banned = ("place_order", "place_algo_order", "close_position", "cancel_order")
-    for path in root.glob("*.py"):
-        src = path.read_text()
+    # The paper engine/runner/config must never grow an order path.  Order
+    # execution lives only in mirror.LiveMirror, which is opt-in and gated.
+    for name in ("engine.py", "runner.py", "config.py"):
+        src = (root / name).read_text()
         for token in banned:
-            assert token not in src, f"{path.name} references {token}"
+            assert token not in src, f"{name} references {token}"
+    # The shadow planner has no client at all.
+    shadow = ShadowMirror(mode="shadow")
+    assert not hasattr(shadow, "client_provider")
+    assert not hasattr(shadow, "db")
 
 
 def test_backtest_reports_stats_and_curve():
@@ -987,8 +993,226 @@ def test_shadow_state_survives_a_roundtrip():
     assert restored.orders[-1]["coin"] == "AAA"
 
 
-def test_live_mirror_mode_is_refused():
+def test_live_mirror_needs_explicit_rails():
+    # live without a whitelist / caps is rejected
     with pytest.raises(ValueError):
         _cfg(mirror_mode="live").validate()
     with pytest.raises(ValueError):
+        _cfg(mirror_mode="live", mirror_coins=("ZZZ",), mirror_equity=2000,
+             mirror_max_notional=50, mirror_max_total_notional=100,
+             mirror_daily_order_cap=5).validate()
+    with pytest.raises(ValueError):
         _cfg(mirror_mode="teleport").validate()
+    # a named coin plus every cap is accepted
+    _cfg(mirror_mode="live", mirror_coins=("AAA",), mirror_equity=2000,
+         mirror_max_notional=50, mirror_max_total_notional=100,
+         mirror_daily_order_cap=5).validate()
+
+
+# ── live mirror: fail-closed executor (mocked client, no exchange) ───────
+
+from app.bots.trend_portfolio.mirror import LiveMirror
+
+
+class _MirrorDB:
+    def __init__(self, flag="1"):
+        self.s = {"trend_mirror_live_enabled": flag}
+
+    async def get_setting(self, key):
+        return self.s.get(key)
+
+    async def set_setting(self, key, value):
+        self.s[key] = value
+
+
+class _FakeLiveClient:
+    demo = False
+
+    def __init__(self):
+        self.orders = []
+        self.algos = []
+        self.cancels = []
+        self.flat = True
+        self.fail_stop = False
+
+    def has_credentials(self):
+        return True
+
+    async def place_order(self, **kw):
+        self.orders.append(kw)
+        if kw.get("is_close") or kw.get("reduce_only") or kw.get("side") == "sell":
+            self.flat = True
+        else:
+            self.flat = False
+        return {"code": "0", "data": [{
+            "ordId": "1", "sCode": "0",
+            "accFillSz": kw.get("sz"), "avgPx": "100",
+        }]}
+
+    async def place_algo_order(self, **kw):
+        if self.fail_stop:
+            return {"code": "51000", "msg": "algo rejected"}
+        self.algos.append(kw)
+        return {"code": "0", "data": [{"algoId": "a1", "sCode": "0"}]}
+
+    async def cancel_algo_order(self, inst, algo):
+        self.cancels.append((inst, algo))
+        return {"code": "0", "data": [{}]}
+
+    async def amend_algo_order(self, inst, algo, **kw):
+        return {"code": "0", "data": [{"algoId": algo}]}
+
+    async def get_order(self, inst, ord_id=None):
+        return {"code": "0", "data": [{"accFillSz": "2", "avgPx": "100"}]}
+
+    async def get_positions(self, inst_type="SWAP", inst_id=None):
+        if self.flat:
+            return {"code": "0", "data": []}
+        return {"code": "0", "data": [{"instId": inst_id, "pos": "2"}]}
+
+
+def _live(flag="1", coins=("AAA",), client=None, daily_cap=20, max_total=500.0):
+    m = LiveMirror(equity=1000.0, max_notional=100.0, db=_MirrorDB(flag),
+                   coins=coins, daily_cap=daily_cap,
+                   max_total_notional=max_total)
+    m.specs = {"AAA": _SPEC}
+    m._specs_ts = time.time() + 10_000
+    lc = client or _FakeLiveClient()
+
+    async def provider():
+        return lc
+
+    m.client_provider = provider
+    return m, lc
+
+
+_OPEN_EV = {"kind": "open", "coin": "AAA", "ts": TS0,
+            "price": 100.0, "notional": 200.0, "stop": 80.0}
+
+
+def _no_claim(monkeypatch):
+    import app.services.position_claim as pc
+
+    async def claim(*a, **k):
+        return True
+
+    async def release(*a, **k):
+        return None
+
+    monkeypatch.setattr(pc, "claim_open", claim)
+    monkeypatch.setattr(pc, "release_open", release)
+
+
+def test_live_mirror_refuses_without_the_explicit_flag(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live(flag="0")
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert lc.orders == [] and m.positions == {}
+    assert m.skipped[-1]["reason"] == "live_disabled"
+
+
+def test_live_mirror_refuses_a_non_whitelisted_coin(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live(coins=("BTC",))
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert lc.orders == []
+    assert m.skipped[-1]["reason"] == "not_whitelisted"
+
+
+def test_live_mirror_refuses_a_demo_client(monkeypatch):
+    _no_claim(monkeypatch)
+    lc = _FakeLiveClient()
+    lc.demo = True
+    m, _ = _live(client=lc)
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert lc.orders == []
+    assert m.skipped[-1]["reason"] == "no_live_client"
+
+
+def test_live_mirror_opens_with_a_stop_and_claims_the_position(monkeypatch):
+    claimed = {}
+
+    async def claim(db, bot_id, inst, side, sz, entry):
+        claimed.update(bot_id=bot_id, inst=inst, side=side, sz=sz, entry=entry)
+        return True
+
+    import app.services.position_claim as pc
+    monkeypatch.setattr(pc, "claim_open", claim)
+
+    m, lc = _live()
+    orders = asyncio.run(m.on_events([_OPEN_EV], _MirrorBook()))
+    assert len(orders) == 1
+    assert lc.orders[0]["side"] == "buy"
+    assert lc.orders[0]["cl_ord_id"].startswith("trdoAAA")
+    assert lc.algos[0]["sl_trigger_px"] == "80.00"
+    assert lc.algos[0]["side"] == "sell" and lc.algos[0]["reduce_only"] is True
+    assert m.positions["AAA"]["algo_id"] == "a1"
+    assert m.positions["AAA"]["entry"] == pytest.approx(100.0)
+    assert claimed["bot_id"] == "trend_live"
+    assert claimed["inst"] == "AAA-USDT-SWAP"
+
+
+def test_live_mirror_undoes_the_entry_when_the_stop_fails(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live()
+    lc.fail_stop = True
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert m.positions == {}
+    assert m.skipped[-1]["reason"] == "stop_rejected"
+    # buy, then an immediate reduce-only sell
+    assert len(lc.orders) == 2
+    assert lc.orders[0]["side"] == "buy"
+    assert lc.orders[1]["side"] == "sell" and lc.orders[1]["pos_side"] == "long"
+
+
+def test_live_mirror_closes_and_cancels_the_stop(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live()
+    asyncio.run(m.on_events([_OPEN_EV], _MirrorBook()))
+    closed = asyncio.run(m.on_events([{
+        "kind": "close", "coin": "AAA", "ts": TS0 + DAY,
+        "price": 90.0, "reason": "signal",
+    }], _MirrorBook()))
+    assert len(closed) == 1
+    assert lc.orders[-1]["side"] == "sell"
+    assert lc.orders[-1]["pos_side"] == "long"     # hedge close, never a short
+    assert lc.cancels and lc.cancels[-1][1] == "a1"
+    assert m.positions == {}
+
+
+def test_live_mirror_enforces_the_daily_order_cap(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live(daily_cap=1)
+    asyncio.run(m.on_events([_OPEN_EV], _MirrorBook()))
+    m.positions.pop("AAA", None)          # pretend the book closed it
+    asyncio.run(m.on_events([{**_OPEN_EV, "ts": TS0 + 1000}], _MirrorBook()))
+    assert len([o for o in lc.orders if o["side"] == "buy"]) == 1
+    assert m.skipped[-1]["reason"] == "daily_cap"
+
+
+def test_live_mirror_total_notional_cap(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live(max_total=50.0)
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert lc.orders == []
+    assert m.skipped[-1]["reason"] == "total_cap"
+
+
+def test_live_mirror_never_adds_to_an_existing_position(monkeypatch):
+    _no_claim(monkeypatch)
+    m, lc = _live()
+    lc.flat = False                     # manual trade / another bot
+    assert asyncio.run(m.on_events([_OPEN_EV], _MirrorBook())) == []
+    assert lc.orders == []
+    assert m.skipped[-1]["reason"] == "exchange_not_flat"
+
+
+def test_live_mirror_never_inherits_a_shadow_ledger(monkeypatch):
+    _no_claim(monkeypatch)
+    shadow = _mirror()
+    asyncio.run(shadow.on_events([_OPEN_EV], _MirrorBook()))
+    live, lc = _live()
+    live.from_state(shadow.to_state())      # mode="shadow" ≠ "live"
+    assert live.positions == {}
+    assert live.opens == 0
+    assert lc.orders == []

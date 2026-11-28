@@ -1605,6 +1605,10 @@ async def startup():
         from app.bots.trend_portfolio.runner import configure as configure_trend, get_runner
         configure_trend(db)   # durable state: the book survives restarts
         _trend_runner = get_runner()
+        if _trend_runner is not None:
+            # Live mirror (only used when TREND_MIRROR_MODE=live): the same
+            # LIVE client the AI mirror connects, never a demo one.
+            _trend_runner.set_client_provider(_trend_live_client)
         if _trend_runner is not None and _trend_runner.cfg.enabled:
             if _trend_runner.start():
                 print('[startup] trend portfolio paper runner started', flush=True)
@@ -5459,6 +5463,9 @@ async def health(request: Request):
                 'brake': round(float(getattr(_tr.book, 'brake', 1.0) or 1.0), 2),
                 # Shadow mirror: plans OKX orders, never sends them.
                 'mirror_mode': getattr(_tr.cfg, 'mirror_mode', 'off'),
+                # True only when the live executor is armed in the DB AND the
+                # explicit opt-in flag was read on the last cycle.
+                'mirror_live': bool(getattr(_tr.mirror, 'live_enabled', False)),
                 'mirror_opens': int(getattr(_tr.mirror, 'opens', 0) or 0),
                 'mirror_skips': int(getattr(_tr.mirror, 'skips', 0) or 0),
                 'mirror_positions': len(getattr(_tr.mirror, 'positions', {}) or {}),
@@ -5714,6 +5721,31 @@ async def _ensure_live_mirror_client() -> bool:
         print(f'[LIVE] ensure watermark: {_we}', flush=True)
     print('[LIVE] ensure: mirror client ready', flush=True)
     return True
+
+
+async def _trend_live_client():
+    """Client provider for the trend mirror: real LIVE client or None.
+
+    Reuses the same LIVE connection the AI mirror uses (DB credentials, explicit
+    connect).  Fail-closed: a demo client or missing credentials returns None.
+    """
+    global live_manager
+    lc = live_manager.get_client() if live_manager else None
+    if lc is not None and not getattr(lc, 'demo', True) and \
+            getattr(lc, 'has_credentials', lambda: False)():
+        return lc
+    try:
+        if not await _ensure_live_mirror_client():
+            return None
+    except Exception as e:
+        print(f'[LIVE] trend provider ensure: {e}', flush=True)
+        return None
+    lc = live_manager.get_client() if live_manager else None
+    if lc is None or getattr(lc, 'demo', True) or \
+            not getattr(lc, 'has_credentials', lambda: False)():
+        return None
+    return lc
+
 
 async def _save_live_creds(key: str, secret: str, passphrase: str) -> None:
     global _live_key, _live_secret, _live_pass

@@ -684,7 +684,11 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
               <span className="font-semibold text-[var(--txt-muted)] uppercase tracking-wider">
                 Зеркало · {status.mirror.mode}
               </span>
-              <span className="mono text-[var(--info)]">ордера не отправляются</span>
+              <span className={`mono ${status.mirror.mode === 'live' ? (status.mirror.live_enabled ? 'text-[var(--loss)] font-bold' : 'text-amber-400') : 'text-[var(--info)]'}`}>
+                {status.mirror.mode === 'live'
+                  ? (status.mirror.live_enabled ? 'РЕАЛЬНЫЕ ОРДЕРА' : 'live не армирован')
+                  : 'ордера не отправляются'}
+              </span>
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
               <KV
@@ -700,6 +704,13 @@ function TrendPortfolioCard({ status, positions = [], trades = [], onRunCycle, l
               />
               <KV label="Зеркальный notional" value={`$${Number(status.mirror.open_notional || 0).toFixed(0)}`} />
             </div>
+            {status.mirror.mode === 'live' && (
+              <div className="text-[0.6rem] mono text-[var(--txt-muted)]">
+                монеты: {(status.mirror.coins || []).join(', ') || '—'} · ордеров сегодня{' '}
+                {status.mirror.orders_today ?? 0}/{status.mirror.daily_cap ?? 0}
+                {status.mirror.client_ready ? '' : ' · клиент не готов'}
+              </div>
+            )}
             {status.mirror.orders?.[0] && (
               <div className="text-[0.6rem] mono text-[var(--txt-muted)] truncate">
                 последний план: {status.mirror.orders[0].kind} {status.mirror.orders[0].coin} ·{' '}

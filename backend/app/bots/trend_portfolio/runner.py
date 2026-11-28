@@ -23,7 +23,7 @@ import httpx
 from app.bots.base import load_state, save_state
 from app.bots.trend_portfolio.config import TrendPortfolioConfig
 from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, feed_chronological
-from app.bots.trend_portfolio.mirror import ShadowMirror
+from app.bots.trend_portfolio.mirror import LiveMirror, ShadowMirror
 
 log = logging.getLogger("trend_portfolio")
 
@@ -165,13 +165,24 @@ class TrendPaperRunner:
         self._state_key = f"{self.cfg.state_name}_state"
         state = load_state(self.cfg.state_name, {}) or {}
         self.book = TrendPortfolio.from_state(self.cfg, state)
-        # Shadow mirror: plans the OKX orders a LIVE book would send.  It has
-        # no client and cannot place anything (see mirror.py).
-        self.mirror = ShadowMirror(
-            mode=self.cfg.mirror_mode,
-            equity=self.cfg.mirror_equity,
-            max_notional=self.cfg.mirror_max_notional,
-        )
+        # Shadow mirror: plans the OKX orders a LIVE book would send.  In
+        # "live" mode it also executes them, behind an explicit DB flag and
+        # hard caps (see mirror.py).  Default is off.
+        if self.cfg.mirror_mode == "live":
+            self.mirror = LiveMirror(
+                equity=self.cfg.mirror_equity,
+                max_notional=self.cfg.mirror_max_notional,
+                db=db,
+                coins=self.cfg.mirror_coins,
+                daily_cap=self.cfg.mirror_daily_order_cap,
+                max_total_notional=self.cfg.mirror_max_total_notional,
+            )
+        else:
+            self.mirror = ShadowMirror(
+                mode=self.cfg.mirror_mode,
+                equity=self.cfg.mirror_equity,
+                max_notional=self.cfg.mirror_max_notional,
+            )
         self.mirror.from_state(state.get("mirror"))
         # Forward track record starts when the *first persisted* snapshot is
         # written (i.e. after the initial replay).  Replayed PnL is already in
@@ -409,6 +420,7 @@ class TrendPaperRunner:
         # No-op unless TREND_MIRROR_MODE=shadow.  Never raises into the cycle.
         try:
             self.last_mirror_orders = await self.mirror.on_events(_new_events, self.book)
+            await self.mirror.maintain(self.book)
         except Exception as exc:
             self.last_mirror_orders = []
             self.mirror.last_error = f"{type(exc).__name__}: {exc}"
@@ -466,6 +478,11 @@ class TrendPaperRunner:
     def positions(self) -> List[dict]:
         return self.book.positions()
 
+    def set_client_provider(self, provider) -> None:
+        """Attach the async LIVE-client provider (only used in live mode)."""
+        if isinstance(self.mirror, LiveMirror):
+            self.mirror.client_provider = provider
+
     def trades(self, limit: int = 50) -> List[dict]:
         """Closed paper trades, newest first."""
         n = max(1, min(int(limit or 50), 500))
@@ -488,6 +505,8 @@ def configure(db) -> None:
     if _runner is not None:
         _runner.db = db
         _runner._db_restored = False
+        if isinstance(_runner.mirror, LiveMirror):
+            _runner.mirror.db = db
 
 
 def get_runner() -> Optional[TrendPaperRunner]:

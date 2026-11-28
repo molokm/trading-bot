@@ -166,14 +166,21 @@ class TrendPortfolioConfig:
     # "shadow" — translate open/close events into the exact OKX USDT-M SWAP
     #            orders a LIVE mirror would send, and record them.  Nothing is
     #            sent: this module has no client and no credentials.
-    # "live" is deliberately NOT implemented: a bar-close mirror cannot yet
-    # reproduce the engine's intraday Chandelier stop, so it must not trade.
+    # "live"   — actually place the orders.  Requires ALL of: an explicit DB
+    #            flag (trend_mirror_live_enabled=1), a coin whitelist, a
+    #            per-order cap, a total cap and a daily order cap.  Fail-closed.
     mirror_mode: str = "off"
     # Equity the mirror would run with.  0 = mirror the book 1:1 ($10k).
     # The order is scaled by mirror_equity / book.capital.
     mirror_equity: float = 0.0
-    # Hard per-order notional cap (USD), 0 = no cap.
+    # Hard per-order notional cap (USD), 0 = no cap (not allowed in live).
     mirror_max_notional: float = 0.0
+    # Micro-live: only these coins may be mirrored.  Empty = none (live is
+    # rejected), so going live is always a deliberate, named choice.
+    mirror_coins: Tuple[str, ...] = ()
+    # Safety rails for live: max orders per UTC day and max total notional.
+    mirror_daily_order_cap: int = 20
+    mirror_max_total_notional: float = 0.0
 
     # ── costs (conservative vs OKX retail) ───────────────────────────────
     fee_pct: float = 0.0008            # per side; OKX perp maker is 0.0002
@@ -249,14 +256,20 @@ class TrendPortfolioConfig:
             )
         if self.mirror_mode not in ("off", "shadow", "live"):
             raise ValueError("trend_portfolio: mirror_mode must be off/shadow/live")
-        if self.mirror_mode == "live":
-            raise ValueError(
-                "trend_portfolio: mirror_mode=live is not implemented — the paper "
-                "engine fills its Chandelier stop intraday and a bar-close mirror "
-                "cannot reproduce that yet; use shadow"
-            )
         if self.mirror_equity < 0 or self.mirror_max_notional < 0:
             raise ValueError("trend_portfolio: mirror equity/cap must be >= 0")
+        if self.mirror_mode == "live":
+            if not self.mirror_coins:
+                raise ValueError("trend_portfolio: live mirror needs mirror_coins")
+            unknown = [c for c in self.mirror_coins if c not in self.universe]
+            if unknown:
+                raise ValueError(f"trend_portfolio: mirror_coins not in universe: {unknown}")
+            if self.mirror_equity <= 0 or self.mirror_max_notional <= 0:
+                raise ValueError("trend_portfolio: live mirror needs equity and a per-order cap")
+            if self.mirror_max_total_notional < self.mirror_max_notional:
+                raise ValueError("trend_portfolio: live mirror total cap must be >= per-order cap")
+            if self.mirror_daily_order_cap <= 0:
+                raise ValueError("trend_portfolio: live mirror needs a daily order cap")
 
     @classmethod
     def from_env(cls) -> "TrendPortfolioConfig":
@@ -275,6 +288,13 @@ class TrendPortfolioConfig:
             mirror_mode=(os.getenv("TREND_MIRROR_MODE", "off") or "off").strip().lower(),
             mirror_equity=_env_float("TREND_MIRROR_EQUITY", 0.0),
             mirror_max_notional=_env_float("TREND_MIRROR_MAX_NOTIONAL", 0.0),
+            mirror_coins=tuple(
+                c.strip().upper()
+                for c in (os.getenv("TREND_MIRROR_COINS", "") or "").split(",")
+                if c.strip()
+            ),
+            mirror_daily_order_cap=_env_int("TREND_MIRROR_DAILY_CAP", 20),
+            mirror_max_total_notional=_env_float("TREND_MIRROR_MAX_TOTAL", 0.0),
             regime_symbol=(os.getenv("TREND_PORTFOLIO_REGIME", "") or "").strip().upper(),
             regime_ma=_env_int("TREND_PORTFOLIO_REGIME_MA", 200),
             poll_interval_sec=_env_int("TREND_PORTFOLIO_POLL", 3600),
