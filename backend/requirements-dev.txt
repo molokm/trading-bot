@@ -1,0 +1,8 @@
+# Development / CI dependencies.
+# Installs the runtime deps too:
+#   pip install -r requirements-dev.txt
+#   pytest          (pytest.ini: pythonpath=backend, testpaths=tests)
+-r requirements.txt
+
+pytest>=8,<10
+pytest-asyncio>=0.24

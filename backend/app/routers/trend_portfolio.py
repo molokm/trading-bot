@@ -1,0 +1,191 @@
+"""Read-only HTTP surface for the daily trend portfolio (paper only).
+
+There is no endpoint here that can place, amend or cancel an order.  The only
+side effect of ``/api/trend/cycle`` is that the in-process paper book advances
+to the newest closed daily bar and its state file is rewritten.
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from app.bots.trend_portfolio.config import TrendPortfolioConfig
+from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, backtest
+from app.bots.trend_portfolio.mirror import LIVE_FLAG
+from app.bots.trend_portfolio.runner import fetch_daily_bars, get_runner
+from app.services.route_policy import ADMIN, policy
+
+log = logging.getLogger("trend_portfolio")
+
+router = APIRouter(tags=["trend-portfolio"])
+
+
+class BacktestRequest(BaseModel):
+    risk_per_sleeve: float | None = None
+    entry_lookback: int | None = None
+    exit_lookback: int | None = None
+    chandelier_mult: float | None = None
+    sizing_halflife_days: float | None = None
+    regime_symbol: str | None = None
+    regime_ma: int | None = None
+    brake_start_pct: float | None = None
+    brake_mult: float | None = None
+    brake_recover_pct: float | None = None
+    coins: list[str] | None = None
+    bars: int = 300
+
+
+@router.get("/api/trend/status")
+@policy(ADMIN)
+async def trend_status():
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "reason": "config rejected"}
+    return runner.status()
+
+
+@router.get("/api/trend/positions")
+@policy(ADMIN)
+async def trend_positions():
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "positions": []}
+    return {"enabled": runner.cfg.enabled, "positions": runner.positions()}
+
+
+@router.get("/api/trend/trades")
+@policy(ADMIN)
+async def trend_trades(limit: int = 50):
+    """Closed paper trades, newest first. Read-only."""
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "trades": []}
+    return {"enabled": runner.cfg.enabled, "trades": runner.trades(limit)}
+
+
+@router.post("/api/trend/cycle")
+@policy(ADMIN)
+async def trend_cycle():
+    """Advance the paper book to the newest closed daily bar."""
+    runner = get_runner()
+    if runner is None:
+        return {"ok": False, "reason": "config rejected"}
+    return {"ok": True, **await runner.cycle()}
+
+
+@router.get("/api/trend/mirror")
+@policy(ADMIN)
+async def trend_mirror_status():
+    """Mirror ledger: planned/executed orders, skips, caps. Read-only."""
+    runner = get_runner()
+    if runner is None:
+        return {"enabled": False, "reason": "config rejected"}
+    return runner.mirror.status()
+
+
+@router.post("/api/trend/mirror/enable")
+@policy(ADMIN)
+async def trend_mirror_enable():
+    """Arm the LIVE trend mirror. Explicit, fail-closed opt-in.
+
+    Requires TREND_MIRROR_MODE=live, a coin whitelist, hard caps and an already
+    connected LIVE account. Does not place an order by itself.
+    """
+    runner = get_runner()
+    if runner is None:
+        return {"ok": False, "reason": "config rejected"}
+    cfg = runner.cfg
+    if cfg.mirror_mode != "live":
+        return {"ok": False, "reason": "TREND_MIRROR_MODE is not 'live'"}
+    if not cfg.mirror_coins:
+        return {"ok": False, "reason": "TREND_MIRROR_COINS is empty"}
+    if cfg.mirror_max_notional <= 0 or cfg.mirror_max_total_notional <= 0:
+        return {"ok": False, "reason": "mirror notional caps are not set"}
+    if runner.db is None:
+        return {"ok": False, "reason": "no database"}
+    try:
+        live = await runner.db.get_setting("live_mirror_enabled")
+    except Exception as exc:
+        return {"ok": False, "reason": f"cannot read LIVE flag: {exc}"}
+    if str(live or "").strip().lower() in ("", "0", "false", "no", "off"):
+        return {"ok": False, "reason": "LIVE mirror is not connected"}
+    await runner.db.set_setting(LIVE_FLAG, "1")
+    return {
+        "ok": True,
+        "enabled": True,
+        "coins": list(cfg.mirror_coins),
+        "max_notional": cfg.mirror_max_notional,
+        "max_total_notional": cfg.mirror_max_total_notional,
+        "daily_cap": cfg.mirror_daily_order_cap,
+    }
+
+
+@router.post("/api/trend/mirror/disable")
+@policy(ADMIN)
+async def trend_mirror_disable():
+    """Disarm the LIVE trend mirror. Open positions are left untouched."""
+    runner = get_runner()
+    if runner is None:
+        return {"ok": False, "reason": "config rejected"}
+    if runner.db is None:
+        return {"ok": False, "reason": "no database"}
+    await runner.db.set_setting(LIVE_FLAG, "0")
+    return {"ok": True, "enabled": False}
+
+
+@router.post("/api/trend/backtest")
+@policy(ADMIN)
+async def trend_backtest(req: BacktestRequest):
+    """Replay the engine over recent daily bars. Read-only, no orders."""
+    cfg = TrendPortfolioConfig.from_env()
+    if req.risk_per_sleeve is not None:
+        cfg.risk_per_sleeve = req.risk_per_sleeve
+    if req.entry_lookback is not None:
+        cfg.entry_lookback = req.entry_lookback
+    if req.exit_lookback is not None:
+        cfg.exit_lookback = req.exit_lookback
+    if req.chandelier_mult is not None:
+        cfg.chandelier_mult = req.chandelier_mult
+    if req.sizing_halflife_days is not None:
+        cfg.sizing_halflife_days = req.sizing_halflife_days
+    if req.regime_symbol is not None:
+        cfg.regime_symbol = req.regime_symbol.strip().upper()
+    if req.regime_ma is not None:
+        cfg.regime_ma = req.regime_ma
+    if req.brake_start_pct is not None:
+        cfg.brake_start_pct = req.brake_start_pct
+    if req.brake_mult is not None:
+        cfg.brake_mult = req.brake_mult
+    if req.brake_recover_pct is not None:
+        cfg.brake_recover_pct = req.brake_recover_pct
+    if req.coins:
+        cfg.universe = tuple(c.upper() for c in req.coins)
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        return {"ok": False, "reason": str(exc)}
+
+    series = {}
+    errors = {}
+    for coin in cfg.universe:
+        try:
+            bars = await fetch_daily_bars(f"{coin}-USDT", limit=req.bars, source=cfg.source)
+            if bars:
+                series[coin] = bars
+        except Exception as exc:
+            errors[coin] = type(exc).__name__
+    if not series:
+        return {"ok": False, "reason": "no market data", "errors": errors}
+
+    res = backtest(series, cfg)
+    return {
+        "ok": True,
+        "coins_used": len(series),
+        "errors": errors,
+        "stats": res["stats"],
+        "book": res["book"],
+        "trades": res["trades"],
+        "curve": res["curve"][-180:],
+    }

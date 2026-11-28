@@ -1,0 +1,528 @@
+"""Paper runner for the daily trend portfolio.
+
+SAFETY CONTRACT (do not weaken)
+-------------------------------
+* The runner is **read-only** against the exchange: it only calls public
+  market-data endpoints.  There is no import of any order-placing method and no
+  client credential is read.
+* ``cfg.paper_only`` must be True (validated by the engine) and
+  ``TrendPortfolioConfig.enabled`` must be True before a single cycle runs.
+* Every failure is swallowed into the returned status dict — the runner must
+  never take the API process down.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from typing import Dict, List, Optional
+
+import httpx
+
+from app.bots.base import load_state, save_state
+from app.bots.trend_portfolio.config import TrendPortfolioConfig
+from app.bots.trend_portfolio.engine import Bar, TrendPortfolio, feed_chronological
+from app.bots.trend_portfolio.mirror import LiveMirror, ShadowMirror
+
+log = logging.getLogger("trend_portfolio")
+
+OKX_BASE = "https://www.okx.com"
+BINANCE_BASE = "https://api.binance.com"
+# Public market-data mirror of the Binance API.  Same UTC-bucketed klines as
+# api.binance.com, but served from a static CDN that does not answer 451 to
+# cloud regions (Render).  This is the venue that can serve the full 45-coin
+# universe from the host, which is what makes the forward record complete.
+BINANCE_VISION_BASE = "https://data-api.binance.vision"
+
+# Per-venue fallback order.  The configured source is tried first; the rest are
+# only used when a venue fails repeatedly inside one cycle.
+VENUE_CHAIN = {
+    "binance_vision": ("binance_vision", "okx", "binance"),
+    "binance": ("binance", "binance_vision", "okx"),
+    "okx": ("okx", "binance_vision", "binance"),
+}
+
+# A coin whose newest bar is older than this is delisted/suspended: replaying
+# its history would open phantom positions at 2024 prices, so it is skipped.
+STALE_AFTER_MS = 3 * 86_400_000
+
+# Durable-state schema.  v1 was written while the OKX fetch silently served
+# only 26/45 coins (rate limit); v2 added retry/pacing; v3 moves the book to
+# the full-universe UTC venue and skips delisted coins.  Bump on any change
+# that makes old books incomparable.
+_STATE_SCHEMA = 3
+
+
+def _drop_forming_bar(bars: List[Bar]) -> List[Bar]:
+    """Sort ascending and drop the candle that is still forming today."""
+    bars.sort(key=lambda b: b.ts)
+    if bars:
+        bars.pop()
+    return bars
+
+
+async def fetch_okx_daily_bars(inst_id: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """Public daily candles, ascending, with the still-forming bar dropped."""
+    url = f"{OKX_BASE}/api/v5/market/candles"
+    params = {"instId": inst_id, "bar": "1D", "limit": str(min(max(limit, 1), 300))}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
+        resp.raise_for_status()
+        payload = resp.json()
+    if str(payload.get("code", "0")) != "0":
+        raise RuntimeError(f"okx {payload.get('code')}: {payload.get('msg')}")
+    rows = payload.get("data") or []
+    bars: List[Bar] = []
+    for r in rows:
+        try:
+            bars.append(
+                Bar(
+                    ts=int(r[0]),
+                    open=float(r[1]),
+                    high=float(r[2]),
+                    low=float(r[3]),
+                    close=float(r[4]),
+                )
+            )
+        except (TypeError, ValueError, IndexError):
+            continue
+    return _drop_forming_bar(bars)
+
+
+def _klines_to_bars(rows) -> List[Bar]:
+    bars: List[Bar] = []
+    for r in rows:
+        try:
+            bars.append(
+                Bar(
+                    ts=int(r[0]),
+                    open=float(r[1]),
+                    high=float(r[2]),
+                    low=float(r[3]),
+                    close=float(r[4]),
+                )
+            )
+        except (TypeError, ValueError, IndexError):
+            continue
+    return _drop_forming_bar(bars)
+
+
+async def _fetch_binance_klines(base: str, coin: str, limit: int, timeout: float) -> List[Bar]:
+    url = f"{base}/api/v3/klines"
+    params = {
+        "symbol": f"{coin.upper()}USDT",
+        "interval": "1d",
+        "limit": min(max(limit, 1), 1000),
+    }
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, params=params, headers={"User-Agent": "copix-trend-paper"})
+        resp.raise_for_status()
+        rows = resp.json()
+    if not isinstance(rows, list):
+        raise RuntimeError(f"binance unexpected payload: {type(rows).__name__}")
+    return _klines_to_bars(rows)
+
+
+async def fetch_binance_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """Public UTC-bucketed daily klines — the venue the research was measured on."""
+    return await _fetch_binance_klines(BINANCE_BASE, coin, limit, timeout)
+
+
+async def fetch_binance_vision_daily_bars(coin: str, limit: int = 300, timeout: float = 20.0) -> List[Bar]:
+    """UTC daily klines from the public mirror (reachable from cloud hosts)."""
+    return await _fetch_binance_klines(BINANCE_VISION_BASE, coin, limit, timeout)
+
+
+async def fetch_daily_bars(
+    inst_id: str, limit: int = 300, timeout: float = 20.0, source: str = "binance_vision"
+) -> List[Bar]:
+    """Daily bars from the configured venue (``inst_id`` is e.g. ``BTC-USDT``)."""
+    if source == "binance":
+        return await fetch_binance_daily_bars(inst_id.split("-")[0], limit=limit, timeout=timeout)
+    if source == "binance_vision":
+        return await fetch_binance_vision_daily_bars(
+            inst_id.split("-")[0], limit=limit, timeout=timeout
+        )
+    return await fetch_okx_daily_bars(inst_id, limit=limit, timeout=timeout)
+
+
+class TrendPaperRunner:
+    """Steps the portfolio once per cycle over newly closed daily bars.
+
+    State durability: the book is persisted to the database when a ``db``
+    handle is attached (``configure(db)`` from startup), with the JSON file as
+    a best-effort fallback.  Render's container filesystem is ephemeral, so a
+    file-only book replays its whole candle window after every deploy and can
+    never build a forward track record — the DB copy is what makes the
+    ``live_since`` baseline meaningful.
+    """
+
+    def __init__(self, cfg: Optional[TrendPortfolioConfig] = None, db=None):
+        self.cfg = cfg or TrendPortfolioConfig.from_env()
+        self.db = db
+        self._db_restored = False
+        self._state_key = f"{self.cfg.state_name}_state"
+        state = load_state(self.cfg.state_name, {}) or {}
+        self.book = TrendPortfolio.from_state(self.cfg, state)
+        # Shadow mirror: plans the OKX orders a LIVE book would send.  In
+        # "live" mode it also executes them, behind an explicit DB flag and
+        # hard caps (see mirror.py).  Default is off.
+        if self.cfg.mirror_mode == "live":
+            self.mirror = LiveMirror(
+                equity=self.cfg.mirror_equity,
+                max_notional=self.cfg.mirror_max_notional,
+                db=db,
+                coins=self.cfg.mirror_coins,
+                daily_cap=self.cfg.mirror_daily_order_cap,
+                max_total_notional=self.cfg.mirror_max_total_notional,
+            )
+        else:
+            self.mirror = ShadowMirror(
+                mode=self.cfg.mirror_mode,
+                equity=self.cfg.mirror_equity,
+                max_notional=self.cfg.mirror_max_notional,
+            )
+        self.mirror.from_state(state.get("mirror"))
+        # Forward track record starts when the *first persisted* snapshot is
+        # written (i.e. after the initial replay).  Replayed PnL is already in
+        # the baseline, so ``forward_return_pct`` only measures what happened
+        # after the book was first saved to durable storage.
+        self.live_since = int(state.get("live_since") or 0)
+        self.live_start_equity = float(state.get("live_start_equity") or 0.0)
+        self.state_store = "file"
+        # Where the in-memory book came from at startup ("" = fresh replay).
+        # Health exposes it: after a deploy it must say "postgres", otherwise
+        # the forward record is being rebuilt from scratch.
+        self.restored_from = "file" if self.live_since else ""
+        self.last_cycle_ts: float = 0.0
+        self.last_error: str = ""
+        self.last_mirror_orders: List[dict] = []
+        self.cycles: int = 0
+        self.bars_consumed: int = 0
+        self.sources_used: Dict[str, int] = {}
+        self.data_note: str = ""
+        self.last_failed: int = 0
+        self.stale_coins: int = 0
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+
+    # ── durable state ────────────────────────────────────────────────────
+    async def _restore_from_db(self) -> None:
+        """Load the durable snapshot once, before the first cycle.
+
+        The DB copy wins over the container file: the file is recreated empty
+        after every deploy, and mixing the two would silently reset the book.
+        """
+        if self._db_restored or self.db is None:
+            return
+        try:
+            raw = await self.db.get_setting(self._state_key)
+        except Exception as exc:
+            # Transient DB error: retry on the next cycle instead of silently
+            # starting a second, file-only book.
+            log.warning("trend_portfolio db restore failed: %s", exc)
+            return
+        self._db_restored = True
+        if not raw:
+            self.state_store = self._store_label()
+            return
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict) or not data.get("sleeves"):
+                return
+            if data.get("schema") != _STATE_SCHEMA:
+                log.info("trend_portfolio state schema %r -> %s: fresh replay",
+                         data.get("schema"), _STATE_SCHEMA)
+                self.state_store = self._store_label()
+                return
+            book = TrendPortfolio.from_state(self.cfg, data)
+            # Crash guard: if the previous save failed, the container file can
+            # be one bar ahead of the DB.  Keep the newer book and let the
+            # normal save write it back.
+            if book.last_ts < self.book.last_ts:
+                log.info("trend_portfolio db state behind file (db=%s file=%s)",
+                         book.last_ts, self.book.last_ts)
+                return
+            self.book = book
+            self.live_since = int(data.get("live_since") or 0)
+            self.live_start_equity = float(data.get("live_start_equity") or 0.0)
+            self.mirror.from_state(data.get("mirror"))
+            self.state_store = self._store_label()
+            self.restored_from = self.state_store
+            log.info("trend_portfolio state restored from db (last_ts=%s)",
+                     self.book.last_ts)
+        except Exception as exc:
+            log.warning("trend_portfolio db state rejected: %s", exc)
+
+    def _store_label(self) -> str:
+        if self.db is None:
+            return "file"
+        return "postgres" if getattr(self.db, "_pg_mode", False) else "sqlite"
+
+    async def _save_state(self) -> None:
+        data = self.book.to_state()
+        data["schema"] = _STATE_SCHEMA
+        data["live_since"] = self.live_since
+        data["live_start_equity"] = self.live_start_equity
+        data["mirror"] = self.mirror.to_state()
+        data["saved_at"] = int(time.time() * 1000)
+        save_state(self.cfg.state_name, data)   # best-effort file copy
+        if self.db is None:
+            self.state_store = "file"
+            return
+        try:
+            await self.db.set_setting(self._state_key, json.dumps(data))
+            self.state_store = self._store_label()
+        except Exception as exc:
+            self.state_store = "file"
+            log.warning("trend_portfolio db save failed: %s", exc)
+
+    async def _fetch_retry(self, inst: str, source: str, attempts: int = 2):
+        """Fetch one coin with one retry and OKX pacing.
+
+        OKX rate-limits ``/market/candles`` (and its responses from cloud IPs
+        are sometimes slow), which silently shrank the universe to the first
+        coins of the list.  Pacing plus a single retry keeps the book on the
+        full 45-coin universe.
+        """
+        last: Optional[Exception] = None
+        for _ in range(max(1, attempts)):
+            try:
+                bars = await fetch_daily_bars(
+                    inst, limit=self.cfg.candle_limit, source=source
+                )
+            except Exception as exc:
+                last = exc
+                await asyncio.sleep(0.3)
+                continue
+            if source == "okx":
+                await asyncio.sleep(0.12)
+            return bars
+        raise last or RuntimeError(f"{source}: no data")
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    def start(self) -> bool:
+        """Start the background loop. Returns False when disabled."""
+        if not self.cfg.enabled:
+            return False
+        if self._running:
+            return True
+        self._running = True
+        self._task = asyncio.create_task(self._loop())
+        return True
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._task = None
+
+    async def _loop(self) -> None:
+        while self._running:
+            try:
+                await self.cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # never kill the app
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                log.warning("trend_portfolio cycle failed: %s", self.last_error)
+            await asyncio.sleep(max(60, self.cfg.poll_interval_sec))
+
+    # ── one cycle ────────────────────────────────────────────────────────
+    async def cycle(self) -> dict:
+        """Fetch fresh bars for the universe and step the book."""
+        await self._restore_from_db()
+        self.cycles += 1
+        self.last_cycle_ts = time.time()
+        errors: Dict[str, str] = {}
+        series: Dict[str, List[Bar]] = {}
+        missing = 0
+        chain = VENUE_CHAIN.get(self.cfg.source, (self.cfg.source,))
+        venue_fails: Dict[str, int] = {}
+        venue_down: List[str] = []
+        served_by: Dict[str, int] = {}
+        last_seen: Dict[str, int] = {}
+        for coin in self.cfg.universe:
+            inst = f"{coin}-USDT"
+            sleeve = self.book.sleeves.get(coin)
+            if sleeve is None:
+                continue
+            bars = None
+            for venue in chain:
+                if venue in venue_down:
+                    continue
+                try:
+                    bars = await self._fetch_retry(inst, venue)
+                except Exception as exc:
+                    venue_fails[venue] = venue_fails.get(venue, 0) + 1
+                    errors[coin] = f"{venue} {type(exc).__name__}"
+                    # A venue that fails three times in a row is having a
+                    # venue-wide problem (OKX rate limit, Binance 451): stop
+                    # probing it this cycle so the remaining coins are not lost.
+                    if venue_fails[venue] >= 3:
+                        venue_down.append(venue)
+                    continue
+                served_by[venue] = served_by.get(venue, 0) + 1
+                break
+            if bars is None:
+                missing += 1
+                continue
+            last_seen[coin] = bars[-1].ts
+            fresh = [b for b in bars if b.ts > sleeve.last_ts]
+            if fresh and self.live_since and sleeve.last_ts == 0:
+                # A coin seen for the first time *after* the forward baseline
+                # must not dump its whole history into the forward record:
+                # seed it with the newest bar and let indicators warm up.
+                fresh = fresh[-1:]
+            if fresh:
+                series[coin] = fresh
+        for venue, n in served_by.items():
+            self.sources_used[venue] = self.sources_used.get(venue, 0) + n
+        # Drop delisted coins: a stale series would replay 2024 prices and open
+        # phantom positions in the paper book.  Measured on every fetched coin,
+        # so the count stays stable after a restart (not only on the first
+        # replay, when fresh bars are rare).
+        self.stale_coins = 0
+        if last_seen:
+            newest = max(last_seen.values())
+            stale = [c for c, ts in last_seen.items() if newest - ts > STALE_AFTER_MS]
+            for coin in stale:
+                series.pop(coin, None)
+            self.stale_coins = len(stale)
+        if served_by and self.cfg.source not in served_by:
+            self.data_note = (
+                f"{self.cfg.source} unavailable from this host — bars served by "
+                + ", ".join(f"{v} ({n})" for v, n in served_by.items())
+            )
+        else:
+            self.data_note = "; ".join(f"{c}: {e}" for c, e in list(errors.items())[:5])
+        # Only coins with no bars at all count as failed: a coin served by the
+        # fallback venue keeps the book complete.
+        self.last_failed = missing
+        # Replay in strict timestamp order: the regime gate reads the regime
+        # asset's latest close, so feeding one coin at a time would judge every
+        # historical alt entry against *today's* regime state (see
+        # engine.feed_chronological).
+        _ev_before = len(self.book.events)
+        fresh = feed_chronological(self.book, series)
+        _new_events = self.book.events[_ev_before:]
+        self.bars_consumed += fresh
+        # Shadow mirror: turn this cycle's events into planned OKX orders.
+        # No-op unless TREND_MIRROR_MODE=shadow.  Never raises into the cycle.
+        try:
+            self.last_mirror_orders = await self.mirror.on_events(_new_events, self.book)
+            await self.mirror.maintain(self.book)
+        except Exception as exc:
+            self.last_mirror_orders = []
+            self.mirror.last_error = f"{type(exc).__name__}: {exc}"
+            log.warning("trend mirror cycle failed: %s", self.mirror.last_error)
+        # Start the forward baseline after the very first replay, so replayed
+        # PnL is excluded from ``forward_return_pct``.
+        if not self.live_since:
+            self.live_since = int(time.time() * 1000)
+            self.live_start_equity = self.book.mark_equity()
+        await self._save_state()
+        status = self.status()
+        status["fresh_events"] = fresh
+        status["errors"] = errors
+        return status
+
+    # ── reporting ────────────────────────────────────────────────────────
+    def status(self) -> dict:
+        st = self.book.stats()
+        return {
+            "enabled": self.cfg.enabled,
+            "paper_only": self.cfg.paper_only,
+            "running": self._running,
+            "cycles": self.cycles,
+            "last_cycle_ts": self.last_cycle_ts,
+            "last_error": self.last_error,
+            "bars_consumed": self.bars_consumed,
+            "risk_per_sleeve": self.cfg.risk_per_sleeve,
+            "risk_per_trade_pct": round(100 * self.cfg.risk_per_trade_pct, 3),
+            "entry_lookback": self.cfg.entry_lookback,
+            "exit_lookback": self.cfg.exit_lookback,
+            "chandelier_mult": self.cfg.chandelier_mult,
+            "sizing_halflife_days": self.cfg.sizing_halflife_days,
+            "source": self.cfg.source,
+            "sources_used": dict(self.sources_used),
+            "data_note": self.data_note,
+            "last_failed": self.last_failed,
+            "stale_coins": self.stale_coins,
+            "state_store": self.state_store,
+            "restored_from": self.restored_from,
+            "live_since": self.live_since,
+            "live_start_equity": round(self.live_start_equity, 2),
+            "forward_days": round(
+                (time.time() * 1000 - self.live_since) / 86_400_000, 1
+            ) if self.live_since else 0.0,
+            "forward_return_pct": round(
+                (self.book.mark_equity() / self.live_start_equity - 1) * 100, 2
+            ) if self.live_start_equity else 0.0,
+            "regime_symbol": self.cfg.regime_symbol,
+            "regime_ma": self.cfg.regime_ma,
+            "universe_size": len(self.cfg.universe),
+            "mirror": self.mirror.status(),
+            **st,
+        }
+
+    def positions(self) -> List[dict]:
+        return self.book.positions()
+
+    def set_client_provider(self, provider) -> None:
+        """Attach the async LIVE-client provider (only used in live mode)."""
+        if isinstance(self.mirror, LiveMirror):
+            self.mirror.client_provider = provider
+
+    def trades(self, limit: int = 50) -> List[dict]:
+        """Closed paper trades, newest first."""
+        n = max(1, min(int(limit or 50), 500))
+        return list(reversed(self.book.closed_trades[-n:]))
+
+
+_runner: Optional[TrendPaperRunner] = None
+_db = None
+
+
+def configure(db) -> None:
+    """Attach the app database so the book's state survives restarts.
+
+    Called from startup right after ``db.init()``.  A runner that was built
+    earlier (file state only) is re-pointed at the DB and re-reads it on the
+    next cycle.
+    """
+    global _db
+    _db = db
+    if _runner is not None:
+        _runner.db = db
+        _runner._db_restored = False
+        if isinstance(_runner.mirror, LiveMirror):
+            _runner.mirror.db = db
+
+
+def get_runner() -> Optional[TrendPaperRunner]:
+    """Lazily build the singleton runner (disabled config → not created)."""
+    global _runner
+    if _runner is None:
+        try:
+            cfg = TrendPortfolioConfig.from_env()
+        except Exception as exc:
+            log.warning("trend_portfolio config rejected: %s", exc)
+            return None
+        _runner = TrendPaperRunner(cfg, db=_db)
+    return _runner
+
+
+async def stop_runner() -> None:
+    """Stop the singleton loop if it was ever created (shutdown hook)."""
+    if _runner is not None:
+        await _runner.stop()

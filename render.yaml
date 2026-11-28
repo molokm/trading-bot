@@ -9,8 +9,9 @@ services:
     envVars:
       - key: PYTHONUNBUFFERED
         value: "1"
+      # PORT is set by Render; entrypoint uses PORT first
       - key: BACKEND_PORT
-        value: "8000"
+        value: "10000"
       - key: BACKEND_HOST
         value: "0.0.0.0"
       - key: OKX_DEMO
@@ -27,6 +28,14 @@ services:
         sync: false
       - key: JWT_SECRET
         sync: false
+      - key: RISK_KILL_SWITCH
+        sync: false
+      - key: RISK_MAX_DAILY_LOSS_USD
+        sync: false
+      - key: RISK_MAX_POSITION_USD
+        sync: false
+      - key: RISK_MAX_LEVERAGE
+        sync: false
       - key: DASHBOARD_PASSWORD
         sync: false
       - key: TELEGRAM_BOT_TOKEN
@@ -35,15 +44,74 @@ services:
         sync: false
       - key: TELEGRAM_CHANNEL_ID
         sync: false
-      - key: SIGNAL_PRICE_STARS
-        value: "100"
-      - key: SIGNAL_PLAN_DAYS
-        value: "30"
-      - key: SIGNAL_INVITE_DAYS
-        value: "3"
+      # Pro plan (Telegram Stars). The paid "Signals" plan and the public
+      # /tracker page are retired — removed SIGNAL_* / TRACKER_URL keys.
       - key: PRO_PRICE_STARS
         value: "500"
       - key: PRO_PLAN_DAYS
         value: "30"
-      - key: TRACKER_URL
-        value: "https://trading-bot-mu99.onrender.com/tracker"
+      # ── AI Discretionary: muted 2026-11-24 ─────────────────────────────
+      # Owner's call: stop the LLM bot and focus on the paper daily trend
+      # book.  The AI engine stays in the codebase; set to "1" (or press
+      # Start in the UI) to bring it back.  Demo-only, no real money.
+      - key: AI_AUTO_START
+        value: "0"
+      # ── Daily trend portfolio (paper-only, read-only) ──────────────────
+      # The book itself cannot place an order: it only reads public daily
+      # candles.  Enabled here to build a forward paper track record.
+      # Target profile (chosen 2026-11-26, unchanged): BTC 200-day regime gate
+      # ON, risk 0.32 per 1/45 sleeve (= 0.71% of the account per trade).
+      # Measured on 7.9y of UTC daily bars at 0.16%/side: CAGR +29.7% with a
+      # *mark-to-market* maxDD of 31.4% (risk 0.64: +46.3% at 44.0%).  The old
+      # "19.5% CAGR at 22% DD" quote came from a realized-only curve and
+      # understated the drawdown by ~20pp.  Set TREND_PORTFOLIO_ENABLE=0 to
+      # stop the book.
+      # A portfolio drawdown brake (TREND_PORTFOLIO_BRAKE_*) exists but stays
+      # OFF: measured 0.64 + brake(20%/0.5) = +35.5% at 32.4% DD, i.e. it
+      # buys drawdown with CAGR and *lowers* Sharpe 1.10 -> 1.04.  Not a free
+      # lunch, so it must not silently change a running forward record.
+      - key: TREND_PORTFOLIO_ENABLE
+        value: "1"
+      - key: TREND_PORTFOLIO_REGIME
+        value: "BTC"
+      - key: TREND_PORTFOLIO_REGIME_MA
+        value: "200"
+      - key: TREND_PORTFOLIO_RISK
+        value: "0.32"
+      # Shadow mirror: translate the paper book's open/close events into the
+      # exact OKX USDT-M SWAP orders a LIVE mirror would send, and record them.
+      # NOTHING is sent — the module has no client and no credentials, and
+      # TREND_MIRROR_MODE=live is rejected by the config.  Equity here is the
+      # hypothetical mirror account: the order is scaled by equity/book.capital.
+      # $2k is the smallest account that clears OKX minSz on nearly the whole
+      # 41-coin tradeable universe; $100 caps any single order.
+      - key: TREND_MIRROR_MODE
+        value: "shadow"
+      - key: TREND_MIRROR_EQUITY
+        value: "2000"
+      - key: TREND_MIRROR_MAX_NOTIONAL
+        value: "100"
+      # Venue for the daily bars.  Measured from Render on 2026-11-22:
+      # api.binance.com answers 451 and OKX rate-limits the shared IP after
+      # ~26 of 45 coins, so the runner reads the public Binance mirror
+      # (data-api.binance.vision): same UTC-bucketed klines as the validated
+      # research feed, full universe, no 451.  OKX stays as the fallback.
+      - key: TREND_PORTFOLIO_SOURCE
+        value: "binance_vision"
+      # ── Core portfolio (paper-only): daily book + 6h block, 50/50 ──────
+      # Two independent paper accounts over the same 45-coin universe.  No
+      # order path: public candles only.  Validated 2021-06 → 2026-11 at
+      # 0.16%/side: +21.0% CAGR, 14.9% maxDD, Sharpe 1.42 (daily alone
+      # 28.7% / 22.9% / 1.18; 6h alone 10.1% / 13.5% / 1.01; daily
+      # correlation -0.01).  Ships OFF — set to "1" to start the forward
+      # paper track record.
+      - key: CORE_PORTFOLIO_ENABLE
+        value: "0"
+      # 6h bars must be UTC-bucketed (the validated feed).  On Render the
+      # main Binance host answers 451, so the runner tries Binance, then
+      # data-api.binance.vision (same UTC klines).  If both are unreachable
+      # the 6h block skips that cycle instead of silently switching to OKX's
+      # UTC+8 buckets; set CORE_PORTFOLIO_SOURCE=okx only if you accept that
+      # different strategy.  Any bucketing change restarts the block.
+      - key: CORE_PORTFOLIO_SOURCE
+        value: "binance"

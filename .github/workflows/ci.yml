@@ -10,28 +10,51 @@ permissions:
   contents: read
   packages: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  test:
-    name: Validate backend + frontend build
+  backend:
+    name: Backend — compile + tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
 
-      - name: Compile backend
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements-dev.txt
+
+      - name: Compile
         working-directory: backend
         run: python -m py_compile app/main.py app/services/*.py
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      # pytest.ini sets testpaths=tests and pythonpath=backend.
+      # tests/test_mirror_strict.py guards the LIVE mirror invariants (money-critical).
+      - name: Tests
+        run: pytest -q
 
-      - name: Build frontend
+  frontend:
+    name: Frontend — build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Build
         working-directory: frontend
         run: |
           npm ci
@@ -39,11 +62,11 @@ jobs:
 
   docker:
     name: Build & publish Docker image to GHCR
-    needs: test
+    needs: [backend, frontend]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
